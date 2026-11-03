@@ -2156,10 +2156,10 @@ def test_mcqa_trial_operations_with_unsupported_provenance_are_unproven_not_rais
     ],
 )
 def test_collector_projection_preserves_verification_stop_without_regenerating(tmp_path, case):
-    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_transport import FailureReportRow
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
     from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row, _collection_failure_report
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent
 
     verifier = NgFailureEvent(
         boundary=FailureBoundary.RESOURCES_SERVER,
@@ -2299,7 +2299,7 @@ def test_projected_explicit_final_model_zero_stays_settled(tmp_path):
 )
 @pytest.mark.parametrize("mode", ["default", "terminal", "explicit_fail"])
 def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, case, mode):
-    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.core.failure_transport import FailureReportRow
     from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row, _collection_failure_report
 
     failure = TimeoutError("dispatch did not reach the agent")

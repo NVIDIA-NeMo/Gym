@@ -1011,12 +1011,15 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
 
     from nemo_gym.client import server_client
     from nemo_gym.config import BaseServerConfig
-    from nemo_gym.core import rollout_context
-    from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
-    from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
+    from nemo_gym.core import (
+        HARNESS_TERMINATION_UNCONFIRMED,
+        FailureBoundary,
+        FailureReportRow,
+        NgFailureEvent,
+        report_for_current_request,
+        rollout_context,
+    )
     from nemo_gym.orchestration.recovery import _policy_evidence
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent
 
     f = fixture
     if graded in {"cleanup_unconfirmed", "limit_then_cleanup"}:
@@ -1135,10 +1138,14 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
 @pytest.mark.parametrize("reported", [True, False])
 def test_episode_infrastructure_refusal_keeps_the_harness_failure_as_its_cause(reported):
     """The 503 stays; a harness-reported failure is its cause, and an unreported one is not invented."""
-    from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
-    from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import (
+        HARNESS_TERMINATION_UNCONFIRMED,
+        FailureBoundary,
+        FailureReportRow,
+        NgFailureEvent,
+        failure_report_for,
+        report_for_current_request,
+    )
 
     failure = NgFailureEvent(
         boundary=FailureBoundary.HARNESS,
@@ -1196,9 +1203,13 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
 
     from nemo_gym.client import server_client
     from nemo_gym.config import BaseServerConfig
-    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
-    from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
-    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.core import (
+        HARNESS_TERMINATION_UNCONFIRMED,
+        FailureReportRow,
+        NeMoGymResponse,
+        NeMoGymResponseCreateParamsNonStreaming,
+        rollout_context,
+    )
     from nemo_gym.orchestration.recovery import _policy_evidence, _policy_replay_is_unsupported
     from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
@@ -1331,9 +1342,7 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
 
 @pytest.mark.parametrize("typed", [False, True])
 async def test_actual_harness_exec_cause_survives_legacy_verify(fixture, monkeypatch, typed):
-    from nemo_gym.core import PROVIDER_UNAVAILABLE
-    from nemo_gym.failure_transport import FailureReportRow
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import PROVIDER_UNAVAILABLE, FailureReportRow, NgFailureEvent
     from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEHarness
 
     f = fixture

@@ -10,7 +10,8 @@ import pytest
 
 from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core.episode_types import FailureEvent, FailureReport
+from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
     CollectedEvidence,
@@ -20,7 +21,6 @@ from nemo_gym.orchestration.recovery import (
 from nemo_gym.rollouts.rollout_records import logical_rollout_id
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.server_runtime.episode_types import FailureEvent, FailureReport
 
 
 def _failure(case):
@@ -196,11 +196,11 @@ async def test_failed_agent_outcome_through_environment_and_collection(tmp_path,
         SingleAgentTurnLegacyEnvironmentServer,
         SingleAgentTurnLegacyEnvironmentServerConfig,
     )
-    from nemo_gym.failure_transport import FailureHeader, observe_reply
+    from nemo_gym.core.failure_transport import FailureHeader, observe_reply
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from tests.single_agent_turn_helpers import _Client, _environment_server, _request, _Response
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
-    from tests.unit_tests.test_saved_generation_admission import response
+    from tests.unit_tests.rollouts.test_saved_generation_admission import response
 
     class ObservingClient(_Client):
         async def post(self, *args, **kwargs):

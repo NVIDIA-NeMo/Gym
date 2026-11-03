@@ -62,6 +62,7 @@ from nemo_gym.agents.agent_outcome import (
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import mask_url_passwords
+from nemo_gym.core.episode_types import FailureBoundary
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
@@ -91,7 +92,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
     is_server_status,
 )
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.orchestration.collect_evidence import (
     COLLECT_SCRIPT,
     EPISODE_DEADLINE_REASON,  # noqa: F401
@@ -109,7 +110,6 @@ from nemo_gym.orchestration.executors.resume_script import (
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
 )
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
 
 

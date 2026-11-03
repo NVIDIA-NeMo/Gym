@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
 
-from nemo_gym.exception_inspection import provider_error_reason, sandbox_failure_prefix
+from nemo_gym.utils.exception_inspection import provider_error_reason, sandbox_failure_prefix
 
 
 def test_the_sandbox_prefix_names_known_facts_in_a_fixed_order_and_leaves_out_unknown_ones() -> None:

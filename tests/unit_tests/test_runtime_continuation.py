@@ -258,9 +258,9 @@ async def test_actual_collection_failure_reaches_installed_runtime_and_retry_bud
     from omegaconf import OmegaConf
     from pydantic import BaseModel
 
+    from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
-    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
     from tests.unit_tests.rollouts.test_rollout_recovery import FakeResponse, install_fake_server_client
 
     class TaskInput(BaseModel):
