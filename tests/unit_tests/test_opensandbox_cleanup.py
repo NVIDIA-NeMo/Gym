@@ -823,7 +823,11 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
         # A TERM in either window would end the step without recording the stop, or be lost.
         "srun": (
             "#!/bin/bash\n"
-            'if [[ " $* " == *eval-container-on-node* ]]; then\n'
+            "is_eval=0\n"
+            'for arg in "$@"; do\n'
+            '    case "$arg" in --container-name=eval-*) is_eval=1 ;; esac\n'
+            "done\n"
+            "if (( is_eval )); then\n"
             '    if [[ "$FIRST_STEP" == eval ]]; then\n'
             '        while [[ ! -f "$SERVER_READY" ]]; do sleep 0.01; done\n'
             '        if [[ "$EVAL_STATUS" == 143 ]]; then kill -TERM "$PPID"; fi\n'

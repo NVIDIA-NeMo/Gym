@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from aiohttp import web
 
 from nemo_gym.client import request
+from nemo_gym.failure_transport import StreamFailureReportReader
 
 
 @asynccontextmanager
@@ -45,9 +46,16 @@ async def rate_limit_proxy(base_url: str, invocation_id: str, *, max_retries: in
                     },
                 )
                 await response.prepare(incoming)
-                async for chunk in upstream.content.iter_any():
-                    await response.write(chunk)
-                await response.write_eof()
+                # The model's report rides the stream's terminal event when its headers went out first.
+                reader = StreamFailureReportReader()
+                try:
+                    async for chunk in upstream.content.iter_any():
+                        reader.feed(chunk)
+                        await response.write(chunk)
+                    await response.write_eof()
+                finally:
+                    # A disconnect mid-stream still keeps what the stream reported so far.
+                    reader.observe()
                 return response
             finally:
                 upstream.release()
