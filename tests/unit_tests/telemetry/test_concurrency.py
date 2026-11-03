@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 import pytest
 
-from nemo_gym.telemetry import concurrency, observer
+from nemo_gym.telemetry import concurrency, gym_metrics, observer
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from tests.unit_tests.telemetry.test_observer import collected  # noqa: F401 - fixture
@@ -201,6 +201,47 @@ def test_a_garbage_collected_limit_stops_reporting_state_but_keeps_its_totals(co
     for name in STATE_INSTRUMENTS:
         assert name not in exported, f"{name} must not report a limit that no longer exists"
     assert _values(exported, concurrency.ADMISSION_CANCELLED_INSTRUMENT) == {_key(MODEL_ATTRIBUTES): 0}
+
+
+def test_only_a_caller_that_queued_records_its_wait(collected, monkeypatch):  # noqa: F811
+    gym_metrics._reset_for_testing()
+    clock = iter([10.0, 10.25])  # the queued caller's start and admission
+    monkeypatch.setattr(concurrency.time, "perf_counter", lambda: next(clock))
+    semaphore = MeteredSemaphore(1, component="resources_server", limit_name="judge_calls")
+
+    async def scenario() -> None:
+        await semaphore.acquire()  # free slot: reads no clock and records no sample
+        waiter = asyncio.create_task(semaphore.acquire())
+        while semaphore.queued == 0:
+            await asyncio.sleep(0)
+        semaphore.release()
+        await waiter
+        semaphore.release()
+
+    asyncio.run(scenario())
+
+    (point,) = collected()[gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT]
+    assert point.count == 1
+    assert point.sum == pytest.approx(250)
+    assert dict(point.attributes) == {
+        "nemo.gym.concurrency.component": "resources_server",
+        "nemo.gym.concurrency.limit_name": "judge_calls",
+    }
+
+
+def test_a_wait_that_times_out_records_no_wait(collected):  # noqa: F811
+    gym_metrics._reset_for_testing()
+    semaphore = MeteredSemaphore(1, component="resources_server", limit_name="judge_calls", admission_timeout_s=0.01)
+
+    async def scenario() -> None:
+        await semaphore.acquire()
+        with pytest.raises(TimeoutError):
+            await semaphore.acquire()
+        semaphore.release()
+
+    asyncio.run(scenario())
+
+    assert gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT not in collected()
 
 
 def test_nothing_is_exported_while_metrics_are_off(collected, monkeypatch):  # noqa: F811

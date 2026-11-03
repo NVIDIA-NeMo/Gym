@@ -278,3 +278,18 @@ async def test_registered_provider_drives_the_public_sandbox_api(tmp_path: Path)
     assert await sandbox.status() is SandboxStatus.RUNNING
     await sandbox.stop()
     assert not workspace.exists()
+
+
+def test_providers_with_the_same_concurrency_share_one_exec_limit_while_alive():
+    import gc
+
+    from nemo_gym.sandbox.providers.local.provider import LocalProvider
+
+    first = LocalProvider(concurrency=3)
+    second = LocalProvider(concurrency=3)
+    assert first._semaphore is second._semaphore
+
+    del first, second
+    gc.collect()
+    # A limit no live provider holds is dropped, so its slots are not reported next to a new limit.
+    assert 3 not in LocalProvider._semaphores

@@ -44,6 +44,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.docker import pty as docker_pty
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -308,7 +309,9 @@ class DockerProvider:
         self._create_config = _coerce_config(create, DockerCreateConfig)
         self._probe = _coerce_config(probe, DockerProbeConfig)
         self._binary = _require_docker()
-        self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._semaphore = MeteredSemaphore(
+            self._exec_config.concurrency, component="sandbox_provider", limit_name="docker_exec"
+        )
         # Live PTY sessions by container name; closed with their container and at provider shutdown.
         self._pty_sessions: dict[str, set[docker_pty.DockerPtySession]] = {}
 
