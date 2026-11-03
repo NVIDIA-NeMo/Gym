@@ -429,6 +429,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Copilot"
             ),
+            invocation_id=f"copilot-{uuid4().hex}",
         )
         try:
             if owns_sandbox:
@@ -575,9 +576,13 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             "COPILOT_PROVIDER_BASE_URL": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
             ),
-            "COPILOT_PROVIDER_API_KEY": "EMPTY",  # pragma: allowlist secret
+            # Copilot masks the provider key and header values as secrets wherever they appear in its events,
+            # including model text, tool output, tool-call IDs and timestamps. Both values must be ones that task
+            # text cannot contain: a placeholder such as "EMPTY" or a capture key such as "1-0" would be masked
+            # inside ordinary words, dates and IDs. The Gym Model Server does not read this key.
+            "COPILOT_PROVIDER_API_KEY": f"unused-{uuid4().hex}",
             # Model-call capture assigns every attempt, including failed ones, to this invocation.
-            "COPILOT_PROVIDER_HEADERS": f"x-session-id: {state.request.episode_id.capture_key}",
+            "COPILOT_PROVIDER_HEADERS": f"x-session-id: {state.invocation_id}",
             "COPILOT_MODEL": self.config.model,
             "COPILOT_OTEL_EXPORTER_TYPE": "file",
             "COPILOT_OTEL_FILE_EXPORTER_PATH": f"{directory}/otel.jsonl",
@@ -599,7 +604,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         *,
         failure: BaseException | None = None,
     ) -> AgentObservationBundle:
-        invocation_id = state.request.episode_id.capture_key
+        invocation_id = state.invocation_id
         # Span IDs first; events add calls whose span the exporter never wrote.
         response_ids = list(dict.fromkeys([*(usage.response_ids if usage else []), *transcript.response_ids]))
         gaps = [
@@ -672,7 +677,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
     async def _sandbox_response(
         self, state: CopilotSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str
     ) -> NeMoGymResponse:
-        invocation_id = state.request.episode_id.capture_key
+        invocation_id = state.invocation_id
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         payload = {
             "directory": state.session.session_dir,
@@ -724,7 +729,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         *,
         timeout: float,
     ) -> NeMoGymResponse:
-        invocation_id = state.request.episode_id.capture_key
+        invocation_id = state.invocation_id
         transcript = parse_copilot_events(_events(artifacts.events), invocation_id)
         usage = parse_copilot_usage(artifacts.otel, compaction_state=artifacts.compaction_state)
         cleanup = state.session.cleanup

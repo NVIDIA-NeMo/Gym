@@ -111,6 +111,12 @@ the compatibility `/run` are rejected: Copilot never runs on the Agent Server ho
 
 ## Results and limits
 
+Copilot masks its BYOK provider key and header values as `******` wherever they appear in the events it writes,
+including model text, tool output, tool-call IDs and timestamps. The adapter therefore sends a random unused key
+and a random per-session `x-session-id`, which is also the invocation ID in close observations and model-call
+captures; the rollout ID stays in the Model Server URL. Task text cannot contain either value, so the recorded
+output matches what the model saw, except that these two values stay masked if a tool prints Copilot's environment.
+
 Responses keep Copilot's reasoning, messages, tool calls, and tool results. Usage comes from Copilot's
 OpenTelemetry chat spans, written locally to the session directory: counts are summed over successful
 model calls, and a count the provider omitted stays unknown rather than zero. Close returns the model-call

@@ -371,7 +371,8 @@ def test_session_runs_copilot_in_borrowed_sandbox(setup):
     assert env["COPILOT_PROVIDER_BASE_URL"] == "http://model.example:9000/ng-rollout/copilot-smoke-a2/v1"
     assert env["COPILOT_OFFLINE"] == "true" and env["COPILOT_MODEL"] == "test-model"
     # Capture assigns failed attempts, which have no response ID, to the invocation through this header.
-    assert env["COPILOT_PROVIDER_HEADERS"] == "x-session-id: copilot-smoke-a2"
+    header_name, session_header = env["COPILOT_PROVIDER_HEADERS"].split(": ")
+    assert header_name == "x-session-id"
     assert env["COPILOT_CLI_DIST_DIR"] == RUNTIME["dist_dir"]
     assert env["COPILOT_HOME"].startswith(sandbox.payload["directory"])
     # Tool shells keep the task environment.
@@ -386,12 +387,30 @@ def test_session_runs_copilot_in_borrowed_sandbox(setup):
     assert sandbox_record["sandbox_id"] == tool["sandbox_id"] == "resources-owned"
     assert sandbox_record["outcome"] == "completed" and sandbox_record["exit_code"] == 0
     assert sandbox_record["provider"] == "sandbox"
+    assert invocation["invocation_id"] == tool["invocation_id"] == session_header
     assert invocation["status"] == "completed" and invocation["harness_session_id"] == "copilot-run-1"
     assert [call["response_id"] for call in invocation["model_calls"]] == ["chatcmpl-1", "chatcmpl-2"]
     assert tool["tool_call_id"] == "call-1" and tool["timing_source"] == "harness"
     assert "partial_model_usage_unavailable" not in {gap["code"] for gap in observations["gaps"]}
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+def test_provider_secrets_cannot_mask_task_text(setup):
+    # Copilot masks its provider key and header values in every event it writes. With the capture key "1-0" as the
+    # header value, a timestamp "2026-11-03" was recorded as "2026-1******3", and tool-call IDs containing "2-0" were
+    # rewritten. Each value must be one that model text, tool output and IDs cannot contain.
+    agent, sandbox = setup
+    result, closed = run_session(agent)
+    assert result.status_code == 200, result.text
+    env = sandbox.payload["env"]
+    session_header = env["COPILOT_PROVIDER_HEADERS"].removeprefix("x-session-id: ")
+    api_key = env["COPILOT_PROVIDER_API_KEY"]
+    assert session_header.startswith("copilot-") and len(session_header.removeprefix("copilot-")) == 32
+    assert api_key.startswith("unused-") and len(api_key.removeprefix("unused-")) == 32
+    # The capture key stays in the rollout-prefixed URL, which Copilot does not mask.
+    assert "/ng-rollout/copilot-smoke-a2/" in env["COPILOT_PROVIDER_BASE_URL"]
+    assert closed.json()["agent_observations"]["records"][0]["invocation_id"] == session_header
 
 
 def test_leading_dash_prompt_is_passed_as_one_option_value(setup):

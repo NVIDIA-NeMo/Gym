@@ -62,6 +62,9 @@ class CopilotSandboxSession(AgentSessionState):
     """Copilot request/output state; SandboxSession owns execution and teardown."""
 
     session: SandboxSession[CopilotArtifacts]
+    # Correlates model calls with this invocation (x-session-id). Copilot masks provider header values wherever they
+    # appear in its output, so this must be an ID that task text cannot contain, not the short capture key.
+    invocation_id: str
     runtime: CopilotRuntime | None = None
     sandbox_id: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
