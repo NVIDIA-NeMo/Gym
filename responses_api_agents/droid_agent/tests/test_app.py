@@ -97,6 +97,7 @@ def state(*, cleanup=None, artifacts=None, request=None):
             artifacts=artifacts,
             closing=False,
             expired=False,
+            sandbox=SimpleNamespace(sandbox_id=None),
         ),
     )
 
@@ -198,6 +199,7 @@ async def test_failed_seed_releases_and_failed_release_retains_state(monkeypatch
 async def test_activation_routes_droid_through_the_rollout_model_route(monkeypatch):
     instance = agent(monkeypatch, system_prompt="Configured.", context_window=32768)
     session = state()
+    session.session.sandbox = SimpleNamespace(sandbox_id="box-1")
     execute = AsyncMock(return_value=adapter.DroidArtifacts(stdout(EVENTS)))
     monkeypatch.setattr(adapter.DroidSandboxSession, "execute", execute)
     response = await instance._sandbox_response(session, body())
@@ -224,16 +226,19 @@ async def test_activation_routes_droid_through_the_rollout_model_route(monkeypat
 
     assert response.status == "completed"
     assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
-    assert response.usage.input_tokens == 10 and response.usage.total_tokens == 12
+    # Droid counts cache reads apart from input_tokens; the response's input total includes them.
+    assert response.usage.input_tokens == 14 and response.usage.total_tokens == 16
     assert response.usage.input_tokens_details.cached_tokens == 4
-    assert response.usage.output_tokens_details.reasoning_tokens == 1
+    assert response.usage.output_tokens_details.reasoning_tokens == 0
+    assert "reasoning_token_usage_unavailable" in {gap.code for gap in session.observations.gaps}
     assert response.metadata == {"harness_execution": "sandbox"}
 
     invocation, tool, sandbox_record = session.observations.records
     assert invocation.invocation_id == capture_key and invocation.harness_session_id == "droid-session"
     assert [item.role for item in invocation.conversation[:2]] == ["system", "user"]
-    assert (tool.tool_call_id, tool.status, tool.duration_ms) == ("c1", "completed", 250)
+    assert (tool.tool_call_id, tool.status, tool.duration_ms, tool.sandbox_id) == ("c1", "completed", 250, "box-1")
     assert (sandbox_record.role, sandbox_record.outcome, sandbox_record.exit_code) == ("agent", "completed", 0)
+    assert sandbox_record.sandbox_id == "box-1"
     assert "model_call_ownership_unavailable" not in {gap.code for gap in session.observations.gaps}
 
 

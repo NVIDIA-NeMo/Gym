@@ -150,11 +150,15 @@ The close bundle (`source: droid`) has:
 - a `ToolCallObservation` per tool call, timed by Droid's event timestamps. A tool reported as an
   error, or an `Execute` command whose result ends with a nonzero `[Process exited with code N]`,
   is `failed`;
-- a `SandboxObservation` with the harness exit code.
+- a `SandboxObservation` with the sandbox id and the harness exit code; tool records carry the
+  same sandbox id.
 
 The response usage is Droid's run total from its `completion` event, which counts every call,
-compaction and subagents included; cached and reasoning tokens come from its
-`cache_read_input_tokens` and `thinking_tokens`. Without that event the usage is unknown and the
+compaction and subagents included. Droid counts cache reads and writes apart from `input_tokens`, as
+Anthropic's usage does, so the response's input total adds them back, and `cached_tokens` is the
+cache reads. Droid 1.1.0 reports zero thinking tokens for a Chat Completions model that reasons, so
+reasoning tokens are reported as 0 with a `reasoning_token_usage_unavailable` gap; the captured
+model calls carry the provider's count. Without the `completion` event the usage is unknown and the
 bundle records `model_call_usage_unavailable`. Droid's stream-json output does not name the served
 response of each call, so the invocation lists no `ModelCallRef`s; model-call capture joins calls
 to it through the `x-session-id` header. Other gaps: `subagent_hierarchy_unavailable` when a Task

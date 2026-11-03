@@ -319,21 +319,24 @@ class DroidAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _usage(run: DroidRun) -> Optional[NeMoGymResponseUsage]:
-        # The completion event totals every call of the run, compaction and subagents included.
+        # The completion event totals every call of the run, compaction and subagents included. Like Anthropic's
+        # usage, Droid's input_tokens leaves out cache reads and writes, which a Responses input total includes.
         if not run.completed or not run.usage:
             return None
-        counts = {
-            key: run.usage.get(key)
-            for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "thinking_tokens")
-        }
+        keys = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        counts = {key: run.usage.get(key, 0 if key == "cache_creation_input_tokens" else None) for key in keys}
         if any(type(value) is not int or value < 0 for value in counts.values()):
             return None
+        input_tokens = (
+            counts["input_tokens"] + counts["cache_read_input_tokens"] + counts["cache_creation_input_tokens"]
+        )
         return NeMoGymResponseUsage(
-            input_tokens=counts["input_tokens"],
+            input_tokens=input_tokens,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=counts["cache_read_input_tokens"]),
             output_tokens=counts["output_tokens"],
-            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=counts["thinking_tokens"]),
-            total_tokens=counts["input_tokens"] + counts["output_tokens"],
+            # Droid 1.1.0 reports thinking_tokens 0 for a Chat Completions model that reasons; see the gap below.
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=input_tokens + counts["output_tokens"],
         )
 
     async def _sandbox_response(
@@ -385,8 +388,19 @@ class DroidAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="agent_artifact_unavailable", invocation_id=invocation_id))
         elif usage is None:
             gaps.append(ObservationGap(code="model_call_usage_unavailable", invocation_id=invocation_id))
+        else:
+            gaps.append(
+                ObservationGap(
+                    code="reasoning_token_usage_unavailable",
+                    invocation_id=invocation_id,
+                    detail="Droid does not count reasoning tokens of Chat Completions models",
+                )
+            )
         if state.runtime_info is None:
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        sandbox_id = state.session.sandbox.sandbox_id
+        for tool in run.tools:
+            tool.sandbox_id = sandbox_id
         records: list[Any] = [
             AgentInvocation(
                 invocation_id=invocation_id,
@@ -404,6 +418,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
                 SandboxObservation(
                     role="agent",
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
+                    sandbox_id=sandbox_id,
                     outcome={"timeout": "timeout", "cancelled": "cancelled"}.get(
                         reason, "failed" if status == "failed" else "completed"
                     ),
