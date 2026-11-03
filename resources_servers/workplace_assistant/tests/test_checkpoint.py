@@ -26,6 +26,8 @@ from fastapi import FastAPI
 from omegaconf import DictConfig
 
 from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest
 from resources_servers.workplace_assistant import app as workplace_app
 from resources_servers.workplace_assistant.app import (
     WorkbenchResourcesServer,
@@ -204,6 +206,62 @@ async def test_invalid_restored_state_installs_nothing(tmp_path: Path) -> None:
     assert commit["manifest"]["record_count"] == 2
     assert restored.session_id_to_tool_env == {}
     assert status["phase"] == "idle" and status["report"]["counts"]["sessions"] == 0
+
+
+@pytest.mark.parametrize("reseed", [False, True])
+async def test_restored_typed_session_keeps_its_binding_and_verify_lifetime(tmp_path: Path, reseed: bool) -> None:
+    task_data = {
+        key: value for key, value in verify_body().items() if key not in ("response", "responses_create_params")
+    }
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="typed-session",
+        episode_id=EpisodeId(rollout_id="r"),
+        task_id=TaskId(taskset="workplace_assistant", task_id="0"),
+        task_data=task_data,
+    )
+    _, source_app = make_server()
+    async with client_for(source_app) as client:
+        assert (await client.post("/ng-rollout/r/seed_session", json=seed.model_dump(mode="json"))).status_code == 200
+        await call_tools(client, BEFORE, "r")
+        await checkpoint(client, tmp_path)
+        cookies = dict(client.cookies)
+
+    restored, restored_app = make_server()
+    replacement = seed.model_copy(update={"episode_id": EpisodeId(rollout_id="r", attempt=1)})
+    async with client_for(restored_app, cookies) as client:
+        assert (await restore(client, tmp_path)).json()["phase"] == "restored"
+        await client.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        if reseed:
+            # Restoring gives ownership to the replacement attempt, never to a different task or the old attempt.
+            for conflicting in (
+                seed,
+                replacement.model_copy(update={"task_id": TaskId(taskset="workplace_assistant", task_id="other")}),
+            ):
+                refused = await client.post("/ng-rollout/r-a1/seed_session", json=conflicting.model_dump(mode="json"))
+                assert refused.status_code == 409, refused.text
+            wrong_close = await client.post(
+                "/ng-rollout/r-a1/close_session",
+                json={"resources_session_id": seed.resources_session_id, "episode_id": seed.episode_id.model_dump()},
+            )
+            assert wrong_close.status_code == 409, wrong_close.text
+            repeated = await client.post("/ng-rollout/r-a1/seed_session", json=replacement.model_dump(mode="json"))
+            assert repeated.status_code == 200, repeated.text
+        assert await call_tools(client, AFTER[:1], "r-a1") == ["00000301"]
+        for _ in range(2):
+            verified = (await client.post("/ng-rollout/r-a1/verify", json=verify_body())).json()
+            assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+        assert seed.resources_session_id in restored.session_id_to_tool_env
+        client.cookies.clear()
+        closed = await client.post(
+            "/ng-rollout/r-a1/close_session",
+            json={
+                "resources_session_id": seed.resources_session_id,
+                "episode_id": replacement.episode_id.model_dump(),
+            },
+        )
+        assert closed.status_code == 200, closed.text
+    assert restored.session_id_to_tool_env == {}
+    assert restored._typed_sessions == {}
 
 
 async def test_a_retired_session_is_gone(tmp_path: Path) -> None:

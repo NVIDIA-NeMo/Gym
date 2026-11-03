@@ -38,6 +38,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
+    next_attempt,
 )
 from resources_servers.workplace_assistant.task_data import TaskData
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
@@ -262,23 +263,48 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             for session_id in session_ids
             if session_id in self.session_id_to_tool_env
         }
+
+        def encode() -> dict[str, JsonValue]:
+            states = {}
+            for session_id, tool_env in tool_envs.items():
+                state = _export_tool_env(tool_env)
+                identity = self._typed_sessions.get(session_id)
+                if identity is not None:
+                    episode_id, task_id = identity
+                    state = {
+                        "tool_env": state,
+                        "episode_id": episode_id.model_dump(mode="json"),
+                        "task_id": task_id.model_dump(mode="json"),
+                    }
+                states[session_id] = state
+            return states
+
         # Encoding every table is CPU work; admission is closed during a commit, so no tool call mutates them.
-        return await asyncio.to_thread(
-            lambda: {session_id: _export_tool_env(tool_env) for session_id, tool_env in tool_envs.items()}
-        )
+        return await asyncio.to_thread(encode)
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
-        def rebuild() -> dict[str, Any]:
+        def rebuild() -> tuple[dict[str, Any], dict[str, tuple[EpisodeId, TaskId]]]:
             restored = {}
+            typed_sessions = {}
             for session_id, state in states.items():
                 try:
+                    if "tool_env" in state:
+                        # The checkpoint participant transfers a restored session to the replacement attempt.
+                        typed_sessions[session_id] = (
+                            next_attempt(EpisodeId.model_validate(state["episode_id"])),
+                            TaskId.model_validate(state["task_id"]),
+                        )
+                        state = state["tool_env"]
+                    # Existing snapshots and sessions seeded by /run contain only the tables.
                     restored[session_id] = _restore_tool_env(state)
                 except (AttributeError, KeyError, TypeError, ValueError) as error:
                     raise ValueError(f"invalid workplace assistant state for session {session_id}: {error}") from error
-            return restored
+            return restored, typed_sessions
 
         # Rebuild every session before installing any, so an invalid state installs nothing.
-        self.session_id_to_tool_env.update(await asyncio.to_thread(rebuild))
+        restored, typed_sessions = await asyncio.to_thread(rebuild)
+        self.session_id_to_tool_env.update(restored)
+        self._typed_sessions.update(typed_sessions)
 
     async def retire_session_state(self, session_id: str) -> None:
         self._release(session_id)
