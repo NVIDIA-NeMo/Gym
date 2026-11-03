@@ -338,7 +338,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.model_call_id,
         context.rollout_id,
         context.parent_resolution.reason if context.parent_resolution is not None else None,
-        len(request_messages),
+        len(context.request_items),
     )
     await ledger.record_failure(
         context.rollout_id,
