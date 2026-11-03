@@ -77,7 +77,7 @@ class BirdInteractTask(BaseModel):
     preprocess_sql: list[str] = Field(default_factory=list)
     test_cases: list[str] = Field(default_factory=list)
     conditions: Conditions = Field(default_factory=Conditions)
-    # Query or Management. A Management phase runs its custom test cases.
+    # Query or Management. A Management phase runs its custom test cases, on PostgreSQL.
     category: str = QUERY_CATEGORY
     # The question without its ambiguities. The simulator reads it when the row has it.
     query: str | None = None
@@ -94,10 +94,15 @@ class BirdInteractTask(BaseModel):
         return len(self.user_query_ambiguity.critical_ambiguity) + len(self.knowledge_ambiguity)
 
     def needs_custom_test_cases(self) -> bool:
-        """Whether a phase is graded by its custom test cases, as BIRD-Interact grades a phase that is not a query
-        and has them. Every other phase is graded by comparing its result with the solution's."""
+        """Whether a phase is graded by its custom test cases (see ``custom_test_cases``)."""
         phases = [self] if self.follow_up is None else [self, self.follow_up]
-        return any(phase.category != QUERY_CATEGORY and phase.test_cases for phase in phases)
+        return any(custom_test_cases(phase) for phase in phases)
+
+
+def custom_test_cases(phase: BirdInteractTask | FollowUp) -> list[str]:
+    """The test cases that grade a phase, as BIRD-Interact grades it: a phase that is not a query runs its own. A
+    query, or a phase with none, is graded by comparing its result with the solution's, so it gets an empty list."""
+    return [] if phase.category == QUERY_CATEGORY else phase.test_cases
 
 
 TaskData = BirdInteractTask

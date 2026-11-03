@@ -83,7 +83,7 @@ from environment_servers.bird_interact.simulator import (
     read_reply,
     response_generator_prompt,
 )
-from environment_servers.bird_interact.task_data import BirdInteractTask
+from environment_servers.bird_interact.task_data import BirdInteractTask, custom_test_cases
 from nemo_gym import PARENT_DIR
 from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.client import get_response_json, raise_for_status
@@ -123,7 +123,7 @@ USER_SIMULATOR_FAILED = "bird_interact:user_simulator_failed"
 SANDBOX_FAILED = "bird_interact:sandbox_failed"
 # Runs inside the episode's sandbox; see its module docstring.
 _SANDBOX_RUNNER = Path(__file__).with_name("grading.py")
-# Time for a sandbox command beyond its two queries: the scratch copies and the round trip.
+# Time for a sandbox command beyond its queries: the scratch copies and the round trip.
 _SANDBOX_COMMAND_SLACK_SECONDS = 60.0
 # BIRD-Interact's a-Interact action costs, in BIRD-COIN.
 DEFAULT_ACTION_COSTS = {
@@ -690,10 +690,10 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 f"Task {task.instance_id} has no sol_sql. The public BIRD-Interact releases withhold the ground truth; "
                 "merge it into the rows before running."
             )
-        if task.needs_custom_test_cases():
+        if self.config.database_engine == "sqlite" and task.needs_custom_test_cases():
             raise _refused(
                 f"Task {task.instance_id} is graded by its custom test cases (a phase of a category other than "
-                "Query), which this server does not run yet."
+                "Query), which this server runs on PostgreSQL only."
             )
         files = self._database_files(task.selected_database)
         source = self._sandbox_source(task)
@@ -825,9 +825,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         episode.
         """
         task, phase = episode.task, episode.phase
-        solution, conditions = (
-            (task.sol_sql, task.conditions) if phase == 1 else (task.follow_up.sol_sql, task.follow_up.conditions)
-        )
+        current = task if phase == 1 else task.follow_up
         follows = phase == 1 and task.follow_up is not None and len(self.config.phase_rewards) > 1
         episode.attempts += 1
         result = await self.in_sandbox(
@@ -835,8 +833,10 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             "grade",
             {
                 "predicted_sql": sql,
-                "solution_sql": solution,
-                "ordered": conditions.order,
+                "solution_sql": current.sol_sql,
+                "ordered": current.conditions.order,
+                # A management phase runs its own; any other phase is graded by the default test case.
+                "test_cases": custom_test_cases(current),
                 "timeout_seconds": self.config.sql_timeout_seconds,
                 # Phase 2 sees what phase 1 changed.
                 "apply_if_passed": follows,
@@ -959,9 +959,13 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                     json.dumps(request | {"engine": self.config.database_engine, "database": handle.database})
                 )
                 await handle.sandbox.upload(local, handle.path(name))
+            # Two queries, or the submission and two for each test case, which mostly runs the submission's and the
+            # solution's queries again.
+            test_cases = request.get("test_cases") or []
+            queries = 1 + 2 * len(test_cases) if test_cases else 2
             result = await handle.sandbox.exec(
                 shlex.join(["python3", handle.path(_SANDBOX_RUNNER.name), command, handle.path(name)]),
-                timeout_s=2 * self.config.sql_timeout_seconds + _SANDBOX_COMMAND_SLACK_SECONDS,
+                timeout_s=queries * self.config.sql_timeout_seconds + _SANDBOX_COMMAND_SLACK_SECONDS,
             )
         except Exception as error:
             raise SandboxCommandError(f"grading.py {command}: {type(error).__name__}: {error}") from error
