@@ -41,6 +41,13 @@ class EvalRDLExportConfig(RunExportConfig):
     parallel: int = Field(default=4, ge=1, description="Number of parallel upload parts.")
     wait: bool = Field(default=True, description="Block until EvalRDL has a verdict on the upload.")
     timeout: float = Field(default=1800, gt=0, description="Seconds to wait for the verdict.")
+    run_dir: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Directory to upload as the run; it must contain the rollouts file. "
+            "Defaults to the directory the rollouts file is in."
+        ),
+    )
     url: Optional[str] = Field(
         default=None, description="EvalRDL service: `prod`, `stg` or a URL. Defaults to the SDK's own choice."
     )
@@ -87,6 +94,9 @@ class EvalRDLExporter(IsolatedExporter):
             raise ExportPreparationError(unexportable)
         # `absolute`, not `resolve`: a symlinked rollouts file must not move the upload to its target's directory.
         rollouts = artifacts.rollouts_jsonl_fpath.absolute()
+        run_dir = self.config.run_dir.absolute() if self.config.run_dir is not None else rollouts.parent
+        if not rollouts.is_relative_to(run_dir):
+            raise ExportPreparationError(f"`run_dir` {run_dir} does not contain the rollouts file {rollouts}.")
         others = sorted(
             path.name
             for path in rollouts.parent.glob("*rollouts.jsonl")
@@ -99,7 +109,7 @@ class EvalRDLExporter(IsolatedExporter):
             )
         config = self.config
         return {
-            "run_dir": str(rollouts.parent),
+            "run_dir": str(run_dir),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,

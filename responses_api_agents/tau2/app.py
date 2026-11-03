@@ -38,12 +38,12 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import NeMoGymAsyncOpenAI, get_server_url
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.models import chat_completion_usage_to_response_usage
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -456,6 +456,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             created_at=0.0,
             model=body.responses_create_params.model or "tau2",
             object="response",
+            # No generation happened: recovery must not keep this placeholder as the model's answer.
+            metadata=dict(NG_NO_GENERATION_METADATA),
             output=[
                 {
                     "type": "message",
