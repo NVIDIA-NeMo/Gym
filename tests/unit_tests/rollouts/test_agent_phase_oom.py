@@ -6,10 +6,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
 from nemo_gym.failure_transport import FailureHeader
-from nemo_gym.rollouts import NG_TERMINAL_KEY
-from nemo_gym.rollouts.rollout_collection import NG_FAILURE_COUNTS_AS_ZERO_KEY, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import (
+    NG_FAILURE_COUNTS_AS_ZERO_KEY,
+    NG_TERMINAL_KEY,
+    RolloutCollectionHelper,
+)
 from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
 from nemo_gym.sandbox.failure_details import sandbox_failure_event
 from nemo_gym.server_runtime.episode_types import FailureBoundary, SandboxFailureDetails
