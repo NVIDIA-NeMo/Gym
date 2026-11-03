@@ -1329,7 +1329,7 @@ _EXTEND_RETRIES_SCOPE = (
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
-    """The omitted identities by stage and policy, e.g. "1 omitted by an accepted partial stage (1, tolerate_unresolved)"."""
+    """The omitted identities by stage and policy, e.g. "1 omitted by an accepted partial stage (stage_index 1, tolerate_unresolved)"."""
     stages = Counter(item.reason for item in evidence if item.state == IdentityState.OMITTED)
     return ", ".join(f"{n} omitted by an accepted partial stage {stage}" for stage, n in sorted(stages.items()))
 
@@ -2990,7 +2990,7 @@ def continuation_admission(
             return "stop"
         collected.accounted_walltime_s = collected.walltime_used_s
         # A completed outcome plus untouched pending inputs establishes planned segment work. Actual failed
-        # attempts still consume infra retries, even if the driver happened to exit75. A missing output,
+        # attempts still consume infra retries, even if the driver happened to exit 75. A missing output,
         # reservation, judge answer or unowned selected cause is rejected by the ordinary decision below.
         # A scheduler allocation timeout continues untouched work, but never a failed agent attempt.
         segment = previous_state == "TIMEOUT"
