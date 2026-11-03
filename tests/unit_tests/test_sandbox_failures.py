@@ -368,3 +368,84 @@ def test_broken_exception_formatter_does_not_hide_observed_failure():
     assert failure.failure_kind == "provider_unavailable" and failure.http_status == 503
     assert failure.__cause__ is cause
     assert failure.foreign_error.message == ""
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("KUBERNETES::POD_IP_NOT_AVAILABLE", PROVIDER_UNAVAILABLE),
+        ("KUBERNETES::SANDBOX_NOT_FOUND", PROVIDER_REQUEST_FAILED),
+    ],
+)
+async def test_structured_endpoint_availability_controls_create_retries(code, expected):
+    from opensandbox.adapters.converter.response_handler import handle_api_error
+    from opensandbox.exceptions import SandboxApiException
+
+    # The installed SDK retains the structured code, even when both errors use HTTP 404.
+    response = SimpleNamespace(status_code=404, headers={}, parsed=SimpleNamespace(code=code, message="same text"))
+    with pytest.raises(SandboxApiException) as sdk_error:
+        handle_api_error(response, "Get endpoint")
+    failure = sandbox_failure(operation="create", cause=sdk_error.value)
+    assert failure.failure_kind == expected
+    assert failure.http_status == 404
+    handle = SandboxHandle("sb", "opensandbox", None)
+    provider = module.OpenSandboxProvider(create={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0})
+    provider._create_once = AsyncMock(side_effect=[sdk_error.value, handle])
+    if expected == PROVIDER_UNAVAILABLE:
+        assert await provider.create(module.SandboxSpec(image="test")) is handle
+        assert provider._create_once.await_count == 2
+    else:
+        with pytest.raises(NgFailureEvent):
+            await provider.create(module.SandboxSpec(image="test"))
+        provider._create_once.assert_awaited_once()
+    fail_policy = module.OpenSandboxCreateOutcomePolicy(by_status_code={404: "fail"})
+    assert failure_outcome_policy(failure, config=fail_policy) == OutcomeAction.FAIL
+
+
+@pytest.mark.parametrize("message", ["imagepullbackoff", "pod may still be starting", "gateway timeout"])
+def test_creation_uses_sdk_readiness_evidence_not_message_markers(message):
+    from opensandbox.exceptions import SandboxReadyTimeoutException, SandboxUnhealthyException
+
+    for sdk_error in (SandboxReadyTimeoutException(message), SandboxUnhealthyException(message)):
+        failure = sandbox_failure(operation="create", cause=sdk_error)
+        assert module._is_retryable_create_error(failure)
+    assert not module._is_retryable_create_error(RuntimeError(message))
+
+
+def test_retry_after_does_not_search_other_events_causes():
+    import httpx
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+
+    request = httpx.Request("GET", "https://sandbox.example/status")
+    response = httpx.Response(429, headers={"Retry-After": "27"}, content=b"", request=request)
+    sdk_error = ExceptionConverter.to_sandbox_exception(
+        httpx.HTTPStatusError("busy", request=request, response=response)
+    )
+    failure = sandbox_failure(operation="status", cause=sdk_error)
+    assert module._retry_delay(failure, fallback=1) == 27
+    outer = sandbox_failure(operation="create", cause=failure, http_status=429)
+    assert module._retry_delay(outer, fallback=1) == 1
+    response.headers["Retry-After"] = "invalid"
+    assert module._retry_delay(failure, fallback=1) == 1
+
+
+async def test_retry_after_cannot_extend_status_recovery_budget(monkeypatch):
+    import httpx
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+
+    request = httpx.Request("GET", "https://sandbox.example/status")
+    response = httpx.Response(429, headers={"Retry-After": "27"}, content=b"", request=request)
+    error = ExceptionConverter.to_sandbox_exception(httpx.HTTPStatusError("busy", request=request, response=response))
+    commands = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(id="exec-1")),
+        get_command_status=AsyncMock(side_effect=error),
+    )
+    provider, handle = provider_and_handle(monkeypatch, commands, status_recovery_timeout_s=0.03)
+    start = asyncio.get_running_loop().time()
+    with pytest.raises(NgFailureEvent) as caught:
+        await provider.exec(handle, "long run", timeout_s=3600)
+    assert asyncio.get_running_loop().time() - start < 0.2
+    assert caught.value.failure_kind == PROVIDER_STATUS_UNAVAILABLE
+    assert caught.value.__cause__.http_status == 429
+    commands.get_command_status.assert_awaited_once()
+    commands.run.assert_awaited_once()
