@@ -204,12 +204,32 @@ def test_a_rollout_that_ended_on_a_failed_policy_request_and_scored_zero_is_a_se
     assert passed is False and "(server 1: model_transport_error 1)" in reason
 
 
-@pytest.mark.parametrize("change", [{"reward": 1.0}, {"recorded": False}])
-def test_a_failed_last_request_without_a_zero_score_or_its_event_is_not_counted(change):
+def test_a_failed_last_request_without_its_event_is_not_counted():
     collected = _collected()
-    _end_on_a_failed_request(collected, **change)
+    _end_on_a_failed_request(collected, recorded=False)
     decision = _decide(collected)
     assert final_zero_trials(decision, collected) == {}
     passed, reason = trial_health(decision, collected)
     assert passed is None
     assert "known failures are a lower bound: evaluation-side faults: 0 of 1" in reason
+
+
+def test_a_graded_row_that_ended_on_the_models_own_failed_request_is_a_model_result():
+    # The verifier graded the state the model reached before its own context limit ended the rollout: a model result
+    # at any reward, not a final zero and not an unaccounted failure.
+    collected = _collected()
+    _end_on_a_failed_request(collected, reward=1.0)
+    decision = _decide(collected)
+    assert final_zero_trials(decision, collected) == {}
+    passed, reason = trial_health(decision, collected)
+    assert passed is True, reason
+
+
+def test_a_graded_row_that_ended_on_an_evaluation_side_failed_request_stays_unverified():
+    collected = _collected()
+    _end_on_a_failed_request(collected, reward=1.0)
+    events = _policy_call(collected)["response_metadata"]["failure_report"]["events"]
+    events["request-failure-1"]["failure_kind"] = "model_transport_error"
+    passed, reason = trial_health(_decide(collected), collected)
+    assert passed is None
+    assert "known failures are a lower bound" in reason
