@@ -736,6 +736,7 @@ def test_default_context_options_keep_the_published_contract() -> None:
     assert stop["context_prompt_token_limit"] == 40960
     assert "unterminated_episode_policy" not in default
     assert normalize_nemotron_agent_options({"unterminated_episode_policy": "fail"})["unterminated_episode_policy"] == "fail"
+    assert normalize_nemotron_agent_options({"unterminated_episode_policy": "mask"})["unterminated_episode_policy"] == "mask"
     with pytest.raises(ValueError, match="unterminated_episode_policy"):
         normalize_nemotron_agent_options({"unterminated_episode_policy": "score"})
 

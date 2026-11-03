@@ -31,12 +31,16 @@ class RolloutOutcomeFacts:
     environment_done: bool = False
     horizon_reached: bool = False
     policy_stop_reason: Optional[str] = None
+    # Legacy cc_app training masked every rollout that ended without DONE/FAIL
+    # or environment termination; opt in to reproduce that admission rule.
+    mask_unterminated: bool = False
 
     def __post_init__(self) -> None:
         for name in (
             "evaluation_completed",
             "environment_done",
             "horizon_reached",
+            "mask_unterminated",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be boolean")
@@ -117,6 +121,15 @@ def classify_rollout_outcome(facts: RolloutOutcomeFacts) -> RolloutOutcome:
             evaluation_completed=True,
             runtime_eligible=False,
             runtime_admission_reason="rollout_state_incomplete",
+        )
+
+    if facts.mask_unterminated and facts.terminal_action is None and not facts.environment_done:
+        return RolloutOutcome(
+            termination_reason=termination_reason,
+            horizon_reached=facts.horizon_reached,
+            evaluation_completed=True,
+            runtime_eligible=False,
+            runtime_admission_reason="unterminated_masked",
         )
 
     return RolloutOutcome(

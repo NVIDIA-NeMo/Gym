@@ -1756,6 +1756,7 @@ def run_osworld_task(
     step_timeout: float = 60.0,  # per-action backend timeout where supported
     model_timeout: float = 900.0,
     task_timeout: int = 1800,  # cooperative deadline checked between steps and by Pointer model calls
+    rollout_timeout_s: Optional[float] = None,  # agent-loop budget from the first step, checked between steps
     docker_port_lock_timeout: float = 300.0,
     runner_name: str = "gym_pyautogui",
     action_space: Optional[str] = None,
@@ -2360,7 +2361,17 @@ def run_osworld_task(
             },
         )
 
+        loop_start = time.monotonic()
         for step_idx in range(max_steps):
+            if rollout_timeout_s is not None and time.monotonic() - loop_start > rollout_timeout_s:
+                error = f"rollout_timeout_s exceeded ({rollout_timeout_s}s) at step {step_idx}"
+                timed_out = True
+                task_logger.warning(error)
+                _append_task_trajectory(
+                    task_artifacts,
+                    {"event": "timeout", "step_num": step_idx + 1, "error": error},
+                )
+                break
             if time.monotonic() - task_start > task_timeout:
                 error = f"task_timeout exceeded ({task_timeout}s) at step {step_idx}"
                 timed_out = True
@@ -2689,6 +2700,13 @@ def run_osworld_task(
             environment_done=finished and agent_terminal_action is None,
             horizon_reached=horizon_reached,
             policy_stop_reason=agent_stop_reason,
+            mask_unterminated=(
+                runner_spec.agent_kwargs.get("unterminated_episode_policy") == "mask"
+                or (
+                    bool(runner_spec.agent_kwargs.get("mask_context_limit"))
+                    and agent_stop_reason == CONTEXT_LIMIT_STOP_REASON
+                )
+            ),
         )
     )
 

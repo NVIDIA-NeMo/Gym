@@ -1136,6 +1136,32 @@ def test_horizon_preserves_evaluated_zero_as_runtime_eligible(monkeypatch) -> No
     assert result.termination_reason == "max_steps"
 
 
+def test_mask_policy_masks_evaluated_horizon_without_terminal_action(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    FakePromptAgent.next_actions = [{"action_type": "LEFT_CLICK", "x": 753, "varies": 45}]
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-horizon-mask", "instruction": "Try once, then evaluate."},
+        model_fn=lambda *_args: "unused",
+        runner_name="prompt_agent_computer_13",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePromptAgent",
+        agent_kwargs={"unterminated_episode_policy": "mask"},
+        messages_model_fn=lambda _messages, _payload: "native response",
+        max_steps=1,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.horizon_reached is True
+    assert result.evaluation_completed is True
+    assert result.reward == 1.0
+    assert result.runtime_eligible is False
+    assert result.mask_sample is True
+    assert result.runtime_admission_reason == "unterminated_masked"
+    assert result.termination_reason == "max_steps"
+
+
 def test_prompt_agent_runner_strips_thinking_before_native_agent_parse(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
@@ -2633,3 +2659,23 @@ def test_a_guest_start_timeout_is_reported_as_a_sandbox_start_failure(monkeypatc
     assert result.sandbox_start_failure == (expected if reported else None)
     # The score and the runtime mask do not change.
     assert (result.reward, result.mask_sample, result.evaluation_completed) == (0.0, True, False)
+
+
+def test_rollout_timeout_counts_the_agent_loop_and_masks_the_rollout(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    clock = iter(range(0, 10_000, 100))
+    monkeypatch.setattr(osworld_client.time, "monotonic", lambda: float(next(clock)))
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-rollout-timeout", "instruction": "Keep clicking."},
+        model_fn=lambda *_args: "```pyautogui.click(1, 1)```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        max_steps=50,
+        task_timeout=1_000_000,
+        rollout_timeout_s=1200,
+    )
+
+    assert "rollout_timeout_s exceeded (1200s)" in (result.error or "")
+    assert result.mask_sample is True
+    assert 0 < len(result.steps) < 50

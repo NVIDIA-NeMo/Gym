@@ -379,6 +379,9 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     # receives this value as a cooperative deadline so model/step boundaries
     # can stop cleanly before the parent has to cancel the Ray task.
     task_timeout: int = 1800
+    # Agent-loop budget counted from the first step, like the pre-rebase
+    # cc_app rollout_timeout_s; reaching it ends the rollout as a timeout.
+    rollout_timeout_s: Optional[float] = Field(default=None, gt=0)
     task_cancel_grace_s: float = Field(default=30.0, gt=0)
     # Optional semantic Ray resources for each OSWorld rollout task. This lets
     # an embedding scheduler keep image-heavy environment work off trainer
@@ -891,6 +894,9 @@ def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
     prompt_tokens = getattr(getattr(resp, "usage", None), "prompt_tokens", None)
     if type(prompt_tokens) is int:
         normalized["prompt_tokens"] = prompt_tokens
+    completion_tokens = getattr(getattr(resp, "usage", None), "completion_tokens", None)
+    if type(completion_tokens) is int:
+        normalized["completion_tokens"] = completion_tokens
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1578,6 +1584,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "step_timeout": self.config.step_timeout,
                 "model_timeout": self.config.model_timeout,
                 "task_timeout": self.config.task_timeout,
+                "rollout_timeout_s": self.config.rollout_timeout_s,
                 "docker_port_lock_timeout": self.config.docker_port_lock_timeout,
                 "evaluator_disable_gpu": self.config.evaluator_disable_gpu,
                 "reward_mode": self.config.reward_mode,
@@ -1933,6 +1940,11 @@ def _build_response(
     return OSWorldVerifyResponse(**response_fields)
 
 
+def _is_loss_member(model_call: Mapping[str, Any]) -> bool:
+    """Accepted calls train; ``loss_member`` overrides that, e.g. for a trained invalid terminal call."""
+    return model_call.get("loss_member", model_call.get("accepted")) is True
+
+
 def _served_model_call_output(
     model_calls: List[Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], Optional[str]]:
@@ -1964,7 +1976,7 @@ def _served_model_call_output(
             continue
         response_id = response.get("response_id")
         terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
-        terminal_accepted = model_call.get("accepted") is True
+        terminal_accepted = _is_loss_member(model_call)
         if not terminal_accepted:
             continue
         output.append(
@@ -1991,7 +2003,7 @@ def _accepted_call_references(model_calls: List[Dict[str, Any]]) -> List[Dict[st
 
     references: List[Dict[str, str]] = []
     for model_call in model_calls:
-        if model_call.get("accepted") is not True:
+        if not _is_loss_member(model_call):
             continue
         response = model_call.get("response")
         if not isinstance(response, Mapping):

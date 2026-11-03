@@ -29,6 +29,11 @@ from responses_api_agents.osworld_agent.history_policy import (
     HistoryPolicyState,
     plan_history,
 )
+from responses_api_agents.osworld_agent.legacy_parser import (
+    is_invalid_legacy_parse,
+    normalize_vendor_parser_input,
+    parse_response_to_cot_and_action,
+)
 from responses_api_agents.osworld_agent.rollout_outcome import CONTEXT_LIMIT_STOP_REASON
 from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
 from responses_api_agents.osworld_agent.trajectory import stable_id
@@ -93,6 +98,14 @@ TEXT_HISTORY_CODE_TEMPLATE = "\n## Code:\n```python\n{code}\n```\n"
 # raw_full: raw_live, plus the policy's original Code in compacted turns.
 _ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"normalized", "raw_live", "raw_full"})
 _RAW_ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"raw_live", "raw_full"})
+# osworld: text-folded history from ``history_policy`` (reference agent).
+# cc_chat: the pre-rebase ``nemotron_osworld`` CC prompt. Every turn stays a
+# chat turn; dropped screenshots become a marker at the start of each omitted
+# run; the first screenshot is never dropped; and the image window is a frozen
+# base of the last ``cc_keep_last_groups`` observations plus a growing tail,
+# re-based once it holds more than ``cc_max_active_images`` images.
+_HISTORY_LAYOUTS = frozenset({"osworld", "cc_chat"})
+CC_OMITTED_IMAGE_MARKER = "[Earlier image omitted]"
 ASSISTANT_HISTORY_TEMPLATE_THINKING = "<think>\n{thought}\n</think>\n## Action:\n{action}\n"
 ASSISTANT_HISTORY_TEMPLATE_NON_THINKING = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
 
@@ -537,7 +550,7 @@ _CONTEXT_OVERFLOW_POLICIES = frozenset({"shrink", "stop"})
 # fail: like the reference Nemotron agent, reaching the step horizon, exhausting
 # parse retries or the context-limit stop executes FAIL, so OSWorld scores a
 # feasible task 0 unless the policy itself returned computer.terminate.
-_UNTERMINATED_EPISODE_POLICIES = frozenset({"evaluate", "fail"})
+_UNTERMINATED_EPISODE_POLICIES = frozenset({"evaluate", "fail", "mask"})
 
 
 def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, Any]:
@@ -580,9 +593,57 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
         result["context_prompt_token_limit"] = prompt_token_limit
     unterminated_episode_policy = options.get("unterminated_episode_policy", "evaluate")
     if unterminated_episode_policy not in _UNTERMINATED_EPISODE_POLICIES:
-        raise ValueError("unterminated_episode_policy must be 'evaluate' or 'fail'")
+        raise ValueError("unterminated_episode_policy must be 'evaluate', 'fail', or 'mask'")
     if unterminated_episode_policy != "evaluate":
         result["unterminated_episode_policy"] = unterminated_episode_policy
+    history_layout = options.get("history_layout", "osworld")
+    if history_layout not in _HISTORY_LAYOUTS:
+        raise ValueError("history_layout must be 'osworld' or 'cc_chat'")
+    if history_layout == "cc_chat":
+        if assistant_history_replay != "raw_full":
+            raise ValueError("history_layout='cc_chat' replays served outputs and requires raw_full")
+        if context_overflow_policy != "stop":
+            # Shrinking replans through history_policy, which cc_chat does not use.
+            raise ValueError("history_layout='cc_chat' requires context_overflow_policy='stop'")
+        result["history_layout"] = history_layout
+        for field, default, minimum in (
+            ("cc_keep_last_groups", 2, 0),
+            ("cc_max_active_images", 10, 1),
+            ("cc_actions_per_chunk", 100, 1),
+        ):
+            value = options.get(field)
+            value = default if value is None else value
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{field} must be an integer >= {minimum}")
+            result[field] = value
+        result["cc_chunk_turns_as_generated"] = bool(options.get("cc_chunk_turns_as_generated") or False)
+        if result["cc_keep_last_groups"] + 1 > result["cc_max_active_images"]:
+            raise ValueError("cc_max_active_images must hold the initial image plus cc_keep_last_groups")
+        prompt_token_guard = options.get("cc_prompt_token_guard")
+        if prompt_token_guard is not None:
+            if type(prompt_token_guard) is not int or prompt_token_guard <= 0:
+                raise ValueError("cc_prompt_token_guard must be a positive integer")
+            result["cc_prompt_token_guard"] = prompt_token_guard
+    # Pre-rebase nemotron_osworld response handling. Only non-default values
+    # enter the contract, so existing contracts stay byte-identical.
+    for field, default in (
+        ("validate_python_syntax", True),
+        ("require_clean_finish", True),
+        ("train_invalid_terminal_call", False),
+        ("legacy_response_parser", False),
+        ("mask_context_limit", False),
+    ):
+        value = options.get(field)
+        value = default if value is None else value
+        if type(value) is not bool:
+            raise ValueError(f"{field} must be a boolean")
+        if value != default:
+            result[field] = value
+    if result.get("train_invalid_terminal_call") and unterminated_episode_policy != "fail":
+        # Only the fail policy turns an invalid response into a scored episode end.
+        raise ValueError("train_invalid_terminal_call requires unterminated_episode_policy='fail'")
+    if result.get("mask_context_limit") and options.get("context_overflow_policy") != "stop":
+        raise ValueError("mask_context_limit requires context_overflow_policy='stop'")
     return result
 
 
@@ -672,6 +733,17 @@ class NemotronV3NanoOmniAgent:
         context_overflow_policy: str = "shrink",
         context_prompt_token_limit: int | None = None,
         unterminated_episode_policy: str = "evaluate",
+        history_layout: str = "osworld",
+        cc_keep_last_groups: int | None = None,
+        cc_max_active_images: int | None = None,
+        cc_actions_per_chunk: int | None = None,
+        cc_chunk_turns_as_generated: bool = False,
+        cc_prompt_token_guard: int | None = None,
+        validate_python_syntax: bool = True,
+        require_clean_finish: bool = True,
+        train_invalid_terminal_call: bool = False,
+        legacy_response_parser: bool = False,
+        mask_context_limit: bool = False,
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -705,6 +777,17 @@ class NemotronV3NanoOmniAgent:
                 "context_overflow_policy": context_overflow_policy,
                 "context_prompt_token_limit": context_prompt_token_limit,
                 "unterminated_episode_policy": unterminated_episode_policy,
+                "history_layout": history_layout,
+                "cc_keep_last_groups": cc_keep_last_groups,
+                "cc_max_active_images": cc_max_active_images,
+                "cc_actions_per_chunk": cc_actions_per_chunk,
+                "cc_chunk_turns_as_generated": cc_chunk_turns_as_generated,
+                "cc_prompt_token_guard": cc_prompt_token_guard,
+                "validate_python_syntax": validate_python_syntax,
+                "require_clean_finish": require_clean_finish,
+                "train_invalid_terminal_call": train_invalid_terminal_call,
+                "legacy_response_parser": legacy_response_parser,
+                "mask_context_limit": mask_context_limit,
             }
         )
         if action_space != "pyautogui":
@@ -748,6 +831,17 @@ class NemotronV3NanoOmniAgent:
         self.context_overflow_policy = behavior_options.get("context_overflow_policy", "shrink")
         self.context_prompt_token_limit = behavior_options.get("context_prompt_token_limit")
         self.unterminated_episode_policy = behavior_options.get("unterminated_episode_policy", "evaluate")
+        self.history_layout = behavior_options.get("history_layout", "osworld")
+        self.cc_keep_last_groups = behavior_options.get("cc_keep_last_groups")
+        self.cc_max_active_images = behavior_options.get("cc_max_active_images")
+        self.cc_actions_per_chunk = behavior_options.get("cc_actions_per_chunk")
+        self.cc_chunk_turns_as_generated = behavior_options.get("cc_chunk_turns_as_generated", False)
+        self.cc_prompt_token_guard = behavior_options.get("cc_prompt_token_guard")
+        self.validate_python_syntax = behavior_options.get("validate_python_syntax", True)
+        self.require_clean_finish = behavior_options.get("require_clean_finish", True)
+        self.train_invalid_terminal_call = behavior_options.get("train_invalid_terminal_call", False)
+        self.legacy_response_parser = behavior_options.get("legacy_response_parser", False)
+        self.mask_context_limit = behavior_options.get("mask_context_limit", False)
         self.max_steps = max_steps
         self.client_password = client_password
         self.thinking = behavior_options["thinking"]
@@ -779,6 +873,13 @@ class NemotronV3NanoOmniAgent:
         self.actions: List[str] = []
         self.cots: List[Dict[str, Any]] = []
         self.history_policy_state = HistoryPolicyState()
+        self.cc_chunk_start: int | None = None
+        # (turn, prompt_tokens, completion_tokens, opened_chunk) of the last
+        # served call, and the measured prompt growth of one appended turn.
+        self.cc_last_usage: tuple[int, int, int, bool] | None = None
+        self.cc_turn_growth: int | None = None
+        self.cc_first_prompt_tokens: int | None = None
+        self.cc_guard_rebases = 0
         # Turns folded into the text summary. Replaces the former
         # ``compacted_before`` scalar, which assumed the live images were one
         # contiguous suffix and is meaningless once a policy keeps a sink.
@@ -865,6 +966,22 @@ class NemotronV3NanoOmniAgent:
             return f"<think>\n{reasoning}\n</think>\n{content}"
         return content
 
+    def _legacy_parse(self, response: Any) -> tuple[str, List[str], Dict[str, Any]]:
+        """Parse as the pre-rebase agent did from the engine's reasoning split."""
+
+        raw_content = response.get("raw_content") if isinstance(response, Mapping) else None
+        if isinstance(raw_content, str) and raw_content.startswith("<think>") and "</think>" in raw_content:
+            reasoning, _, content = raw_content[len("<think>") :].partition("</think>")
+        else:
+            content, reasoning = _response_parts(response)
+        parser_input = normalize_vendor_parser_input({"content": content, "reasoning_content": reasoning})
+        return parse_response_to_cot_and_action(
+            parser_input,
+            self.screen_size,
+            self.coordinate_type,
+            thinking=self.thinking,
+        )
+
     def _check_prompt_token_limit(self, response: Any) -> None:
         """Reject a served call whose prompt left less than the output reserve.
 
@@ -944,6 +1061,8 @@ class NemotronV3NanoOmniAgent:
         *,
         max_images: int | None = None,
     ) -> List[Dict[str, Any]]:
+        if self.history_layout == "cc_chat":
+            return self._cc_messages(instruction, obs)
         messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         instruction_prompt = self.model_protocol.instruction_template.format(instruction=instruction)
         action_count = len(self.actions)
@@ -1023,6 +1142,143 @@ class NemotronV3NanoOmniAgent:
         )
         return messages
 
+    def _cc_prompt_guard_exceeded(self, chunk_start: int, turn: int) -> bool:
+        """Predict whether the next in-chunk prompt crosses the CC token guard.
+
+        The pre-rebase client measured the prepared prompt and closed a
+        non-empty chunk once it exceeded the guard. Appending one turn grows
+        the prompt by the previous completion plus one observation, whose size
+        is measured from consecutive in-chunk calls of this episode.
+        """
+
+        if self.cc_prompt_token_guard is None or self.cc_last_usage is None or turn <= chunk_start:
+            return False
+        last_turn, prompt_tokens, completion_tokens, _ = self.cc_last_usage
+        if last_turn != turn - 1:
+            return False
+        growth = self.cc_turn_growth if self.cc_turn_growth is not None else self.cc_first_prompt_tokens
+        if growth is None:
+            return False
+        return prompt_tokens + completion_tokens + growth > self.cc_prompt_token_guard
+
+    def _record_cc_usage(self, response: Any) -> None:
+        if not isinstance(response, Mapping):
+            return
+        prompt_tokens = response.get("prompt_tokens")
+        completion_tokens = response.get("completion_tokens")
+        if type(prompt_tokens) is not int or type(completion_tokens) is not int:
+            return
+        turn = len(self.actions)
+        opened_chunk = bool(self.snapshot_window.get("snapshot_compaction_triggered")) or turn == 0
+        if turn == 0:
+            self.cc_first_prompt_tokens = prompt_tokens
+        last = self.cc_last_usage
+        if last is not None and last[0] == turn - 1 and not opened_chunk:
+            self.cc_turn_growth = prompt_tokens - last[1] - last[2]
+        self.cc_last_usage = (turn, prompt_tokens, completion_tokens, opened_chunk)
+
+    def _cc_retained_turns(self, chunk_start: int, turn: int) -> frozenset[int]:
+        keep = self.cc_keep_last_groups
+        base = set(range(max(1, chunk_start - keep + 1), chunk_start + 1)) if keep else set()
+        return frozenset({0, *base, *range(chunk_start + 1, turn + 1)})
+
+    @staticmethod
+    def _cc_assistant_history(raw_output: str, *, spliced: bool) -> str:
+        """Render one served output as the CC prompt showed it.
+
+        CC re-rendered history from the parser's reasoning field, which the
+        template wraps as ``<think>\\n{reasoning}\\n</think>\\n{content}``.
+        With token capture, calls inside a chunk instead continued from the
+        parent's exact tokens. Replaying the served message unchanged is what
+        lets source-history capture admit the call as the parent's
+        continuation, so the engine splices those exact tokens.
+        """
+
+        if spliced or not raw_output.startswith("<think>") or "</think>" not in raw_output:
+            return raw_output
+        reasoning, _, content = raw_output[len("<think>") :].partition("</think>")
+        if not reasoning.strip():
+            return content
+        return f"<think>\n{reasoning}\n</think>\n{content}"
+
+    def _cc_messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
+        turn = len(self.actions)
+        chunk_start = self.cc_chunk_start
+        rebased = (
+            chunk_start is None
+            or turn - chunk_start >= self.cc_actions_per_chunk
+            or len(self._cc_retained_turns(chunk_start, turn)) > self.cc_max_active_images
+        )
+        if not rebased and self._cc_prompt_guard_exceeded(chunk_start, turn):
+            rebased = True
+            self.cc_guard_rebases += 1
+            self.logger.warning(
+                "OSWORLD_CC_PROMPT_GUARD|step=%d|chunk_start=%d|last_prompt_tokens=%d|turn_growth=%s",
+                turn + 1,
+                chunk_start,
+                self.cc_last_usage[1],
+                self.cc_turn_growth,
+            )
+        if rebased:
+            chunk_start = turn
+            self.cc_chunk_start = turn
+        retained = self._cc_retained_turns(chunk_start, turn)
+        instruction_prompt = self.model_protocol.instruction_template.format(instruction=instruction)
+
+        def _user(index: int, screenshot: bytes) -> Dict[str, Any]:
+            parts: List[Dict[str, Any]] = []
+            if index in retained:
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{_encode_image(screenshot)}"},
+                    }
+                )
+            elif index - 1 in retained:
+                parts.append({"type": "text", "text": CC_OMITTED_IMAGE_MARKER})
+            parts.append({"type": "text", "text": instruction_prompt + f"You are currently on Step {index + 1}.\n"})
+            return {"role": "user", "content": parts}
+
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
+        for index in range(turn):
+            raw_output = self.cots[index].get("raw_output")
+            if not isinstance(raw_output, str) or not raw_output:
+                raise ValueError("cc_chat history is missing the served assistant output")
+            messages.append(_user(index, self.observations[index]["screenshot"]))
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": self._cc_assistant_history(
+                        raw_output, spliced=self.cc_chunk_turns_as_generated and index >= chunk_start
+                    ),
+                }
+            )
+        messages.append(_user(turn, obs["screenshot"]))
+
+        self.compacted_turns = tuple(index for index in range(turn + 1) if index not in retained)
+        intervals: List[List[int]] = []
+        for index in sorted(retained):
+            if intervals and intervals[-1][1] == index:
+                intervals[-1][1] = index + 1
+            else:
+                intervals.append([index, index + 1])
+        epoch = int(self.snapshot_window.get("history_policy_compaction_epoch") or 0)
+        self.snapshot_window = {
+            "prompt_snapshot_count": len(retained),
+            "snapshot_window_start": chunk_start,
+            "snapshot_image_intervals": intervals,
+            "snapshot_sink_size": 1,
+            "snapshot_image_budget_clamped": False,
+            "snapshot_compaction_triggered": rebased and turn > 0,
+            "snapshot_window_min": self.cc_keep_last_groups + 1,
+            "snapshot_window_max": self.cc_max_active_images,
+            "history_policy_id": "cc_chat",
+            "history_policy_name": "cc_chat",
+            "history_policy_schema_version": 1,
+            "history_policy_compaction_epoch": epoch + int(rebased and turn > 0),
+        }
+        return messages
+
     def _scale_windows_scroll(self, code: str, factor: int = 50) -> str:
         if self.platform.lower() != "windows":
             return code
@@ -1071,9 +1327,10 @@ class NemotronV3NanoOmniAgent:
                 "max_tokens": self.max_tokens,
                 "temperature": self.temperature if attempt == 0 else retry_temperature,
                 "_nemo_gym_return_message": True,
-                "_nemo_gym_require_stop": True,
                 "_osworld_log_context": call_log_context,
             }
+            if self.require_clean_finish:
+                payload["_nemo_gym_require_stop"] = True
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
             model_call_record: Dict[str, Any] = {
@@ -1091,24 +1348,39 @@ class NemotronV3NanoOmniAgent:
                 model_call_completed = True
                 completed_model_calls += 1
                 model_call_record["response"] = _jsonable(response)
+                if self.history_layout == "cc_chat":
+                    self._record_cc_usage(response)
                 self._check_prompt_token_limit(response)
                 finish_reason = response.get("finish_reason") if isinstance(response, Mapping) else None
-                if finish_reason is not None and finish_reason not in {"stop", "tool_calls"}:
+                if (
+                    self.require_clean_finish
+                    and finish_reason is not None
+                    and finish_reason not in {"stop", "tool_calls"}
+                ):
                     raise ValueError(f"Model response did not finish cleanly: finish_reason={finish_reason!r}")
-                content, _reasoning = _response_parts(response)
-                if not content:
-                    raise ValueError("model response has no content")
-                low_level, actions, response_info = self.model_protocol.parser(
-                    response,
-                    screen_size=self.screen_size,
-                    coordinate_type=self.coordinate_type,
-                    thinking=self.thinking,
-                )
-                attempt_actions = list(actions)
-                parsed_info.update(response_info)
-                if low_level.startswith("<Error>"):
-                    raise ValueError(low_level)
-                _validate_python_actions(actions)
+                if self.legacy_response_parser:
+                    content, _reasoning = _response_parts(response)
+                    low_level, actions, response_info = self._legacy_parse(response)
+                    attempt_actions = list(actions)
+                    parsed_info.update(response_info)
+                    if is_invalid_legacy_parse(low_level, actions, response_info):
+                        raise ValueError(f"<Error>: legacy parser found no executable action: {str(low_level)[:200]}")
+                else:
+                    content, _reasoning = _response_parts(response)
+                    if not content:
+                        raise ValueError("model response has no content")
+                    low_level, actions, response_info = self.model_protocol.parser(
+                        response,
+                        screen_size=self.screen_size,
+                        coordinate_type=self.coordinate_type,
+                        thinking=self.thinking,
+                    )
+                    attempt_actions = list(actions)
+                    parsed_info.update(response_info)
+                    if low_level.startswith("<Error>"):
+                        raise ValueError(low_level)
+                if self.validate_python_syntax:
+                    _validate_python_actions(actions)
                 model_call_record["accepted"] = True
                 model_call_record["parsed_actions"] = attempt_actions
                 model_calls.append(model_call_record)
@@ -1231,7 +1503,18 @@ class NemotronV3NanoOmniAgent:
                 "last_error": last_error,
             }
             # Transport failures stay runtime facts for admission to mask.
-            if self.unterminated_episode_policy == "fail" and (context_limit_stop or model_call_completed):
+            # The pre-rebase client rejected a rollout whose rebased prompt
+            # still exceeded its guard, so that rollout was never trained.
+            mask_context_limit = context_limit_stop and self.mask_context_limit
+            if (
+                self.unterminated_episode_policy == "fail"
+                and (context_limit_stop or model_call_completed)
+                and not mask_context_limit
+            ):
+                if self.train_invalid_terminal_call and not context_limit_stop:
+                    # The pre-rebase agent kept the rejected generation in the
+                    # trained trace, so the episode reward reaches its tokens.
+                    model_calls[-1]["loss_member"] = True
                 parsed_info.update(
                     {
                         "forced_terminal": "context_limit" if context_limit_stop else "model_response_invalid",

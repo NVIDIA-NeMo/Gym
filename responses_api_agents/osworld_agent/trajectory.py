@@ -432,6 +432,9 @@ def collect_model_calls(
                     "partial_generation_evidence": partial_generation_evidence,
                     "exact_evidence": not call_reasons,
                     "accepted": raw_call.get("accepted") is True,
+                    # Loss membership: accepted actions, plus a rejected
+                    # terminal call when train_invalid_terminal_call is set.
+                    "loss_member": raw_call.get("accepted") is True or raw_call.get("loss_member") is True,
                     "parse_error": raw_call.get("parse_error"),
                     "parsed_actions": list(parsed_actions),
                     "reward": reward,
