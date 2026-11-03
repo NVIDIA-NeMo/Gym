@@ -48,7 +48,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxBackendUnreachableError, SandboxHandle
 from nemo_gym.trajectory import (
     AgentInvocation,
     SandboxObservation,
@@ -1817,7 +1817,7 @@ async def test_a_provider_exception_that_reports_no_ended_sandbox_observes_nothi
     config.artifacts_dir = str(tmp_path)
     config.preinstalled_opencode = True
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
-    sandbox = MagicMock(exec=AsyncMock(side_effect=TimeoutError("status read timed out")), download=AsyncMock())
+    sandbox = MagicMock(exec=AsyncMock(side_effect=RuntimeError("status read failed")), download=AsyncMock())
     server._sandbox_id_to_sandbox = {"session": sandbox}
     server._create_opencode_config = AsyncMock(return_value={})
     request = SimpleNamespace(
@@ -1878,3 +1878,154 @@ def test_the_ripgrep_warning_is_logged_by_the_main_process_only(
     with caplog.at_level(logging.WARNING, logger=app_module.__name__):
         OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     assert app_module.RIPGREP_WARNING not in [r.getMessage() for r in caplog.records]
+
+
+_RIPGREP_TIMEOUT = "Timed out during OpenSandbox write_file(/tmp/nemo-gym-ripgrep-x) after 300s"
+
+
+def _staged_agent(tmp_path, sandbox):
+    """An agent whose sandbox is ``sandbox`` and that stages a local ripgrep, with the request to run it."""
+    from nemo_gym.sandbox import SandboxHandle
+
+    binary = tmp_path / "rg"
+    binary.write_text("rg")
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    config.local_ripgrep_binary_path = binary
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox._handle = SandboxHandle(sandbox_id="box-1", provider_name="opensandbox", raw=None)
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    return server, request, body
+
+
+def _failing_upload(error):
+    async def upload(local_path, remote_path):
+        if str(remote_path).startswith("/tmp/nemo-gym-ripgrep-"):
+            raise error
+
+    return AsyncMock(side_effect=upload)
+
+
+async def _run_observing_failures(server, request, body):
+    """The failure the route raises and the report its reply would carry, as the server middleware builds it."""
+    from nemo_gym.core import RequestFailureLog
+
+    with RequestFailureLog.capture() as log:
+        with raises(Exception) as caught:
+            await server.responses(request, body)
+    report = log.reply_report(caught.value)
+    return caught.value, report, [event for event in report.events.values() if event.boundary == "sandbox"]
+
+
+def _ended_timeout(reason="OOMKilled", container_line="container sandbox exited with code 137 (OOMKilled)"):
+    """A TimeoutError that also carries the provider's report of an ended sandbox."""
+    message = (
+        f"Sandbox box-1 has ended ({reason}): 1/1 observed pods failed; primary reason=ContainerFailed; "
+        f"sample pod=box-1-0; sample detail=Pod box-1-0 {container_line}"
+    )
+    error = type("EndedTimeout", (TimeoutError,), {})(message)
+    error.error = SimpleNamespace(code="SANDBOX::ENDED", message=message)
+    return error
+
+
+async def test_a_staging_upload_that_times_out_is_observed_as_a_seed_stage_transport_timeout(tmp_path):
+    from nemo_gym.rollouts.rollout_collection import (
+        NG_FAILURE_COUNTS_AS_ZERO_KEY,
+        NG_TERMINAL_KEY,
+        _agent_request_failure_row,
+    )
+    from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
+
+    error = TimeoutError(_RIPGREP_TIMEOUT)
+    sandbox = MagicMock(upload=_failing_upload(error), exec=AsyncMock(), download=AsyncMock())
+    server, request, body = _staged_agent(tmp_path, sandbox)
+
+    raised, report, [event] = await _run_observing_failures(server, request, body)
+
+    # The route still raises the provider's own error; nothing else was added to it.
+    assert raised is error
+    assert (event.failure_kind, event.stage) == ("transport_timeout", "seed")
+    assert event.operation == "agent.sandbox_upload_ripgrep"
+    assert (event.details.sandbox_id, event.details.provider) == ("box-1", "opensandbox")
+    assert len(report.events) == 1
+    sandbox.exec.assert_not_awaited()
+    # The row stays an ordinary retryable failure: no terminal flag and no counts-as-zero marker.
+    assert not agent_phase_oom(report.events)
+    row = _agent_request_failure_row(raised, 500)
+    assert NG_FAILURE_COUNTS_AS_ZERO_KEY not in row and NG_TERMINAL_KEY not in row
+
+
+_NO_ANSWER = mark.parametrize(
+    "error, kind",
+    [
+        (TimeoutError("status read timed out"), "transport_timeout"),
+        (SandboxBackendUnreachableError("connection refused"), "provider_unavailable"),
+    ],
+)
+
+
+@_NO_ANSWER
+async def test_an_agent_exec_that_gets_no_answer_is_observed_as_an_agent_stage_failure(tmp_path, error, kind):
+    from nemo_gym.core import NgFailureEvent
+    from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
+
+    sandbox = MagicMock(upload=AsyncMock(), exec=AsyncMock(side_effect=error), download=AsyncMock())
+    server, request, body = _staged_agent(tmp_path, sandbox)
+
+    raised, report, [event] = await _run_observing_failures(server, request, body)
+
+    # The raised failure is unchanged: the agent route failure, caused by the provider's error.
+    assert isinstance(raised, NgFailureEvent)
+    assert raised.failure_kind == "agent_route_failed" and raised.__cause__ is error
+    assert (event.failure_kind, event.stage, event.operation) == (kind, "agent", "agent.sandbox_exec")
+    assert len(report.events) == 2
+    assert not agent_phase_oom(report.events)
+
+
+@_NO_ANSWER
+async def test_a_staging_upload_with_no_answer_is_observed_for_both_error_types(tmp_path, error, kind):
+    sandbox = MagicMock(upload=_failing_upload(error), exec=AsyncMock(), download=AsyncMock())
+    server, request, body = _staged_agent(tmp_path, sandbox)
+
+    raised, _, [event] = await _run_observing_failures(server, request, body)
+
+    assert raised is error
+    assert (event.failure_kind, event.stage) == (kind, "seed")
+
+
+@mark.parametrize("where", ["upload", "exec"])
+async def test_an_error_that_already_reports_an_ended_sandbox_is_observed_once(tmp_path, where):
+    error = _ended_timeout()
+    sandbox = MagicMock(
+        upload=_failing_upload(error) if where == "upload" else AsyncMock(),
+        exec=AsyncMock(side_effect=error if where == "exec" else None),
+        download=AsyncMock(),
+    )
+    server, request, body = _staged_agent(tmp_path, sandbox)
+
+    _, _, events = await _run_observing_failures(server, request, body)
+
+    [event] = events
+    assert event.failure_kind == "provider_oom_killed"
+    assert event.stage == ("seed" if where == "upload" else "agent")
+
+
+@mark.parametrize("where", ["upload", "exec"])
+async def test_an_error_that_is_neither_a_timeout_nor_an_unreachable_backend_observes_nothing(tmp_path, where):
+    error = RuntimeError("write failed")
+    sandbox = MagicMock(
+        upload=_failing_upload(error) if where == "upload" else AsyncMock(),
+        exec=AsyncMock(side_effect=error if where == "exec" else None),
+        download=AsyncMock(),
+    )
+    server, request, body = _staged_agent(tmp_path, sandbox)
+
+    _, report, events = await _run_observing_failures(server, request, body)
+
+    assert events == []
