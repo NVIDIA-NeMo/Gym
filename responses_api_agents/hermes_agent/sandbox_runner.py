@@ -23,6 +23,7 @@ def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 _MODEL_API_KEY = "gym"
+_COMPRESSION_CONFIG_KEY = "compression"
 
 
 def _use_model_server(base_url: str) -> None:
@@ -65,7 +66,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     import yaml
 
     config = yaml.safe_load(payload["config_yaml"]) or {}
-    config.setdefault("auxiliary", {})["compression"] = {
+    config.setdefault("auxiliary", {})[_COMPRESSION_CONFIG_KEY] = {
         "provider": "custom",
         "base_url": payload["model_base_url"],
         "api_key": _MODEL_API_KEY,
@@ -79,10 +80,10 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
 
     try:
         from .model_kwargs import _model_api_kwargs, install_summary_compat
-        from .sandbox_observer import SandboxHermesObserver
+        from .sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     except ImportError:
         from model_kwargs import _model_api_kwargs, install_summary_compat
-        from sandbox_observer import SandboxHermesObserver
+        from sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     from run_agent import AIAgent
 
     if payload["mcp_servers"]:
@@ -168,8 +169,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     # Hermes omits aggregates on early returns. Preserve its actual counters, including zero
     # before any completed call, without manufacturing usage absent from the runtime.
     result = dict(result)
-    for field in ("prompt_tokens", "completion_tokens", "cache_read_tokens", "reasoning_tokens"):
-        count = getattr(agent, f"session_{field}", None)
+    for field, counter in SESSION_TOKEN_COUNTERS.items():
+        count = getattr(agent, counter, None)
         if field not in result and type(count) is int and count >= 0:
             result[field] = count
     return {

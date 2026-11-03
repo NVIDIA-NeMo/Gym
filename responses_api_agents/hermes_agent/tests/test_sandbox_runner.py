@@ -181,6 +181,8 @@ def _payload(model_base_url: str, **overrides) -> dict:
 
 @pytest.mark.parametrize("inherited_hermes_home", [False, True])
 def test_worker_configures_session_state_before_hermes_imports(tmp_path, inherited_hermes_home) -> None:
+    import yaml
+
     from responses_api_agents.hermes_agent import sandbox_runner
 
     task_home = tmp_path / "task-home"
@@ -275,10 +277,24 @@ raise SystemExit(status)
     assert json.loads(output_path.read_text())["result"]["final_response"] == "done"
     report = json.loads(report_path.read_text())
     hermes_home = session_dir / "hermes-home"
+    expected_config = {
+        "model": "policy_model",
+        "provider": "auto",
+        "auxiliary": {
+            "compression": {
+                "provider": "custom",
+                "base_url": server.base_url,
+                "api_key": "gym",
+                "model": "policy_model",
+            }
+        },
+    }
+    for imported in report["imports"].values():
+        imported["config"] = yaml.safe_load(imported["config"])
     assert report["imports"] == {
         name: {
             "home": str(hermes_home),
-            "config": payload["config_yaml"],
+            "config": expected_config,
             "model_base_url": server.base_url,
             "model_api_key": "gym",
         }
