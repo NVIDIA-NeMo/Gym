@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.sandbox.providers.registry import create_provider
+from nemo_gym.sandbox import create_provider
 from resources_servers.critpt_custom_grader.execution import ExecutionPolicy, Grader
 from resources_servers.critpt_custom_grader.reference_cache import ReferenceCache
 from resources_servers.critpt_custom_grader.task_data import TaskData

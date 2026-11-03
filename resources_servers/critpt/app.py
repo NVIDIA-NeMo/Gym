@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -25,15 +26,15 @@ from typing import Any, Dict, List, Optional, Union
 from fastapi import FastAPI
 from pydantic import Field, field_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import request
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import request
 
 
 # Repo root: resources_servers/critpt/app.py -> nemo-gym/
@@ -61,6 +62,15 @@ def _run_subdir_name() -> str:
     launches that land in the same second within one process.
     """
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def _key_fingerprint(api_key: str) -> str:
+    """Non-reversible short fingerprint of an AA API key, safe to log.
+
+    Truncated SHA-256. Used only to identify *which* key a run used when
+    correlating runs against AA outcomes; never enough to reconstruct the key.
+    """
+    return hashlib.sha256(api_key.encode()).hexdigest()[:8]
 
 
 def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
@@ -131,6 +141,27 @@ class CritPtRateLimitExceeded(RuntimeError):
         self.body = body
         super().__init__(
             f"CritPt AA quota exhausted (retry_after={retry_after_seconds}s, reset_unix={reset_unix}); body={body!r}"
+        )
+
+
+class CritPtAccessDenied(RuntimeError):
+    """Raised when the AA scoring API returns HTTP 403 (key's account not approved).
+
+    Distinct from :class:`CritPtRateLimitExceeded` (429, "approved but out of
+    quota"): a 403 means AA never looked at the submissions, so no quota was
+    consumed and waiting does not help. Only an AA-side approval of the account
+    holding the key does. Typed so verify() can log an actionable message and so
+    rotation can try the next key -- a mixed pool where only some keys are
+    approved recovers instead of failing the whole cohort.
+    """
+
+    def __init__(self, body: str):
+        self.body = body
+        super().__init__(
+            f"CritPt AA denied access (HTTP 403): the account holding this API key is not on "
+            f"AA's CritPt approved list. No quota was consumed and retrying will not help. "
+            f"Request approval by emailing critpt@artificialanalysis.ai from an institutional "
+            f"address, naming the account that holds the key. AA response: {body!r}"
         )
 
 
@@ -227,6 +258,16 @@ class CritPtResourcesServer(SimpleResourcesServer):
         raw = self.config.api_key
         self._api_keys: List[str] = [raw] if isinstance(raw, str) else list(raw)
         self._key_index: int = 0
+        # Log a non-reversible fingerprint per configured key. The key usually comes from the
+        # launching user's environment ($ARTIFICIAL_ANALYSIS_API_KEY), so it is not visible in
+        # the run config: two people launching the same benchmark can silently use different
+        # AA accounts, one approved for CritPt grading and one not. Recording which keys a run
+        # actually used makes that difference diagnosable from the logs.
+        LOG.warning(
+            "CritPt AA key pool: %d key(s), fingerprints (sha256[:8]) %s",
+            len(self._api_keys),
+            ", ".join(_key_fingerprint(k) for k in self._api_keys),
+        )
         if self.config.cache_dir is not None:
             base = _resolve_cache_dir(self.config.cache_dir)
             if self.config.unique_cache_per_run:
@@ -347,6 +388,21 @@ class CritPtResourcesServer(SimpleResourcesServer):
                     self.config.cache_dir,
                 )
                 future.set_exception(e)
+            except CritPtAccessDenied as e:
+                LOG.error(
+                    "CritPt AA REFUSED ACCESS on all %d configured key(s) (HTTP 403). None of the "
+                    "accounts holding these keys is on AA's CritPt approved list; no grading quota "
+                    "was consumed and retrying or waiting will NOT help. Point "
+                    "`artificial_analysis_api_key` at an approved key, or request approval by "
+                    "emailing critpt@artificialanalysis.ai from an institutional address. The %d "
+                    "model submissions in this batch are cached at %s and can be scored later "
+                    "without re-running inference via "
+                    "`python -m resources_servers.critpt.replay --cache-dir <that_path>`.",
+                    len(self._api_keys),
+                    len(submissions_snapshot),
+                    self.config.cache_dir,
+                )
+                future.set_exception(e)
             except Exception as e:
                 LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
@@ -396,7 +452,9 @@ class CritPtResourcesServer(SimpleResourcesServer):
         `self._key_index`.
         """
         n = len(self._api_keys)
-        last_exc: Optional[CritPtRateLimitExceeded] = None
+        last_exc: Optional[Union[CritPtRateLimitExceeded, CritPtAccessDenied]] = None
+        last_rate_limited: Optional[CritPtRateLimitExceeded] = None
+        denied = 0
         for attempt in range(n):
             current = (self._key_index + attempt) % n
             try:
@@ -409,22 +467,44 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 )
                 self._key_index = current
                 return result
-            except CritPtRateLimitExceeded as exc:
+            except (CritPtRateLimitExceeded, CritPtAccessDenied) as exc:
                 last_exc = exc
+                if isinstance(exc, CritPtRateLimitExceeded):
+                    last_rate_limited = exc
+                else:
+                    denied += 1
                 remaining = n - (attempt + 1)
                 if remaining > 0:
                     next_idx = (current + 1) % n
-                    LOG.warning(
-                        "CritPt AA rate-limited on key %d/%d (retry_after=%ds, reset_unix=%d); rotating to key %d/%d.",
-                        current + 1,
-                        n,
-                        exc.retry_after_seconds,
-                        exc.reset_unix,
-                        next_idx + 1,
-                        n,
-                    )
+                    if isinstance(exc, CritPtRateLimitExceeded):
+                        LOG.warning(
+                            "CritPt AA rate-limited on key %d/%d (retry_after=%ds, reset_unix=%d); "
+                            "rotating to key %d/%d.",
+                            current + 1,
+                            n,
+                            exc.retry_after_seconds,
+                            exc.reset_unix,
+                            next_idx + 1,
+                            n,
+                        )
+                    else:
+                        LOG.warning(
+                            "CritPt AA denied key %d/%d (403, account not approved; no quota spent); "
+                            "rotating to key %d/%d.",
+                            current + 1,
+                            n,
+                            next_idx + 1,
+                            n,
+                        )
         if last_exc is None:
             raise RuntimeError("_call_aa_with_rotation invoked with no api_keys configured")
+        if last_rate_limited is not None and denied:
+            # A mixed pool: an approved key is only out of quota, so its reset decides when grading can resume,
+            # whichever key rotation happened to try last.
+            last_rate_limited.add_note(
+                f"{denied} of {n} key(s) were denied (HTTP 403, account not approved); the others are rate-limited."
+            )
+            raise last_rate_limited
         raise last_exc
 
     # ──────────────────────────────────────────────────────────
@@ -577,6 +657,12 @@ async def _call_api(
                 reset_unix=reset_unix,
                 body=body,
             )
+        # 403: the key authenticated but its account is not approved for CritPt
+        # grading. AA rejects at the auth layer, so nothing was graded and no quota
+        # was spent. Typed so the caller can rotate to another key and log an
+        # actionable message instead of a bare RuntimeError.
+        if response.status == 403:
+            raise CritPtAccessDenied(body=body)
         # Retry only on 5xx (transient AA server errors). Non-429 4xx means a bad
         # request/payload that won't succeed on retry, so fail fast with the
         # response body for debugging.

@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, NamedTuple, Optional
 from uuid import uuid4
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,

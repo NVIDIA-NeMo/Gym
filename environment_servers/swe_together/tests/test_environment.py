@@ -15,8 +15,8 @@ from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnviro
 from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
-from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifier_invocation_id
+from nemo_gym.rollouts.rollout_collection import _episode_record
 
 
 def activation(index=0, **kwargs):
@@ -389,7 +389,7 @@ async def test_verify_keeps_judge_failure_cause_apart_from_valid_zero(tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_path", ["/v1/agent_sessions", "/ng-rollout/one-judge/v1/responses"])
+@pytest.mark.parametrize("failed_path", ["/v1/agent_sessions", "/ng-rollout/one-judge-test/v1/responses"])
 @pytest.mark.parametrize("close_failure", [None, "unconfirmed", "request_error"])
 async def test_verify_preserves_primary_judge_error_and_transport_classification(
     tmp_path, monkeypatch, failed_path, close_failure
@@ -565,8 +565,10 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("activation_error", [False, True])
-async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, monkeypatch, activation_error):
+@pytest.mark.parametrize("activation_error,receipt_missing", [(False, False), (True, False), (False, True)])
+async def test_local_lifecycle_closes_candidate_before_verification(
+    tmp_path, monkeypatch, activation_error, receipt_missing
+):
     environment = server(tmp_path)
     order = []
     sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
@@ -597,16 +599,58 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
 
     async def verify(self, value, initial, activations):
+        assert current_verifier_invocation_id().startswith("verify-")
         assert order[-1] == "agent close"
         order.append("verify")
-        return {
+        model = {"type": "responses_api_models", "name": "judge-model"}
+        (tmp_path / "explicit-child.capture.jsonl").write_text(
+            json.dumps(
+                {
+                    "model_call_id": "judge-call",
+                    "model_ref": model,
+                    "status_code": 200,
+                    "request": {"messages": []},
+                    "response": {"id": "judge-response", "content": []},
+                }
+            )
+            + "\n"
+        )
+        verification = {
             "responses_create_params": initial,
             "response": activations[-1].response,
             "reward": 1,
             "judge_score": 1,
             "task_id": "task",
             "evaluation_completed": True,
+            "judge_capture_episode": "explicit-child",
+            "judge_close": {
+                "agent_session_id": "judge-session",
+                "cleanup_confirmed": True,
+                "agent_observations": {
+                    "source": "claude_code",
+                    "records": [
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": "judge-invocation",
+                            "status": "completed",
+                            "model_calls": [{"model_ref": model, "response_id": "judge-response"}],
+                        }
+                    ],
+                },
+            },
         }
+        if receipt_missing:
+            verification.pop("judge_close")
+            verification.update(
+                reward=0,
+                judge_score=0,
+                mask_sample=True,
+                evaluation_completed=False,
+                judge_close_error="connection lost",
+                failure_kind=app.JUDGE_FAILED,
+                failure_reason="Judge cleanup was not confirmed",
+            )
+        return verification
 
     async def post(name, path, *, json, cookies, headers=None, _control=False):
         if path == "/v1/agent_sessions":
@@ -646,7 +690,13 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         return response.payload
 
     monkeypatch.setattr(app, "get_response_json", payload)
-    environment.server_client = SimpleNamespace(post=post)
+    environment.server_client = SimpleNamespace(
+        post=post,
+        global_config_dict={
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        },
+    )
     req = request()
     result = await environment.run_request(req)
     collected = _episode_record(result.model_dump(mode="json"))
@@ -668,8 +718,16 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         assert collected["ng_trajectory"]["rollout_id"] == "one"
         assert (tmp_path / "one" / "candidate-agent-close.json").exists()
         return
-    assert result.result and result.result.reward == 1
-    assert collected["reward"] == 1
+    assert result.result and result.result.reward == (0 if receipt_missing else 1)
+    assert collected["reward"] == (0 if receipt_missing else 1)
+    if receipt_missing:
+        assert collected["mask_sample"] is True and collected["evaluation_completed"] is False
+        assert not collected["ng_trajectory"]["verifier_invocations"]
+        assert "judge_receipt_unavailable" in {gap["code"] for gap in collected["ng_trajectory"]["gaps"]}
+    else:
+        assert collected["ng_trajectory"]["verifier_invocations"][0]["invocation_id"] == "judge-invocation"
+    assert collected["ng_trajectory"]["model_calls"][0]["model_call_id"] == "judge-call"
+    assert (tmp_path / "one" / "judge-model-calls.json").exists()
     assert result.result.ng_agent_close.trajectory.task_id == "task"
     assert result.result.ng_trajectory.rollout_id == "one"
     assert collected["ng_trajectory"]["rollout_id"] == "one"
@@ -693,7 +751,9 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
 async def test_interaction_deadline_closes_remote_work_before_grading(
     tmp_path, monkeypatch, native_outcome, confirmed
 ):
-    environment = server(tmp_path, interaction_timeout_seconds=0.03, cleanup_timeout_seconds=1)
+    # The deadline must fire while the activation is in flight: 0.5 s leaves a loaded runner time to start it,
+    # and the remote work outlasts the deadline, so only the deadline close can end it.
+    environment = server(tmp_path, interaction_timeout_seconds=0.5, cleanup_timeout_seconds=1)
     remote = None
     close_count = 0
     verified = False
@@ -701,7 +761,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
 
     async def work():
         nonlocal late_work
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(5)
         late_work = True
 
     async def prepare(self, value):
@@ -778,6 +838,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
     monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
     environment.server_client = SimpleNamespace(post=post)
     result = await environment.run_request(request())
+    assert remote is not None, "the activation did not start before the interaction deadline"
     assert remote.cancelled() and not late_work
     simulator.assert_not_awaited()
     if native_outcome == "interrupted" and confirmed:

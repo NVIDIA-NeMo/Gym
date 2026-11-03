@@ -21,14 +21,19 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    RolloutStopRequest,
+    is_harness_termination_failure,
+    parse_cleanup_receipt,
+)
+from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxStatus
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig, _model_endpoint_error
 
 
@@ -86,6 +91,9 @@ def events(*, stop_reason="stop") -> str:
 
 
 class Sandbox:
+    # Like OpenSandbox in background mode: a stop's upload never waits behind the running worker.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.files = {}
         self.result = {
@@ -97,6 +105,8 @@ class Sandbox:
             "pid": 123,
         }
         self.events = events()
+        # False: the worker ends before it opens its transcript, so it leaves no events.jsonl.
+        self.writes_events = True
         self.blocked = False
         self.started = asyncio.Event()
         self.exited = asyncio.Event()
@@ -111,6 +121,10 @@ class Sandbox:
 
     async def upload(self, source, destination):
         self.files[destination] = Path(source).read_text()
+        if destination.endswith("/expire.request"):
+            # The supervisor ends the harness as at its deadline; before launch, it never starts it.
+            self.result.update(timed_out=True, return_code=-signal.SIGTERM if hasattr(self, "directory") else None)
+            self.exited.set()
 
     async def download(self, source, destination):
         Path(destination).write_text(self.files[source])
@@ -122,11 +136,18 @@ class Sandbox:
         self.files[f"{self.directory}/runtime.json"] = json.dumps(
             {key: self.result[key] for key in ("hostname", "pid")}
         )
-        self.files[f"{self.directory}/events.jsonl"] = self.events
+        if self.writes_events:
+            self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def execute(self, command, **kwargs):
         if "exec bash " in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
+        if "echo absent" in command:
+            # The adapter checks whether a stopped worker left a transcript.
+            present = any(path.endswith("/events.jsonl") for path in self.files)
+            return SimpleNamespace(
+                error_type=None, return_code=0, stdout="present\n" if present else "absent\n", stderr=""
+            )
         if "touch " in command and "stop.request" in command:
             self.signals.append("SIGTERM")
             if hasattr(self, "directory"):
@@ -141,6 +162,12 @@ class Sandbox:
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
         assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
+        if self.result["timed_out"] and self.result["return_code"] is None:
+            self.files[f"{payload['directory']}/cleanup.json"] = json.dumps(
+                {key: value for key, value in self.result.items() if key not in ("hostname", "pid")}
+            )
+            self.started.set()
+            return self.exec.return_value
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -523,8 +550,9 @@ def test_mcp_tool_timeout_must_be_positive_and_within_the_run_timeout(setup, val
     CodexAgentConfig(**(agent.config.model_dump() | {"timeout": 600, "mcp_tool_timeout_seconds": 600}))
 
 
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("started", [False, True])
-def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
+def test_startup_failure_reports_the_codex_stderr_tail(setup, started, native):
     agent, sandbox = setup
     # Codex repeats a failed server's error body, up to 8 KiB, after the line's start that names the server.
     stderr = (
@@ -543,6 +571,12 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
     def publish_with_stderr():
         publish()
         sandbox.files[f"{sandbox.directory}/stderr.log"] = stderr
+        if native:
+            # Observations then come from Codex's own transcript instead of the CLI events. Codex 0.144.4 writes
+            # none before a startup failure, but the stderr tail and its gap must not depend on the path.
+            sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = native_transcript(
+                [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
+            )
 
     sandbox.publish = publish_with_stderr
     with TestClient(agent.setup_webserver()) as client:
@@ -551,18 +585,21 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
     assert result.status_code == 502
     detail = result.json()["detail"]
-    gaps = {gap["code"]: gap["detail"] for gap in closed["agent_observations"]["gaps"]}
+    gaps = closed["agent_observations"]["gaps"]
+    # Only the CLI-events path lacks the model-call join key, so this shows which path built the observations.
+    assert ("model_call_join_key_unavailable" in [gap["code"] for gap in gaps]) is not native
+    startup_gaps = [gap["detail"] for gap in gaps if gap["code"] == "agent_startup_failed"]
     if started:
         # A turn started, so the event stream explains the failure; stderr is not appended.
         assert "stderr:" not in detail
-        assert "agent_startup_failed" not in gaps
+        assert startup_gaps == []
     else:
         assert "required MCP servers failed to initialize: gdpval_resources_server" in detail
         assert detail.endswith(" (-32603)")
         assert len(detail) < 2100, "the stderr tail is bounded"
         assert "x" * 600 not in detail, "long stderr lines are shortened"
         # Environment Servers record the observations, not the 502 body.
-        assert gaps["agent_startup_failed"] in detail
+        assert len(startup_gaps) == 1 and startup_gaps[0] in detail
 
 
 def test_startup_failure_stderr_hides_the_grant_tokens(setup):
@@ -868,7 +905,7 @@ def test_only_the_failure_that_ended_the_run_is_checked(transcript, ended_by_end
 @pytest.mark.parametrize("case", list(CODEX_0154_ENDPOINT_FAILURES))
 def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -> None:
     from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     message, retries = CODEX_0154_ENDPOINT_FAILURES[case]
@@ -910,7 +947,7 @@ CODEX_NATIVE_ENDPOINT_FAILURES = {
 @pytest.mark.parametrize("case", list(CODEX_NATIVE_ENDPOINT_FAILURES))
 def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) -> None:
     from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     message = CODEX_NATIVE_ENDPOINT_FAILURES[case]
@@ -941,7 +978,7 @@ def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) ->
 def test_reported_provider_failure_keeps_its_classified_outcome(setup, message, action) -> None:
     """Codex exited 1 on turn.failed: the outcome policy decides it, not verify_after_agent_error."""
     from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     sandbox.result["return_code"] = 1
@@ -1262,7 +1299,7 @@ def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
     with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
         with TestClient(agent.setup_webserver()) as client:
-            with pytest.raises(RuntimeError, match="legacy path reached"):
+            with raises_agent_failure(RuntimeError, match="legacy path reached"):
                 client.post("/v1/responses", json={"input": "task"})
         legacy.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
@@ -1274,6 +1311,106 @@ async def activate(agent, sandbox):
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(sandbox.started.wait(), 2)
     return request, seeded.agent_session_id, task
+
+
+async def test_rollout_stop_ends_codex_as_a_timeout(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
+    request, session_id, task = await activate(agent, sandbox)
+    rollout_id = seed().episode_id.capture_key
+    assert (await agent.stop_rollout(rollout_id, RolloutStopRequest(reason="budget"))).stopped is True
+    assert (await agent.stop_rollout(rollout_id)).stopped is False
+    response = await task
+    # The same response as at the run's own deadline, verified as a timeout, plus the stop's marker and no failure kind.
+    assert response.status == "incomplete" and response.error is None
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert "ng_agent_outcome" not in response.metadata
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert sandbox.signals == []
+    assert (await agent.stop_rollout(rollout_id)).stopped is False
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations.records[0].status == "incomplete"
+    with pytest.raises(HTTPException) as unknown:
+        await agent.stop_rollout(rollout_id)
+    assert unknown.value.status_code == 404
+
+
+async def test_rollout_stop_before_activation_never_starts_codex(setup):
+    agent, sandbox = setup
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    assert (await agent.stop_rollout(seed().episode_id.capture_key)).stopped is True
+    response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.status == "incomplete" and response.error is None and response.output == []
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": None}
+    assert "ng_agent_outcome" not in response.metadata
+    launch = next(call.kwargs["command"] for call in sandbox.launch.await_args_list)
+    assert "--expire-file" in launch
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+async def test_rollout_stop_before_the_worker_writes_events_is_an_empty_timeout(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.writes_events = False
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    response = await task
+    # The launch ran and the supervisor ended it at the stop, with no transcript: graded like the timeout it is.
+    assert response.status == "incomplete" and response.error is None and response.output == []
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert "ng_agent_outcome" not in response.metadata
+    state = agent._session_records[session_id].state
+    assert state.session.expired and not state.session.expired_before_launch
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_rollout_stop_keeps_a_failed_transcript_download_an_error(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    download = sandbox.download
+
+    async def lose_events(source, destination):
+        if source.endswith("/events.jsonl"):
+            raise ConnectionError("connection reset")
+        if source.endswith("/output.log"):
+            Path(destination).write_text("diagnostic from shared supervisor")
+            return
+        await download(source, destination)
+
+    sandbox.download = AsyncMock(side_effect=lose_events)
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    # The worker wrote events, so the stop is no evidence that there are none: the failed transfer stays an error.
+    with pytest.raises(RuntimeError, match="Codex sandbox runner returned no valid result") as failure:
+        await task
+    assert "diagnostic from shared supervisor" in str(failure.value)
+    assert isinstance(failure.value.__cause__, ConnectionError)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_rollout_stop_without_a_transcript_check_reports_the_missing_events(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.writes_events = False
+    execute = sandbox.exec.side_effect
+
+    async def unreachable_probe(command, **kwargs):
+        if "echo absent" in command:
+            raise ConnectionError("sandbox unreachable")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = unreachable_probe
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    # Without confirmation that the transcript is absent, the missing events are reported as before.
+    with pytest.raises(RuntimeError, match="Codex sandbox runner returned no valid result"):
+        await task
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
 
 
 async def test_close_cancels_active_codex_before_detaching(setup):
@@ -1342,8 +1479,9 @@ async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="harness termination was not confirmed") as failure:
         await task
+    assert is_harness_termination_failure(failure.value)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is None
     sandbox.disconnect.assert_awaited_once()
@@ -1504,7 +1642,7 @@ def test_close_retry_and_stale_activation_do_not_run_host_codex(setup):
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: 100.0)
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: 100.0)
     with TestClient(agent.setup_webserver()) as client:
 
         def seed_and_close(index):
@@ -1534,7 +1672,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
 async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1560,7 +1698,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
 async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1601,7 +1739,7 @@ async def test_concurrent_closes_share_receipt(setup):
 async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -1892,7 +2030,7 @@ async def _local_exec(command, **kwargs):
 
 async def test_session_rollouts_are_copied_to_the_logs_dir(tmp_path):
     """Codex's session rollouts (per-call token counts) survive the session directory, as Harbor keeps them."""
-    from nemo_gym.agent_utils.sandbox_session import SandboxSession
+    from nemo_gym.agents import SandboxSession
     from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 
     def state(directory, logs_dir):
@@ -2069,7 +2207,7 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
 async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     body = seed()
     close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
@@ -2127,7 +2265,7 @@ async def test_caller_identifier_is_not_a_filesystem_path(setup):
 
 
 async def test_session_lifecycle_uses_shared_bookkeeping(setup):
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     agent, sandbox = setup
     assert type(agent).close_agent_session is SimpleResponsesAPIAgent.close_agent_session
@@ -2143,11 +2281,12 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     """Exercise the checked-in recipe through collector, real environment, and real Codex lifecycle.
 
     A failed Codex run bypasses verification unless verify_after_agent_error grades it."""
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-    from nemo_gym.global_config import GlobalConfigDictParser
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-    from nemo_gym.server_utils import BaseServerConfig
+    from environment_servers.single_agent_turn_legacy.app import (
+        SingleAgentTurnLegacyEnvironmentServer,
+        SingleAgentTurnLegacyEnvironmentServerConfig,
+    )
+    from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     agent, sandbox = setup
     provider_failure = outcome == "provider-failure"
@@ -2185,7 +2324,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent.server_client = transport
     environment = SingleAgentTurnLegacyEnvironmentServer(
-        config=SingleAgentTurnEnvironmentServerConfig(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
             name=environment_name,
             host="localhost",
             port=8002,
@@ -2719,7 +2858,7 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         patch("responses_api_agents.codex_agent.app.AsyncSandbox", return_value=sandbox),
         TestClient(agent.setup_webserver()) as client,
     ):
-        with pytest.raises(RuntimeError) as error:
+        with raises_agent_failure(RuntimeError) as error:
             client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert error.value is original
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
@@ -2744,7 +2883,7 @@ def test_borrow_connection_failure_never_creates_replacement(setup):
         TestClient(agent.setup_webserver()) as client,
     ):
         factory.connect = AsyncMock(side_effect=RuntimeError("borrow failed"))
-        with pytest.raises(RuntimeError, match="borrow failed"):
+        with raises_agent_failure(RuntimeError, match="borrow failed"):
             client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         factory.assert_not_called()
         sandbox.stop.assert_not_awaited()
@@ -3292,8 +3431,8 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
 
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     sandbox.result["return_code"] = 1
@@ -3364,8 +3503,8 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     ],
 )
 def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     sandbox.result["return_code"] = 1
@@ -3390,3 +3529,107 @@ def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expec
             OutcomeAction.VERIFY if attempt["status"] == 400 else OutcomeAction.RETRY
         )
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+@pytest.mark.parametrize("case", ["budget", "operator", "unknown_kill", "cleanup_failed"])
+async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(setup, tmp_path, monkeypatch, case):
+    """An acknowledged stop marks the response; actual verification and failures still decide its outcome."""
+    from httpx import ASGITransport, AsyncClient
+
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore
+    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
+
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
+    request, session_id, task = await activate(agent, sandbox)
+    reason = "operator" if case == "operator" else "budget"
+    stopped = await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason=reason))
+    assert stopped.stopped
+    response = await task
+    assert response.status == "incomplete" and response.error is None
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": reason}
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+    environment, dependency = _environment_server()
+    returned = response.model_dump(mode="json")
+    if case == "unknown_kill":
+        # A separate failed outcome remains a failure even if it also carries an operator marker.
+        returned.update(status="failed")
+        returned["metadata"][AGENT_OUTCOME_METADATA_KEY] = AgentOutcome(failure_kind="kill_shaped").model_dump_json()
+        del dependency.responses[4]  # No verifier response is available for an ungraded interruption.
+    else:
+        verified = json.loads(dependency.responses[4].body)
+        verified.update(response=returned, reward=0.0)
+        dependency.responses[4] = _Response(verified)
+    dependency.responses[2] = _Response(returned)
+    if case == "cleanup_failed":
+        dependency.responses[5] = ConnectionError("resources cleanup disconnected")
+        dependency.responses.append(ConnectionError("resources cleanup still disconnected"))
+
+    materialized = _request().task.model_dump(mode="json")
+    source = tmp_path / "input.jsonl"
+    source.write_text(json.dumps(materialized) + "\n")
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        environment_server_routes={"test:source": "environment"},
+        disable_aggregation=True,
+        disable_health_check=True,
+        route_failures_to_sidecar=True,
+    )
+    run_calls = []
+    async with AsyncClient(
+        transport=ASGITransport(app=environment.setup_webserver()), base_url="http://environment"
+    ) as http:
+
+        async def post(*, server_name, url_path, json, **kwargs):
+            assert server_name == "environment" and url_path == "/run"
+            run_calls.append(json)
+            result = await http.post(url_path, json=json)
+            result.raise_for_status()
+            return FakeResponse(result.status_code, result.json())
+
+        collector = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        collector.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+        if case == "unknown_kill":
+            from nemo_gym.rollouts import IncompleteEvaluationError
+
+            with pytest.raises(IncompleteEvaluationError, match="no score"):
+                await RolloutCollectionHelper().run_from_config(config)
+        else:
+            await RolloutCollectionHelper().run_from_config(config)
+        store = RolloutStore.read(Path(config.output_jsonl_fpath))
+        coverage = store.coverage()
+        if case == "unknown_kill":
+            assert coverage["successful"] == 0 and coverage.get("final_zeros", 0) == 0
+            assert len(store.failures()) == 1
+            assert "/verify" not in [path for _, path, _ in dependency.calls]
+        else:
+            assert coverage["successful"] == 1 and coverage.get("final_zeros", 0) == 0
+            rows = [json.loads(line) for line in Path(config.output_jsonl_fpath).read_text().splitlines()]
+            assert rows[0]["reward"] == 0.0
+            assert rows[0]["response"]["metadata"]["ng_rollout_stop"] == response.metadata["ng_rollout_stop"]
+            assert [path for _, path, _ in dependency.calls].count("/verify") == 1
+            if case == "cleanup_failed":
+                events = rows[0]["_ng_failure_events"]
+                cleanup_events = [event for event in events.values() if event["operation"] == "episode.cleanup"]
+                assert len(cleanup_events) == 2
+                assert {event["failure_kind"] for event in cleanup_events} == {"session_release_failed"}
+                assert {event["stage"] for event in cleanup_events} == {"cleanup"}
+                assert rows[0].get("_ng_failure_id") is None
+                assert all(
+                    event["foreign_error"]["exception_type"].endswith("ConnectionError") for event in cleanup_events
+                )
+        assert store.pending() == []
+        await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True}))
+        if case == "unknown_kill":
+            assert RolloutStore.read(Path(config.output_jsonl_fpath)).coverage()["complete"] is False
+            with pytest.raises(RuntimeError, match="0/1"):
+                await RolloutCollectionHelper().run_from_config(
+                    config.model_copy(update={"resume_from_cache": True, "require_complete": True})
+                )
+        assert len(run_calls) == 1
+    sandbox.launch.assert_awaited_once()

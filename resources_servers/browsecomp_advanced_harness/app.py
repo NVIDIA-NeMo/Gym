@@ -35,7 +35,10 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES, SESSION_ID_KEY, raise_for_status, request
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
@@ -43,16 +46,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    RATE_LIMIT_ERROR_CODES,
-    RETRY_ERROR_CODES,
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
+from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -1495,7 +1490,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._cleanup_workspace(request.session[SESSION_ID_KEY])
 
         if judge_error is not None:
-            raise JudgeError(judge_error)
+            raise judge_error
         return verify_response
 
     ###### UTILITY FUNCTIONS ######
@@ -1555,7 +1550,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _verify_answer_with_judge(
         self, question: str, ground_truth: str, response: str
-    ) -> tuple[JudgeEvaluation, Optional[str]]:
+    ) -> tuple[JudgeEvaluation, Optional[Exception]]:
         response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
@@ -1574,6 +1569,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_response = None
         last_error: Optional[str] = None
+        last_failure: Optional[Exception] = None
         for attempt in range(self.JUDGE_MAX_ATTEMPTS):
             judge_call_start = time()
             # Judge samples at temperature 1.0 on every attempt; parse-error retries simply
@@ -1585,8 +1581,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
             try:
                 judge_response, text = await self._call_judge(judge_create_params)
-            except JudgeError as e:
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
                 last_error = str(e)
+                last_failure = e
                 sleep_s = _judge_backoff_s(attempt)
                 print(
                     f"[judge_call attempt={attempt + 1} status=error duration_s={time() - judge_call_start:.2f} error={last_error[:200]} backoff_s={sleep_s}]",
@@ -1635,7 +1634,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             ),
             None
             if judge_response is not None
-            else (last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts"),
+            else (
+                last_failure or JudgeError(last_error or f"judge exhausted after {self.JUDGE_MAX_ATTEMPTS} attempts")
+            ),
         )
 
     def _verify_answer_with_regex(self, ground_truth: str, response: str) -> JudgeEvaluation:

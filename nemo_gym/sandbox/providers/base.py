@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
+from nemo_gym.exception_inspection import error_to_http_status
+from nemo_gym.server_runtime.episode_types import FailureBoundary, SandboxFailureDetails
+from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
+
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
 # and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
@@ -262,6 +267,36 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+def sandbox_credentials_rejected(
+    error: BaseException,
+    *,
+    operation: str,
+    details: SandboxFailureDetails | None = None,
+    stage: FailureStage | None = None,
+    sdk_message: str | None = None,
+) -> NgFailureEvent | None:
+    """A sandbox-boundary failure for an observed HTTP 401/403, caused by ``error``; else ``None``.
+
+    The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
+    the caller selected for the provider's SDK (see ``sdk_error_details``).
+    """
+    status = error_to_http_status(error)
+    if status not in (401, 403):
+        return None
+    rejected = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        details=details,
+        failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
+        operation=operation,
+        stage=stage,
+        http_status=status,
+        foreign_error=sdk_error_details(error, message=sdk_message),
+    )
+    rejected.__cause__ = error
+    return rejected
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
@@ -422,6 +457,19 @@ class SupportsSandboxPullPolicy(Protocol):
     """
 
     def pull_policy_options(self, policy: str) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxIndependentUploads(Protocol):
+    """Optional provider capability: a file upload never waits for capacity that running commands hold.
+
+    A provider that bounds its concurrent operations with one limit shared by commands and file transfers
+    (CLI slots, worker threads, pooled connections) cannot promise this: once long-running commands hold every
+    slot, an upload waits until one of them ends. ``SandboxSession.expire`` needs it to stop a running harness,
+    because the stop is a file the harness's supervisor watches for. The answer may depend on configuration.
+    """
+
+    def uploads_independent_of_execs(self) -> bool: ...
 
 
 @runtime_checkable

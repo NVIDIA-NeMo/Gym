@@ -12,10 +12,10 @@ from datasets import Dataset
 from omegaconf import OmegaConf
 
 from benchmarks.indic.mbpp import prepare as module
-from nemo_gym.benchmarks import BenchmarkConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.environment.benchmarks import BenchmarkConfig
 from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 
 
 @pytest.fixture
@@ -257,8 +257,8 @@ def test_native_config_reuses_prompt_agent_and_verifier():
         )
     en, indic = configs
     assert "responses_create_params" not in OmegaConf.load(module.BENCHMARK_DIR / "config.yaml")
-    assert indic.policy_model.responses_api_models.vllm_model.sampling_overrides is None
-    assert indic.policy_model.responses_api_models.vllm_model.chat_template_kwargs is None
+    assert indic.policy_model.responses_api_models.vllm_model.get("sampling_overrides") is None
+    assert indic.policy_model.responses_api_models.vllm_model.get("chat_template_kwargs") is None
     original = OmegaConf.to_container(en.mbpp_evalplus_simple_agent.responses_api_agents.simple_agent, resolve=True)
     translated = OmegaConf.to_container(indic.indic_mbpp_simple_agent.responses_api_agents.simple_agent, resolve=True)
     assert original["datasets"][0]["prompt_config"] == translated["datasets"][0]["prompt_config"]
@@ -266,7 +266,7 @@ def test_native_config_reuses_prompt_agent_and_verifier():
     original["resources_server"]["name"] = "indic_mbpp_resources_server"
     assert original == translated
     assert indic.indic_mbpp_resources_server.resources_servers.scicodepile.subprocess_timeout == 120
-    relay = indic.indic_mbpp_environment_server.environment_servers.legacy_agent
+    relay = indic.indic_mbpp_environment_server.environment_servers.single_agent_turn_legacy
     assert relay.agent_server == {"type": "responses_api_agents", "name": "indic_mbpp_simple_agent"}
     assert {server.name for server in parser.filter_for_server_instance_configs(indic)} == {
         "policy_model",
@@ -313,7 +313,7 @@ def test_standalone_smoke_config_preserves_model_settings():
     assert dataset.num_repeats == 1
     assert dataset.type == "benchmark"
     assert dataset.jsonl_fpath == "benchmarks/indic/mbpp/data/review-smoke.jsonl"
-    relay = config.indic_mbpp_environment_server.environment_servers.legacy_agent
+    relay = config.indic_mbpp_environment_server.environment_servers.single_agent_turn_legacy
     assert relay.agent_server == {"type": "responses_api_agents", "name": "indic_mbpp_simple_agent"}
     assert {server.name for server in parser.filter_for_server_instance_configs(config)} == {
         "policy_model",

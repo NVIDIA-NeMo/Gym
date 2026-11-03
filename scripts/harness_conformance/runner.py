@@ -15,12 +15,20 @@ from pathlib import Path
 
 import psutil
 
-from nemo_gym import harness_capabilities
-from nemo_gym.harness_capabilities.behavior import inspect_behavior
-from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
-from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
-from nemo_gym.harness_capabilities.health import inspect_health
-from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
+from nemo_gym.config import ConfigError
+from nemo_gym.rollouts import harness_capabilities
+from nemo_gym.rollouts.harness_capabilities import (
+    NAMES,
+    EvidenceScope,
+    digest_file,
+    gate_passes,
+    inspect_behavior,
+    inspect_bundle,
+    inspect_health,
+    inspect_record,
+    json_rows,
+    render_matrices,
+)
 
 from .episode import HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
@@ -197,7 +205,10 @@ def run_suite(
         },
         health_sources={
             str(p.relative_to(ROOT)): digest_file(p)
-            for p in [ROOT / "nemo_gym/rollout_health.py", *sorted((ROOT / "nemo_gym/health").glob("*.py"))]
+            for p in [
+                ROOT / "nemo_gym/rollouts/rollout_health.py",
+                *sorted((ROOT / "nemo_gym/rollouts/health").glob("*.py")),
+            ]
         },
     )
     (output / "suite.json").write_text(_json(manifest))
@@ -226,7 +237,7 @@ def run_suite(
             execution_error |= execution["returncode"] != 0 or execution["timed_out"]
             try:
                 result = inspect_episode(scenario, directory, execution)
-            except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+            except (ConfigError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
                 execution_error = True
                 result = {
                     "scenario": scenario.name,
@@ -303,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = tuple(s for s in SCENARIOS if not args.scenario or s.name in args.scenario)
     try:
         _, code = run_suite(harnesses=harnesses, scenarios=scenarios, output=args.output, timeout=args.timeout)
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (ConfigError, OSError, ValueError, TypeError, KeyError) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)
         return 2
     if os.environ.get("GITHUB_ACTIONS") == "true":

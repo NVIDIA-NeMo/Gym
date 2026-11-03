@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 import json
 import logging
 import sys
@@ -11,11 +10,12 @@ import pytest
 import yaml
 
 import nemo_gym.cli.main as main_module
-import nemo_gym.global_config as global_config
-from nemo_gym.path_utils import failures_path_for, materialized_path_for
-from nemo_gym.tasks.harbor.cli import build_run, prepare_target, resolve_agent
-from nemo_gym.tasks.harbor.validation_report import summarize_validation
-from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
+import nemo_gym.config.global_config as global_config
+import nemo_gym.orchestration.server_supervisor
+from nemo_gym.data.tasks.harbor.prepare import build_run, prepare_target, resolve_agent
+from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
+from nemo_gym.utils.path_utils import failures_path_for, materialized_path_for
+from tests.unit_tests.test_harbor_tasks import write_task
 
 
 def result(task="a", *, index=0, repeat=0, **fields):
@@ -359,7 +359,11 @@ def test_validate_needs_no_model_even_with_unused_endpoint_settings(tmp_path, mo
         assert "policy_model" not in config
         for key, value in settings.items():
             assert config[key] == value
-        monkeypatch.setattr(env, "_probe_endpoint", lambda *args: pytest.fail("Oracle must not probe an unused model"))
+        monkeypatch.setattr(
+            nemo_gym.orchestration.server_supervisor,
+            "_probe_endpoint",
+            lambda *args: pytest.fail("Oracle must not probe an unused model"),
+        )
         env.RunHelper().wait_for_model_endpoints(config)
         write_jsonl(Path(config.output_jsonl_fpath), [result()])
 
@@ -425,7 +429,7 @@ def oracle_collection(monkeypatch, validation_cli):
     from types import SimpleNamespace
 
     from nemo_gym.cli.eval import RunHelper
-    from nemo_gym.rollout_collection import RolloutCollectionHelper, _CompletedRollout
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper, _CompletedRollout
 
     collection = SimpleNamespace(dispatched=[], payload=lambda row: result())
 
@@ -469,8 +473,10 @@ def test_validate_resume_rejects_changed_digest_and_preserves_unchanged_retries(
         return result(response={"metadata": {"oracle": "solved"}})
 
     oracle_collection.payload = payload
-    with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
+    with pytest.raises(SystemExit) as exc:
         invoke()
+    assert exc.value.code == 75
+    assert "None of the 1 dispatched rollouts produced a result" in capsys.readouterr().out
     first_attempt = False
     invoke()
     assert len(dispatched) == 2 and dispatched[-1]["_ng_attempt_index"] == 1
@@ -503,7 +509,7 @@ def test_validate_resume_repairs_an_interrupted_final_record(tmp_path, monkeypat
     the cache with the collector's tolerance, so the collector's own repair runs and only the lost task reruns.
     A complete unterminated final record still counts (and is still rejected when another agent wrote it), and
     a damaged interior record is refused by file and line with the cache left as it was."""
-    from nemo_gym.tasks.harbor.validation_report import _validation_key
+    from nemo_gym.data.tasks.harbor.validation_report import _validation_key
 
     write_task(tmp_path / "ds" / "a")
     write_task(tmp_path / "ds" / "b")
@@ -521,12 +527,13 @@ def test_validate_resume_repairs_an_interrupted_final_record(tmp_path, monkeypat
     # Interrupted mid-append: one complete record and part of the next, cut one byte into 日, no newline.
     cut = second.encode().index("日".encode()) + 1
     rollouts.write_bytes(first.encode() + b"\n" + second.encode()[:cut])
-    invoke()
+    with pytest.warns(UserWarning, match="Removed .* bytes of incomplete final JSON"):
+        invoke()
     assert [_validation_key(row)[1] for row in dispatched[2:]] == [lost]
     rows = [json.loads(line) for line in rollouts.read_text().splitlines()]
     assert rows[0] == json.loads(first) and [row["_ng_task_id"]["task_id"] for row in rows] == [kept, lost]
     out = capsys.readouterr().out
-    assert "Dropped a truncated final line" in out and "oracle solved\t1.0" in out
+    assert "oracle solved\t1.0" in out
 
     # A complete final record without a newline is a result: nothing reruns.
     rollouts.write_text(rollouts.read_text().rstrip("\n"))
@@ -593,7 +600,7 @@ def test_validate_renders_a_template_where_eval_run_does(tmp_path, monkeypatch, 
     """A template is rendered into results/harbor/<taskset>/rendered/ by `gym dataset validate` as by `gym eval run`:
     the rendered folder is the dataset root prepare records into, so one copy means one manifest and a template's
     image built and pushed once, while the oracle's rows and results still live under results/harbor/validation/."""
-    from nemo_gym.tasks.harbor.records import read_built_images
+    from nemo_gym.data.tasks.harbor.records import read_built_images
     from tests.unit_tests.test_harbor_authoring import write_template
 
     write_template(tmp_path / "ds")

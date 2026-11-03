@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

@@ -18,6 +18,12 @@ Downloads the ``openai/gdpval`` HuggingFace dataset and converts it into the
 NeMo-Gym benchmark JSONL format: task fields at the top level, which the
 benchmark's ``prompt_config`` renders into the user prompt and the GDPVal
 resources server reads at /verify.
+
+``gdpval/pi`` and ``gdpval/codex`` use ``prepare_harness_neutral.py``, which writes the same rows without the tool
+list: Stirrup takes its tools from that list, while Pi and Codex get them over the resources server's MCP grant and
+reject a tool list in the request. It is a separate script because a dataset cannot pass its own arguments to its
+prepare script: ``gym eval prepare`` gives every dataset the same top-level ``prepare_script_args``, and the file the
+script writes must be the dataset's ``jsonl_fpath``.
 """
 
 from __future__ import annotations

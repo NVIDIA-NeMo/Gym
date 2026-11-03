@@ -10,7 +10,7 @@ import pytest
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -86,9 +86,9 @@ def test_swe_shared_preparation_preserves_grading_metadata_through_legacy_adapte
 def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() -> None:
     from omegaconf import OmegaConf
 
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from nemo_gym.global_config import GlobalConfigDictParser
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
+    from nemo_gym.config import GlobalConfigDictParser
+    from nemo_gym.rollouts import RolloutCollectionHelper
     from nemo_gym.sandbox import AsyncSandbox
     from resources_servers.swebench_pro.app import SWEBenchProResourcesServerConfig
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
@@ -97,7 +97,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() ->
     _, configs = parser.load_extra_config_paths([str(ROOT / "benchmarks/swebench/pro/nooa.yaml")])
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
-    environment = SingleAgentTurnEnvironmentServerConfig(
+    environment = SingleAgentTurnLegacyEnvironmentServerConfig(
         name="swebench_pro_nooa",
         host="localhost",
         port=8000,

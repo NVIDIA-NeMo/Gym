@@ -21,13 +21,16 @@ from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
+from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
-import nemo_gym.global_config as gc
+import nemo_gym.config.global_config as gc
+import nemo_gym.orchestration.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -618,7 +621,7 @@ class TestFriendlyValidationError:
         from pydantic import ValidationError
 
         from nemo_gym.cli.main import _handle_pydantic_validation_error
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (so it passes the scoping check) with one missing and one invalid field.
         class _Model(BaseNeMoGymCLIConfig):
@@ -642,7 +645,7 @@ class TestFriendlyValidationError:
         assert "invalid configuration: count" in recorder.message
 
     def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
         class _Config(BaseNeMoGymCLIConfig):
@@ -739,6 +742,7 @@ class TestFriendlyValidationError:
                 raise AssertionError("RunHelper must not be built for a malformed head_server")
 
         monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
@@ -780,7 +784,7 @@ class TestFriendlyValidationError:
     def test_dataset_config_mistake_is_a_clean_error_not_a_traceback(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, request, argv: list[str], expected: str
     ) -> None:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data.prompt import load_prompt_config
 
         # The loader caches by the path string, and these relative names would otherwise outlive this tmp_path.
         load_prompt_config.cache_clear()
@@ -909,10 +913,9 @@ class TestDatasetValidateFlags:
         # The file name is not a Hydra expression: unquoted, `(` is a parse error and `,` is ambiguous. It is
         # also not JSON: Hydra keeps `\uXXXX` and a doubled backslash literally, so the override must parse
         # back to the exact name the user typed, Unicode and backslashes included.
-        from nemo_gym.tasks.harbor import cli as harbor_cli
 
         captured: list = []
-        monkeypatch.setattr(harbor_cli, "validate_target", lambda args, overrides: captured.append(overrides))
+        monkeypatch.setattr(cli_eval, "validate_target", lambda args, overrides: captured.append(overrides))
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", "tasks", "--output", name])
         main()
         assert len(captured) == 1 and len(captured[0]) == 1
@@ -1677,22 +1680,22 @@ class TestDidYouMean:
     """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
 
     def test_helper_suggests_close_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
 
     def test_helper_silent_when_nothing_close(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
     def test_helper_does_not_suggest_exact_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["list", "eval", "env"]) == ""
 
     def test_helper_suggests_next_close_match_after_excluding_exact(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
 
@@ -2024,10 +2027,8 @@ def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, delet
 
 
 def test_eval_run_keeps_home_relative_target(monkeypatch):
-    import nemo_gym.tasks.harbor.cli as harbor_cli
-
     captured = []
-    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append(args.target))
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append(args.target))
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes_agent"])
     cli_main.main()
     assert captured == ["~/tasks"]
@@ -2039,8 +2040,6 @@ def test_eval_run_keeps_home_relative_target(monkeypatch):
 def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch, target):
     import pwd
     from types import SimpleNamespace
-
-    import nemo_gym.tasks.harbor.cli as harbor_cli
 
     home = tmp_path / "home"
     (home / "tasks").mkdir(parents=True)
@@ -2054,7 +2053,7 @@ def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch
         lambda name: SimpleNamespace(pw_dir=str(home)) if name == "harbor_test_user" else real_getpwnam(name),
     )
     captured = []
-    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes_agent", "+limit=3"])
     cli_main.main()
     assert captured == [(target, ["+agent_name=hermes_agent", "+limit=3"])]
@@ -2093,3 +2092,52 @@ def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve,
         main()
     assert exc.value.code == 2
     assert "--only-tasks and --exclude-tasks apply to a task TARGET" in capsys.readouterr().err
+
+
+def _resolve_eval_run(monkeypatch: MonkeyPatch, selectors: list[str]) -> DictConfig:
+    """Resolve the config `gym eval run <selectors>` would run: the CLI's config_paths, in its order, then the parser."""
+    _, overrides = _dispatch_for(monkeypatch, ["eval", "run", *selectors])
+    (token,) = [o for o in overrides if o.startswith("+config_paths=[")]
+    config_paths = token[len("+config_paths=[") : -1].split(",")
+    initial = DictConfig(
+        {
+            "config_paths": config_paths,
+            "policy_base_url": "https://example.test/v1",
+            "policy_api_key": "test-key",  # pragma: allowlist secret
+            "policy_model_name": "test-model",
+        }
+    )
+    return gc.GlobalConfigDictParser().parse(
+        gc.GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+        )
+    )
+
+
+class TestModelTypeKeepsBenchmarkPolicySettings:
+    """`--model-type vllm_model` merges after the benchmark config, so it must not reset what the benchmark set."""
+
+    POLICY_SETTINGS = {
+        "extra_body": {"thinking_token_budget": 17408},
+        "chat_template_kwargs": {"enable_thinking": True},
+        "sampling_overrides": {"temperature": 0.6},
+    }
+
+    def test_benchmark_policy_settings_survive_the_model_type_config(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        bench_dir = tmp_path / "benchmarks" / "budget_probe"
+        bench_dir.mkdir(parents=True)
+        (bench_dir / "config.yaml").write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": self.POLICY_SETTINGS}}})
+        )
+        selectors = ["--search-dir", str(tmp_path), "--benchmark", "budget_probe", "--model-type", "vllm_model"]
+
+        resolved = _resolve_eval_run(monkeypatch, selectors)
+
+        # The model-type config is the later sibling, i.e. the one whose values would win.
+        assert resolved["config_paths"][-1].endswith("responses_api_models/vllm_model/configs/vllm_model.yaml")
+        vllm_model = resolved["policy_model"]["responses_api_models"]["vllm_model"]
+        for key, value in self.POLICY_SETTINGS.items():
+            assert vllm_model[key] == value, key
+        assert vllm_model["entrypoint"] == "app.py"  # the model-type config still applied

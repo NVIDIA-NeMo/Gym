@@ -304,7 +304,7 @@ def _make_server(subprocess_timeout: float = 120.0):
 
     from app import SciCodePileResourcesServer, SciCodePileResourcesServerConfig
 
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
 
     return SciCodePileResourcesServer(
         config=SciCodePileResourcesServerConfig(
@@ -322,7 +322,7 @@ def _make_server(subprocess_timeout: float = 120.0):
 
 def _make_response(text: str):
     """Minimal NeMoGymResponse carrying one assistant message."""
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     return NeMoGymResponse(
         id="resp-1",
