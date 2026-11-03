@@ -84,6 +84,41 @@ def test_headless_node_may_have_no_cache(helper: ModuleType, tmp_path: Path) -> 
         helper.collect_caches(tmp_path, allow_empty=False)
 
 
+def test_ranked_autotune_caches_survive_export_install_and_verification(helper: ModuleType, tmp_path: Path) -> None:
+    cache = tmp_path / "source"
+    config = cache / ("a" * 64)
+    config.mkdir(parents=True)
+    (cache / ".warmup-start").touch()
+    expected = {}
+    for rank in range(4):
+        filename = f"autotune_configs_dp{rank}_rank{rank}.json"
+        contents = json.dumps({f"expert-rank-{rank}": ["prims", rank]})
+        (config / filename).write_text(contents)
+        expected[f"{'a' * 64}/{filename}"] = contents
+    assert helper.collect_caches(cache, allow_empty=False) == expected
+    stream = io.BytesIO()
+    helper.dump_warmup(cache, tmp_path / "jit", tmp_path / "startup", stream, allow_empty=False)
+    stream.seek(0)
+    target, aot, startup = (tmp_path / name for name in ("target", "aot", "startup"))
+    assert helper.install_warmup(target, aot, startup, stream) == []
+    for key, contents in expected.items():
+        assert (target / key).read_text() == contents
+    assert not (target / ("a" * 64) / "autotune_configs.json").exists()
+    helper.write_manifest(target, aot, startup, [])
+    assert helper.inspect_manifest(target, aot, startup) == []
+    (target / next(iter(expected))).write_text('{"changed": true}')
+    with pytest.raises(ValueError, match="missing or changed"):
+        helper.inspect_manifest(target, aot, startup)
+
+
+@pytest.mark.parametrize(
+    "suffix", ["../outside.json", "autotune_configs_dp0_rank0.json/../../outside", "autotune_configs_dpX_rank0.json"]
+)
+def test_ranked_cache_paths_are_validated(helper: ModuleType, tmp_path: Path, suffix: str) -> None:
+    with pytest.raises(ValueError, match="Invalid vLLM cache"):
+        helper.install_caches(tmp_path, [json.dumps({f"{'a' * 64}/{suffix}": '{"op": 1}'})])
+
+
 def test_cli_transfers_node_archives_through_file(
     helper: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -51,10 +51,27 @@ def wait_for_engines(urls: list[str], timeout: int) -> None:
         time.sleep(min(5, max(0, deadline - time.monotonic())))
 
 
+def autotune_cache_path(root: Path, key: str) -> Path:
+    """Resolve legacy configuration keys and per-rank cache filenames safely."""
+    if re.fullmatch(r"[0-9a-f]{64}", key):
+        return root / key / "autotune_configs.json"
+    if re.fullmatch(r"[0-9a-f]{64}/autotune_configs_dp[0-9]+_rank[0-9]+\.json", key):
+        return root / key
+    raise ValueError(f"Invalid vLLM cache configuration hash or filename: {key!r}")
+
+
+def autotune_cache_files(root: Path) -> dict[str, Path]:
+    """Preserve rank-specific tactics instead of merging different ranks."""
+    files = {}
+    for path in sorted(root.glob("*/autotune_configs*.json")):
+        key = path.parent.name if path.name == "autotune_configs.json" else f"{path.parent.name}/{path.name}"
+        files[key] = autotune_cache_path(root, key)
+    return files
+
+
 def validate_cache(config_hash: str, contents: str) -> None:
     """Check the vLLM directory key and reject empty or corrupt cache files."""
-    if not re.fullmatch(r"[0-9a-f]{64}", config_hash):
-        raise ValueError(f"Invalid vLLM cache configuration hash: {config_hash!r}")
+    autotune_cache_path(Path(), config_hash)
     data = json.loads(contents)
     if not isinstance(data, dict) or not any(not key.startswith("_") for key in data):
         raise ValueError(f"No autotuning entries in cache {config_hash}")
@@ -65,10 +82,10 @@ def collect_caches(root: Path, *, allow_empty: bool) -> dict[str, str]:
     started_at = (root / ".warmup-start").stat().st_mtime_ns
     caches = {}
     updated = False
-    for path in sorted(root.glob("*/autotune_configs.json")):
+    for key, path in autotune_cache_files(root).items():
         contents = path.read_text()
-        validate_cache(path.parent.name, contents)
-        caches[path.parent.name] = contents
+        validate_cache(key, contents)
+        caches[key] = contents
         updated |= path.stat().st_mtime_ns >= started_at
     # Re-warming an exported image may reuse every tactic without rewriting
     # its JSON while still compiling missing kernels or creating startup plans.
@@ -105,9 +122,9 @@ def install_caches(root: Path, payloads: list[str]) -> None:
     if not caches:
         raise ValueError("No autotuning caches collected; refusing to export an unwarmed image")
     for config_hash, contents in caches.items():
-        directory = root / config_hash
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "autotune_configs.json").write_text(contents)
+        path = autotune_cache_path(root, config_hash)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
     (root / ".warmup-start").unlink(missing_ok=True)
     (root / ".baked").write_text("Loaded automatically by sbatch_external_vllm.sh\n")
     print(f"Installed {len(caches)} autotuning configuration caches in {root}", flush=True)
@@ -309,8 +326,8 @@ def write_manifest(
         "schema": 1,
         "build_id": uuid.uuid4().hex,
         "autotune": {
-            cache.parent.name: hashlib.sha256(cache.read_bytes()).hexdigest()
-            for cache in sorted(cache_root.glob("*/autotune_configs.json"))
+            key: hashlib.sha256(cache.read_bytes()).hexdigest()
+            for key, cache in autotune_cache_files(cache_root).items()
         },
         "startup_plans": {
             plan.name: hashlib.sha256(plan.read_bytes()).hexdigest()
@@ -340,9 +357,7 @@ def inspect_manifest(
     if manifest.get("schema") != 1 or not manifest.get("autotune"):
         raise ValueError("Invalid warmed-container manifest; rebuild with SAVE_WARMED_CONTAINER")
     for name, digest in manifest["autotune"].items():
-        if not re.fullmatch(r"[0-9a-f]{64}", name):
-            raise ValueError(f"Invalid baked autotune hash: {name}")
-        path = cache_root / name / "autotune_configs.json"
+        path = autotune_cache_path(cache_root, name)
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError(f"Baked autotune cache missing or changed: {path}")
     for name, digest in manifest["startup_plans"].items():

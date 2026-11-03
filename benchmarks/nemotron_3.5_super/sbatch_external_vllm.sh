@@ -1082,8 +1082,13 @@ nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 # Scope names to a job attempt so a new warmed image is actually imported.
 container_attempt="\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}"
 worker_container="vllm-\$container_attempt"
+cache_export_dir=""
+cache_export_mount=""
 if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     worker_container="vllm-warm-\$container_attempt"
+    # Pyxis cannot add mounts when attaching to the running serving container.
+    cache_export_dir=\$(mktemp -d "$(dirname "$SAVE_WARMED_CONTAINER")/.vllm-warm.XXXXXX")
+    cache_export_mount=",\$cache_export_dir:\$cache_export_dir"
 fi
 echo "Starting vLLM image $CONTAINER in container \$worker_container"
 
@@ -1092,7 +1097,7 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
     --container-image=$CONTAINER \
     --container-name="\$worker_container" \
     --container-writable \
-    --container-mounts=$worker_mounts \
+    --container-mounts="$worker_mounts\$cache_export_mount" \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
     bash -c '
@@ -1102,7 +1107,6 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
     ' bash bash -c "\$vllm_command" &
 server_step=\$!
 cache_warmup_step=""
-cache_export_dir=""
 
 cleanup_server() {
     job_status=\$?
@@ -1149,10 +1153,9 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     (( completed_status == 0 )) || exit "\$completed_status"
     cache_warmup_step=""
 
-    # Write archives directly to the shared export directory. Mount only this
-    # temporary transfer directory; runtime caches stay inside each container.
+    # Write archives to the shared directory mounted at container creation.
+    # Runtime caches stay inside each container.
     # Include both PD roles and headless workers' compiled modules/startup plans.
-    cache_export_dir=\$(mktemp -d "$(dirname "$SAVE_WARMED_CONTAINER")/.vllm-warm.XXXXXX")
     for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
         dump_args=(--output "\$cache_export_dir/caches.tar")
         if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
@@ -1162,7 +1165,6 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
         srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
             --nodelist="\${nodes[node_index]}" --container-name="\$worker_container" \
             --container-writable --no-container-mount-home --container-workdir=/ \
-            --container-mounts="\$cache_export_dir:\$cache_export_dir" \
             python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}"
     done
 
