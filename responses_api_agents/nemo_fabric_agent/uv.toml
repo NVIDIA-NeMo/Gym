@@ -1,0 +1,36 @@
+# Gym's root [tool.uv] policy, minus the exclusions OpenHands needs: openhands-sdk imports cryptography, and
+# its tools use pathspec and wcwidth. Gym installs this server with --config-file uv.toml, which replaces the
+# root table, so the rest of the policy is mirrored here.
+required-version = ">=0.9.30"
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
+]
+override-dependencies = [
+    "spacy>=3.8.13",
+    "opencv-python-headless; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+]
+exclude-dependencies = [
+    "fasttext-wheel",
+    "alembic",
+    "blinker",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "werkzeug",
+    "waitress",
+    "diskcache",
+]

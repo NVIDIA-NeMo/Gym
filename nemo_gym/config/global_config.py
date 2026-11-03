@@ -217,6 +217,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "hermes_agent",
         "kilocode_agent",
         "miniswe_sandboxed_agent",
+        "nemo_fabric_agent",
         "nooa_agent",
         "openclaw_agent",
         "opencode_agent",
