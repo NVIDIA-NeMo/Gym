@@ -3887,26 +3887,35 @@ class RolloutCollectionHelper(BaseModel):
         # A run of several agents scores each agent as soon as its last expected rollout is scored,
         # without waiting for the others, and writes a completion file for it. The run-wide aggregate
         # metrics are still written once, after every agent is done. Resume counts the rollouts an
-        # earlier job finished, so the expected rollouts come from all the materialized rows.
+        # earlier job finished, so the expected rollouts come from all the materialized rows. An agent
+        # is the environment server that scores its rollouts, as the run-wide aggregate groups them: a
+        # task routed to the server and a row naming the agent behind it are one agent, whatever
+        # spelling their dispatch uses.
         agent_expected_keys: Dict[str, Set[Tuple[int, int]]] = {}
         agent_pending_keys: Dict[str, Set[Tuple[int, int]]] = {}
         agent_samples: Dict[str, Dict[str, Any]] = {}
         agent_complete_tasks: List[asyncio.Task] = []
+        completion_servers_by_agent: Mapping[str, list[str]] = {}
         if not config.disable_aggregation:
+            completion_servers_by_agent = _environment_servers_by_agent(identity_client.global_config_dict)
             agent_expected_keys, agent_samples = self._agent_completion_plan(
-                input_rows if store.started_fresh else _iter_jsonl(config.materialized_jsonl_fpath)
+                input_rows if store.started_fresh else _iter_jsonl(config.materialized_jsonl_fpath),
+                completion_servers_by_agent,
             )
             if len(agent_expected_keys) > 1:
                 agent_pending_keys = {
                     name: keys - persisted_success_keys for name, keys in agent_expected_keys.items()
                 }
 
-        def start_agent_complete(dispatch_name: str) -> None:
+        def completion_group(row: Mapping[str, Any]) -> str:
+            return _metrics_group(row, lambda: completion_servers_by_agent) or self._dispatch_name(row)
+
+        def start_agent_complete(group_name: str) -> None:
             agent_complete_tasks.append(
                 asyncio.create_task(
                     self._write_agent_complete(
-                        dispatch_name=dispatch_name,
-                        keys=agent_expected_keys[dispatch_name],
+                        group_name=group_name,
+                        keys=agent_expected_keys[group_name],
                         output_fpath=output_fpath,
                         samples=agent_samples,
                         store=store,
@@ -4274,12 +4283,13 @@ class RolloutCollectionHelper(BaseModel):
                     # Success → main jsonl.
                     store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
                     persisted_success_keys.add((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
-                    pending_keys = agent_pending_keys.get(dispatch_name)
+                    completion_name = completion_group(row)
+                    pending_keys = agent_pending_keys.get(completion_name)
                     if pending_keys is not None:
                         pending_keys.discard((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
                         if not pending_keys:
-                            del agent_pending_keys[dispatch_name]
-                            start_agent_complete(dispatch_name)
+                            del agent_pending_keys[completion_name]
+                            start_agent_complete(completion_name)
                     _record_rollout_outcome(result, "scored", dispatch_name)
                     health_outcome = "scored"
                     _record_rollout_shape(row, result)
@@ -4761,26 +4771,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         return metrics_fpath
 
     def _agent_completion_plan(
-        self, rows: Iterable[Mapping[str, Any]]
+        self, rows: Iterable[Mapping[str, Any]], servers_by_agent: Mapping[str, list[str]]
     ) -> Tuple[Dict[str, Set[Tuple[int, int]]], Dict[str, Dict[str, Any]]]:
         """The rollouts each agent of a run must score, and one routing sample of each agent's rows.
 
         ``rows`` are all of the run's materialized rows, including those a resumed run finished
-        earlier. Both results are keyed by dispatch name (``_dispatch_name``). A sample keeps only the
-        fields that route a row to its environment server, for ``_agent_complete_labels``.
+        earlier. Both results are keyed by the environment server that scores the rows, as the run-wide
+        aggregate groups them (``_metrics_group``), not by how a row is dispatched: a task routed to a
+        server and a row naming an agent behind it are scored together, so they are one agent here.
+        A sample keeps only the fields that route a row to its environment server, for
+        ``_agent_complete_labels``.
         """
-        keys_by_dispatch_name: Dict[str, Set[Tuple[int, int]]] = {}
+        keys_by_group: Dict[str, Set[Tuple[int, int]]] = {}
         samples: Dict[str, Dict[str, Any]] = {}
         for row in rows:
-            dispatch_name = self._dispatch_name(row)
-            keys_by_dispatch_name.setdefault(dispatch_name, set()).add(
-                (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
-            )
-            if dispatch_name not in samples:
-                samples[dispatch_name] = {
+            group_name = _metrics_group(row, lambda: servers_by_agent) or self._dispatch_name(row)
+            keys_by_group.setdefault(group_name, set()).add((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]))
+            if group_name not in samples:
+                samples[group_name] = {
                     key: row[key] for key in (AGENT_REF_KEY_NAME, NG_ENVIRONMENT_SERVER_KEY) if key in row
                 }
-        return keys_by_dispatch_name, samples
+        return keys_by_group, samples
 
     def _agent_complete_labels(self, samples: Mapping[str, Mapping[str, Any]]) -> Dict[str, str]:
         """The label a full aggregation of the run gives each environment server's entry (``label_runs``).
@@ -4803,7 +4814,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
     async def _write_agent_complete(
         self,
         *,
-        dispatch_name: str,
+        group_name: str,
         keys: Set[Tuple[int, int]],
         output_fpath: Path,
         samples: Mapping[str, Mapping[str, Any]],
@@ -4826,6 +4837,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         gathered, which is before the run-wide aggregate is computed, and a run whose rollouts all
         succeeded would end without one.
         """
+        # The group is an environment server; messages name its agent when the rows say which one it is.
+        agent_name = (samples.get(group_name, {}).get(AGENT_REF_KEY_NAME) or {}).get("name") or group_name
         try:
             # The store's index is updated on the event loop, so it is read here and not in the worker thread.
             selected = store.selected_records("success")
@@ -4842,14 +4855,20 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
             if scored_keys != keys:
                 raise RuntimeError(
-                    f"Agent '{dispatch_name}' has every expected rollout scored, but {output_fpath} holds "
+                    f"Agent '{agent_name}' has every expected rollout persisted, but {output_fpath} holds "
                     f"{len(scored_keys)} of its {len(keys)} rollouts."
                 )
+            # A persisted result may carry no reward (an execute-only or reward-less result): it is valid and
+            # stays in the output and the run-wide aggregate, but it is not a scored rollout, so the agent is
+            # not announced as scored. A reward of zero is a score.
+            if any(type(result.get("reward")) not in (int, float) for result in results):
+                logger.info("Agent '%s' has a rollout without a reward, so it gets no completion file.", agent_name)
+                return None
 
             entries, _ = await self._aggregate_entries(results, results, labels=self._agent_complete_labels(samples))
             if len(entries) != 1:
                 raise RuntimeError(
-                    f"Agent '{dispatch_name}' aggregated into {len(entries)} environment servers, expected one."
+                    f"Agent '{agent_name}' aggregated into {len(entries)} environment servers, expected one."
                 )
             entry = entries[0]
             label = entry[AGENT_REF_KEY_NAME]["name"]
@@ -4870,7 +4889,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         except Exception:
             logger.exception(
                 "Could not write the completion file of agent '%s'; the run-wide aggregate is unaffected.",
-                dispatch_name,
+                agent_name,
             )
             return None
         print(f"Agent '{label}' complete: all {len(keys)} rollouts scored. Completion file: {fpath}", flush=True)
