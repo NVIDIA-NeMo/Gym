@@ -1,7 +1,7 @@
 ---
 title: "Multi-Container Tasks"
 description: "Author a task folder whose environment runs sidecar containers beside the agent's sandbox, described with Docker Compose."
-position: 9
+position: 6
 ---
 
 # Multi-Container Tasks
@@ -13,7 +13,7 @@ episode, and stops the group when the episode ends.
 
 Use Compose when the task needs a process with its own image, or one the agent must not control. A tool the agent
 calls can often run in the agent's sandbox instead (see
-[A task with its own MCP tool](/main/data/task-folder-patterns#a-task-with-its-own-mcp-tool)).
+[A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool)).
 
 <Note>
 A Compose task needs a sandbox provider that connects the sandboxes of a group. On main, that is OpenSandbox. Other
@@ -54,7 +54,7 @@ services:
 
 `${MAIN_IMAGE_NAME}` is the task's own image. Services reach each other by name, so the agent calls
 `http://api:8080`. A sidecar with a `build:` section is built once at prepare, like a build-mode Dockerfile (see
-[Dockerfile modes](/main/data/task-folder-format#dockerfile-modes) and
+[Dockerfile modes](/main/data/task-folders/task-folder-format#dockerfile-modes) and
 [Harbor image builds](/main/reference/configuration#harbor-image-builds)).
 
 Prepare (`gym eval run` or `gym dataset validate`) resolves the file, checks every service, and records each image's
@@ -63,7 +63,7 @@ configuration in `compose-images.json` at the dataset root. A task it cannot run
 document again at seed.
 
 `artifacts` entries and `[[verifier.collect]]` hooks can name a `service`. A sidecar that writes a file for `test.sh`
-needs [Sidecar inputs](/main/data/task-folder-verifiers#sidecar-inputs).
+needs [Sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs).
 
 ## Run on OpenSandbox
 
@@ -93,7 +93,7 @@ gym dataset validate my-dataset --sandbox opensandbox --config compose-deploymen
 | `networking.loopback_forwarding` | A service uses `network_mode: service:<name>`. |
 | `runtime_requirements.shm_size_metadata_key` | A service sets `shm_size`. Name the label your cluster reads shared-memory size from, such as `nemo.nvidia.com/shm`. |
 | `runtime_requirements.capability_probes` | A service uses `cap_add`: one probe command per capability. |
-| `shared_storage.host_path` | A service mounts a named volume, or a sidecar binds a `/logs` path. |
+| `shared_storage.host_path` | A service mounts a named volume or one mapped through `volume_sources`, or a sidecar binds a `/logs` path. |
 | `volume_sources` | A volume is `external: true`, or a bind source sits outside the task. |
 | `images.auth` | A service image is private. Prepare reads its configuration with the same credentials. Compose images are pulled at their recorded digest, so key a Docker Hub image as `myorg/`, whether the file writes `myorg/img` or `docker.io/myorg/img`, and an image on another registry by its host prefix (see [OpenSandbox Provider](/main/infrastructure/sandbox/opensandbox#task-folders)). |
 
@@ -106,7 +106,8 @@ Prepare resolves `${NAME}` the way Harbor's `docker compose` does, and the serve
 source that defines a name wins:
 
 1. Gym's infrastructure variables, below.
-2. The task's `[environment].env`. A whole value `${VAR}` or `${VAR:-default}` reads the process environment.
+2. The task's `[environment].env`. A whole value `${VAR}` or `${VAR:-default}` reads the process environment. An
+   unset `VAR` with no default leaves the task out.
 3. The process environment of the command that runs prepare or the server.
 4. `environment/.env`, read as Compose reads it.
 5. At seed only, the server's `compose_variables`.
@@ -145,23 +146,25 @@ harbor_environment_server:
         SIM_USER_MODEL: {value: gpt-5.5}
 ```
 
-A service's `env_file` entries are read at prepare and inlined into its `environment`, which wins over them. The file
-must sit under the task's `environment/` folder and must not be a symbolic link. A missing file leaves the task out
-unless the entry says `required: false`.
+A service's `env_file` entries are read at prepare and inlined, with no `${VAR}` interpolation, into its
+`environment`, which wins over them. The file must sit under the task's `environment/` folder and must not be a
+symbolic link. A missing file leaves the task out unless the entry says `required: false`.
 
 ## Service fields
 
 Beyond `image`, `command`, `entrypoint`, `environment`, `working_dir`, `user`, `depends_on`, `healthcheck`, `expose`,
-`labels`, `cap_add`, `shm_size` and `network_mode: service:<name>`, these fields have a defined meaning. Any other key,
-such as `privileged` or `secrets`, leaves the task out.
+`labels`, `cap_add`, `shm_size` and `network_mode: service:<name>`, these fields have a defined meaning. Any other
+service key, such as `privileged` or `secrets`, leaves the task out. So does a top-level key other than `name`,
+`services`, `networks` and `volumes`, such as `version` or an `x-` block. A `depends_on` entry with `required: false`
+or `restart: true`, or a `user` with a group, such as `1000:1000`, fails when the group starts.
 
 | Field | Meaning in a sandbox group |
 | --- | --- |
-| `deploy.resources` | `limits.cpus` and `limits.memory` size the sandbox. A numeric GPU `count` routes the service to the server's `gpu_sandbox_provider`, when set. `count: all` and `limits.pids` fail. |
+| `deploy` | `resources.limits.cpus` and `limits.memory` size the sandbox, or `reservations` when `limits` leaves them out. A sidecar that reserves GPUs (`count` or `device_ids`) goes to the server's `gpu_sandbox_provider`, when set. `main` follows the task's `[environment].gpus`. `count: all`, `limits.pids`, `replicas` other than 1 and keys besides `resources`, `replicas` and `restart_policy` fail. |
 | `cpus`, `mem_limit` | Size the sandbox's CPUs or memory when `deploy.resources` does not. |
 | `restart` | Accepted. Nothing restarts. |
-| `pull_policy` | `always`, `missing` or `never`. |
-| `platform` | Must match the deployment platform, `linux/amd64` by default. |
+| `pull_policy` | `always`, `missing` or `never`. `if_not_present`, `daily`, `weekly` and `every_<n>` count as `missing`. `build` fails unless prepare built the service. |
+| `platform` | Must match the server's `sandbox_provider_options.platform`, `linux/amd64` by default. |
 | `networks` | Become name scopes on the group's one network. `internal: true`, `ipam`, `driver_opts` and static addresses fail. |
 | `ports` | A container port alone. Fixed published ports, `host_ip`, non-TCP protocols and ranges fail. |
 | `extra_hosts` | Host-to-IP entries. `host-gateway` fails, and a non-root sidecar cannot take them. |
@@ -201,7 +204,7 @@ harbor_environment_server:
 | Key | What it does |
 | --- | --- |
 | `files` | Merged in order onto each task's Compose document, as Compose merges `-f` files, `!reset` and `!override` included. An image-only task first becomes a one-service group, `main`. |
-| `mcp_servers` | Merged by name with the task's `[[environment.mcp_servers]]`. The overlay wins on a name. |
+| `mcp_servers` | Merged by name with the task's `[[environment.mcp_servers]]`. The overlay wins on a name. The entries count as the task's own, so a harness that does not start task tool servers is refused for every task unless they are granted (see [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool)). |
 | `prompt_template` | A Jinja2 file using `{{ instruction }}`, rendered around the first turn's instruction. |
 
 - Write absolute paths. Relative paths inside an overlay file resolve against the task's `environment/` folder.

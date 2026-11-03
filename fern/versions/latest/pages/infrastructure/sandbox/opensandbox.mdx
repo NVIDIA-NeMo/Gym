@@ -197,19 +197,22 @@ sandbox:
 
 ## Task folders
 
-When the `harbor` Environment Server runs [task folders](/main/data/harbor-tasks) on OpenSandbox:
+When the `harbor` Environment Server runs [task folders](/main/data/task-folders/harbor-tasks) on OpenSandbox:
 
-- Prepare reads the configuration of private images with the same `images.auth` credentials the provider pulls them
-  with. The provider matches each prefix against the reference it pulls, after `images.rewrites`. A declared
+- Prepare reads the configuration of private images with the `sandbox:` block's `images.auth` (never the
+  `gpu_sandbox_provider` block's), at the reference the task names. The provider matches each prefix against the
+  reference it pulls, after `images.rewrites`, so an image a rewrite moves between private registries needs an entry
+  for each. A declared
   `docker_image` is pulled as written; a Dockerfile's `FROM` image and every Compose service image are pulled at their
   recorded digest, which spells a Docker Hub image without `docker.io/`. So key a Docker Hub image as `myorg/` (prepare
   also accepts `docker.io/myorg/` for its own reads), and an image on another registry by its host prefix. Outside a
   Compose task, a declared `docker_image` written `docker.io/myorg/img` also needs a `docker.io/myorg/` entry.
 - Images built from a task's Dockerfile must be pushed to a registry, so set `builds.repository` (see
-  [Harbor image builds](/main/reference/configuration#harbor-image-builds)).
+  [Harbor image builds](/main/reference/configuration#harbor-image-builds)). The build tool pushes with its own
+  login, but the provider pulls with `images.auth`, so a private repository needs an entry there too.
 - Compose tasks need `networking.enabled: true`, and `networking.loopback_forwarding: true` when a service uses
   `network_mode: service:<name>`. Named volumes need `shared_storage`. See
-  [Run on OpenSandbox](/main/data/compose-tasks#run-on-opensandbox) for every setting a Compose task needs.
+  [Run on OpenSandbox](/main/data/task-folders/compose-tasks#run-on-opensandbox) for every setting a Compose task needs.
 
 ## SandboxSpec Provider Options
 
@@ -263,7 +266,7 @@ What the control plane does with it, verified live with the OpenSandbox 0.1.15 S
 - A sandbox created with a policy keeps its `defaultAction` for life. The SDK's `patch_egress_rules` and `delete_egress_rules` change the rules of a running sandbox and the change is enforced within seconds, but no call changes `defaultAction`, and `*` is not a catch-all target: a `deny *` rule under `defaultAction: allow` blocks nothing, and an `allow *` rule under `deny` opens nothing.
 - Under `defaultAction: deny`, name resolution failed and a connection to a raw IP timed out on the deployment probed. The probes did not establish which layer caused the timeout: `dns` filters name resolution only, so a hard-coded IP bypasses the policy and a `no-network` phase is weaker there, while `dns+nft` additionally enforces at the IP layer; confirm which mode your cluster runs before relying on it. An `allow` rule for a host name, a `*.domain` wildcard or an IP literal opened exactly that target.
 
-A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the `harbor` Environment Server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see [Shared and separate verification](/main/data/task-folder-verifiers#shared-and-separate-verification)), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
+A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the `harbor` Environment Server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see [Shared and separate verification](/main/data/task-folders/task-folder-verifiers#shared-and-separate-verification)), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
 
 ## Relevant SandboxSpec Fields
 

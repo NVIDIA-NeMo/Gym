@@ -10,22 +10,31 @@ the troubleshooting steps live in the pages under [Documentation map](#documenta
 One `/run` call is one whole episode, and no Resources Server takes part. For each row the server runs:
 
 1. **Seed.** Check the row's digest against the taskset mapping and the folder, start the task's image as a
-   sandbox through the configured sandbox provider (a sandbox group for a Compose task), run an overlay-mode
-   Dockerfile's `RUN` lines, create the working directory and wait for the health checks.
+   sandbox through the configured sandbox provider (a sandbox group for a Compose task, or for any task when the
+   job-level `compose_overlay` names `files`), run an overlay-mode Dockerfile's `RUN` lines, create the working
+   directory, start the image's `ENTRYPOINT` and wait for the health checks.
 2. **Agent.** Open a session on the configured Agent Server with a `SandboxAccess` for that sandbox, post the
-   task's `responses_create_params`, then close the session and keep what the agent observed. When the agent is
-   `harbor_oracle_agent`, the seed first uploads the task's `solution/` to `/solution`.
+   task's `responses_create_params`, then close the session and keep what the agent observed. A failed response
+   whose harness names its cause goes through `agent_outcome_policy` before verification; by default a transport or
+   unknown cause is retried ungraded. When the agent is `harbor_oracle_agent`, the seed first uploads the task's
+   `solution/` to `/solution`; a `[[steps]]` task instead gets each step's `steps/<name>/solution/` (else the
+   task's) before that step.
 3. **Verify.** Run the `[[verifier.collect]]` hooks. In shared mode, empty `/tests` and `/logs/verifier` in the
-   agent's sandbox, keeping only the task's `[verifier].inputs`; in separate mode, start a fresh sandbox. Then
-   upload `tests/`, write the agent's transcript to `/logs/agent/trajectory.json` (ATIF), run `test.sh` and read
-   `reward.json`, else `reward.txt`.
+   agent's sandbox, keeping only the task's `[verifier].inputs`, and upload `tests/`. In separate mode (also forced
+   by `separate_verifier_for_artifacts` for a task with `artifacts`), collect `/logs/artifacts` and the task's
+   `artifacts`, stop the agent's sandbox and restore them into a fresh one, which gets `tests/` only if its image
+   has no `/tests/test.sh` or a Python verifier grades the task. Then write the agent's transcript to
+   `/logs/agent/trajectory.json` (ATIF), run `test.sh` and read `reward.json`, else `reward.txt`.
 4. **Cleanup.** Stop every sandbox of the episode, whatever happened before.
 
-Once `test.sh` has run, the sample counts: a missing or invalid reward file scores 0 with a `failure_kind`, and only
-a Gym-side failure (a lost sandbox, a failed transfer) sets `mask_sample`. A task that cannot be set up fails at
-`stage: seed`, terminally when the task is at fault and retryably when the provider failed. A task with `[[steps]]`
-runs one such turn per step in the same sandbox. It stops early after a step whose preparation fails, or one that is
-masked, leaves no valid reward or misses its `min_reward`.
+Once `test.sh` has run, the sample counts: a missing or invalid reward file scores 0 with a `failure_kind`. A Gym-side
+failure (a lost sandbox, a failed transfer) sets `mask_sample`. So do a failed ATIF export, an image without `bash` or
+`timeout`, an image `ENTRYPOINT` that exits non-zero during the rollout and an overlay or entrypoint that fails in a
+separate verifier's sandbox. A task that cannot be set up fails at `stage: seed`: terminally when the server refuses
+the task, row or configuration (such as a failed overlay `RUN` line or `ENTRYPOINT`), and retryably otherwise, even
+for a health check that never passes or an image that cannot be pulled. A task with `[[steps]]` runs one such turn
+per step in the same sandbox. It stops early after a step whose preparation fails, or one that is masked, leaves no
+valid reward or misses its `min_reward`.
 
 ## How it fits
 
@@ -36,8 +45,11 @@ included, so this server seeds the sandbox from the folder and runs the task's o
 and `gym dataset validate` load the folders with `nemo_gym.tasks.harbor`, write one row per task and a run
 configuration with a per-taskset instance of this server, and bind it to a harness: the one `gym eval run` names
 with `--agent`, or `harbor_oracle_agent` for `gym dataset validate`. The harness must accept a sandbox in its
-session seed and leave the sandbox to the server when the session closes. `harbor_agent` and `harbor_agent_general`
-are separate Agent Servers that run Harbor's own runtime; they are not this path.
+session seed and leave the sandbox to the server when the session closes. A task with a `skills_dir`, or with MCP
+servers not granted through `task_mcp_grants: required`, also needs a harness that reports
+`supports_task_tool_context`, or it fails terminally at `stage: agent`; `turn_sessions: continue` needs one that
+declares multi-turn continuation. `harbor_agent` and `harbor_agent_general` are separate Agent Servers that run
+Harbor's own runtime; they are not this path.
 
 ## Run it
 
@@ -52,8 +64,9 @@ gym eval run terminal_bench_2_1 --agent terminus_2_sandboxed_agent --sandbox ope
 ```
 
 `gym dataset validate` plays each task's `solution/` through `harbor_oracle_agent` and exits non-zero unless every
-solution scores 1. Two Terminal-Bench 2.1 tasks fail their own reference solutions as published, so the full set
-exits non-zero and names them; see
+selected task loads and every solution scores 1; a task without `solution/` is listed as unvalidated and does not fail
+the command, unless no selected task has one. Two Terminal-Bench 2.1 tasks fail their own reference solutions as
+published, so the full set exits non-zero and names them; see
 [`fern/versions/latest/pages/evaluation-tutorials/terminal-bench-2-1-harbor.mdx`](../../fern/versions/latest/pages/evaluation-tutorials/terminal-bench-2-1-harbor.mdx).
 `--limit N` or `--only-tasks <names>` narrows either command. A task folder, a folder of task folders or a `harbor:`
 reference also works as the target.
@@ -65,11 +78,12 @@ its default and the sandbox provider setup are documented in
 [`fern/versions/latest/pages/agent-interactions/harbor.mdx`](../../fern/versions/latest/pages/agent-interactions/harbor.mdx)
 under "Configure the server". Dockerfiles that need a build are built at prepare and configured by the top-level
 `builds:` block of the merged configuration (`env.yaml`, a `--config` file or `++builds.<setting>=<value>`), not by
-this server's block. Its settings are `tool` (buildah, podman or docker), `repository` (default
-`$NEMO_GYM_BUILD_REPOSITORY`), `platform` (default `linux/amd64`), `enabled` and `force`; they are documented in
+this server's block. Its settings are `tool` (buildah, podman or docker; buildah and podman need a `repository`;
+default: the first usable one on `PATH`), `repository` (default `$NEMO_GYM_BUILD_REPOSITORY`), `platform` (default
+`linux/amd64`), `enabled` and `force`; they are documented in
 [`fern/versions/latest/pages/reference/configuration.mdx`](../../fern/versions/latest/pages/reference/configuration.mdx)
 under "Harbor image builds". The job-level `compose_overlay` and `compose_variables` are documented in
-[`fern/versions/latest/pages/data/compose-tasks.mdx`](../../fern/versions/latest/pages/data/compose-tasks.mdx).
+[`fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`](../../fern/versions/latest/pages/data/task-folders/compose-tasks.mdx).
 
 ## Test it
 
@@ -182,12 +196,12 @@ All under `fern/versions/latest/pages/`:
 
 | Page | What it covers |
 | --- | --- |
-| [`data/harbor-tasks.mdx`](../../fern/versions/latest/pages/data/harbor-tasks.mdx) | Tutorial: write, validate, run and publish task folders; coming from Harbor |
-| [`data/task-folder-format.mdx`](../../fern/versions/latest/pages/data/task-folder-format.mdx) | The canonical spec: layout, `task.toml`, `dataset.toml`, Dockerfile modes, Harbor compatibility, what the loader refuses |
-| [`data/task-folder-verifiers.mdx`](../../fern/versions/latest/pages/data/task-folder-verifiers.mdx) | The verifier contract: reward files, Python verifiers, reference answers, sidecar inputs, shared and separate verification |
-| [`data/multi-step-tasks.mdx`](../../fern/versions/latest/pages/data/multi-step-tasks.mdx) | `[[steps]]` tasks, the reward roll-up and `turn_sessions: continue` |
-| [`data/compose-tasks.mdx`](../../fern/versions/latest/pages/data/compose-tasks.mdx) | Compose tasks, OpenSandbox networking, template variables, volumes and the job-level overlay |
-| [`data/task-folder-patterns.mdx`](../../fern/versions/latest/pages/data/task-folder-patterns.mdx) | Parameterized tasks, typed task fields, task MCP tools, shared verifier code |
+| [`data/task-folders/harbor-tasks.mdx`](../../fern/versions/latest/pages/data/task-folders/harbor-tasks.mdx) | Tutorial: write, validate, run and publish task folders; coming from Harbor |
+| [`data/task-folders/task-folder-format.mdx`](../../fern/versions/latest/pages/data/task-folders/task-folder-format.mdx) | The canonical spec: layout, `task.toml`, `dataset.toml`, Dockerfile modes, Harbor compatibility, what the loader refuses |
+| [`data/task-folders/task-folder-verifiers.mdx`](../../fern/versions/latest/pages/data/task-folders/task-folder-verifiers.mdx) | The verifier contract: reward files, Python verifiers, reference answers, sidecar inputs, shared and separate verification |
+| [`data/task-folders/multi-step-tasks.mdx`](../../fern/versions/latest/pages/data/task-folders/multi-step-tasks.mdx) | `[[steps]]` tasks, the reward roll-up and `turn_sessions: continue` |
+| [`data/task-folders/compose-tasks.mdx`](../../fern/versions/latest/pages/data/task-folders/compose-tasks.mdx) | Compose tasks, OpenSandbox networking, template variables, volumes and the job-level overlay |
+| [`data/task-folders/task-folder-patterns.mdx`](../../fern/versions/latest/pages/data/task-folders/task-folder-patterns.mdx) | Parameterized tasks, typed task fields, task MCP tools, shared verifier code |
 | [`agent-interactions/harbor.mdx`](../../fern/versions/latest/pages/agent-interactions/harbor.mdx) | The episode, the harnesses, the server's keys and what it writes |
 | [`reference/task-folder-storage.mdx`](../../fern/versions/latest/pages/reference/task-folder-storage.mdx) | Pulled datasets, image records, the run summary, digests and what is safe to delete |
 | [`reference/configuration.mdx`](../../fern/versions/latest/pages/reference/configuration.mdx) | The `builds:` block and the Harbor environment variables |

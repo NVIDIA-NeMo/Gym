@@ -55,6 +55,6 @@ env = { CIRCLE_NODE_TOTAL = "3" }
 ```
 
 Deployment settings go in the `sandbox` and `sandbox_gpu` provider blocks of the merged configuration (`env.yaml` or a `--config` overlay): Compose networking and
-the shared-memory label as documented in `fern/versions/latest/pages/data/compose-tasks.mdx`, and, for `gym dataset validate` on the three images
+the shared-memory label as documented in `fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`, and, for `gym dataset validate` on the three images
 that run as a non-root user, `images.rewrites` pointing them at derived images with writable `/solution` and
 `/logs` folders. Model runs use the upstream images.

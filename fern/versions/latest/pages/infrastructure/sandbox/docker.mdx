@@ -175,7 +175,8 @@ through that pid.
   more exec: `SIGHUP` to the recorded process's group, up to one second for a shell to relay the hangup to its jobs
   (under job control, an interactive shell's foreground and background jobs sit in process groups of their own, which
   a signal to the shell's group never reaches), then `SIGKILL` to every
-  process still in the recorded process's session. Both pid paths are removed with it. `close()` of a session whose
+  process still in the recorded process's session, then to its group and the process itself (all a pipe-mode process
+  that leads no session gets). Both pid paths are removed with it. `close()` of a session whose
   process already exited only removes them.
 - The in-container `kill` lines work in busybox `sh` (Alpine-based images) as well as dash and bash
   (`kill -INT -<pgid>`).
@@ -186,8 +187,9 @@ The session's own user writes the pid file and can rewrite it, or replace it wit
 world-writable `/tmp` a hard link keeps the linked inode's owner). So neither the file's content nor its owner is
 trusted as such:
 
-- It is read once, as the session's own user, at most 32 bytes, under a timeout of its own: `PID_READ_TIMEOUT_S`
-  (30 seconds), or `exec.default_timeout_s` when that is shorter. A path that is not a regular file (a FIFO, or a link
+- It is read as the session's own user, at most 32 bytes, under a timeout of its own: `PID_READ_TIMEOUT_S`
+  (30 seconds), or `exec.default_timeout_s` when that is shorter. A pid that passes the checks below is kept; after a
+  failed read, the next `send_signal()` or `close()` reads again. A path that is not a regular file (a FIFO, or a link
   to a device) is refused at once rather than opened, and the file is tested again on its opened descriptor, so swapping the path
   after the test cannot hand the read something that blocks.
 - The read runs as the session's user because `/proc/<pid>/environ` is readable by the process's own uid but not by a
@@ -217,7 +219,8 @@ without starting the program. Gym tells this from the client's stderr, using the
 `error_type="sandbox"`, and ends the session with `SandboxPtyError` from `wait_exit()` and `read()` instead of
 reporting the client's exit code as the program's. So `sandbox.pty.exec()` raises where `sandbox.exec()` returns the
 runtime sentinel. In PTY mode the client's own stderr is kept apart from the terminal output for this; in pipe mode it
-is the program's stderr too, and is classified as `exec()` classifies its stderr.
+is the program's stderr too, and is classified as `exec()` classifies its stderr. If the sandbox is stopped while
+`create()` opens a session, `create()` raises `SandboxPtyError`.
 
 ### Limitations
 
@@ -262,7 +265,7 @@ Command failures return `SandboxExecResult` with the command's exit code. A comm
 
 ## Task folders
 
-When the `harbor` Environment Server runs [task folders](/main/data/harbor-tasks) on Docker:
+When the `harbor` Environment Server runs [task folders](/main/data/task-folders/harbor-tasks) on Docker:
 
 - A task whose Dockerfile needs a build is built with `docker` into the local daemon, so no registry is needed. This
   holds while no build repository is set. When `builds.repository` or `NEMO_GYM_BUILD_REPOSITORY` names one, the
@@ -271,8 +274,9 @@ When the `harbor` Environment Server runs [task folders](/main/data/harbor-tasks
 - Compose tasks do not start on Docker, which cannot network a group of sandboxes. A task with a Compose file in
   `environment/`, or any task when the server's `compose_overlay` names Compose `files`, fails at seed with
   `Could not set up sandbox for '<task>': Sandbox provider does not support networking between sandboxes`. The
-  failure is reported as retryable, so each `--resume` runs these tasks again and they fail the same way. Leave them
-  out with `--exclude-tasks`, or run them on OpenSandbox (see [Multi-Container Tasks](/main/data/compose-tasks)).
+  failure is reported as retryable, so `--resume` runs these tasks again, and they fail the same way, until each has
+  used its `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` attempts (3 by default). Leave them
+  out with `--exclude-tasks`, or run them on OpenSandbox (see [Multi-Container Tasks](/main/data/task-folders/compose-tasks)).
 - Gym holds a running image `ENTRYPOINT` in one `docker exec`. That exec ends at `exec.default_timeout_s` (180
   seconds by default), but the entrypoint keeps running, untracked. If it then exits non-zero during the rollout, the
   sample is still scored, not masked with `harbor:entrypoint_failed`. The exit status is only logged and kept as

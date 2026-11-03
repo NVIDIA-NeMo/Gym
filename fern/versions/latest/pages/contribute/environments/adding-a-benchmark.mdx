@@ -139,11 +139,11 @@ For workloads with a verifier fixture, finish the local onboarding checks with `
 
 ## Task-folder benchmarks
 
-A benchmark made of task folders carries its own verifiers and runs on the `harbor` Environment Server, so it needs no Resources Server, `manifest.yaml`, or `gym env` checks (see [Author Task Folders](/main/data/harbor-tasks)):
+A benchmark made of task folders carries its own verifiers and runs on the `harbor` Environment Server, so it needs no Resources Server, `manifest.yaml`, or `gym env` checks (see [Author Task Folders](/main/data/task-folders/harbor-tasks)):
 
-1. **Place it.** For a dataset on Harbor's package store or registry, commit `environments/harbor/<name>/` with a `README.md`, any deployment YAML overlays, and a `dataset.toml` whose `[gym] source` pins the reference by tag, version, or `sha256:` digest. Git ignores the pulled task folders there. Commit task folders you wrote, with their `dataset.toml`, in their own folder outside `environments/harbor/`, like the `environments/hello_*` examples.
+1. **Place it.** For a dataset on Harbor's package store or registry, commit `environments/harbor/<name>/` with a `README.md`, any deployment YAML overlays, and a `dataset.toml` whose `[gym] source` pins the reference by tag, version, or `sha256:` digest. Git ignores the pulled task folders there. Commit task folders you wrote, with any `dataset.toml`, in their own folder outside `environments/harbor/`, like the `environments/hello_*` examples. Leave out the records validating writes at that folder's root (`compose-images.json`, `built-images.json`, their `.lock` files and `manifest.toml`).
 2. **Name it** in snake_case, like `terminal_bench_4`. The name is the taskset that labels the rows and names `results/harbor/<name>/`.
-3. **Validate.** Pull an entry with `gym dataset pull <name>`. Then `gym dataset validate <target> --sandbox <provider>` must pass: every reference solution scores 1.
+3. **Validate.** Pull an entry with `gym dataset pull <name>`. Then `gym dataset validate <target> --sandbox <provider>` must pass: every reference solution scores 1, apart from known upstream failures, which you leave out with `--exclude-tasks` and list in the README.
 4. **Run one harness** on a few tasks (`gym eval run <target> --agent <harness> --sandbox <provider> --limit 5 ...`) and read the trajectories, the [run summary](/main/reference/task-folder-storage#the-run-summary), and the health report.
 5. **Document** the source, pin, license, task count, commands, and known upstream failures in the README.
 6. **Run the checks:** `pre-commit run --files <your files>`, plus unit tests for any Python you add, such as `task_data.py`.

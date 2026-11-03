@@ -4,7 +4,7 @@ Hello MCP Tool lets you give an agent a tool it needs for a task without changin
 
 ## Concept
 
-A task can declare required tools through the Model Context Protocol (MCP). NeMo Gym checks that the selected agent and sandbox can provide those tools before the run starts. MCP gives tasks a standard way to describe and connect them.
+A task can declare required tools through the Model Context Protocol (MCP). NeMo Gym refuses each episode to an agent that cannot provide those tools, rather than run it without them. MCP gives tasks a standard way to describe and connect them.
 
 For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
 
@@ -19,11 +19,11 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 ## Run it
 
 ```bash
-gym eval run environments/hello_mcp_tool --agent opencode_agent --sandbox docker \
+gym eval run environments/hello_mcp_tool --agent miniswe_sandboxed_agent --sandbox docker \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
+The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider.
 
 ## Validate it
 
@@ -34,7 +34,9 @@ row instead). The oracle plays it through the task's verifier and expects reward
 gym dataset validate environments/hello_mcp_tool --sandbox docker
 ```
 
-On a cluster, pass `--sandbox opensandbox` instead.
+On a cluster, pass `--sandbox opensandbox` instead, and set `builds.repository` to a registry the sandboxes can pull
+from, because this task's Dockerfile needs a build (see "Harbor image builds" in
+`fern/versions/latest/pages/reference/configuration.mdx`).
 
 ## Check the result
 

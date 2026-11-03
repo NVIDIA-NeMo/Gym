@@ -7,7 +7,7 @@ position: 1
 A verifier scores an agent's behavior on a task. Where you implement it depends on how you define your tasks:
 
 - **JSONL rows plus a Resources Server.** You implement the verifier in a **Resources Server**, the component that owns the verifier, per-task state, and any environment-specific tools. The rest of this page covers this path.
-- **Task folders.** The verifier is part of the task, in the folder's `tests/`. The `harbor` Environment Server runs it in a sandbox after the agent finishes, with no Resources Server. See [Task Folder Verifiers](/main/data/task-folder-verifiers).
+- **Task folders.** The verifier is the task folder's `tests/`, or one `verifier.py` beside `dataset.toml` that grades every single-step task without `tests/`. The `harbor` Environment Server runs it in a sandbox after the agent finishes, with no Resources Server. See [Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers).
 
 The pattern pages below apply to both paths: they describe how to score a rollout, whichever component runs the check. Their examples use a Resources Server's `verify()`.
 
