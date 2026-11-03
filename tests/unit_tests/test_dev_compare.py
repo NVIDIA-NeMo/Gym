@@ -24,19 +24,14 @@ import pytest
 from pytest import CaptureFixture, MonkeyPatch
 
 import nemo_gym.cli.dev as cli_dev
-import nemo_gym.global_config as gc
+import nemo_gym.config.global_config as gc
 from nemo_gym.cli.main import main
-from nemo_gym.rollout_compare import (
-    CompareInputError,
-    RolloutCompareConfig,
-    compare_rollouts,
-    detect_task_key,
-    load_rollouts,
-    render_report,
-    run_compare,
-    summary_dict,
-    tail_lines,
-)
+from nemo_gym.rollout_compare.command import RolloutCompareConfig, run_compare
+from nemo_gym.rollout_compare.compare import compare_rollouts
+from nemo_gym.rollout_compare.join import detect_task_key
+from nemo_gym.rollout_compare.report import render_report, summary_dict, tail_lines
+from nemo_gym.rollout_compare.rows import load_rollouts
+from nemo_gym.rollout_compare.schema import CompareInputError
 
 
 def old_row(task: str, reward, **extra) -> dict:

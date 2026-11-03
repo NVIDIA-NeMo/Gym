@@ -12,19 +12,19 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    AgentSessionState,
     SandboxCommand,
     SandboxSession,
     shell_assignments,
 )
-from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.kilocode_agent.observability import read_kilo_snapshot
 
 
@@ -192,7 +192,7 @@ class KiloSandboxSession(AgentSessionState):
         )
 
     async def stage_activation(
-        self, *, command: list[str], config: str, mcp_preflight: bool = False
+        self, *, command: list[str], config: str, output_token_max: int | None = None, mcp_preflight: bool = False
     ) -> SandboxCommand:
         """Stage the isolated provider config and CLI argv without altering task files."""
         directory = self.directory
@@ -218,6 +218,11 @@ class KiloSandboxSession(AgentSessionState):
                 "XDG_DATA_HOME": f"{directory}/data",
                 "XDG_CONFIG_HOME": f"{directory}/config",
                 "XDG_CACHE_HOME": f"{directory}/cache",
+                **(
+                    {"KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_token_max)}
+                    if output_token_max is not None
+                    else {}
+                ),
                 "KILO_NO_DAEMON": "1",
                 "KILO_DB": f"{directory}/kilo.db",
                 "KILO_CONFIG": f"{directory}/kilo.json",

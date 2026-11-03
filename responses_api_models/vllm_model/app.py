@@ -32,23 +32,11 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
-from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
-from nemo_gym.base_responses_api_model import (
-    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
-    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-    _request_messages,
-    _validate_responses_params,
-    context_overflow_error_fields,
-    is_propagated_refusal,
-    start_model_execution,
-)
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI
+from nemo_gym.client.http_client import _redacted_url
+from nemo_gym.core import (
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
-    NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -56,29 +44,41 @@ from nemo_gym.openai_utils import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_rollout_id,
 )
-from nemo_gym.responses_converter import (
+from nemo_gym.models import (
+    CAPTURE_REFUSAL_HEADER,
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+    BaseResponsesAPIModelConfig,
+    Body,
+    CaptureAdmissionError,
+    CaptureContext,
+    CaptureInputError,
+    ExternalCaptureHandler,
+    SimpleResponsesAPIModel,
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
-    split_responses_input_output_items,  # noqa: F401
-)
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
-from nemo_gym.token_id_capture import (
-    CaptureContext,
     capture_engine_refusal,
+    context_overflow_error_fields,
     current_capture_context,
+    is_propagated_refusal,
+    make_external_capture_handler,
+    note_generation_backend,
+    note_generation_request,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
-)
-from nemo_gym.token_id_capture.config import token_id_capture_config
-from nemo_gym.token_id_capture.external_capture import (
-    ExternalCaptureHandler,
-    make_external_capture_handler,
+    split_responses_input_output_items,  # noqa: F401
+    start_model_execution,
+    token_capture_config,
     validate_framework_context_options,
 )
-from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
+from nemo_gym.models.base_responses_api_model import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    _request_messages,
+    _validate_responses_params,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
 
@@ -704,7 +704,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        config = token_id_capture_config(self.server_client.global_config_dict)
+        config = token_capture_config(self.server_client.global_config_dict)
         if config.token_id_capture.parent_resolution == "source_history":
             app.post("/context/measure")(self.measure_context)
         return app
@@ -812,7 +812,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._transport_call_index = 0
 
         global_config = getattr(self.server_client, "global_config_dict", None)
-        capture_config = token_id_capture_config(global_config) if global_config is not None else None
+        capture_config = token_capture_config(global_config) if global_config is not None else None
         self._external_capture_handler = None
         if capture_config is not None and capture_config.token_id_capture.external_staging:
             overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})

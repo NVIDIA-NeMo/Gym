@@ -29,7 +29,7 @@ import pytest
 from pytest import fixture
 
 import resources_servers.browsecomp_advanced_harness.app as app_module
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     BrowseRequest,
     ExaAIOHTTPClient,

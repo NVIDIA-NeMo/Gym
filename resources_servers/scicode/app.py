@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from scicode_integration.runner import build_test_program, preflight_grading_interpreter, run_substep, sanitize_test
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

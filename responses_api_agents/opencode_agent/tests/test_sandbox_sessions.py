@@ -17,13 +17,10 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, parse_cleanup_receipt
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 
 
@@ -455,6 +452,50 @@ async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     assert invocation.conversation[-1].content[0].text == "Fixed"
 
 
+async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, tmp_path):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    export = json.loads(sandbox.events)
+    export["messages"][-1]["parts"].append(
+        {
+            "type": "tool",
+            "callID": "running-shell",
+            "tool": "bash",
+            "state": {"status": "running", "input": {"command": "sleep 60"}, "metadata": {"output": "started"}},
+        }
+    )
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+
+    async def stop_requested():
+        # The process supervisor reports a requested stop as a forced exit, not as a timeout.
+        sandbox.result["return_code"] = 241
+        sandbox.exited.set()
+        await asyncio.sleep(0)
+
+    sandbox.request_stop.side_effect = stop_requested
+    request, session_id, task = await activate(agent, sandbox)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    records = closed.agent_observations.records
+    agent_sandbox = next(record for record in records if record.kind == "sandbox")
+    assert (agent_sandbox.outcome, agent_sandbox.error_type, agent_sandbox.exit_code) == (
+        "cancelled",
+        "cancelled",
+        241,
+    )
+    tools = {record.tool_call_id: record for record in records if record.kind == "tool_call"}
+    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("cancelled", "invocation_cancelled")
+    assert tools["tool-1"].status != "cancelled"
+    invocation = next(record for record in records if record.kind == "agent_invocation")
+    assert {"type": "function_call_output", "call_id": "running-shell", "output": "started"}.items() <= next(
+        item.model_dump()
+        for item in invocation.conversation
+        if getattr(item, "call_id", None) == "running-shell" and item.type == "function_call_output"
+    ).items()
+
+
 async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
@@ -486,8 +527,11 @@ def test_cleanup_receipt_is_required():
         parse_cleanup_receipt({"return_code": 0, "error": None})
 
 
-def test_instructions_and_text_parts_reach_opencode(setup):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_instructions_and_text_parts_reach_opencode(setup, mode):
     agent, sandbox = setup
+    agent.config.system_prompt_mode = mode
+    agent.config.opencode_config = {"tools": {"*": False}, "permission": {"bash": "deny"}}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         result = client.post(
@@ -503,14 +547,23 @@ def test_instructions_and_text_parts_reach_opencode(setup):
         assert result.status_code == 200, result.text
         payload = sandbox.params()
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert sandbox.files[config["instructions"][0]] == "outer\n\nsystem"
+        assert config["tools"] == {"*": False}
+        assert config["permission"] == {"bash": "deny"}
+        if mode == "replace":
+            assert payload["command"][payload["command"].index("--agent") + 1] == "build"
+            assert config["agent"]["build"]["prompt"] == "outer\n\nsystem"
+            assert "instructions" not in config
+            assert f"{sandbox.directory}/instructions.md" not in sandbox.files
+        else:
+            assert "--agent" not in payload["command"]
+            assert sandbox.files[config["instructions"][0]] == "outer\n\nsystem"
         assert payload["prompt"] == "task"
         assert config["enabled_providers"] == ["nemo_gym"]
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: 100.0)
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: 100.0)
     with TestClient(agent.setup_webserver()) as client:
 
         def seed_and_close(index):
@@ -539,7 +592,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
 async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -561,7 +614,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
 async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -603,7 +656,7 @@ async def test_concurrent_closes_share_receipt(setup):
 async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -1057,7 +1110,7 @@ async def test_file_cleanup_failure_keeps_connection_and_can_retry(setup):
 
 
 def test_malformed_later_artifact_keeps_partial_output(setup):
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     agent, _ = setup
     export = json.loads(events())
@@ -1233,7 +1286,7 @@ async def test_caller_session_id_is_never_used_as_a_filesystem_path(setup):
 async def test_expired_receipt_cookie_cannot_seed_or_activate(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     body = seed()
     request = Request({"type": "http", "session": {}})
@@ -1684,7 +1737,7 @@ def test_provider_report_does_not_hide_other_execution_outcomes(change):
     ],
 )
 async def test_statusless_transient_provider_failure_stays_retryable(setup, message, code):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
 
     agent, sandbox = setup
     export = json.loads(sandbox.events)
@@ -1717,7 +1770,7 @@ def test_statusless_error_without_native_retry_flag_remains_unknown(setup, retry
 
 @pytest.mark.parametrize("cleanup_error", [None, "cleanup failed"])
 async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failure(setup, tmp_path, cleanup_error):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
 
     agent, sandbox = setup
     export = json.loads(sandbox.events)

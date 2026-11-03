@@ -27,7 +27,7 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
@@ -206,7 +206,7 @@ async def upload_dir(
     solution the task user must read; a verifier tree keeps its modes because tests may check them.
     ``ignore`` is called with each entry's path relative to ``source`` (posix form); an entry it names is left
     out, its subtree with it. The environment server passes the task digest's rule
-    (:func:`nemo_gym.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
+    (:func:`nemo_gym.data.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
     ``environment/__pycache__`` that the digest skips never reaches the sandbox; artifacts restored by
     :func:`upload_path` travel whole. ``replace_links`` is for a merge into a tree another user has written to:
     a symbolic link at any member's path is removed, as root, before the extraction, so the member lands where its

@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from nemo_gym.data.tasks.harbor.digest import is_ignored
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.compose_fields import (
     ComposeFieldError,
@@ -51,7 +52,6 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxServiceOptions,
     SupportsSandboxSharedStorage,
 )
-from nemo_gym.tasks.harbor.digest import is_ignored
 
 
 LOGGER = logging.getLogger(__name__)
@@ -77,6 +77,12 @@ def _merge_provider_options(*layers: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 merged[key] = list(value) if isinstance(value, tuple) else value
     return merged
+
+
+# Every sandbox of one Compose project carries this label with the project name. Members
+# reach each other by pod IP and share storage, so a multi-cell front end (cell-router)
+# must place them together; it routes every create with the same value to one cell.
+PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
 
 
 def _seconds(value: str | int | float) -> float:
@@ -202,7 +208,7 @@ class AsyncSandboxCompose:
             if not isinstance(service, Mapping):
                 raise ValueError(f"Service {name!r} requires a mapping")
         try:
-            # The one field check, shared with prepare (``nemo_gym.tasks.harbor.image_configs``), which reports a
+            # The one field check, shared with prepare (``nemo_gym.data.tasks.harbor.image_configs``), which reports a
             # refused field per task before any sandbox exists; here it is the last line before provisioning. A key
             # the group does not start is refused first, then every M28 field takes its normalized shape, so the
             # checks below read one form each.
@@ -520,6 +526,7 @@ class AsyncSandboxCompose:
                         **spec.metadata,
                         **(service.get("labels") or {}),
                         **self._runtime_metadata.get(name, {}),
+                        PLACEMENT_GROUP_KEY: self.project,
                     },
                     provider_options=_merge_provider_options(
                         spec.provider_options, self._service_options.get(name, {})
@@ -558,7 +565,7 @@ class AsyncSandboxCompose:
                     image=self.volume_init_image,
                     ttl_s=self.timeout_s + 3600,
                     entrypoint=["sh", "-c", "while :; do sleep 3600; done"],
-                    metadata=provider.shared_volume_metadata(),
+                    metadata={**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.project},
                     provider_options=provider.shared_volume_options(None, root),
                 ),
                 owns_provider=False,
@@ -576,7 +583,7 @@ class AsyncSandboxCompose:
             # shared storage, the copy-up seed (a sandbox of the service's own spec) and the mount options.
             provider = self._provider_for(name)
             volume_sources = self._volume_sources_for(name)
-            metadata = provider.shared_volume_metadata()
+            metadata = {**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.project}
             helper = await self._volume_helper_for(provider, root)
             mounts = []
             for volume in service["volumes"]:
@@ -720,7 +727,7 @@ class AsyncSandboxCompose:
         included (a program that expects the output or cache folder the task supplies finds it, as under
         a bind mount), over whatever the image already has there (a merge, where a bind mount would hide
         the image's folder). The names the task digest skips (``__pycache__``, ``*.pyc``, editor leftovers:
-        :func:`nemo_gym.tasks.harbor.digest.is_ignored`) are left out, so what reaches the service is what
+        :func:`nemo_gym.data.tasks.harbor.digest.is_ignored`) are left out, so what reaches the service is what
         the digest covers, and a link inside the folder is refused, naming it, rather than read through.
         """
         sandbox = self.services[name]
