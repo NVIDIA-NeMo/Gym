@@ -1010,11 +1010,11 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
     from omegaconf import OmegaConf
 
     from nemo_gym.client import server_client
+    from nemo_gym.config import BaseServerConfig
     from nemo_gym.core import rollout_context
     from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
     from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
     from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.server_utils import BaseServerConfig
     from nemo_gym.typed_exceptions import NgFailureEvent
 
     f = fixture

@@ -42,6 +42,8 @@ if TYPE_CHECKING:
         TrajectoryTurn,
         VerifierInvocation,
         failure_observations,
+        join_agent_model_calls,
+        join_assistant_message_calls,
     )
 
 
@@ -69,6 +71,8 @@ _PUBLIC_API = {
     "VerifierInvocation": "trajectory_record",
     "encode_atif_trajectory": "atif_export",
     "failure_observations": "trajectory_record",
+    "join_agent_model_calls": "trajectory_record",
+    "join_assistant_message_calls": "trajectory_record",
     "transcript_to_atif": "atif_export",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)

@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import OutcomeAction, failure_outcome_policy
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
@@ -20,6 +19,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
 )
+from nemo_gym.core.outcome_policy import OutcomeAction, failure_outcome_policy
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxHandle

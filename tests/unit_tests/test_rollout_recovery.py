@@ -789,7 +789,7 @@ def test_invalid_explicit_identity_is_a_configuration_error(identity):
 async def test_failure_sidecar_retains_observations_and_captured_model_calls(
     runner_config, monkeypatch, route_failures
 ):
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models.model_call_capture import CaptureStore
 
     runner_config.route_failures_to_sidecar = route_failures
     capture_dir = Path(runner_config.output_jsonl_fpath).parent / "captures"
@@ -1187,7 +1187,7 @@ def test_auth_headers_need_not_resolve_but_task_headers_still_affect_identity(sa
 async def test_judge_failure_saves_token_evidence_without_retiring_capture(
     runner_config, monkeypatch, tmp_path, native_tokens
 ):
-    from nemo_gym.token_id_capture import TokenCaptureStore
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
     from tests.unit_tests.test_rollout_collection import TestFinalizeRolloutTokenCapture
 
     captures = TokenCaptureStore(tmp_path / "tokens")
@@ -1559,8 +1559,8 @@ async def test_resumed_collector_dispatches_longest_previous_failure_first(runne
 async def test_incomplete_capture_policy_preserves_recovery_accounting(
     runner_config, monkeypatch, tmp_path, mask_setting, judge_failed
 ):
-    from nemo_gym.token_id_capture import ParentResolutionStatus, TokenCaptureStore, stamp_lineage
-    from nemo_gym.token_id_capture.records import TokenEntry
+    from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
 
     runner_config.limit = 1
     captures = TokenCaptureStore(tmp_path / "tokens")

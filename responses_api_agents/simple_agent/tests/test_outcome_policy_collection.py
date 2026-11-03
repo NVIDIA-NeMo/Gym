@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 import nemo_gym.client.http_client
 import nemo_gym.rollout_collection
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction
+from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
@@ -143,10 +143,10 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
     import httpx
     from fastapi import FastAPI, Request, Response
 
-    from nemo_gym.agent_outcome import OutcomeAction
+    from nemo_gym.agents import OutcomeAction
+    from nemo_gym.client import NeMoGymAsyncOpenAI
     from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
     from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
-    from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
     from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
     from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
@@ -165,7 +165,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
     port = listener.sockets[0].getsockname()[1]
     session = aiohttp.ClientSession()
     monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
-    monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(nemo_gym.server_runtime.base_server, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(
         api_key="test",
         base_url=f"http://127.0.0.1:{port}",

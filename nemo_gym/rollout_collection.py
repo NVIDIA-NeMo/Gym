@@ -102,6 +102,7 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
@@ -112,7 +113,6 @@ from nemo_gym.observability.model_calls import (
     observability_enabled_from_config,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
@@ -197,6 +197,7 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
+from nemo_gym.agents.skills import SkillsConfig, load_skill_directory
 from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -207,19 +208,18 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
-from nemo_gym.skills import SkillsConfig, load_skill_directory
-from nemo_gym.task_materialization import TASK_ID_FIELDS
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
+    TokenCaptureConfig,
     TokenCaptureStore,
-    TokenIdCaptureConfig,
     clear_token_captures_for_rollouts,
     installed_token_source,
     mask_incomplete_when_attributed_from_config,
-    token_id_capture_dirs_from_config,
+    token_capture_dirs_from_config,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
-from nemo_gym.token_id_capture.delivery import (
+from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
@@ -340,7 +340,7 @@ NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 NG_RESULT_TYPE_KEY = "_ng_result_type"
 NG_TASK_ID_KEY = "_ng_task_id"
 # Provenance stamps preparation writes into a materialized row's task_data (the same strings as
-# nemo_gym.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
+# nemo_gym.data.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
 # The collector copies only these from a row onto its record: task_data is dataset-controlled, and any
 # other `_ng_*` key there (`_ng_no_persist`, `_ng_failure_class`, ...) would steer the collector.
 NG_DIGEST_KEY = "_ng_digest"
@@ -2140,6 +2140,17 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     def materialized_jsonl_fpath(self) -> Path:
         return materialized_path_for(Path(self.output_jsonl_fpath))
 
+    dispatch_connect_grace_s: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Seconds during which collection keeps resending a /run whose every connection attempt was "
+            "refused. Such a request was never delivered, so resending it cannot start a second episode; "
+            "it covers an Environment Server that is restarting or not yet listening. A connection that "
+            "was made and then dropped may have delivered the request and keeps the strict two-attempt "
+            "limit. 0 disables the grace period."
+        ),
+    )
     dispatch_budget_s: Optional[float] = Field(
         default=None,
         ge=0,
@@ -3968,7 +3979,7 @@ class RolloutCollectionHelper(BaseModel):
         # Resolve the training-token store directory once.
         # Training capture is independent of evaluation capture.
         # An empty result disables training-token capture.
-        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        token_capture_dirs = token_capture_dirs_from_config(global_config)
         # The finalizer reads and freezes records through this source.
         # The source is absent when capture or response rebuilding is disabled.
         # A framework-owned transport may rebuild through its own source.
@@ -3976,7 +3987,7 @@ class RolloutCollectionHelper(BaseModel):
         # Reruns still clear deterministic rollout ids before dispatch.
         token_source = None
         owned_token_source = None
-        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        token_capture_config = TokenCaptureConfig.model_validate(global_config)
         if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
             token_source = installed_token_source()
 
@@ -3992,7 +4003,7 @@ class RolloutCollectionHelper(BaseModel):
         def token_capture_enabled_for_row(row: dict[str, Any]) -> bool:
             agent_name = self._agent_name_for_row(row, global_config)
             if agent_name not in token_capture_enabled_by_agent:
-                token_capture_enabled_by_agent[agent_name] = token_id_capture_enabled_for_agent(
+                token_capture_enabled_by_agent[agent_name] = token_capture_enabled_for_agent(
                     global_config, agent_name, config=token_capture_config
                 )
             return token_capture_enabled_by_agent[agent_name]
@@ -4139,10 +4150,11 @@ class RolloutCollectionHelper(BaseModel):
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 record_unrouted_failures=True,
-                # One bounded resend of a /run whose connection dropped or was refused before any reply, as before
-                # this change: nothing was saved for it. Other failures belong to the persisted attempt and the
-                # recovery selector.
+                # A /run whose connection dropped before any reply may have been delivered: it gets one bounded
+                # resend. One whose every connection was refused was never delivered, and is resent within the
+                # connect grace period. Other failures belong to the persisted attempt and the recovery selector.
                 _max_num_tries=2,
+                _connect_grace_s=config.dispatch_connect_grace_s,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
                 on_dispatch_batch=store.record_dispatches,
@@ -5145,6 +5157,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         _max_num_tries: Optional[int] = None,
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
+        _connect_grace_s: Optional[float] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -5281,21 +5294,35 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         else nullcontext()
                     )
                     with dispatch_span as dispatch_span_context:
-                        res = await server_client.post(
-                            server_name=server_name,
-                            url_path="/run",
-                            json=request_body,
-                            **({"_resend_after_disconnect": False} if not retry_requests else {}),
-                            **(
-                                {
-                                    "_max_num_tries": _max_num_tries,
-                                    "_retry_other_errors": False,
-                                    "_on_transport_failure": lambda error, _: attempt_errors.append(error),
-                                }
-                                if _max_num_tries is not None
-                                else {}
-                            ),
-                        )
+                        connect_deadline = time.monotonic() + (_connect_grace_s or 0.0)
+                        while True:
+                            try:
+                                res = await server_client.post(
+                                    server_name=server_name,
+                                    url_path="/run",
+                                    json=request_body,
+                                    **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                                    **(
+                                        {
+                                            "_max_num_tries": _max_num_tries,
+                                            "_retry_other_errors": False,
+                                            "_on_transport_failure": lambda error, _: attempt_errors.append(error),
+                                        }
+                                        if _max_num_tries is not None
+                                        else {}
+                                    ),
+                                )
+                                break
+                            except ClientConnectorError:
+                                # Every attempt so far was refused, so /run was never delivered and resending it
+                                # cannot start a second episode. A connection that was made keeps the strict limit.
+                                if _max_num_tries is None or time.monotonic() >= connect_deadline:
+                                    raise
+                                if not attempt_errors or not all(
+                                    isinstance(error, ClientConnectorError) for error in attempt_errors
+                                ):
+                                    raise
+                                await asyncio.sleep(0.5)
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)

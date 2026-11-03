@@ -11,7 +11,7 @@ import pytest
 from aiohttp import web
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
+from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.failure_transport import (
     FailureHeader,
@@ -183,6 +183,34 @@ def test_the_request_log_forwards_a_recovered_attempt_without_a_failure_id() -> 
     assert success.events[attempt.event.event_id].http_status == 503
     assert RequestFailureLog.current() is None
     observe_failure(attempt)  # outside a request: nothing to record, nothing raised
+
+
+def test_the_request_log_keeps_a_bounded_sample_and_counts_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retry loop can fail without end: the log keeps the first events, counts the rest, and never re-checks
+    the whole history on each insert."""
+    import nemo_gym.server_runtime.episode_types as episode_types
+
+    checked: list[int] = []
+    validate = episode_types.validate_failure_event_map
+
+    def counting(events):
+        checked.append(len(events))
+        return validate(events)
+
+    attempts = [_model(operation_id="call", attempt_id=f"call-{n}", http_status=503) for n in range(500)]
+    reports = [failure_report_for(attempt) for attempt in attempts]
+    monkeypatch.setattr(episode_types, "validate_failure_event_map", counting)
+    with RequestFailureLog.capture() as log:
+        for report in reports:
+            log.add(report)
+        assert sum(checked) == 0  # each report was validated when it was built
+        kept = log.report.events
+        assert 0 < len(kept) <= 100
+        assert set(kept) == {attempt.event_id for attempt in attempts[: len(kept)]}
+        assert log.dropped_events == len(attempts) - len(kept)
+        assert log.report.omitted is True  # events are missing from what the reply forwards
+        reply = log.reply_report(attempts[-1])
+    assert attempts[-1].event_id in reply.events and reply.failure_id == attempts[-1].event_id
 
 
 def test_an_exhausted_request_links_its_last_observed_attempt() -> None:

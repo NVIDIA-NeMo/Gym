@@ -39,6 +39,7 @@ from fastapi import FastAPI
 from omegaconf import OmegaConf
 from pydantic import JsonValue
 
+from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.episode import EpisodeId
 from nemo_gym.models._checkpoint import PolicyModelParticipant
 from nemo_gym.server_runtime._checkpoint import coordination
@@ -54,7 +55,6 @@ from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipa
 from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
 from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state
-from nemo_gym.server_utils import BaseServerConfig
 from tests.unit_tests.server_runtime.test_checkpoint_coordination import InProcessClient
 from tests.unit_tests.server_runtime.test_checkpoint_sequences import GatedWrites
 

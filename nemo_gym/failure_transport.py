@@ -16,6 +16,7 @@ Flow for one request a Gym server serves:
 
 import json
 import logging
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -125,10 +126,17 @@ class RequestFailureLog:
 
     The server middleware opens one per request with ``capture``; code serving the request reaches it through
     ``current``, so a retry loop deep in a client can record an attempt without threading it through calls.
+
+    A retry loop can fail without end, so the log keeps the first ``MAX_EVENTS`` events and counts the events of
+    every later report in ``dropped_events``; the report is then marked ``omitted``. A report is kept or dropped
+    whole, so every kept event's causes stay in the log.
     """
 
     report: FailureReport = field(default_factory=FailureReport)
     model_operations: dict[str, ModelOperationObservation] = field(default_factory=dict)
+    dropped_events: int = 0
+
+    MAX_EVENTS: ClassVar[int] = 64
 
     _current: ClassVar[ContextVar["RequestFailureLog | None"]] = ContextVar("ng_request_failure_log", default=None)
 
@@ -150,7 +158,19 @@ class RequestFailureLog:
 
     def add(self, report: FailureReport) -> None:
         """Add ``report``'s events as observations; the log never has a ``failure_id`` of its own."""
-        self.report = self.report.merged(report.model_copy(update={"failure_id": None}))
+        kept = self.report.events
+        new = {key: event for key, event in report.events.items() if key not in kept}
+        omitted = report.omitted
+        if len(kept) + len(new) > self.MAX_EVENTS:
+            self.dropped_events += len(new)
+            new, omitted = {}, True
+        if not new and (self.report.omitted or not omitted):
+            return
+        # Both maps were validated when their reports were built, and each report is closed under its causes, so
+        # their union is valid. It is not checked again, which would cost the whole history on every insert.
+        self.report = FailureReport.model_construct(
+            failure_id=None, events=new | kept, omitted=self.report.omitted or omitted
+        )
 
     def reply_report(self, error: BaseException | None) -> FailureReport:
         """The report for this request's reply: its own failure (``error``, ``None`` on success) and the log."""
@@ -208,9 +228,18 @@ class StreamFailureReportReader:
         {"response.completed", "response.incomplete", "response.failed"}
     )
     _FIELD: ClassVar[bytes] = FailureHeader.STREAM_FIELD.encode()
+    # The report field as a JSON object key: after ``{``, ``,`` or whitespace and before ``:``. Answer text that only
+    # mentions the name sits inside a JSON string, where its quotes are escaped, so it never matches.
+    _KEY: ClassVar[re.Pattern[bytes]] = re.compile(rb'[{,\s]"' + re.escape(_FIELD) + rb'"\s{0,8}:')
+    # Bytes kept from a skipped line's end, enough to find the key across a chunk boundary.
+    _KEY_TAIL: ClassVar[int] = len(_FIELD) + 12
 
     def __init__(self) -> None:
         self._pending = b""
+        # Inside a line over ``_MAX_LINE_BYTES``: its bytes are dropped up to its newline, keeping only enough at the
+        # end of ``_pending`` to find the report key across chunks. Whether that line carried the key so far.
+        self._skipping = False
+        self._skipped_field = False
         self.report: FailureReport | None = None
 
     def _merge(self, report: FailureReport) -> None:
@@ -227,37 +256,50 @@ class StreamFailureReportReader:
     def feed(self, chunk: bytes) -> None:
         lines = (self._pending + chunk).split(b"\n")
         self._pending = lines.pop()
-        if len(self._pending) > self._MAX_LINE_BYTES:
-            self._merge(FailureReport(omitted=True))
-            self._pending = b""
         for line in lines:
+            if self._skipping:
+                # The newline that ends an oversized line: the line after it is framed as usual.
+                carried = self._skipped_field or self._KEY.search(line) is not None
+                self._skipping = self._skipped_field = False
+                if carried:
+                    self._merge(FailureReport(omitted=True))
+                continue
             if len(line) > self._MAX_LINE_BYTES:
-                self._merge(FailureReport(omitted=True))
+                # An oversized event is not read; only one that carries a report key loses failure evidence.
+                if self._KEY.search(line) is not None:
+                    self._merge(FailureReport(omitted=True))
                 continue
-            if not line.startswith(b"data: ") or self._FIELD not in line:
-                continue
-            try:
-                payload = json.loads(line[len(b"data: ") :])
-            except (ValueError, RecursionError):
-                self._merge(FailureReport(omitted=True))
-                continue
-            if not isinstance(payload, dict) or FailureHeader.STREAM_FIELD not in payload:
-                continue
-            event_type = payload.get("type")
-            choices = payload.get("choices")
-            final_choice = isinstance(choices, list) and any(
-                isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str) for choice in choices
-            )
-            final_usage = choices == [] and isinstance(payload.get("usage"), dict)
-            terminal = (isinstance(event_type, str) and event_type in self._TERMINAL_TYPES) or (
-                event_type is None and (final_choice or final_usage or isinstance(payload.get("error"), dict))
-            )
-            if not terminal:
-                self._merge(FailureReport(omitted=True))
-                continue
-            report = FailureHeader.decode_stream_event(payload)
-            if report is not None:
-                self._merge(report)
+            self._read_line(line)
+        if self._skipping or len(self._pending) > self._MAX_LINE_BYTES:
+            self._skipping = True
+            self._skipped_field = self._skipped_field or self._KEY.search(self._pending) is not None
+            self._pending = self._pending[-self._KEY_TAIL :]
+
+    def _read_line(self, line: bytes) -> None:
+        if not line.startswith(b"data: ") or self._FIELD not in line:
+            return
+        try:
+            payload = json.loads(line[len(b"data: ") :])
+        except (ValueError, RecursionError):
+            self._merge(FailureReport(omitted=True))
+            return
+        if not isinstance(payload, dict) or FailureHeader.STREAM_FIELD not in payload:
+            return
+        event_type = payload.get("type")
+        choices = payload.get("choices")
+        final_choice = isinstance(choices, list) and any(
+            isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str) for choice in choices
+        )
+        final_usage = choices == [] and isinstance(payload.get("usage"), dict)
+        terminal = (isinstance(event_type, str) and event_type in self._TERMINAL_TYPES) or (
+            event_type is None and (final_choice or final_usage or isinstance(payload.get("error"), dict))
+        )
+        if not terminal:
+            self._merge(FailureReport(omitted=True))
+            return
+        report = FailureHeader.decode_stream_event(payload)
+        if report is not None:
+            self._merge(report)
 
     def feed_text(self, text: str) -> None:
         """Read an existing capture without copying its entire body or accepting invalid Unicode."""
@@ -269,9 +311,10 @@ class StreamFailureReportReader:
 
     def finish(self) -> FailureReport | None:
         """Close the body; an unfinished data line is not complete report evidence."""
-        if self._pending.strip().startswith(b"data:") or self._FIELD in self._pending:
+        if self._skipping or self._pending.strip().startswith(b"data:") or self._FIELD in self._pending:
             self._merge(FailureReport(omitted=True))
         self._pending = b""
+        self._skipping = self._skipped_field = False
         return self.report
 
     def observe(self) -> None:

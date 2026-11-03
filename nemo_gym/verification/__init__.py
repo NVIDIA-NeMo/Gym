@@ -41,7 +41,11 @@ if TYPE_CHECKING:
         SandboxVerificationError,
         run_verification_sandbox,
     )
-    from nemo_gym.verification.verifier_fixture import VerifierFixture, exercise_verifier_fixture
+    from nemo_gym.verification.verifier_fixture import (
+        VerifierFixture,
+        exercise_verifier_fixture,
+        load_verifier_fixture,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -56,6 +60,7 @@ _PUBLIC_API = {
     "record_parsed_judge_verdict": "judge",
     "exercise_verifier_fixture": "verifier_fixture",
     "judge_failsafe": "judge",
+    "load_verifier_fixture": "verifier_fixture",
     "normalize_math_judge_verdict": "judge",
     "reraise_judge_errors": "judge",
     "run_verification_sandbox": "sandbox_verification",

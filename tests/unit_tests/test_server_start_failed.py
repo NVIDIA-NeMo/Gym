@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import errno
+import shlex
+import socket
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,7 +12,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.cli.env as env_module
 from nemo_gym.cli.env import RunHelper, ServerStartFailedError, _bind_errno
-from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME
+from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME, NEMO_GYM_LOG_DIR_KEY_NAME, UV_CACHE_DIR_KEY_NAME
 from nemo_gym.core.failure_kinds import FAILURE_KINDS, SERVER_START_FAILED
 
 
@@ -55,6 +58,48 @@ def test_a_server_that_exits_after_every_server_was_ready_is_no_start_failure() 
         _polling_runner(ready=True).poll()
 
     assert not isinstance(raised.value, ServerStartFailedError)
+
+
+@pytest.mark.parametrize("log_dir", [False, True], ids=["terminal", "log-dir"])
+def test_a_real_server_that_cannot_bind_an_occupied_port_reports_eaddrinuse(tmp_path, capfd, log_dir) -> None:
+    """A real child process started the way `_start` starts a server finds its port taken and exits.
+
+    Its bind error reaches the supervisor, so the start failure carries EADDRINUSE and the port retry can run. The
+    output is still forwarded live. With a log dir the launch command merges stderr into stdout before `tee`.
+    """
+    config = {UV_CACHE_DIR_KEY_NAME: str(tmp_path / "uv-cache")}
+    if log_dir:
+        config[NEMO_GYM_LOG_DIR_KEY_NAME] = str(tmp_path / "logs")
+    server = (
+        "import uvicorn\nasync def app(scope, receive, send): pass\nuvicorn.run(app, host='127.0.0.1', port={port})"
+    )
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        runner = RunHelper()
+        runner._servers_ready = False
+        runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
+        runner._h2_ping_sidecar = None
+        runner._processes = {}
+        runner._output_tails = {}
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(server.format(port=port))}"
+        process = runner._spawn_server(
+            "judge_model",
+            command,
+            tmp_path,
+            project_root=None,
+            extra_env={},
+            global_config_dict=OmegaConf.create(config),
+        )
+        assert process.wait(timeout=60) != 0
+
+        with pytest.raises(ServerStartFailedError) as raised:
+            runner.poll()
+
+    assert (raised.value.server_name, raised.value.errno) == ("judge_model", errno.EADDRINUSE)
+    assert "address already in use" in str(raised.value)
+    assert "error while attempting to bind" in "".join(capfd.readouterr())
 
 
 @pytest.fixture

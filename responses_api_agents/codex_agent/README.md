@@ -138,7 +138,7 @@ last `session_close_retry_window_seconds` (default 300 seconds) without renewal 
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
 
-Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+Harness execution uses `nemo_gym.agents.utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session
 uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
@@ -295,7 +295,7 @@ CODEX_HOME=/tmp/codex_home OPENAI_API_KEY=local \
 
 The agent runs `codex exec --json` as an async subprocess for each request. Codex handles all tool execution (shell commands, file edits, MCP tool calls) internally in a per-rollout scratch working directory. The agent parses the JSONL event stream into NeMoGym output items and forwards the response to a resources server for verification.
 
-Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/responses_streaming.py`).
+Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/models/responses_streaming.py`).
 
 Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool (`features`). Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
 

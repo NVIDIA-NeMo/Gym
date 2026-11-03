@@ -23,14 +23,15 @@ import shlex
 import sys
 from functools import cache
 from glob import glob
+from math import isfinite
 from pathlib import Path
 from shutil import rmtree
-from signal import SIGINT
-from subprocess import Popen, TimeoutExpired
+from signal import SIGINT, SIGKILL
+from subprocess import PIPE, Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Lock, Thread
 from time import monotonic, sleep, time
-from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
+from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 import requests
 import rich
@@ -63,10 +64,12 @@ from nemo_gym.config.global_config import (
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PORT_RANGE_HIGH_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
     QUERY_KEY_NAME,
+    SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
@@ -92,15 +95,10 @@ from nemo_gym.registry import (
     read_environment_details,
     resolve_catalog_entry,
 )
+from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
+from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
+from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
 from nemo_gym.server_runtime.server_status import StatusCommand
-from nemo_gym.server_utils import (
-    HeadServer,
-    ServerInstanceDisplayConfig,
-    entrypoint_ray_enabled,
-    entrypoint_server_class_names,
-    initialize_ray,
-    ray_is_installed,
-)
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers
@@ -358,6 +356,37 @@ def _server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
+def _server_shutdown_timeout_seconds(global_config_dict: DictConfig) -> float:
+    """The finite shared grace period for managed server process groups."""
+    value = global_config_dict.get(SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME)
+    if value is None:
+        return float(_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = float("nan")
+    if isinstance(value, bool) or not isfinite(seconds) or seconds < 0:
+        raise ConfigError(
+            f"`{SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME}` must be finite nonnegative seconds, got {value!r}."
+        )
+    return seconds
+
+
+def _signal_server_group(process: Popen, signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def _server_group_exists(process: Popen) -> bool:
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _resolve_server_dir(rel_path: Path) -> Path:
     """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
 
@@ -545,6 +574,55 @@ def _bind_errno(stderr: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+# The most of a server's latest output the supervisor keeps, to report why it exited before it was ready.
+_SERVER_OUTPUT_TAIL_BYTES = 64 * 1024
+
+
+class _OutputTail:
+    """Forward a server's output pipe to ``sink`` as it arrives, and keep its last ``max_bytes``.
+
+    The operator still sees every line live, and the supervisor can read the error a server printed before it
+    exited, such as the bind error that names an occupied port.
+    """
+
+    def __init__(self, source: IO[bytes], sink: IO, max_bytes: int = _SERVER_OUTPUT_TAIL_BYTES) -> None:
+        self._source = source
+        self._sink = sink
+        self._max_bytes = max_bytes
+        self._tail = bytearray()
+        self._lock = Lock()
+        self._thread = Thread(target=self._pump, name="gym-server-output", daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        try:
+            while chunk := os.read(self._source.fileno(), 65536):
+                with self._lock:
+                    self._tail += chunk
+                    del self._tail[: -self._max_bytes]
+                self._forward(chunk)
+        finally:
+            self._source.close()
+
+    def _forward(self, chunk: bytes) -> None:
+        try:
+            buffer = getattr(self._sink, "buffer", None)
+            if buffer is not None:
+                buffer.write(chunk)
+                buffer.flush()
+            else:
+                self._sink.write(chunk.decode("utf-8", errors="replace"))
+                self._sink.flush()
+        except (OSError, ValueError):
+            pass  # A closed sink must not stop the pipe from draining, or the server would block on a full pipe.
+
+    def text(self, timeout_s: float = 5.0) -> str:
+        """The kept output, after waiting up to ``timeout_s`` for an exited server's pipe to drain."""
+        self._thread.join(timeout_s)
+        with self._lock:
+            return bytes(self._tail).decode("utf-8", errors="replace")
+
+
 def _startup_outcome(error: BaseException) -> str:
     """How a startup that raised `error` ended, as the startup telemetry reports it."""
     if isinstance(error, ServerSpinupTimeoutError):
@@ -560,6 +638,8 @@ class RunHelper:  # pragma: no cover
     _head_server_instance: HeadServer
 
     _processes: Dict[str, Popen]
+    # The output tail of each server in `_processes`, from the stream its errors go to.
+    _output_tails: Dict[str, _OutputTail]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
     _memory_profiler: MemoryProfiler | None
@@ -568,16 +648,18 @@ class RunHelper:  # pragma: no cover
     _h2_ping_sidecar: H2PingSidecarManager | None
     # Created by `_start`, so its clock starts with the startup it measures.
     _startup: Optional[SupervisorStartup] = None
+    _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
 
         Any failure or interrupt before readiness shuts down everything started so far, then re-raises.
         Callers reach their own `shutdown()` only after this returns.
-        The spawned servers have no process group or atexit handler, so nothing else would stop them.
+        Managed servers run in their own sessions, so shutdown owns delivery of their interrupt.
         """
         for attempt in (1, 2):
             self._processes = dict()
+            self._output_tails = dict()
             self._head_server = None
             self._h2_ping_sidecar = None
             # Until every server is ready, a server that exits is a failed start (see poll()).
@@ -632,6 +714,7 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
         self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
+        self._server_shutdown_timeout_seconds = _server_shutdown_timeout_seconds(global_config_dict)
         self._startup.mark("load_config")
 
         # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
@@ -705,21 +788,21 @@ class RunHelper:  # pragma: no cover
             # resolve from the same checkout instead of an older installed Gym distribution.
             # In a wheel install that root is the parent's site-packages; adding it would
             # shadow each server venv's own dependencies, so skip it there.
-            process = run_command(
+            process = self._spawn_server(
+                top_level_path,
                 command,
                 dir_path,
-                server_name=top_level_path,
                 project_root=dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None,
                 extra_env=extra_env,
+                start_new_session=True,
             )
-            self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
             # cache size. For Nemotron's set of environments, parallel installation can produce
             # a cache 10-20GB larger than serial installation.
             if global_config_dict[DRY_RUN_KEY_NAME]:
                 print("DRY_RUN enabled: setup commands are run serially")
-                process.communicate()
+                process.wait()
 
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
@@ -763,6 +846,39 @@ class RunHelper:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_server_readiness(global_config_dict)
+
+    def _spawn_server(
+        self,
+        server_name: str,
+        command: str,
+        dir_path: Path,
+        *,
+        project_root: Path | None,
+        extra_env: Dict[str, str],
+        global_config_dict: DictConfig | None = None,
+        start_new_session: bool = False,
+    ) -> Popen:
+        """Start one server, forwarding the stream its errors go to and keeping that stream's tail for poll()."""
+        if global_config_dict is None:
+            global_config_dict = get_global_config_dict()
+        # With a log dir the launch command merges stderr into stdout before `tee`, so the errors are on stdout.
+        merged = bool(global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME))
+        process = run_command(
+            command,
+            dir_path,
+            server_name=server_name,
+            project_root=project_root,
+            global_config_dict=global_config_dict,
+            stdout_target=PIPE if merged else None,
+            stderr_target=None if merged else PIPE,
+            extra_env=extra_env,
+            start_new_session=start_new_session,
+        )
+        self._processes[server_name] = process
+        self._output_tails[server_name] = (
+            _OutputTail(process.stdout, sys.stdout) if merged else _OutputTail(process.stderr, sys.stderr)
+        )
+        return process
 
     def _wait_for_head_server(self) -> None:
         """Wait until the head server answers; a head server thread that ended (a failed bind) never will."""
@@ -827,7 +943,9 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
-                proc_out, proc_err = process.communicate()
+                tail = getattr(self, "_output_tails", {}).get(process_name)
+                # The tail already went to the terminal live; it is read here for the error and its errno.
+                proc_out, proc_err = (None, tail.text().encode()) if tail is not None else process.communicate()
                 print_str = f"Process `{process_name}` finished unexpectedly!"
 
                 if isinstance(proc_out, bytes):
@@ -944,28 +1062,42 @@ Process `{process_name}` stderr:
         record_active_servers(0)
         shutdown_telemetry()
 
+        deadline = monotonic() + self._server_shutdown_timeout_seconds
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
-            process.send_signal(SIGINT)
+            _signal_server_group(process, SIGINT)
 
         print("Waiting for processes to finish...")
-        killed_process_names: List[str] = []
-        unreaped_process_names: List[str] = []
-        for process_name, process in self._processes.items():
+        remaining = {}
+        for name, process in self._processes.items():
             try:
-                process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+                process.wait(timeout=max(0, deadline - monotonic()))
             except TimeoutExpired:
-                process.kill()
-                killed_process_names.append(process_name)
-                # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
-                try:
-                    process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
-                except TimeoutExpired:
-                    unreaped_process_names.append(process_name)
+                remaining[name] = process
+            else:
+                # A shell can exit before a child that still owns its process group.
+                if _server_group_exists(process):
+                    remaining[name] = process
+        while remaining and monotonic() < deadline:
+            remaining = {name: process for name, process in remaining.items() if _server_group_exists(process)}
+            if remaining:
+                sleep(min(0.01, max(0, deadline - monotonic())))
+
+        killed_process_names = list(remaining)
+        # Escalate every group before waiting for any one child to be reaped.
+        for process in remaining.values():
+            _signal_server_group(process, SIGKILL)
+        reap_deadline = monotonic() + _FORCE_KILL_REAP_TIMEOUT_SEC
+        unreaped_process_names = []
+        for name, process in remaining.items():
+            try:
+                process.wait(timeout=max(0, reap_deadline - monotonic()))
+            except TimeoutExpired:
+                unreaped_process_names.append(name)
 
         if killed_process_names:
             print(
-                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout, killing instead. You may see messages like:
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {self._server_shutdown_timeout_seconds:g}s timeout, killing instead. You may see messages like:
 ```bash
 rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
 ```
@@ -2139,8 +2271,8 @@ class SchemaConfig(RunConfig):
 
 @exit_cleanly_on_config_error
 def show_schema():  # pragma: no cover
-    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/task_data.py``)."""
-    from nemo_gym.task_data import TaskDataSchemaError, load_task_data_schema
+    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/data/task_data.py``)."""
+    from nemo_gym.data.task_data import TaskDataSchemaError, load_task_data_schema
 
     global_config_dict = get_global_config_dict()
     config = SchemaConfig.model_validate(global_config_dict)
@@ -2154,7 +2286,7 @@ def show_schema():  # pragma: no cover
     if adapter is None:
         print(
             f"{config.entrypoint} does not ship a task_data.py schema yet. "
-            "Add one exporting `TaskData` (see nemo_gym/task_data.py for the protocol)."
+            "Add one exporting `TaskData` (see nemo_gym/data/task_data.py for the protocol)."
         )
         exit(1)
     print(json.dumps(adapter.json_schema(), indent=2))

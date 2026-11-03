@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -47,15 +48,14 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.sandbox import SandboxHandle
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
 from nemo_gym.trajectory import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
@@ -173,7 +173,9 @@ class TestOpenCodeSandboxedAgent:
     def test_opencode_export_to_output_items(
         self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+        monkeypatch.setattr(
+            "nemo_gym.models.chat_completions_converter.uuid4", MagicMock(return_value=MagicMock(hex=""))
+        )
 
         actual_output_items = OpenCodeSandboxedAgent._opencode_export_to_output_items(None, opencode_export_test_data)
         expected_output_items = [
@@ -389,7 +391,9 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+        monkeypatch.setattr(
+            "nemo_gym.models.chat_completions_converter.uuid4", MagicMock(return_value=MagicMock(hex=""))
+        )
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
@@ -565,6 +569,180 @@ class TestOpenCodeSandboxedAgent:
             assert not (home / "agent-started").is_file()
         else:
             assert "nemo-gym-ripgrep" not in command
+
+    def _responses_request(self):
+        return MagicMock(
+            session={SESSION_ID_KEY: "my session"},
+            cookies={"sandbox_id": ""},
+            path_params={"rollout_id": "direct-call"},
+        )
+
+    def _mock_sandbox(self, monkeypatch: MonkeyPatch, server: OpenCodeSandboxedAgent) -> MagicMock:
+        """A sandbox whose run, session list and export succeed; the export file is read as empty."""
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+            ]
+        )
+        sandbox_mock.download = AsyncMock()
+        sandbox_mock.upload = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: False)
+        return sandbox_mock
+
+    async def test_responses_uploads_input_images_and_attaches_them_to_the_run(self, monkeypatch: MonkeyPatch) -> None:
+        """Each input_image data URI is decoded, uploaded under the fixed attachments directory with the
+        extension OpenCode's mime sniff expects, and passed with -f ahead of the unchanged text query."""
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+        uploaded: dict[str, tuple[bytes, int]] = {}
+
+        async def upload(local_path, remote_path):
+            # The staging file is deleted after the upload, so record it now.
+            uploaded[remote_path] = (Path(local_path).read_bytes(), Path(local_path).stat().st_mode & 0o777)
+
+        sandbox_mock.upload = AsyncMock(side_effect=upload)
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x01" * 8
+        query = "What does the picture show? Answer: {your answer}"
+
+        await server.responses(
+            request=self._responses_request(),
+            body=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    {"role": "system", "content": "ignored by the adapter"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": query},
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64," + base64.b64encode(png).decode(),
+                                "detail": "high",
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+                                "detail": "auto",
+                            },
+                        ],
+                    },
+                ],
+            ),
+        )
+
+        assert uploaded == {
+            "/tmp/nemo-gym-attachments/image-1.png": (png, 0o644),
+            "/tmp/nemo-gym-attachments/image-2.jpg": (jpeg, 0o644),
+        }
+        # Uploads precede the run, which is the only exec carrying the launch command.
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[:3]] == ["upload", "upload", "exec"]
+        tokens = shlex.split(sandbox_mock.exec.await_args_list[0].kwargs["command"])
+        run_tokens = tokens[tokens.index("run") :]
+        assert run_tokens[run_tokens.index("--thinking") :][:6] == [
+            "--thinking",
+            "-f",
+            "/tmp/nemo-gym-attachments/image-1.png",
+            "-f",
+            "/tmp/nemo-gym-attachments/image-2.jpg",
+            "--",
+        ]
+        assert run_tokens[run_tokens.index("--") + 1] == query
+        # Neither the image bytes nor their base64 reach the command line.
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert base64.b64encode(png).decode() not in command and "detail" not in command
+        assert server._sandbox_id_to_run_result[""]["opencode_attachment_count"] == 2
+        server._create_opencode_config.assert_awaited_once()
+        assert server._create_opencode_config.await_args.kwargs == {"image_input": True}
+
+    async def test_image_input_declares_the_model_vision_capable_only_when_asked(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """OpenCode forwards an attached image only if the model declares image input (otherwise it substitutes
+        an ERROR text) and, unless its `attachment.image` limits are lifted, downscales and re-encodes any image
+        over 2000 px or 5 MiB of base64; a text-only turn keeps the config exactly as before."""
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
+            lambda _name, **kwargs: "http://model-server",
+        )
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"responses_create_params": {"input": "solve"}})
+
+        plain = await server._create_opencode_config(request)
+        vision = await server._create_opencode_config(request, image_input=True)
+
+        plain_model = plain["provider"]["nemo_gym"]["models"]["dummy_model"]
+        assert "modalities" not in plain_model
+        assert "attachment" not in plain
+        assert vision["provider"]["nemo_gym"]["models"]["dummy_model"] == plain_model | {
+            "modalities": {"input": ["text", "image"], "output": ["text"]}
+        }
+        assert vision["attachment"] == {"image": app_module.OPENCODE_IMAGE_LIMITS_UNRESTRICTED}
+        assert set(vision["attachment"]["image"]) == {"max_width", "max_height", "max_base64_bytes"}
+
+    @mark.parametrize(
+        ("image_part", "message"),
+        [
+            ({"image_url": "https://example.com/figure.png"}, "remote URL"),
+            ({"image_url": "data:image/bmp;base64,Qk0AAAAA"}, "media type 'image/bmp'"),
+            ({"image_url": "data:image/png,not-base64"}, "not a base64 data URI"),
+            ({"image_url": "data:image/png;base64,@@@"}, "invalid base64"),
+            ({"file_id": "file-123"}, "no image_url"),
+        ],
+    )
+    async def test_responses_rejects_images_opencode_cannot_attach_before_running(
+        self, monkeypatch: MonkeyPatch, image_part: dict, message: str
+    ) -> None:
+        """The sandbox has no internet and OpenCode's Read tool shows only PNG/JPEG/GIF/WebP, so such a row
+        fails explicitly, without an upload or a run."""
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+
+        with raises(ValueError, match=message):
+            await server.responses(
+                request=self._responses_request(),
+                body=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "Describe the figure."},
+                                {"type": "input_image", "detail": "high", **image_part},
+                            ],
+                        }
+                    ],
+                ),
+            )
+
+        assert not sandbox_mock.upload.await_count and not sandbox_mock.exec.await_count
+        assert "" not in server._sandbox_id_to_run_result
+
+    @mark.parametrize("content", ["hello", [{"type": "input_text", "text": "hello"}]])
+    async def test_text_only_turns_launch_without_attachment_flags(self, monkeypatch: MonkeyPatch, content) -> None:
+        """A string or single input_text turn stays the bare `-- <query>` launch with nothing uploaded for it."""
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+
+        await server.responses(
+            request=self._responses_request(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": content}]),
+        )
+
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        # The f-string's line continuations fold the launch line into one; the query follows `--` directly.
+        assert "--thinking -- hello " in command and "nemo-gym-attachments" not in command
+        assert sandbox_mock.upload.await_count == 0
+        assert server._sandbox_id_to_run_result[""]["opencode_attachment_count"] == 0
+        assert server._create_opencode_config.await_args.kwargs == {"image_input": False}
 
     def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
         with raises(ValidationError, match="Path does not point to a file"):
@@ -1123,7 +1301,7 @@ class TestBenchmarkLifecycle:
         config.tool_servers = [ResourcesServerRef(type="resources_servers", name="tavily")]
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
+            "nemo_gym.agents.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
         )
         monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
         request = MagicMock(cookies={"session": "original"})

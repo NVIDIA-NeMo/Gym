@@ -88,3 +88,57 @@ async def test_binding_failure_cannot_erase_an_already_calculated_grade(monkeypa
         actual = await observe_verifier(verify, enabled=True)()
     assert actual["reward"] == 1 and actual["ng_verifier_invocations"][0]["status"] == "completed"
     assert actual["ng_verifier_invocations"][0]["grading_operations"][0]["outcome"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_without_an_active_verification_the_result_is_not_hashed(monkeypatch):
+    """No invocation will record the observation, so the scorer runs once and its result is not bound."""
+    import nemo_gym.server_runtime.verifier_observability as observation
+
+    hashed = []
+    monkeypatch.setattr(observation, "grading_result_binding", lambda value: hashed.append(value) or "digest")
+    calls = []
+
+    def calculate():
+        calls.append("executed")
+        return result(1)
+
+    async def judge():
+        calls.append("judged")
+        return result(0)
+
+    assert observation.observe_programmatic_grading(calculate) == result(1)
+    assert await observation.observe_llm_judge_grading(judge) == result(0)
+    assert calls == ["executed", "judged"] and hashed == []
+
+    # Errors and validation are unchanged.
+    def failing():
+        raise ValueError("synthetic grading failure")
+
+    with pytest.raises(ValueError, match="synthetic grading failure"):
+        observation.observe_programmatic_grading(failing)
+
+    async def coroutine():
+        return result(1)
+
+    with pytest.raises(TypeError, match="must be synchronous"):
+        observation.observe_programmatic_grading(coroutine)
+    awaitable = coroutine()
+    with pytest.raises(TypeError, match="returned an awaitable"):
+        observation.observe_programmatic_grading(lambda: awaitable)
+    awaitable.close()
+
+    async def failing_judge():
+        raise ValueError("synthetic judge failure")
+
+    with pytest.raises(ValueError, match="synthetic judge failure"):
+        await observation.observe_llm_judge_grading(failing_judge)
+    assert hashed == []
+
+    # Inside a verification the result is still bound once per operation.
+    async def verify():
+        return observation.observe_programmatic_grading(lambda: result(1))
+
+    with rollout_context("synthetic-rollout"):
+        await observe_verifier(verify, enabled=True)()
+    assert hashed == [result(1)]

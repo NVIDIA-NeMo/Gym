@@ -689,6 +689,28 @@ class TestAccessDenied:
             _stop_patches(patches)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("denied_first", [False, True], ids=["429-then-403", "403-then-429"])
+    async def test_mixed_rate_limited_and_denied_pool_reports_the_rate_limit(self, denied_first: bool):
+        """An approved key out of quota and an unapproved key: the error is the rate limit, with the approved key's
+        reset, whichever key rotation tried last. Waiting helps; approval is not the only fix."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0", "k1"]))
+        limited = {"status": 429, "headers": {"Retry-After": "60", "X-Ratelimit-Reset": "111"}, "body": "rl"}
+        denied = {"status": 403, "body": self._DENIED_BODY}
+
+        mock_request, patches = _mock_api_sequence([denied, limited] if denied_first else [limited, denied])
+        try:
+            with pytest.raises(CritPtRateLimitExceeded) as exc_info:
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            assert (exc_info.value.retry_after_seconds, exc_info.value.reset_unix) == (60, 111)
+            assert "1 of 2 key(s) were denied" in "\n".join(getattr(exc_info.value, "__notes__", []))
+            assert mock_request.call_count == 2
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
     async def test_non_403_non_429_client_error_still_bare_runtime_error(self):
         """A 400 keeps the old fail-fast behaviour; only 403 gained a type."""
         server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
