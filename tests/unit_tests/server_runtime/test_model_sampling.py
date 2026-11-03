@@ -73,6 +73,25 @@ def _echo_app(*paths: str, **middleware_options) -> FastAPI:
     return app
 
 
+def test_a_resources_server_exposing_tools_over_mcp_accepts_the_null_marker():
+    """In a training run, a resources server with expose_tools_over_mcp installs the null marker and still starts."""
+    from nemo_gym.server_runtime.mcp_auto_exposure import harvest_tools
+
+    class Server:
+        def mcp_tools(self, harvested, catchall):
+            return harvested
+
+    app = FastAPI()
+
+    @app.post("/lookup")
+    async def lookup() -> dict:
+        return {}
+
+    app.add_middleware(CallerSamplingMiddleware)
+    assert CallerSamplingMiddleware.applies_to_mcp_requests
+    assert "lookup" in harvest_tools(app, Server())
+
+
 @pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
 @pytest.mark.parametrize("stream", [False, True])
 def test_concurrent_rollouts_capture_their_own_effective_model_requests(tmp_path, dialect, stream):

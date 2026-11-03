@@ -248,8 +248,12 @@ class ServerClient(BaseModel):
                     VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
                 }
 
-        if server_entry is not None and "responses_api_models" in server_entry:
-            # A model call made while handling a rollout carries its sampling segment, after any rollout prefix.
+        if server_entry is not None and (
+            "responses_api_models" in server_entry or "responses_api_agents" in server_entry
+        ):
+            # A generation call made while handling a rollout carries its sampling segment, after any rollout prefix:
+            # a model call, and a call to an agent (such as an agent's call to its own /v1/responses), whose model
+            # calls then carry it too.
             url_path = with_model_sampling_segment(url_path, current_model_sampling_segment())
 
         return await request(
@@ -399,8 +403,8 @@ def apply_rollout_prefix(
     clients send the ``traceparent`` header instead and use ``url_path_for_run``.
 
     The sampling segment is ``model_sampling`` when given, otherwise the current request's
-    (``nemo_gym.core.model_call_sampling``). It precedes the trace segment, in the order
-    ``nemo_gym.core.correlation`` reads.
+    (``nemo_gym.core.model_call_sampling``) when ``trace_context`` is set. It precedes the trace segment, in the
+    order ``nemo_gym.core.correlation`` reads.
 
     The span and the sampling named are the ones current when the URL is built, so pass
     ``trace_context=False`` for a URL that is built once and reused across rollouts (a cached
@@ -408,8 +412,10 @@ def apply_rollout_prefix(
     sampled with its values.
     """
     prefix = rollout_path_prefix(rollout_id, token_capture=token_capture) if rollout_id else ""
+    # An explicit segment always applies; the current request's only to a URL built for this rollout.
+    current = current_model_sampling_segment() if trace_context else None
+    prefix += model_sampling_path_segment(model_sampling if model_sampling is not None else current)
     if trace_context:
-        prefix += model_sampling_path_segment(model_sampling or current_model_sampling_segment())
         prefix += trace_context_path_segment()
     if not prefix:
         return base_url
