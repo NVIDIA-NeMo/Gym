@@ -819,6 +819,112 @@ def _session_client(**client_options) -> tuple[LitmusAgentResourcesServer, TestC
 
 
 class TestResourcesSessions:
+    async def test_verify_cleanup_prevents_late_worker_allocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server = _make_sandbox_server()
+        request = _FakeRequest("rs-1")
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        stopped, release = asyncio.Event(), asyncio.Event()
+        original_cleanup = LitmusAgentResourcesServer._cleanup_session
+
+        async def delayed_cleanup(server, session_id):
+            await original_cleanup(server, session_id)
+            stopped.set()
+            await asyncio.wait_for(release.wait(), timeout=5)
+
+        monkeypatch.setattr(LitmusAgentResourcesServer, "_cleanup_session", delayed_cleanup)
+        verification = asyncio.create_task(
+            server._verify_and_cleanup(request, LitmusAgentVerifyRequest.model_validate(VERIFY_BODY))
+        )
+        await asyncio.wait_for(stopped.wait(), timeout=5)
+        tool = asyncio.create_task(_run_code(server, "rs-1", "print(3)"))
+        try:
+            await asyncio.sleep(0.05)
+            assert not tool.done() and server._sessions == {}
+            release.set()
+            assert (await verification).reward == 1.0
+            with pytest.raises(ResourcesSessionLostError):
+                await tool
+            assert server._sessions == {}
+        finally:
+            release.set()
+            await asyncio.gather(verification, tool, return_exceptions=True)
+
+    def test_checkpoint_failed_verify_cleanup_stays_owned_until_retry(self) -> None:
+        server = _make_sandbox_server()
+        app = server.setup_webserver()
+        server.server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test-only"}}
+        server.setup_resources_checkpoint(app)
+        client = TestClient(app, raise_server_exceptions=False)
+        prefix = "/ng-rollout/rollout"
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post(prefix + "/stateful_python_code_exec", json={"code": "print(3)"}).status_code == 200
+        provider = _LocalFakeProvider.instances[-1]
+        provider.close_error = RuntimeError("cleanup failed")
+        first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
+        assert first.status_code == 500
+        assert server.checkpoint_participant.is_open("rs-1")
+        assert "rs-1" in server._session_episodes
+        assert "rs-1" in server._sessions
+        provider.close_error = None
+        second = client.post(prefix + "/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["reward"] == 1.0
+        assert not server.checkpoint_participant.is_open("rs-1")
+        assert server._session_episodes == {}
+        assert server._sessions == {} and provider.closed == 1
+
+    def test_checkpoint_verify_releases_active_identity_but_allows_score_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import nemo_gym.server_runtime.base_resources_server as base_resources
+
+        server = _make_sandbox_server()
+        app = server.setup_webserver()
+        server.server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test-only"}}
+        server.setup_resources_checkpoint(app)
+        client = TestClient(app)
+        prefix = "/ng-rollout/rollout"
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post(prefix + "/stateful_python_code_exec", json={"code": "print(3)"}).status_code == 200
+        assert server.checkpoint_participant.is_open("rs-1")
+
+        first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
+        assert first.status_code == 200 and first.json()["reward"] == 1.0
+        # Default wait verification unbinds before the HTTP reply. A replacement may never send close.
+        assert not server.checkpoint_participant.is_open("rs-1")
+        assert server._session_episodes == {}
+        assert server._verified_sessions.get("rs-1") == (EPISODE_ID, TaskId.model_validate(_seed("rs-1")["task_id"]))
+        second = client.post(prefix + "/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["reward"] == 1.0
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 409
+        assert client.post(prefix + "/stateful_python_code_exec", json={"code": "print(3)"}).status_code == 404
+        wrong_close = _close("rs-1") | {"episode_id": {"rollout_id": "different", "attempt": 0}}
+        assert client.post(prefix + "/close_session", json=wrong_close).status_code == 409
+
+        now = base_resources.monotonic()
+        monkeypatch.setattr(
+            base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
+        )
+        assert server._verified_sessions.get("rs-1") is None
+
+    async def test_checkpoint_retire_releases_owned_sandbox_and_retries_failure(self) -> None:
+        from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+
+        server = _make_sandbox_server()
+        await server.seed_session(_FakeRequest("rs-1"), ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await _run_code(server, "rs-1", "print(3)")
+        provider = _LocalFakeProvider.instances[-1]
+        participant = ResourcesParticipant(server, "restart_only")
+        participant.seeded("rs-1", EPISODE_ID)
+        provider.close_error = RuntimeError("sandbox unavailable")
+        with pytest.raises(RuntimeError, match="sandbox unavailable"):
+            await participant.retire(EPISODE_ID)
+        assert "rs-1" in server._sessions and "rs-1" in participant._sessions
+        provider.close_error = None
+        await participant.retire(EPISODE_ID)
+        assert provider.closed == 1
+        assert server._sessions == {} and server._session_locks == {}
+        assert server._session_episodes == {} and participant._sessions == {}
+
     def test_session_contract(self):
         server = _make_sandbox_server()
 
@@ -862,7 +968,7 @@ class TestResourcesSessions:
         assert server._sessions == {}
         assert server._fence.closed_episode("rs-1") == EPISODE_ID
 
-    def test_failed_stop_at_verify_keeps_the_score(self):
+    def test_failed_stop_at_verify_keeps_ownership_and_fails_the_request(self):
         server, client = _session_client(raise_server_exceptions=False)
         assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
         assert client.post("/stateful_python_code_exec", json={"code": "print(1)"}).status_code == 200
@@ -871,7 +977,7 @@ class TestResourcesSessions:
 
         verified = client.post("/verify", json=VERIFY_BODY)
 
-        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
+        assert verified.status_code == 500
         # The sandbox stays registered, so the close retries the stop and reports its failure.
         assert "rs-1" in server._sessions
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
@@ -924,7 +1030,7 @@ class TestResourcesSessions:
         with pytest.raises(ResourcesSessionLostError):
             await _run_code(server, "rs-1", "print(2)")
 
-    async def test_verify_during_startup_stops_the_sandbox_startup_creates(self, monkeypatch):
+    async def test_verify_during_startup_waits_for_the_cell_and_releases_sandbox(self, monkeypatch):
         server = _make_sandbox_server()
         creating = asyncio.Event()
         finish_create = asyncio.Event()
@@ -948,8 +1054,8 @@ class TestResourcesSessions:
         finish_create.set()
 
         assert (await verify).reward == 1.0
-        with pytest.raises(ResourcesSessionLostError):
-            await tool_call
+        # The accepted cell finishes before verification releases its sandbox.
+        assert (await tool_call).strip() == "1"
         provider = _LocalFakeProvider.instances[-1]
         assert provider.created == 1 and provider.closed == 1
         assert server._sessions == {} and server._session_locks == {}
