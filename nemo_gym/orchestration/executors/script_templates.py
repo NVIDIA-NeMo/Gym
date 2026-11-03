@@ -16,6 +16,9 @@
 import base64
 import re
 import shlex
+from pathlib import Path
+
+from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
 
 
 _RAY_PRELUDE = """\
@@ -31,11 +34,15 @@ echo "Head node IP address: $HEAD_NODE_IP\""""
 
 ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
 
-# Default node-join wait (30s) is too short for slow image pulls.
+# Default node-join wait (30s) is too short for slow image pulls. Also bounds a worker's wait for the head.
 RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
 
 # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops.
 RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S = 1.0
+
+# The head node's proxy prefers its local replica until that replica is full, and a gateway replica
+# never fills (MAX_ONGOING_REQUESTS_PER_INSTANCE), so every other instance would sit idle.
+RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING = 0
 
 
 _VLLM_RAY_SYMMETRIC_RUN = (
@@ -47,9 +54,26 @@ bash -lc '
     export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S="""
     + str(RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S)
     + """
+    export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING="""
+    + str(RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING)
+    + """
     """
     + ENSURE_RAY_INSTALLED
+    # Ray applies the wait above only to the head waiting for workers: a worker gives up on a late
+    # head after ~40s (GcsClient connect timeout), so workers first wait for the head's GCS port.
+    # Node 0 is the head here as in the fallback below: the prelude takes RAY_HEAD_NODE_IP from it.
     + """
+    if [ "${{SLURM_NODEID:-0}}" != "0" ]; then
+        echo "Waiting up to ${{RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT}}s for the Ray head at $RAY_HEAD_NODE_IP..."
+        deadline=$((SECONDS + RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT))
+        until (: >"/dev/tcp/${{RAY_HEAD_NODE_IP%:*}}/${{RAY_HEAD_NODE_IP##*:}}") 2>/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "ERROR: timed out waiting for the Ray head at $RAY_HEAD_NODE_IP." >&2
+                exit 1
+            fi
+            sleep 1
+        done
+    fi
     if ray symmetric-run --help >/dev/null 2>&1; then
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
@@ -173,6 +197,50 @@ def render_write_file_from_base64(content: str, dest_path: str) -> str:
     return f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(dest_path)}"
 
 
+# What the driver step runs for each export, with the exporter's name and its overrides as arguments.
+EXPORT_STEP_MODULE = "nemo_gym.orchestration.export_step"
+
+# Set for a driver whose script has exports: a file this attempt creates once its evaluation has succeeded. The
+# job script watches the services only until then (see `_render_watched_driver`).
+EVAL_SUCCEEDED_MARKER_ENV = "GYM_EVAL_SUCCEEDED_MARKER"
+
+
+def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) -> str:
+    """Render the part of the driver script that runs `gym eval run`, then each export of its rollouts.
+
+    `exports` pairs an exporter name with its shell-quoted override arguments for `EXPORT_STEP_MODULE`. The run is a child, not
+    `exec`'d, so the script can go on to the exports; TERM, which is what the driver gets at the time limit, is
+    passed on to it, so an interrupted run behaves as it did when it was `exec`'d. The run's exit code goes to
+    `<bench_dir>/eval.exit` and is the script's exit code: the exports are reported in their own result files
+    and cannot change it. They run only after a successful run, so a partial run is never exported, and an
+    export that already succeeded is not repeated (the export step decides that from its result file).
+    """
+    bench = shlex.quote(str(bench_dir))
+    lines = [
+        "set +e",
+        '"$@" &',
+        "gym_run_pid=$!",
+        "trap 'kill -TERM \"$gym_run_pid\" 2>/dev/null' TERM INT",
+        'wait "$gym_run_pid"',
+        "gym_run_rc=$?",
+        "# A signal ends the first wait early; wait again for the exit code of the run itself.",
+        'while kill -0 "$gym_run_pid" 2>/dev/null; do wait "$gym_run_pid"; gym_run_rc=$?; done',
+        "trap - TERM INT",
+        "set -e",
+        f"mkdir -p {bench}/{EXPORTS_DIRNAME} || true",
+        f'echo "$gym_run_rc" > {bench}/{EVAL_EXIT_FILENAME} || true',
+        'if [ "$gym_run_rc" -eq 0 ]; then',
+        f'    [ -z "${{{EVAL_SUCCEEDED_MARKER_ENV}:-}}" ] || : > "${EVAL_SUCCEEDED_MARKER_ENV}" || true',
+        *(
+            f"    python3 -m {EXPORT_STEP_MODULE} {shlex.quote(name)} {' '.join(args)} || true"
+            for name, args in exports
+        ),
+        "fi",
+        'exit "$gym_run_rc"',
+    ]
+    return "\n".join(lines)
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -180,6 +248,7 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    export_tail: str | None = None,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -192,11 +261,16 @@ def render_driver_entrypoint(
 
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
-    is where `telemetry` has to be installed for any server to have it.
+    is where `telemetry` has to be installed for any server to have it. `ray` is
+    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
+    and an extra the checkout does not define only makes uv warn.
+
+    `export_tail` (see `render_export_tail`) takes the place of `exec "$@"`, so the exports run in the same step and
+    container as the run, where `gym` is installed.
     """
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
-    install_target = f'".[{",".join(extras)}]"' if extras else "."
+    install_target = f'".[{",".join((*extras, "ray"))}]"'
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -206,7 +280,9 @@ def render_driver_entrypoint(
         # so nothing depends on the clone being reachable afterwards.
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            'source "$HOME/.local/bin/env"',
+            # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
+            # the directory is already on PATH, and the file only does this export anyway.
+            'export PATH="$HOME/.local/bin:$PATH"',
             'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on
@@ -223,9 +299,9 @@ def render_driver_entrypoint(
         preamble.append(prepare_cmd)
 
     if command is None:
-        if not preamble:
+        if not preamble and export_tail is None:
             return '"${GYM_CMD[@]}"'
-        preamble.append('exec "$@"')
+        preamble.append(export_tail if export_tail is not None else 'exec "$@"')
         body = "\n    ".join(["set -euo pipefail", *preamble])
         body = escape_for_single_quoted_block(body)
         return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""

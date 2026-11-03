@@ -12,8 +12,14 @@ endpoint **compliant with the OpenAI `/v1/responses` contract**, and the two ser
 Responses-speaking agents: each call your service receives the conversation so far and returns
 what it wants to do next. Gym runs the loop, executes environment tools, holds the session, and
 verifies.
-Your results land in the standard artifacts (`gym eval profile`, aggregation, and training
-pipelines all work unchanged).
+Your results land in the standard rollout artifacts, so `gym eval profile` and aggregation work unchanged.
+
+<Info>
+**Use Remote Agent to score an agent that you already run, without rewriting it.** Gym treats the service as a black box: it sees what each `/v1/responses` call returns, not the model calls or tool executions inside it.
+
+- **You get:** rewards from the benchmark's verifier, Gym-hosted environment tools, and the standard rollout artifacts.
+- **You do not get:** model-call capture, a task sandbox (your service cannot reach one), or policy training, which needs the token IDs and logprobs of every model call. To get these, [build an Agent Server adapter](/main/agent-server/add-or-update-a-harness). See [Choose a Path](/main/agent-server#choose-a-path) to compare the options.
+</Info>
 
 ```
 collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service ⟲ your model,

@@ -23,18 +23,19 @@ from typing import Any, Literal
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.models import ResponsesConverter, chat_completion_usage_to_response_usage
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 PROTOCOL_VERSION = "domain-generation/v1"
@@ -146,9 +147,11 @@ class DomainGenerationAgent(SimpleResponsesAPIAgent):
         phases: list[DomainGenerationPhaseTrace] = []
         prompt = initial_prompt
         final_response: NeMoGymChatCompletion | None = None
+        usage: NeMoGymResponseUsage | None = None
 
         for phase_index in range(self.config.followup_count + 1):
             request, response = await self._chat_completion(body, prompt)
+            usage = accumulate_response_usage(usage, chat_completion_usage_to_response_usage(response.usage))
             parsed_value, parse_error = parse_domain_response(response)
             candidates.extend(parsed_value)
             phases.append(
@@ -186,6 +189,8 @@ class DomainGenerationAgent(SimpleResponsesAPIAgent):
             response_params,
             final_response,
         )
+        # The response text is the last phase; usage covers every phase in the rollout.
+        response.usage = usage
         response_payload = body.model_dump()
         response_payload.update(
             response=response,

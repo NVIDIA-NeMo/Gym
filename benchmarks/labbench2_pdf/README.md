@@ -162,7 +162,7 @@ the artifacts for this example):
 
 ```bash
 gym env start --benchmark labbench2_pdf \
-  ++labbench2_pdf_benchmark_harbor_agent.responses_api_agents.harbor_agent_general.harbor_jobs_dir=environments/labbench2_pdf/data/harbor_jobs/pr-figqa2-retry1/jobs
+  ++labbench2_pdf_benchmark_harbor_agent.responses_api_agents.harbor_agent_general.job.jobs_dir=environments/labbench2_pdf/data/harbor_jobs/pr-figqa2-retry1/jobs
 ```
 
 Once the server is ready, collect exactly one FigQA2 task in another terminal:

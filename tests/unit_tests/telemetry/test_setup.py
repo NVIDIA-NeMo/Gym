@@ -533,16 +533,24 @@ def test_the_fastapi_instrumentor_is_installed_only_while_traces_export(monkeypa
 
     from fastapi import FastAPI
 
-    from nemo_gym import server_utils
+    from nemo_gym.server_runtime import base_server
     from nemo_gym.telemetry import contrib
 
     instrumented = []
     monkeypatch.setattr(contrib, "instrument_fastapi_app", instrumented.append)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: True)
+    monkeypatch.setattr(base_server, "is_span_group_enabled", lambda _group: True)
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", SimpleNamespace(is_exporting=True))
     monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", traces_exporting)
     app = FastAPI()
 
-    server_utils.SimpleServer.instrument_app_for_telemetry(None, app)
+    base_server.SimpleServer.instrument_app_for_telemetry(None, app)
 
     assert instrumented == ([app] if traces_exporting else [])
+
+
+def test_init_registers_the_rollout_id_provider_for_sandbox_spans(enabled_console_env):
+    import nemo_gym.sandbox.observability as sandbox_observability
+    from nemo_gym.telemetry.setup import init_telemetry, rollout_span_attributes
+
+    init_telemetry()
+    assert sandbox_observability._span_attribute_provider is rollout_span_attributes

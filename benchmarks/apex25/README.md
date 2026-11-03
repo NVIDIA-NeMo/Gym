@@ -33,7 +33,7 @@ gym eval prepare --benchmark apex25
 ```
 
 Writes `data/apex25_benchmark.jsonl` with one row per problem:
-`{"question": "...", "expected_answer": "..."}`. The HuggingFace dataset
+`{"task_id": "...", "question": "...", "expected_answer": "..."}`, where `task_id` is the dataset's `problem_idx`. The HuggingFace dataset
 revision is pinned in `prepare.py` (`HF_REVISION`) for reproducibility.
 
 ## Running servers

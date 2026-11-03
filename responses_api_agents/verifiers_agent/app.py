@@ -29,10 +29,9 @@ from openai import DEFAULT_TIMEOUT, AsyncOpenAI, DefaultAsyncHttpxClient, Timeou
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -47,7 +46,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -379,7 +379,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         The vllm_model server picks a vLLM engine per session
         (``sha256(session_id) % len(base_urls)`` in
         responses_api_models/vllm_model/app.py ``_resolve_client``) and mints the
-        session id per cookie jar (nemo_gym/server_utils.py
+        session id per cookie jar (nemo_gym/server_runtime/base_server.py
         ``setup_session_middleware``). openai's AsyncOpenAI sits on an httpx client
         that persists cookies, so a plain shared client is one session and
         therefore one engine: on CMH job 3670120 (2026-09-10) 512 concurrent
@@ -416,7 +416,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
             openai_client = AsyncOpenAI(
-                base_url=self.resolve_model_base_url(self.config.model_server.name),
+                # Shared across rollouts, so it must not name the span that happens to be current now.
+                base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
                 api_key="EMPTY",  # pragma: allowlist secret
                 # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
                 # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar
@@ -457,13 +458,31 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
 
         if not any(item.get("generation_token_ids") for item in output):
+            has_assistant_turn = any(
+                item.get("type") == "function_call"
+                or (item.get("type") == "message" and item.get("role") == "assistant")
+                for item in output
+            )
             err = rollout_output.get("error") or {}
             err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
-            logger.warning(
-                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
-                "Underlying error: %s",
-                err_msg,
-            )
+            if not has_assistant_turn:
+                logger.warning(
+                    "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
+                    "Underlying error: %s",
+                    err_msg,
+                )
+            elif err:
+                # verifiers stores a mid-rollout error on the state without logging it; this is its only Gym-side log.
+                logger.warning(
+                    "[verifiers_agent] rollout ended with an error after its assistant turns. Underlying error: %s",
+                    err_msg,
+                )
+            else:
+                # Eval mode (return_token_id_information: false) never returns token ids; the trajectory is complete.
+                logger.debug(
+                    "[verifiers_agent] no token ids on assistant turns; token ids were likely not requested. "
+                    "Appending the empty training placeholder."
+                )
             output.append(
                 NeMoGymResponseOutputMessageForTraining(
                     id=_EMPTY_OUTPUT_ITEM_ID,

@@ -69,6 +69,19 @@ MANIFEST_NAME = "gym-job.json"
 # without the file they were applied to.
 RESOLVED_CONFIG_NAME = "resolved-config.yaml"
 
+# What a benchmark's directory (`<run dir>/<benchmark>/`) holds, by name. The executors create it, the job script
+# writes into it and the exports read from it, so the names live in one place.
+LOGS_DIRNAME = "logs"
+ARTIFACTS_DIRNAME = "artifacts"
+EXPORTS_DIRNAME = "exports"
+ROLLOUTS_FILENAME = "rollouts.jsonl"
+# The exit code of `gym eval run`, which is also the job's.
+EVAL_EXIT_FILENAME = "eval.exit"
+# Created by the export tail when the evaluation succeeded; one file per attempt, so `.<Slurm job id>` follows.
+EVAL_SUCCEEDED_FILENAME = "eval.succeeded"
+# `<exports dir>/<exporter><suffix>`: the outcome of one export.
+EXPORT_RESULT_SUFFIX = ".result.json"
+
 
 # The nemo_gym package directory of the code that is running, however it got
 # onto sys.path: an install, an editable checkout, or a plain source tree.
@@ -180,6 +193,20 @@ class SubmissionRecord(BaseModel):
     def failed(self) -> list[BenchmarkJob]:
         return [b for b in self.benchmarks if b.job_id is None]
 
+    def benchmark_job(self, benchmark: str) -> BenchmarkJob:
+        """This record's entry for `benchmark`; an unknown name is an error that lists the known ones."""
+        for job in self.benchmarks:
+            if job.benchmark == benchmark:
+                return job
+        known = ", ".join(b.benchmark for b in self.benchmarks)
+        raise ValueError(f"Submission {self.gym_job_id} has no benchmark {benchmark!r}; it has: {known}.")
+
+    def with_benchmark(self, job: BenchmarkJob) -> "SubmissionRecord":
+        """A copy of this record with the entry for `job.benchmark` replaced by `job`."""
+        self.benchmark_job(job.benchmark)
+        benchmarks = [job if b.benchmark == job.benchmark else b for b in self.benchmarks]
+        return self.model_copy(update={"benchmarks": benchmarks})
+
     def dumps(self) -> str:
         """The manifest's on-disk bytes; one spelling, so every store matches."""
         return self.model_dump_json(indent=2) + "\n"
@@ -259,3 +286,16 @@ def local_index_dir() -> Path:
     """Where this machine remembers its own submissions."""
     base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
     return Path(base) / "nemo-gym" / "jobs"
+
+
+def load_submission_record(gym_job_id: str) -> SubmissionRecord:
+    """The record of submission `gym_job_id`: the run's manifest when its run dir is on this machine, else
+    this machine's job index. Both are written by `BaseExecutor.persist()`."""
+    index = local_index_dir() / f"{gym_job_id}.json"
+    if not index.is_file():
+        raise ValueError(f"No submission {gym_job_id!r} in this machine's job index ({local_index_dir()}).")
+    record = SubmissionRecord.load(json.loads(index.read_text(encoding="utf-8")))
+    manifest = Path(record.run_dir) / MANIFEST_NAME
+    if manifest.is_file():
+        record = SubmissionRecord.load(json.loads(manifest.read_text(encoding="utf-8")))
+    return record

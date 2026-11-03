@@ -3,14 +3,15 @@
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.rollout_collection import _trajectory_identity
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.rollouts.trajectory_builder import _trajectory_identity
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import (
     TerminalBench4Config,
@@ -63,6 +64,7 @@ async def fixture(tmp_path, monkeypatch):
     )
     request = SimpleNamespace(session={SESSION_ID_KEY: "owner"}, cookies={"session": "incoming"})
     task = SimpleNamespace(
+        name=body.task_name,
         config=TaskSettings.model_validate(
             {
                 "environment": {"docker_image": "agent"},
@@ -157,7 +159,7 @@ async def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a: events.append("collect")))
     monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a: events.append("restore")))
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
         events.append("grade")
         return {"rewards": {"reward": 0.75}}
 
@@ -273,7 +275,7 @@ async def test_disconnected_http_caller_does_not_interrupt_episode(fixture, monk
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     if stage == "grade":
 
-        async def grade(*args):
+        async def grade(*args, **kwargs):
             await block()
             return {"rewards": {"reward": 0}}
 
@@ -342,12 +344,46 @@ async def test_agent_outcomes_still_collect_and_grade(fixture, monkeypatch, reas
     assert all(env.closed for env in f.envs)
 
 
+@pytest.mark.parametrize("reason", ["killed", "completed"])
+async def test_collection_past_the_deadline_keeps_a_kill(fixture, monkeypatch, reason):
+    """Slow artifact collection after the process ended makes any other outcome a verified timeout, but cannot turn
+    a kill into one."""
+    f = fixture
+    offset = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: time.monotonic() + offset[0])
+    original = module.MiniSWEHarness
+
+    def harness(**kw):
+        h = original(**kw)
+
+        async def execute(budget):
+            offset[0] += budget
+            outcome = HarnessOutcome(reason=reason, exit_code=-9 if reason == "killed" else None)
+            return module.empty_response(kw["params"], "model"), outcome, {}
+
+        h.execute.side_effect = execute
+        return h
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    result = await f.agent.run(f.request, f.body)
+    assert result.evaluation_completed and not result.infrastructure_error
+    if reason == "killed":
+        assert result.termination["reason"] == "killed"
+        assert result.reward == 0.0
+        f.grade.assert_not_awaited()
+    else:
+        assert result.termination["reason"] == "timeout"
+        assert result.reward == 0.75
+        f.grade.assert_awaited_once()
+    assert all(env.closed for env in f.envs)
+
+
 @pytest.mark.parametrize("stage", ["setup", "execute", "grade"])
 async def test_shutdown_cancels_worker_before_collection_and_cleans_up(fixture, monkeypatch, stage):
     f = fixture
     entered = asyncio.Event()
 
-    async def block(*args):
+    async def block(*args, **kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -556,6 +592,120 @@ async def test_optional_agent_logs_do_not_discard_official_grade(fixture, monkey
     assert any(d.get("operation") == "agent_logs" for d in f.server._sessions[result.session_id].diagnostics)
 
 
+@pytest.mark.parametrize("resource", ["storage", "memory"])
+@pytest.mark.parametrize("stage", ["execute", "quiesce", "agent_logs", "collect", "collect_diagnostic", "stop"])
+async def test_agent_sandbox_limit_death_is_a_replayable_zero(fixture, monkeypatch, resource, stage):
+    f = fixture
+    f.body = f.body.model_copy(update={"client_session_id": "owner"})
+    detail = (
+        "[SANDBOX::ENDED] Pod sandbox entered Failed phase (Evicted): "
+        "Pod ephemeral local storage usage exceeds the total limit of containers 10Gi."
+        if resource == "storage"
+        else "Sandbox was OOM-killed. OpenSandbox status: state='Failed', reason='OOMKilled'"
+    )
+    if resource == "storage" and stage == "execute":
+        detail = "Get command status failed: HTTP 410: " + json.dumps(
+            {"code": "SANDBOX::ENDED", "message": detail.removeprefix("[SANDBOX::ENDED] ")}
+        )
+    seed = await f.server.seed_session(f.request, f.body)
+    env = f.envs[0]
+    if stage == "execute":
+        original = module.MiniSWEHarness
+
+        def harness(**kwargs):
+            h = original(**kwargs)
+            h.execute.side_effect = RuntimeError(detail)
+            return h
+
+        monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    elif stage == "quiesce":
+        env.quiesce_agent.side_effect = RuntimeError(detail)
+    elif stage == "agent_logs":
+        lifecycle.download_dir.side_effect = RuntimeError(detail)
+    elif stage == "collect":
+        lifecycle.collect.side_effect = RuntimeError(detail)
+    elif stage == "stop":
+        stop = env.stop.side_effect
+
+        async def stop_after_failure():
+            if env.stop.await_count == 1:
+                raise RuntimeError(detail)
+            await stop()
+
+        env.stop.side_effect = stop_after_failure
+    else:
+        lifecycle.collect.side_effect = lambda environment, directory, diagnostics: diagnostics.append(
+            {"operation": "collect_artifact", "error": detail}
+        )
+    result = await f.agent.run(f.request, f.body)
+    record = result.model_dump(mode="json")
+    session = f.server._sessions[result.session_id]
+    assert seed.session_id == result.session_id
+    assert session.verify_body.agent_started
+    assert result.reward == 0.0 and result.evaluation_completed
+    assert record["sandbox_resource_limit"]["resource"] == resource
+    assert record["sandbox_resource_limit"]["detail"].endswith(detail)
+    assert result.infrastructure_error is None and record["failure_reason"] is None
+    assert "_ng_failure_class" not in record and "_ng_failure_type" not in record
+    assert record["num_tests_total"] is None
+    assert session.result["verifier_result"] == {"rewards": {"reward": 0.0}, "source": "sandbox_resource_limit"}
+    assert any(d.get("operation") == "sandbox_resource_limit" for d in session.diagnostics)
+    assert session.result.get("verifier") is None
+    assert all(env.closed for env in f.envs)
+    assert f.server._slots._value == f.server.config.max_concurrent_sessions
+    f.grade.assert_not_awaited()
+    f.envs[1].start.assert_not_awaited()
+    if stage == "execute":
+        env.quiesce_agent.assert_not_awaited()
+    # Both HTTP retry and process restart must retain the counted zero and evidence.
+    assert (await f.server.verify(f.request, session.verify_body)).model_dump(mode="json") == record
+    f.server._sessions.clear()
+    f.server._by_identity.clear()
+    f.agent._runs.clear()
+    assert (await f.agent.run(f.request, f.body)).model_dump(mode="json") == record
+
+
+@pytest.mark.parametrize("stage", ["provision", "setup", "verifier_setup", "restore", "grade"])
+async def test_resource_failure_outside_agent_execution_remains_infrastructure(fixture, monkeypatch, stage):
+    f = fixture
+    f.body = f.body.model_copy(update={"client_session_id": "owner"})
+    detail = "[SANDBOX::ENDED] container sandbox terminated with OOMKilled (exit code 137)"
+    if stage == "provision":
+        original = lifecycle.Environment
+
+        def environment(*args, **kwargs):
+            env = original(*args, **kwargs)
+            if not kwargs.get("verifier"):
+                env.start.side_effect = RuntimeError(detail)
+            return env
+
+        monkeypatch.setattr(lifecycle, "Environment", environment)
+    elif stage == "setup":
+        original = module.MiniSWEHarness
+
+        def harness(**kwargs):
+            h = original(**kwargs)
+            h.setup.side_effect = RuntimeError(detail)
+            h.close = AsyncMock()
+            return h
+
+        monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    else:
+        await f.server.seed_session(f.request, f.body)
+        if stage == "verifier_setup":
+            f.envs[1].start.side_effect = RuntimeError(detail)
+        elif stage == "restore":
+            lifecycle.restore.side_effect = RuntimeError(detail)
+        else:
+            f.grade.side_effect = RuntimeError(detail)
+    result = await f.agent.run(f.request, f.body)
+    assert not result.evaluation_completed
+    assert result.infrastructure_error
+    assert result.model_dump()["_ng_failure_class"] == "infrastructure_error"
+    assert result.sandbox_resource_limit is None
+    assert all(env.closed for env in f.envs)
+
+
 async def test_resource_routes_only_seed_and_verify(fixture):
     paths = {route.path for route in fixture.server.setup_webserver().routes}
     assert {"/seed_session", "/verify"} <= paths
@@ -708,7 +858,7 @@ async def test_verify_takes_over_before_seed_deadline(fixture):
     deadline = session.agent_deadline
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
         entered.set()
         await release.wait()
         return {"rewards": {"reward": 0.75}}

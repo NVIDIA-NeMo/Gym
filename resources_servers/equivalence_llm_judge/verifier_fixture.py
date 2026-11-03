@@ -19,9 +19,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.core import NeMoGymResponse
 
 
 def create_hle_verified_server():

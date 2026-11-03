@@ -25,7 +25,7 @@ clean textual copy it can quote from.
 This module is the single home for that ``images_and_text`` conversion so the
 two content-block builders — the pairwise comparison scorer
 (:mod:`resources_servers.gdpval.comparison`) and the rubric visual scorer
-(:mod:`responses_api_agents.stirrup_agent.file_reader`) — share one code path.
+(:mod:`resources_servers.gdpval.file_reader`) — share one code path.
 
 Everything here is pure-python: PDF rasterization uses PyMuPDF (``fitz``, already
 a GDPVal dependency) so there is no poppler/system dependency, and text

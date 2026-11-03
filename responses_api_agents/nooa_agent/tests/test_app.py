@@ -9,16 +9,16 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    current_rollout_id,
 )
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunResult
@@ -89,6 +89,16 @@ async def close(instance: NOOAAgent):
     )
 
 
+async def test_several_workers_seed_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Session routing sends a session's later requests to the worker that seeded it."""
+    monkeypatch.setattr(InProcessNOOARunner, "run", AsyncMock(return_value=result()))
+    instance = NOOAAgent(config=agent_config(num_workers=2), server_client=MagicMock(spec=ServerClient))
+    req = await open_session(instance)
+
+    assert isinstance(instance._require_agent_session("session").runner, InProcessNOOARunner)
+    assert req.session[AGENT_SESSION_COOKIE_KEY] == "session"
+
+
 async def test_embedded_runners_are_created_per_session_at_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     constructor = MagicMock(wraps=InProcessNOOARunner)
     monkeypatch.setattr(app_module, "InProcessNOOARunner", constructor)
@@ -132,9 +142,10 @@ async def test_agent_session_activation_and_close_preserve_identity_cookies_and_
             }
         ],
     )
-    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={"agent_timeout_sec": "45"})
     response = await instance.responses(req, body)
     run_request = runner_run.call_args.args[0]
+    assert run_request.responses_create_params.metadata == {"agent_timeout_sec": "45"}
     assert run_request.task_id == "task"
     assert run_request.rollout_id == "rollout-a2"
     assert run_request.model_url_path == "/ng-rollout/rollout-a2/v1/responses"
@@ -199,8 +210,9 @@ async def test_close_cancels_execution_and_keeps_partial_evidence(monkeypatch: p
     waiter = asyncio.create_task(instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await started.wait()
     receipt = await close(instance)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(HTTPException) as interrupted:
         await waiter
+    assert interrupted.value.status_code == 409
     assert NOOATerminationReason.CANCELLED in {gap.code for gap in receipt.agent_observations.gaps}
     assert receipt.agent_observations.source == "nooa"
     with pytest.raises(HTTPException):

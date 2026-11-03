@@ -21,7 +21,11 @@ from typing import ClassVar
 import yaml
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
+
+
+class UnsupportedOperationError(RuntimeError):
+    """The executor does not implement this operation."""
 
 
 class BaseExecutor(ABC):
@@ -29,6 +33,8 @@ class BaseExecutor(ABC):
     # the scheduler (time limit, preemption, node failure). False means asking
     # for `resumable` on this executor is a config error, not a silent no-op.
     supports_resumable: ClassVar[bool] = False
+    # What this executor writes to `SubmissionRecord.executor`, and what a resubmit dispatches on.
+    name: ClassVar[str]
 
     @abstractmethod
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
@@ -37,6 +43,15 @@ class BaseExecutor(ABC):
         Returns None on a dry run, which renders the scripts and stops before
         anything is submitted; every other path either returns a record or
         raises.
+        """
+
+    @abstractmethod
+    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+        """Queue `benchmark` of `record` again, in place, and return its updated entry.
+
+        Refuses while a job of that benchmark is still active, so two jobs never write one run.
+        Persists the updated record before returning. An executor that cannot do this raises
+        `UnsupportedOperationError`.
         """
 
     def persist(
@@ -66,19 +81,37 @@ class BaseExecutor(ABC):
         The jobs are queued by the time this runs, so a failure has to name them
         or they are stranded with no record anywhere.
         """
-        record.write_local_index()
-        run_dir = Path(record.run_dir)
-        resolved_config = run_dir / RESOLVED_CONFIG_NAME
-        manifest = run_dir / MANIFEST_NAME
-        try:
+
+        def write_resolved_config() -> None:
             # `host:` values are written as their references, so the record is safe for other readers
             # (e.g. certification under another account). The resolved secrets stay in job.sh only.
             record_config = config.model_dump(mode="json", context={HOST_ENV_REFS: True})
-            write_manifest(resolved_config, yaml.safe_dump(record_config, sort_keys=False))
-            write_manifest(manifest, record.dumps())
+            write_manifest(Path(record.run_dir) / RESOLVED_CONFIG_NAME, yaml.safe_dump(record_config, sort_keys=False))
+
+        self._store(record, write_manifest, "Submitted jobs", write_config=write_resolved_config)
+
+    def persist_record(self, record: SubmissionRecord, write_manifest: Callable[..., None]) -> None:
+        """Store an updated record in the same two places `persist()` does; the resolved config is unchanged."""
+        self._store(record, write_manifest, "Queued jobs")
+
+    @staticmethod
+    def _store(
+        record: SubmissionRecord,
+        write_manifest: Callable[..., None],
+        action: str,
+        *,
+        write_config: Callable[[], None] | None = None,
+    ) -> None:
+        """The ordering and failure handling `persist()` describes, for both of its callers."""
+        record.write_local_index()
+        written = "the manifest/resolved config" if write_config else "the manifest"
+        try:
+            if write_config is not None:
+                write_config()
+            write_manifest(Path(record.run_dir) / MANIFEST_NAME, record.dumps())
         except Exception as error:
             queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)
             raise RuntimeError(
-                f"Submitted jobs but could not write the manifest/resolved config under {run_dir}: {error}. "
-                f"Already queued: {queued or 'nothing'}. Record these by hand before collecting."
+                f"{action} but could not write {written} under {record.run_dir}: {error}. The local index has "
+                f"the record. Already queued: {queued or 'nothing'}. Record these by hand before collecting."
             ) from error

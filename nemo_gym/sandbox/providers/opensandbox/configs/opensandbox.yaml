@@ -28,7 +28,8 @@ sandbox:
       request_timeout_s: 300
       use_server_proxy: true
       # Uses Gym's global aiohttp client. Pool limits come from
-      # global_aiohttp_connector_limit and global_aiohttp_connector_limit_per_host.
+      # global_aiohttp_connector_limit and global_aiohttp_connector_limit_per_host;
+      # a process without the Gym config, such as a Ray task worker, uses their defaults.
       # Provider-local pool settings apply only to the legacy httpx backend.
       transport_backend: aiohttp
       # Certificate verification for every connection the provider opens (SDK
@@ -36,10 +37,18 @@ sandbox:
       # certificate the client can verify.
       tls_verify: false
     create:
+      # Capped at the spec's ready_timeout_s per create: the request blocks while
+      # the pod is allocated, so an unplaceable pod fails within one ready timeout.
       request_timeout_s: 1200
-      # Must exceed the spec's ready_timeout_s (1200 for mini_swe_agent_2): this
-      # bounds the whole create call, which now includes the readiness wait.
+      # Bounds one create attempt as configured (the request plus the readiness
+      # wait, which starts once the request returns). Unset, it defaults to the
+      # capped request timeout plus the spec's ready_timeout_s plus 30 s; a value
+      # below that sum is respected and logged once per configuration.
       timeout_s: 1500
+      # A create whose sandbox is still Pending at the timeout is deleted and
+      # retried (Pending also covers a full cluster and an image still pulling).
+      # Set true to report it once instead when the specs are known placeable.
+      fail_fast_on_pending: false
       connect_attempt_timeout_s: 1500
       # Skipping the check lets the first command race a pod whose exec daemon
       # is not listening yet, which returns a 502 and kills the rollout.
@@ -52,6 +61,22 @@ sandbox:
       deadline_s: 180
       stable_count: 2
       stable_delay_s: 1.0
+    # Deployment image policy, applied to every sandbox this provider creates. Tasks and
+    # servers keep naming the published image; the deployment decides what is pulled.
+    images:
+      # Ordered prefix rewrites, e.g. a mirror or a derived image:
+      #   - {from: "harborframework/", to: "registry.example/mirror/"}
+      rewrites: []
+      # Registry credentials by image prefix (longest prefix wins):
+      #   "registry.example/": {username: ${registry_username}, password: ${registry_password}}
+      auth: {}
+    # Commands run as root in every new sandbox before it is handed out, for repairs the
+    # deployment owns rather than the task. A failing command fails the create, unretried.
+    setup:
+      commands: []
+      timeout_s: 600
+      # Environment set in every sandbox, under the spec's own variables (platform knobs only).
+      env: {}
     operations:
       retries: 5
       retry_delay_s: 1.0
