@@ -24,7 +24,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
-        elif path.startswith(("nemo_gym/cli/", "nemo_gym/tasks/")) and path not in (
+        elif path.startswith(("nemo_gym/cli/", "nemo_gym/data/tasks/")) and path not in (
             "nemo_gym/cli/__init__.py",
             "nemo_gym/cli/utils.py",
         ):
@@ -39,7 +39,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
                 "scripts/harness_conformance/",
-                "tests/unit_tests/harness_capabilities/",
+                "tests/unit_tests/rollouts/harness_capabilities/",
                 "tests/unit_tests/test_harness_conformance",
             )
         ):

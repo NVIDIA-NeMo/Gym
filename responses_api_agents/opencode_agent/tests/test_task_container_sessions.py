@@ -14,7 +14,7 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.sandbox import SandboxStatus
 from responses_api_agents.opencode_agent.app import _REMAINING_CONTEXT_PLUGIN as REMAINING_CONTEXT_PLUGIN
 from responses_api_agents.opencode_agent.app import _is_model_endpoint_failure, _sandbox_prepare_command, argv_prompt

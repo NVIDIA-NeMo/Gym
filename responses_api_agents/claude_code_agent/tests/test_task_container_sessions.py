@@ -15,8 +15,8 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter
 from responses_api_agents.claude_code_agent.system_dependencies import system_dependencies_command

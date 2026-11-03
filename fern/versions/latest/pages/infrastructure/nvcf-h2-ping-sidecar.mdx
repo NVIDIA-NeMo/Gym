@@ -103,7 +103,7 @@ All keys are optional except `enabled` and `instances`.
 | `enabled` | `false` | Master switch. When false Gym starts nothing and leaves every URL untouched. |
 | `instances` | (required) | List of `{name, upstream, listen}`. `listen` defaults to `127.0.0.1:1250`; give each instance its own port. |
 | `binary` | `<cache_dir>/h2-ping-sidecar/<sources hash>/<go version>/h2-ping-sidecar` | Path to the compiled sidecar. When it is missing Gym builds it here. The path contains a hash of the Go sources and, when Go is on PATH, the exact Go version, so a binary built from older sources or an older Go is never reused. Without Go on PATH, Gym uses the newest binary already built from the current sources, so a node with no Go can run a cache built elsewhere. |
-| `build_if_missing` | `true` | Run `go build` when `binary` does not exist. Needs Go on PATH (1.25 or newer; see `nemo_gym/tools/sidecar/go.mod`). Set `false` to require a prebuilt binary. |
+| `build_if_missing` | `true` | Run `go build` when `binary` does not exist. Needs Go on PATH (1.25 or newer; see `nemo_gym/orchestration/tools/sidecar/go.mod`). Set `false` to require a prebuilt binary. |
 | `ping_interval` | `60s` | Idle time before a PING. Must be below 340s. |
 | `ping_timeout` | `15s` | Close the upstream connection if a PING is not acknowledged in time. See [Limits](#limits). |
 | `shutdown_grace` | `60s` | On shutdown, let in-flight requests finish for up to this long. |
@@ -141,14 +141,14 @@ some headroom. A value below it slows the sidecar down instead of capping its me
 
 ```bash
 # 1. Optional: build and test the sidecar yourself (Go 1.25+). Gym builds it on first use otherwise.
-cd nemo_gym/tools/sidecar
+cd nemo_gym/orchestration/tools/sidecar
 go vet ./... && go test ./...
 go build -buildvcs=false -trimpath -o h2-ping-sidecar .
 cd -
 
 # 2. Smoke test the proxy by hand against your function.
 export NVIDIA_API_KEY=nvapi-...
-nemo_gym/tools/sidecar/h2-ping-sidecar -listen 127.0.0.1:1250 \
+nemo_gym/orchestration/tools/sidecar/h2-ping-sidecar -listen 127.0.0.1:1250 \
     -upstream https://<function-id>.invocation.api.nvcf.nvidia.com &
 curl -sS -H "Authorization: Bearer $NVIDIA_API_KEY" http://127.0.0.1:1250/v1/models
 kill %1
@@ -195,4 +195,4 @@ returns instead of failing with `ServerDisconnectedError`. The sidecar log is
   HTTP/2.
 - **Only `gym env start`, `gym eval run` and the other commands that start servers** launch the sidecar.
   Servers started some other way (for example one `srun` step per server) must start their own, as
-  described in `nemo_gym/tools/sidecar/README.md`.
+  described in `nemo_gym/orchestration/tools/sidecar/README.md`.
