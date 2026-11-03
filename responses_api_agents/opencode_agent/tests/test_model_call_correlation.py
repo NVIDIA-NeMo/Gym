@@ -8,7 +8,7 @@ import pytest
 from nemo_gym.config import ModelServerRef
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import merge_model_call_capture_into_record, read_model_call_records
-from nemo_gym.rollouts.rollout_collection import _build_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.trajectory import (
     AgentObservationBundle,
     ContextCompactionObservation,

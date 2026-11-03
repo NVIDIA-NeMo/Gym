@@ -28,7 +28,6 @@ if TYPE_CHECKING:
         NG_RESULT_TYPE_KEY,
         NG_TERMINAL_KEY,
         NG_TRAJECTORY_KEY,
-        DispatchLatencyTracker,
         RolloutCollectionConfig,
         RolloutCollectionHelper,
         SharedRolloutCollectionConfig,
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+    from nemo_gym.rollouts.rollout_perf import DispatchLatencyTracker
     from nemo_gym.rollouts.rollout_records import (
         coverage_path_for,
         journal_path_for,
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "AGENT_REQUEST_FAILED_FAILURE_CLASS": "rollout_collection",
-    "DispatchLatencyTracker": "rollout_collection",
+    "DispatchLatencyTracker": "rollout_perf",
     "ELAPSED_S_KEY": "health.timeouts",
     "ENVIRONMENT_SERVER_FAILURE_CLASS": "rollout_collection",
     "IncompleteEvaluationError": "rollout_recovery",
