@@ -17,12 +17,10 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils import SandboxSession
-from nemo_gym.agent_utils import sandbox_session as sandbox_session_module
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agents.utils import sandbox_session as sandbox_session_module
 from nemo_gym.client import ServerClient
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.providers.local.provider import LocalProvider
+from nemo_gym.sandbox import AsyncSandbox, LocalProvider, SandboxSpec
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig
 from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxSession
 
@@ -200,7 +198,7 @@ async def test_unconfirmed_probe_termination_fails_close(probe_env, tmp_path):
 
 
 async def test_final_negative_probe_receipt_releases_unconfirmed(probe_env, tmp_path):
-    from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+    from nemo_gym.agents import HarnessTerminationError
 
     agent, runtime, pid_dir, workdir = probe_env
     owner, state, release = await borrowed_state(tmp_path, runtime, workdir)

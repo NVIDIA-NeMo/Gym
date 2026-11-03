@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.sandbox import SandboxExecResult
@@ -183,7 +183,7 @@ def sandbox_boundary(monkeypatch):
     monkeypatch.setattr(module, "resolve_provider_config", lambda *_args: {"docker": {}})
     monkeypatch.setattr(module, "resolve_provider_metadata", lambda *_args: {})
     monkeypatch.setattr(module, "create_provider", lambda _config: MagicMock())
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.get_first_server_config_dict", lambda *_args: {})
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict", lambda *_args: {})
     monkeypatch.setattr(LangGraphSandboxSession, "install_runtime", AsyncMock())
     return sandbox, factory
 

@@ -18,8 +18,7 @@ from packaging.utils import canonicalize_name
 from pydantic import ValidationError
 
 import nemo_gym
-from nemo_gym.agent_utils import SandboxSession
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+from nemo_gym.agents import AgentCloseSessionRequest, SandboxSession
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.langgraph_agent import sandbox as module
 from responses_api_agents.langgraph_agent.sandbox import LangGraphSandboxSession
@@ -52,8 +51,8 @@ def test_runtime_bundle_contains_current_sources_and_only_runtime_dependencies()
     bundle = module.build_runtime_bundle()
     with tarfile.open(fileobj=io.BytesIO(bundle.archive), mode="r:gz") as archive:
         names = archive.getnames()
-        source = Path(nemo_gym.__file__).parent / "agent_utils" / "sandbox_session.py"
-        assert archive.extractfile("runtime/nemo_gym/agent_utils/sandbox_session.py").read() == source.read_bytes()
+        source = Path(nemo_gym.__file__).parent / "agents" / "utils" / "sandbox_session.py"
+        assert archive.extractfile("runtime/nemo_gym/agents/utils/sandbox_session.py").read() == source.read_bytes()
         agent_dir = Path(module.__file__).parent
         for filename in ("workflows.py", "sandbox_runner.py"):
             assert (

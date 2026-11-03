@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_agent import ROLLOUT_STOP_METADATA_KEY, AgentCloseSessionRequest
+from nemo_gym.agents import ROLLOUT_STOP_METADATA_KEY, AgentCloseSessionRequest
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.langgraph_agent.tests.test_app import (

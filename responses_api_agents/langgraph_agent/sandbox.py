@@ -19,8 +19,7 @@ from packaging.utils import canonicalize_name
 from pydantic import JsonValue
 
 import nemo_gym
-from nemo_gym.agent_utils import DEFAULT_UV_CACHE_DIR, SandboxCommand, SandboxSession, uv_for_sandbox
-from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.agents import DEFAULT_UV_CACHE_DIR, AgentSessionState, SandboxCommand, SandboxSession, uv_for_sandbox
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 

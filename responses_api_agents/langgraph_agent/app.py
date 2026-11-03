@@ -14,8 +14,8 @@ from uuid import uuid4
 from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import ConfigDict, Field, JsonValue
 
-from nemo_gym.agent_utils import DEFAULT_UV_CACHE_DIR, SandboxSession, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    DEFAULT_UV_CACHE_DIR,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
@@ -23,8 +23,10 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
+    SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
+    resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
