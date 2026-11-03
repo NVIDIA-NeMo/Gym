@@ -16,6 +16,7 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.copilot_agent.app import (
     CopilotAgent,
     CopilotAgentConfig,
@@ -539,10 +540,13 @@ def test_native_startup_error_preserves_bounded_stderr(setup, stderr):
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200
-        with pytest.raises(RuntimeError, match="Copilot exited with code 1") as error:
+        with pytest.raises(NgFailureEvent, match="agent.responses") as error:
             client.post("/ng-rollout/copilot-smoke-a2/v1/responses", json={"input": "Fix the code"})
-        assert stderr[-4000:] in str(error.value)
-        assert len(str(error.value)) < 4100
+        # The agent route reports the adapter's error as the failure's cause and replies with it.
+        cause = error.value.__cause__
+        assert isinstance(cause, RuntimeError) and "Copilot exited with code 1" in str(cause)
+        assert stderr[-4000:] in str(cause)
+        assert len(str(cause)) < 4100
         closed = client.post(
             "/v1/agent_sessions/close",
             json={
