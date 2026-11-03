@@ -117,16 +117,6 @@ class TestApp:
             "provider": "test-provider",
             "sandbox_id": "sandbox-123",
             "outcome": "completed",
-            "exit_code": None,
-            "cpu_time_s": None,
-            "peak_memory_mib": None,
-            "resource_usage_source": None,
-            "error_type": None,
-            "observed_client_interval_s": None,
-            "teardown_confirmed": None,
-            "cleanup_errors": [],
-            "phase": None,
-            "error_message": None,
         }
         assert observation["phase"] is None
         assert observation["exit_code"] is None
@@ -135,6 +125,10 @@ class TestApp:
         assert observation["resource_usage_source"] is None
         assert observation["error_type"] is None
         assert observation["error_message"] is None
+        assert observation["failure_id"] is None
+        assert observation["observed_client_interval_s"] is None
+        assert observation["teardown_confirmed"] is None
+        assert observation["cleanup_errors"] == []
 
     async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()

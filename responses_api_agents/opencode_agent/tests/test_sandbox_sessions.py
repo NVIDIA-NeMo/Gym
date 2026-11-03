@@ -394,10 +394,12 @@ def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_sessio
     )
     sandbox.launch.side_effect = error
 
+    webapp = agent.setup_webserver()
+    agent.setup_exception_middleware(webapp)
     module = "responses_api_agents.opencode_agent.app"
     with (
         patch(f"{module}.AsyncSandbox", return_value=sandbox) as factory,
-        TestClient(agent.setup_webserver()) as client,
+        TestClient(webapp) as client,
     ):
         factory.connect = AsyncMock(return_value=sandbox)
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
@@ -415,9 +417,20 @@ def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_sessio
         assert observation.provider == "opensandbox"
         assert observation.sandbox_id == sandbox.sandbox_id
         assert observation.error_type is None
+        from nemo_gym.core import FailureHeader
+
+        report = FailureHeader.decode(response.headers)
+        assert report.failure_id is None
+        assert report.events[observation.failure_id].failure_kind == PROVIDER_OOM_KILLED
         assert observation.failure_id == error.event_id
         assert observation.error_message is None
 
+        retried = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert retried.status_code == 200
+        retry_report = FailureHeader.decode(retried.headers)
+        assert set(retry_report.events) == set(report.events)
+        assert retry_report.failure_id is None
+        assert retried.json() == body
         exec_count_at_failure = sandbox.exec.await_count
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text

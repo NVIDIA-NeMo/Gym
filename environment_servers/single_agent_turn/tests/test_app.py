@@ -1631,6 +1631,7 @@ async def test_seed_observation_is_appended_only_to_the_agent_request(
         **request.task.task_input.task_data,
         "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
         "response": _agent_response().model_dump(mode="json"),
+        "failure_report": None,
     }
     assert verify_call["cookies"] == {"session": "updated-cookie"}
     assert request.task.task_input.responses_create_params is params
