@@ -107,7 +107,7 @@ async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tm
 
     # Persist the actual registered verifier reply through the normal collection writer.
     import nemo_gym.rollouts.rollout_collection as collection
-    from nemo_gym.rollouts import RolloutStore
+    from nemo_gym.rollouts.rollout_store import RolloutStore
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
     from tests.unit_tests.rollouts.test_rollout_recovery import failing_row
 

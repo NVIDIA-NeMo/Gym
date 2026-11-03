@@ -29,8 +29,9 @@ import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.artifacts.rollout_rows import NG_NO_GENERATION_METADATA
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore, RunManifest
-from nemo_gym.rollouts.rollout_recovery import has_recorded_grade, has_saved_generation
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_recovery import RunManifest, has_recorded_grade, has_saved_generation
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.single_agent_turn_helpers import _environment_server, _request
 
 

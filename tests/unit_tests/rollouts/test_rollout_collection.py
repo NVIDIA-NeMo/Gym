@@ -13698,7 +13698,7 @@ class TestUnroutedRunFailure:
         assert row[NG_UNROUTED_RUN_ERROR_KEY] is True and NG_DISPATCH_DRAINED_KEY not in row
         assert row["_ng_failure_http_status"] == status and row["_ng_failure_type"] == type(failure).__name__
         # The run store stamps every dispatched outcome with the run's saved cap; the evidence still spends none of it.
-        from nemo_gym.rollouts import RolloutStore
+        from nemo_gym.rollouts.rollout_store import RolloutStore
 
         assert row[NG_FAILURE_MAX_ATTEMPTS_KEY] == RolloutStore.read(output).manifest.max_rollout_attempts
         assert RolloutStore.read(output).coverage()["counted_failures"] == 0
@@ -13724,7 +13724,7 @@ class TestUnroutedRunFailure:
         # Both reservations remain recorded, and the diagnostic debits no failure budget.
         assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {2: 1}
         output = Path(config.output_jsonl_fpath)
-        from nemo_gym.rollouts import RolloutStore
+        from nemo_gym.rollouts.rollout_store import RolloutStore
 
         assert RolloutStore.read(output).coverage()["counted_failures"] == 0
         assert (
@@ -13810,7 +13810,7 @@ class TestUnroutedRunFailure:
         dispatched, *_ = RolloutCollectionHelper()._load_from_cache(resumed)
         # Attempt 1 may have executed. Keep the older failure's score and debit, but do not dispatch attempt 2.
         assert dispatched == []
-        from nemo_gym.rollouts import RolloutStore
+        from nemo_gym.rollouts.rollout_store import RolloutStore
 
         store = RolloutStore.read(output)
         assert store.manifest.next_attempt["1-0"] == 2
@@ -14110,8 +14110,9 @@ def test_an_episode_result_keeps_only_a_complete_final_zero_marker(markers, acce
 
 def test_historical_unrouted_diagnostic_does_not_erase_judge_zero(tmp_path):
     """The historical judge-then-unrouted sequence keeps its score denominator without replaying an agent."""
-    from nemo_gym.rollouts import RolloutStore, RunManifest
     from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     rows = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0} for i in range(2)]
     source = tmp_path / "input.jsonl"

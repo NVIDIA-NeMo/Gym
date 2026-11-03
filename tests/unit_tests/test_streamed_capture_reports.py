@@ -11,7 +11,7 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
 from nemo_gym.models.model_call_capture import CaptureStore
-from nemo_gym.rollouts import RolloutStore
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
 from tests.unit_tests.test_streamed_failure_reports import FINAL, RECOVERED, _LateChat, _LateResponses
 
@@ -92,7 +92,7 @@ async def test_actual_stream_capture_survives_collection_and_store(tmp_path, mon
 )
 def test_capture_report_negatives_preserve_episode_selection_and_saved_zero(tmp_path, mutation):
     from nemo_gym.failure_transport import FailureHeader, report_for_current_request
-    from nemo_gym.rollouts import merge_model_call_capture_into_record
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
     from nemo_gym.typed_exceptions import NgFailureEvent
 
     episode = NgFailureEvent(
@@ -151,7 +151,7 @@ def test_capture_report_negatives_preserve_episode_selection_and_saved_zero(tmp_
     ],
 )
 def test_malformed_saved_stream_diagnostics_do_not_change_score_or_crash(tmp_path, raw):
-    from nemo_gym.rollouts import merge_model_call_capture_into_record
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 
     capture = tmp_path / "capture"
     CaptureStore(capture).record(
