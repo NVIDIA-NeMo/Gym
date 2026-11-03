@@ -22,7 +22,7 @@ HDF5 at `/data/test_data_cleaned.h5`; see the
 [image instructions](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/scicode/sandbox_image).
 
 `scicode_verified_resources_server.resources_servers.scicode.num_processes`
-limits concurrent grading attempts, including creation and cleanup (20 by default).
+limits concurrent grading attempts, including creation and cleanup (64 by default for this remote overlay).
 Each attempt requests one CPU and 8 GiB; adjust concurrency and
 `sandbox.memory_mib` to your service quota and measured workload. Model generation
 concurrency is independent. Infrastructure failures propagate without being scored

@@ -5,6 +5,7 @@ config_paths:
 scicode_verified_resources_server:
   resources_servers:
     scicode:
+      num_processes: 64
       test_data_fpath: /data/test_data_cleaned.h5
       grading_interpreters:
         - name: "2024"

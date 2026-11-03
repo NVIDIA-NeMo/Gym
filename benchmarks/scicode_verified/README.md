@@ -116,7 +116,7 @@ The image must contain the two configured interpreters and the corrected HDF5 at
 `/data/test_data_cleaned.h5`. A reproducible image definition is in
 [`resources_servers/scicode/sandbox_image`](../../resources_servers/scicode/sandbox_image/README.md).
 
-The overlay preserves the benchmark's grading concurrency (20 by default), with
+The remote overlay defaults to 64 concurrent grading attempts, with
 each sandbox requesting one CPU and 8 GiB of memory. `num_processes` bounds
 concurrent sandbox attempts; model generation concurrency is independent.
 Size `num_processes` and `sandbox.memory_mib` for the service quota and workload.
