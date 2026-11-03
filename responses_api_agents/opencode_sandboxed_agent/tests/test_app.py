@@ -1935,11 +1935,8 @@ def _ended_timeout(reason="OOMKilled", container_line="container sandbox exited 
 
 
 async def test_a_staging_upload_that_times_out_is_observed_as_a_seed_stage_transport_timeout(tmp_path):
-    from nemo_gym.rollouts.rollout_collection import (
-        NG_FAILURE_COUNTS_AS_ZERO_KEY,
-        NG_TERMINAL_KEY,
-        _agent_request_failure_row,
-    )
+    from nemo_gym.rollouts import NG_TERMINAL_KEY
+    from nemo_gym.rollouts.rollout_collection import NG_FAILURE_COUNTS_AS_ZERO_KEY, _agent_request_failure_row
     from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
 
     error = TimeoutError(_RIPGREP_TIMEOUT)

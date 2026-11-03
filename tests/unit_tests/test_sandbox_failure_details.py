@@ -7,13 +7,13 @@ import pytest
 
 from nemo_gym.core.failure_transport import FailureHeader
 from nemo_gym.core.typed_exceptions import failure_report_for
-from nemo_gym.sandbox import SandboxBackendUnreachableError
 from nemo_gym.sandbox.failure_details import (
     ended_sandbox,
     provider_report,
     sandbox_failure_event,
     sandbox_transport_failure_event,
 )
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
 
 
 SANDBOX = "00000000-0000-4000-8000-000000000001"
