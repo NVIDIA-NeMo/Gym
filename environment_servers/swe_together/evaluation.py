@@ -24,7 +24,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import ServerClient, get_response_json, raise_for_status
 from nemo_gym.config import AgentServerRef
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId, model_sampling_path_segment
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, read_text, upload_text
 
 
@@ -160,7 +160,9 @@ async def run_judge(
     deadline: float | None = None,
     cleanup_timeout: float = 300,
     evidence: dict | None = None,
+    model_sampling: str | None = None,
 ) -> dict:
+    """Run the judge agent on a submission. ``model_sampling`` is its activation's ``/ng-sampling/`` value, if any."""
     evidence = evidence if evidence is not None else {}
     prompt = await stage_judge(sandbox, task_dir, patch, workdir)
     session_id = "judge-" + uuid4().hex
@@ -196,7 +198,10 @@ async def run_judge(
             },
         )
         response = await client.post(
-            agent.name, f"/ng-rollout/{judge_episode.capture_key}/v1/responses", json=params, cookies=judge_cookies
+            agent.name,
+            f"/ng-rollout/{judge_episode.capture_key}{model_sampling_path_segment(model_sampling)}/v1/responses",
+            json=params,
+            cookies=judge_cookies,
         )
         await raise_for_status(response)
         transcript = await get_response_json(response)
