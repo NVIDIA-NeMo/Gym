@@ -423,7 +423,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/embeddings")(self.embeddings)
 
         self.setup_policy_checkpoint(app, capture_ledger)
-        # Outermost of the app's middleware, so policy admission and capture see the values the provider receives.
+        # Added after policy admission and capture, so it runs before them and they see the values the provider receives.
         sampling_config = model_call_sampling_config(self.server_client.global_config_dict)
         app.add_middleware(
             ModelSamplingMiddleware,
