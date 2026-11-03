@@ -134,7 +134,7 @@ def test_aggregate_cli_exits_nonzero_after_saving_failed_agent_entry(tmp_path: P
         from aiohttp import ClientResponseError
         from omegaconf import OmegaConf
         from nemo_gym.cli.main import main
-        from nemo_gym.rollout_collection import RolloutCollectionHelper
+        from nemo_gym.rollouts import RolloutCollectionHelper
 
         error = ClientResponseError(
             request_info=SimpleNamespace(real_url="http://agent/aggregate_metrics"),
@@ -303,8 +303,8 @@ class TestEvalRunNoServeWithoutHeadServer:
 def test_collect_rollouts_preserves_incomplete_exit_and_shuts_down_telemetry(
     tmp_path, monkeypatch, retryable, expected_exit, require_complete
 ):
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
-    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
     from nemo_gym.telemetry import setup
 
     output = tmp_path / "output.jsonl"
