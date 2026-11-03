@@ -77,11 +77,18 @@ over only if the successor dies before its own prologue, then reads its predeces
 
 | Predecessor ended | The chain |
 | --- | --- |
-| `TIMEOUT` | Continues from the saved rows, within `max_walltime`. A rollout in flight when its allocation ends is rerun from the start: the first such cut is free, every later one charges one attempt of that identity as the failure kind `rollout_allocation_ended` (evaluation-side, counted in health; at the attempt cap it is final). The Store cannot tell a walltime cut from a preemption or a node failure, so the rule covers any ended allocation. |
+| `TIMEOUT` | Continues from the saved rows, within `max_walltime`. A rollout in flight when its allocation ends is rerun from the start: the first such end of an in-flight rollout is free; from the second end on, each one charges the affected rows one attempt as the failure kind `rollout_allocation_ended` (evaluation-side, counted in health; retried under the attempt cap, and final at it). The Store cannot tell a walltime cut from a preemption or a node failure, so the rule covers any ended allocation. |
 | `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Retries, spending one of `max_retries`. |
 | `COMPLETED` | Ends. |
 | `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. |
 | `TIMEOUT` before the task inventory was written | Stops and names the fresh-restart command (step 6). |
+
+An empty `sacct` reply for the previous job is retried: the job asks up to 6 times, 10 seconds apart,
+and then stops the chain with accounting unknown instead of resuming. A scheduler whose accounting lags
+by about a minute therefore stops chains. The stop's log line names the continuation,
+`gym eval resubmit <id> <benchmark> --recover --max-walltime HH:MM:SS --walltime-reason TEXT`, adding
+`--extend-retries N` when the retries are spent, and `gym eval resubmit --recover --inspect` (step 4)
+reports it too; the `.gym_chain_incomplete` marker keeps the bare reason.
 
 A job whose driver finishes the run ends the chain itself. After the driver step, it writes the
 record the next job would have written (the run complete, or its missing export receipt), cancels
@@ -173,7 +180,7 @@ the exit code. A call handed to a queue can also exit 0 while the gate still rea
 take `ok` and `job_id` from the JSON line, not from the exit code. Its top-level
 keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_id`, `unsupported`,
 `mlflow` (`receipt`: `run_id`, `current`, `uploaded_rollouts`, `rollout_projection_version`),
-`reverify`, `judge_job`, `walltime_plan`, `scheduler_refusal` and `reader_token`. Read:
+`reverify`, `judge_job`, `walltime_plan`, `pin_plan`, `scheduler_refusal` and `reader_token`. Read:
 
 - the decision's `action` (`noop`, `reverify`, `resubmit`, `fresh-restart`, `stop`) and `reason`.
   When the run's latest resume crossed operational configuration drift, the reason ends with
@@ -189,8 +196,11 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
   (present only when false) and `trajectory_evidence`.
 - `gate_task.failures`: `expected`, `omitted`, `response_failures` and `trial_failures` (each with
   `count`, `rate` and `by_cause`, a `count` and `rate` per cause: `truncated`, `empty`, `malformed`
-  for responses; `request`, `judge`, `sandbox`, `harness`, `timeout`, `other` for trials) and
-  `metric_coverage` (`trials`, `expected`, `source`). Facts; no limit is applied to them.
+  for responses; `request`, `judge`, `sandbox`, `harness`, `timeout`, `allocation` (a rollout in flight
+  at repeated ends of its allocation), `other` for trials), `metric_coverage` (`trials`, `expected`,
+  `source`), `output_budget_refits` (`count`, `rows`: model calls sent again with a lowered output
+  budget) and `agent_adaptations` (per name `count`, `rows`: what an agent adapted on its own, for
+  example a GDP-PDF input-limit rejection). Facts; no limit is applied to them.
 - `gate_task.trial_counts` (null until complete): `observed_healthy`, `unhealthy`, `unobserved`,
   `verifier_recorded` (the observed-healthy trials known only through the verifier's own grading
   record) and `unobserved_reason` when `unobserved` is not 0. Unobserved trials are unverified,
@@ -202,7 +212,9 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
   `MLflow delivery <state>: <reasons>`. A run that stated no `tracking_required` is read from its
   saved config.
 - `gate_task.health_verdict` (one line), `criteria`, `mlflow_tracking_required`,
-  `expected_samples`, `scored_samples`, `omitted_samples`, `score`, `errors`, `warnings`, and where
+  `expected_samples`, `scored_samples`, `omitted_samples`, `score`, `errors`, `warnings`,
+  `retry_budget` (`infra` and `attempts`, each with its `configured` cap and recorded `extension`),
+  `observed_grading_recovery` (counts of recovered grading attempts; null when there are none), and where
   the read ran (`reader_host`, `collector_host`, each with a `*_fallback_reason` when a reader
   stayed on the login host).
 
@@ -210,7 +222,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 
 | The inspection says | Do |
 | --- | --- |
-| Eligible work, `PLANNED` | Run the same command without `--inspect`, with the variables the saved config forwards (`compute.forward_env`, `HF_TOKEN` for instance) set in that shell; a missing one stops the dispatch. |
+| Eligible work, `PLANNED` | Run the same command without `--inspect`, with the variables the saved config forwards (`compute.cluster.forward_env`, `HF_TOKEN` for instance) set in that shell; a missing one stops the dispatch. |
 | `reverify`, `PLANNED` (only rows with a saved answer remain: a judge failure, or a verify call lost in transport) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. A run that served its own model, and nothing else beside it, gets a judge-only job on one CPU node. Its partition is the first of: `--judge-partition <partition>`, a node pool of the saved config with `gpus_per_node: 0`, or the partition that `NEMO_GYM_REMOTE_READER_SRUN` names. The job also needs a QOS that matches that partition: `--judge-qos <qos>`, else the QOS of the saved CPU pool, else the `-q` or `--qos` option of `NEMO_GYM_REMOTE_READER_SRUN` when it names this partition or none, else the partition's default. Slurm refuses a GPU QOS on a CPU partition (`QOSMinGRES`); pass `--judge-qos` then. On a site where the saved config has no CPU pool and no reader placement is set, pass `--judge-partition` with the resubmit, or the recovery stops with nothing queued (next row). The judge-only job runs `gym eval reverify --settle-receipt`: the Gym that runs it must define that option, or the queued job stops at argument parsing. A run that serves its judge on a node pool of its own gets a judge-only job on that saved pool instead: the judge's services start on their saved pools and the job keeps the run's QOS; `--judge-partition` and `--judge-qos` are not used (when you pass them, the report says `--judge-partition/--judge-qos apply to the CPU judge profile only; not used`). A run with both judge failures and policy work is resubmitted; the resumed run re-judges the saved judge failures before its policy work, while its judge servers are up, and again at the end of the run. |
 | STOP on a `reverify` of a GPU-served run, `... has no existing CPU-only judge execution profile and none can be derived: no CPU partition is known (... no --judge-partition was given)` | Nothing was queued and no row was lost. Run the same command again with `--recover --judge-partition <cpu partition>` (and `--judge-qos <qos>` when Slurm refuses the job with `QOSMinGRES`), a partition of your site that runs CPU jobs. If the message says instead `this submission has no served-judge execution profile: service(s) <names> run on the policy's nodes (its node pool, or no node_pool of their own, which is the whole allocation)`, no partition helps: the judge-only job does not start the policy's allocation and policy services are not restarted. Give each of those services a node pool of its own, beside the policy's, in the submission config, or report that the saved answers cannot be re-judged. |
 | NOOP, `RUNNING` (`continuation <job> live; nothing to decide`) | A job of the run is live. Wait for it to end, then inspect again. |
@@ -223,7 +235,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 10, item 3). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
 | NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (the warning reads `MLflow delivery <state>: <reasons>`) | The results are complete and the status is whatever they decide: delivery is reported beside the gate, never inside it. Close the delivery: run `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values taken from the run's `artifacts/rollouts_resolved_config.yaml` (the export does not read that file itself), the tracking token given as `+mlflow_tracking_token=<token>` or in the `MLFLOW_TRACKING_TOKEN` environment variable, and `--rollouts PATH` the same as `+rollouts_jsonl_fpath=PATH` (a repeat on an exported run verifies without touching the run lock); `--recover` on a complete run that requires tracking and has no receipt runs the export too. The reasons say which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then export. "does not name all of the tracking URI, experiment and run name": the saved config names no complete tracking target, so nothing tracked the run; set `mlflow_tracking_required: false` next time (step 1). The inspection asks the tracking server the saved config names for the status of the receipt's run (up to about 10 seconds, one retry); from a host without access it reports `unverified` with `status query failed: ...`, so inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status yourself (the run's page, or `GET <tracking uri>/api/2.0/mlflow/runs/get?run_id=<id>`, field `info.status`); a `status query failed: ModuleNotFoundError` means the reader's environment lacks the `mlflow` package, not that the host has no access. Passing the two flags avoids the call. |
-| `SUCCESS` | Done. Keep the run directory as the record. Cancel the last segment's pending sentinel (`scancel` the id in `.gym_followup_sentinel.<job id>`): once Slurm cancels the successor, the sentinel starts only to exit, on a full allocation (step 10). |
+| `SUCCESS` | Done. Keep the run directory as the record. A job that finished the run cancelled its own sentinel and successor (`chain-end-journal.jsonl`); a `job.sh` rendered before that did not, so `scancel` the id in `.gym_followup_sentinel.<job id>`: once Slurm cancels the successor, the sentinel starts only to exit, on a full allocation (step 10). |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
 per-rollout attempt allowance. It is not a substitute for a recovery STOP.
@@ -312,11 +324,12 @@ row's result, graded as a truncated answer and not regenerated; the HTTP 4xx inp
 negotiation (the DPI step-down to 72, the image cap, the text-only fallback) is the benchmark's
 delivery protocol, counted per row (`document_delivery.input_limit_rejections`,
 `output_truncation_regenerations`) and in the run facts; `regenerate_on_incomplete_output=true`
-reproduces the old main behaviour, for comparison only, so its cells differ from main by design.
+reproduces the old main behaviour, for comparison only; with the default (false) GDP-PDF cells differ from main by design.
 A benchmark agent may also recover from an output cut inside the same episode, as part of its own
 protocol: the Stirrup agent's `truncation_recovery` setting follows a turn that spent its whole
 completion budget without a valid tool call with one more turn that has thinking off and a
-one-time instruction to act now, not recorded in the trajectory. That is the
+transient instruction not to restart the analysis, not recorded in the trajectory. The setting is off
+by default; the GDPVal benchmark config turns it on. That is the
 agent's protocol, not a retry of a model failure by recovery; regenerating an incomplete answer
 from scratch after a model-side failure stays excluded.
 `--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
@@ -395,8 +408,9 @@ reason say which one it was.
 
 ## 8. Overriding evaluation parameters
 
-Only the number of repeats (`num_repeats`) and the client parallelism (`--concurrency`, or
-`num_samples_in_parallel`) may be changed from the command line or a benchmark's `run`. Never
+For the evaluation itself, only the number of repeats (`num_repeats`) and the client parallelism
+(`--concurrency`, or `num_samples_in_parallel`) may be changed from the command line or a
+benchmark's `run`; a smoke run also sets `limit` (step 1). Never
 change the benchmark, the judge, or the benchmark's token budgets and timeouts. Those are the
 evaluation's identity, and changing them makes a different evaluation. The model section is yours:
 see [gym-add-model-config](../gym-add-model-config/SKILL.md).
@@ -439,15 +453,16 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 - Whether a trial counts as observed depends on the benchmark: its server recorded the grading
   operation, or saved a grading artifact bound to the answer (`judge_record`, `rubric_verdict`,
   `symbolic_match`, `metric_record`, `test_execution`, `environment_reward`, `repository_test_run`,
-  `substep_tests`), or the model's own failed answer settles it. Most servers grade through the
+  `substep_tests`, `unit_test_results`, `node_set_f1`, `session_reward_file`, `guarded_objective_score`,
+  `native_scorer_score`), or the model's own failed answer settles it. Most servers grade through the
   shared verify wrapper, which records the grading for them. A verifier that calls a judge without
   recording it and saves no recognised artifact is unobserved by construction, and its runs read
   `UNVERIFIED` with `trial_counts.unobserved_reason` naming the server; so does a run whose saved
-  config does not name its resources server. At this head that is the case for `aegis_v4_safety`,
-  `agentif`, `beam`, `deepsearchqa`, `finance_agent_v2`, `finance_sec_search`, `gdp_pdf`,
-  `imo_proofbench`, `longmemeval`, `simpleqa`, `widesearch`, `litmus-bench`, the `abstention`,
-  `inverse_if` and `multichallenge` parts of `nemotron_3.5_super`, `frontierscience_olympiad` and
-  `automationbench` (the benchmarks graded by the verifiers agent, AutomationBench among them).
+  config does not name its resources server. A resources server that sets
+  `grading_may_use_uninstrumented_model` (it may ask a model through an external SDK client) gets no
+  grading record from the shared wrapper, so it is in the same case unless it saves a recognised
+  artifact. So is an agent that grades its own rollouts with an asynchronous or model-judged rubric;
+  a programmatic rubric is recorded.
   `UNVERIFIED` means the answers were scored, but the grading evidence was not recorded on this
   stack version. A resubmit cannot change it, and no flag does: it needs a run on a stack version
   that records grading. Report it with the reason and do not present the run as verified.
@@ -463,7 +478,7 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   `applied: false`; `--max-unhealthy-fraction` (per-rollout health) is judged in `warnings`. None
   of them changes the verdict. `gate_task.failures` lists the response failures (truncated, empty,
   malformed) and the trial failures by cause (`request`, `judge`, `sandbox`, `harness`, `timeout`,
-  `other`), with their rates: facts for you to judge, not verdicts. Model failures count in the
+  `allocation`, `other`), with their rates: facts for you to judge, not verdicts. Model failures count in the
   score and never fail health.
 - `warnings` also carries facts that fail nothing: `no response-health criterion configured` when
   `--max-unhealthy-fraction` was not given, and `health checks not fully evaluated` with the checks
@@ -524,7 +539,7 @@ correct or report yourself, until the matching policy lands in Gym.
   score over the rows the verifier graded beside the headline score.
 - **AutomationBench rows that ended on a serving timeout or a 5xx.** They are graded on the partial
   world. Count them from `rollout_error` before you publish a score; its `kind_candidate` is a
-  candidate (`http_5xx`, `http_429`, `timeout`, `connection`), and the verifier's own time limit
+  candidate (`http_5xx`, `http_429`, `timeout`, `connection`, among others), and the verifier's own time limit
   leaves no `rollout_error`.
 - **SciCode.** A killed grading subprocess shows as a wrong answer unless the step exit is recorded.
   Gym records it: look for `killed:<SIGNAL>` in `step_exits[].exit` (`killed:SIGKILL` for a memory
