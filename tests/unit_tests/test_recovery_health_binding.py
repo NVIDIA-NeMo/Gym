@@ -18,7 +18,7 @@ from nemo_gym.orchestration.recovery import (
     response_health,
     trial_health,
 )
-from nemo_gym.rollout_health import run_health_checks
+from nemo_gym.rollouts import run_health_checks
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 
 
@@ -333,7 +333,7 @@ def test_saved_answer_and_spent_budget_files_unchanged(tmp_path):
     ]
     before = {str(p): p.read_bytes() for p in protected}
     c = collect(a)
-    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
     assert has_saved_generation(c.failures[0])
     assert "synthetic saved answer must not regenerate" not in json.dumps(c.failures[0])
@@ -402,7 +402,7 @@ def test_any_gate_input_changed_after_report_is_unbound(tmp_path, name):
     ],
 )
 def test_inputs_changed_while_producing_report_are_not_bound(tmp_path, monkeypatch, name):
-    import nemo_gym.rollout_health as producer
+    import nemo_gym.rollouts.rollout_health as producer
 
     a, _ = setup(tmp_path)
     original = producer._index_jsonl

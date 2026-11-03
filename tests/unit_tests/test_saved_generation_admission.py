@@ -6,10 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.rollout_recovery import IncompleteEvaluationError
-from nemo_gym.rollout_store import RolloutStore
-from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore
+from nemo_gym.server_runtime.episode_types import ModelFailureDetails
+from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
 
 def response(output=None):
@@ -27,7 +26,7 @@ def response(output=None):
 
 @pytest.mark.parametrize("slot", ["response", "_ng_failure_response", "_ng_failure_partial_response"])
 def test_retained_generation_is_structural_not_placeholder_presence(slot):
-    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
     # A producer finished the response: it has an output item, or a status, even with no assistant text.
     assert has_saved_generation({slot: response() | {"status": "completed"}})
@@ -85,7 +84,9 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
         client.global_config_dict = OmegaConf.create(
             {"environment": {"environment_servers": {"single_agent_turn": {}}}}
         )
-        monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda: client.global_config_dict)
+        monkeypatch.setattr(
+            "nemo_gym.rollouts.rollout_collection.get_global_config_dict", lambda: client.global_config_dict
+        )
         with pytest.raises(IncompleteEvaluationError):
             await RolloutCollectionHelper().run_from_config(config)
         store = RolloutStore.read(output)
@@ -102,7 +103,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
 
 
 def has_actual_generation(row):
-    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
     return has_saved_generation(row)
 
@@ -172,7 +173,9 @@ async def test_failed_agent_partial_output_keeps_the_selected_policy(tmp_path, m
         client.global_config_dict = OmegaConf.create(
             {"environment": {"environment_servers": {"single_agent_turn": {}}}}
         )
-        monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda: client.global_config_dict)
+        monkeypatch.setattr(
+            "nemo_gym.rollouts.rollout_collection.get_global_config_dict", lambda: client.global_config_dict
+        )
         for resume in [False, True]:
             try:
                 await RolloutCollectionHelper().run_from_config(
@@ -205,17 +208,19 @@ async def test_selected_model_body_delivery_blocks_collection_resume(tmp_path, m
         operation_id="operation",
         attempt_id="operation-1",
         http_status=status,
-        request_upload_complete=False if status is None else None,
+        details=ModelFailureDetails(request_upload_complete=False if status is None else None),
     )
     from aiohttp import ClientResponseError
 
-    from tests.unit_tests.test_rollout_collection import http_error
+    from tests.unit_tests.rollouts.test_rollout_collection import http_error
 
     error = http_error(500)
     error.__cause__ = failure
     post = AsyncMock(side_effect=error)
     client = install_fake_server_client(monkeypatch, post)
-    monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda: client.global_config_dict)
+    monkeypatch.setattr(
+        "nemo_gym.rollouts.rollout_collection.get_global_config_dict", lambda: client.global_config_dict
+    )
     source, output = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
     source.write_text(json.dumps({"agent_ref": {"name": "my_agent"}, "responses_create_params": {"input": []}}) + "\n")
     config = RolloutCollectionConfig(
@@ -242,7 +247,7 @@ async def test_selected_model_body_delivery_blocks_collection_resume(tmp_path, m
 
 
 def test_unselected_body_failure_does_not_override_selected_preanswer_infrastructure():
-    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
 
     events = {
         "old": {

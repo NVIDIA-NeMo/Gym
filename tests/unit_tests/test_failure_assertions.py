@@ -5,9 +5,9 @@ on the wrong failure."""
 
 import pytest
 
+from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
 from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR
 from nemo_gym.server_runtime.episode_types import FailureBoundary
-from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.typed_exceptions import NgFailureEvent, agent_route_failure
 
 

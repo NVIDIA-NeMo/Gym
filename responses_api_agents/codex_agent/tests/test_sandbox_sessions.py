@@ -28,11 +28,11 @@ from nemo_gym.agents import (
     is_harness_termination_failure,
     parse_cleanup_receipt,
 )
+from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxStatus
-from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig, _model_endpoint_error
 
@@ -2286,7 +2286,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         SingleAgentTurnLegacyEnvironmentServerConfig,
     )
     from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     agent, sandbox = setup
     provider_failure = outcome == "provider-failure"
@@ -3537,10 +3537,9 @@ async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(
     from httpx import ASGITransport, AsyncClient
 
     from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore
     from tests.single_agent_turn_helpers import _environment_server, _request, _Response
-    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     agent, sandbox = setup
     sandbox.blocked = True
@@ -3596,7 +3595,7 @@ async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(
         collector = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         collector.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
         if case == "unknown_kill":
-            from nemo_gym.rollout_recovery import IncompleteEvaluationError
+            from nemo_gym.rollouts import IncompleteEvaluationError
 
             with pytest.raises(IncompleteEvaluationError, match="no score"):
                 await RolloutCollectionHelper().run_from_config(config)

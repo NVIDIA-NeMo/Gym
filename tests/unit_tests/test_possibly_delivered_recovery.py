@@ -31,8 +31,7 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest
 from tests.unit_tests.test_possibly_delivered_replay import _lost_connection_row
 from tests.unit_tests.test_resume_script import _run_prologue
 

@@ -49,6 +49,7 @@ from nemo_gym.server_runtime import (
     FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
+    ModelFailureDetails,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
@@ -645,7 +646,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         attempts = [event for event in observed if event.operation_id == selected.operation_id]
         connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
         return len({event.attempt_id for event in attempts}) == len(attempts) and all(
-            event.request_upload_complete is False
+            isinstance(event.details, ModelFailureDetails)
+            and event.details.request_upload_complete is False
             and event.foreign_error is not None
             and event.foreign_error.exception_type == connector_type
             for event in attempts

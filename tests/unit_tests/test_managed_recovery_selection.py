@@ -16,12 +16,11 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest
+from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
 from tests.unit_tests.test_eval_resubmit import _handle, _provider_failures, _resumable_run, _sbatch_env
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
-from tests.unit_tests.test_rollout_recovery import runner_config as runner_config
 
 
 def saved_bytes(job):
@@ -406,7 +405,7 @@ def test_hashing_rejects_mid_read_file_mutation(tmp_path, monkeypatch, reader, m
 
 
 async def test_actual_collection_native_outcomes_reach_managed_recovery(runner_config, monkeypatch, tmp_path):
-    from tests.unit_tests.test_rollout_recovery import (
+    from tests.unit_tests.rollouts.test_rollout_recovery import (
         test_typed_episode_outcomes_settle_stop_or_retry_through_collection_and_resume as produce,
     )
 

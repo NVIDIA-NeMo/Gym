@@ -287,8 +287,8 @@ Without it, pre-stamped rows retain their IDs and unstamped rows share a new ID 
 The returned rows are copies; caller-owned input rows are not modified.
 
 ```python
-from nemo_gym.rollout_collection import RolloutCollectionHelper
-from nemo_gym.rollout_outcomes import RolloutFailureRecord
+from nemo_gym.rollouts import RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutFailureRecord
 
 
 async def collect_outcomes(input_rows):

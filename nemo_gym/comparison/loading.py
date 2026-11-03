@@ -36,7 +36,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INFOS_KEY_NAME,
 )
 from nemo_gym.metrics.metrics_config import Stat
-from nemo_gym.rollout_records import resolve_rollout_path
+from nemo_gym.rollouts.rollout_records import resolve_rollout_path
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 from nemo_gym.utils.text import did_you_mean
 

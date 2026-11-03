@@ -10,15 +10,13 @@ import pytest
 
 from nemo_gym import rollout_reverification
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_records import logical_rollout_id, materialized_path_for
-from nemo_gym.rollout_recovery import RunManifest
 from nemo_gym.rollout_reverification import (
     RolloutReverificationConfig,
     bind_judge_failures,
     due_judge_failures,
     rejudge_saved_judge_failures,
 )
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest, logical_rollout_id, materialized_path_for
 
 
 ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}

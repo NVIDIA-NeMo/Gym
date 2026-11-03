@@ -12,11 +12,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import orjson
 import pytest
 
-import nemo_gym.rollout_collection as rollout_collection_module
+import nemo_gym.rollouts.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
 from nemo_gym.config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY
+from nemo_gym.rollouts import NG_ENVIRONMENT_SERVER_KEY
 from resources_servers.gdpval.multistage_elo import StageSpec
 from resources_servers.gdpval.multistage_orchestrator import (
     FINGERPRINT_COMPONENTS_KEY,

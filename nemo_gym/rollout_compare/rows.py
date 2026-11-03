@@ -117,7 +117,7 @@ def load_rollouts(path: str | Path) -> list[dict[str, Any]]:
         failures_path = path.with_name(path.stem + FAILURES_SUFFIX)
         if failures_path.is_file():
             # Lazy: this package does not otherwise load the collection runtime.
-            from nemo_gym.rollout_collection import is_non_superseding_rollout_row
+            from nemo_gym.rollouts.rollout_collection import is_non_superseding_rollout_row
 
             attempts = [record for record in _read_jsonl(failures_path) if not is_non_superseding_rollout_row(record)]
             failures = [record for record in current_failures(attempts, rows) if not record.get("_ng_omitted_rollout")]

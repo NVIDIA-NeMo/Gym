@@ -421,12 +421,10 @@ async def test_protocol_failure_metadata_survives_collection(
 ) -> None:
     from unittest.mock import AsyncMock
 
-    import nemo_gym.rollout_collection as collection
-    from nemo_gym.rollout_outcomes import RolloutFailureRecord
-    from nemo_gym.rollout_records import logical_rollout_id
-    from nemo_gym.rollout_store import RolloutStore
+    import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.rollouts import RolloutFailureRecord, RolloutStore, logical_rollout_id
     from nemo_gym.server_runtime import EpisodeFailure, SingleAgentTurnFailure, SingleAgentTurnResponse
-    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     environment, client = _environment_server()
     if legacy:
@@ -628,7 +626,7 @@ def _chain_report(model_status: int):
 @pytest.mark.parametrize("model_status", [200, 503])
 def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) -> None:
     from nemo_gym.failure_transport import FailureReportRow
-    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
     from nemo_gym.server_runtime import SingleAgentTurnResponse
 
     environment_server, client = _environment_server()

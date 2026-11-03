@@ -21,7 +21,7 @@ from nemo_gym.failure_transport import (
     observe_reply,
     reply_failure_report,
 )
-from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
 from nemo_gym.server_runtime.episode_types import (
     BaseEpisodeResponse,
@@ -29,6 +29,7 @@ from nemo_gym.server_runtime.episode_types import (
     FailureBoundary,
     FailureEvent,
     FailureReport,
+    SandboxFailureDetails,
 )
 from nemo_gym.typed_exceptions import (
     NgFailureEvent,
@@ -252,9 +253,11 @@ def test_judge_failed_is_its_own_kind_above_the_typed_cause() -> None:
 def test_sandbox_credentials_are_rejected_only_by_status(status: int, kind: str) -> None:
     sdk = _SdkError("Authentication credentials are invalid.", status_code=status)
     rejected = sandbox_credentials_rejected(
-        sdk, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", sdk_message=sdk.args[0]
+        sdk, operation="create", sdk_message=sdk.args[0], details=SandboxFailureDetails(provider="test-provider")
     )
     assert rejected.__cause__ is sdk and rejected.event.failure_kind == kind
+    assert rejected.boundary == FailureBoundary.SANDBOX
+    assert rejected.details == SandboxFailureDetails(provider="test-provider")
     assert rejected.event.foreign_error.message == "Authentication credentials are invalid."
     assert "secret" not in rejected.event.model_dump_json()
 
@@ -262,7 +265,7 @@ def test_sandbox_credentials_are_rejected_only_by_status(status: int, kind: str)
 @pytest.mark.parametrize("status", [500, None])
 def test_auth_looking_text_without_a_401_or_403_is_not_a_credentials_failure(status: int | None) -> None:
     sdk = _SdkError("Authentication credentials are invalid.", status_code=status)
-    assert sandbox_credentials_rejected(sdk, boundary=FailureBoundary.ENVIRONMENT, operation="x") is None
+    assert sandbox_credentials_rejected(sdk, operation="create") is None
 
 
 def test_sdk_details_select_only_the_given_text_and_bound_it_visibly() -> None:
@@ -278,9 +281,7 @@ def test_outer_503_keeps_the_inner_sdk_401_below_the_credentials_failure() -> No
     from fastapi import HTTPException
 
     sdk = _SdkError("denied", status_code=401)
-    rejected = sandbox_credentials_rejected(
-        sdk, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", stage="seed"
-    )
+    rejected = sandbox_credentials_rejected(sdk, operation="create", stage="seed")
     outer = _chained(HTTPException(503, "Could not set up sandbox"), rejected)
     episode = _chained(
         NgFailureEvent(
@@ -295,7 +296,7 @@ def test_outer_503_keeps_the_inner_sdk_401_below_the_credentials_failure() -> No
     assert statuses == [None, 401]
     assert report.events[episode.event_id].foreign_error.http_status == 503
     assert report.events[rejected.event_id].foreign_error.http_status == 401
-    assert [event.boundary for event in report.events.values()] == ["environment", "environment"]
+    assert [event.boundary for event in report.events.values()] == ["environment", "sandbox"]
 
 
 def test_an_episode_failure_keeps_its_own_classification_and_its_report_travels_beside_it() -> None:

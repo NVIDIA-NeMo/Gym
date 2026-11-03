@@ -5,9 +5,7 @@ import json
 
 import pytest
 
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore, RunManifest
 
 
 @pytest.mark.parametrize(

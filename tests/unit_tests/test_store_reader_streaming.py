@@ -20,10 +20,9 @@ import tracemalloc
 
 import pytest
 
-import nemo_gym.rollout_records as records
+import nemo_gym.rollouts.rollout_records as records
 from nemo_gym.orchestration.recovery import STORE_SKIP_KEYS
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest
 
 
 _SKIP = frozenset({"ng_trajectory", "ng_model_call_capture"})

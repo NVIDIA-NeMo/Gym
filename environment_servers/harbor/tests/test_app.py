@@ -422,7 +422,9 @@ class TestEpisode:
         assert outer.failure_kind == "environment_episode_failed" and failure.failure_kind is None
         assert outer.foreign_error.http_status == 503
         setup = response.failure_report.events[outer.cause_id]
-        assert len(events) == 2 and setup.operation == "sandbox.setup"
+        assert len(events) == 2
+        assert setup.operation == "sandbox.setup"
+        assert setup.boundary == ("sandbox" if status in (401, 403) else "environment")
         assert setup.foreign_error.exception_type.endswith("SandboxApiException")
         assert setup.foreign_error.message == "Create sandbox failed: Authentication credentials are invalid."
         assert setup.foreign_error.http_status == status

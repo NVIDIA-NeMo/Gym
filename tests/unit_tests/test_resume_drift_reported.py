@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from nemo_gym.orchestration.recovery import decide_from_collected, resume_drift_note
-from nemo_gym.rollout_recovery import resume_drift_path_for, validate_resume
+from nemo_gym.rollouts.rollout_recovery import resume_drift_path_for, validate_resume
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir

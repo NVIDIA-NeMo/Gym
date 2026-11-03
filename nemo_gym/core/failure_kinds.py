@@ -209,7 +209,7 @@ MALFORMED_ANSWER = "malformed_answer"
 MODEL_SERVER_ERROR = "model_server_error"
 NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 # An ``agent_timeout`` whose window held a recorded server-side fault (``is_infrastructure_agent_timeout`` in
-# ``nemo_gym.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
+# ``nemo_gym.rollouts.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
 AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
 INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 INVALID_REQUEST_PARAMETER = "invalid_request_parameter"

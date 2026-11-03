@@ -13,11 +13,10 @@ import pytest
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.resume_script import EXPORT_RECEIPT_MISSING_REASON, INCOMPLETE_MARKER_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest
+from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
 from tests.unit_tests.test_managed_recovery_selection import prepare_managed
 from tests.unit_tests.test_resume_script import _run_prologue
-from tests.unit_tests.test_rollout_recovery import runner_config as runner_config
 
 
 @pytest.mark.parametrize(
@@ -258,10 +257,9 @@ async def test_actual_collection_failure_reaches_installed_runtime_and_retry_bud
     from omegaconf import OmegaConf
     from pydantic import BaseModel
 
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
-    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionHelper
     from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-    from tests.unit_tests.test_rollout_recovery import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_recovery import FakeResponse, install_fake_server_client
 
     class TaskInput(BaseModel):
         pass

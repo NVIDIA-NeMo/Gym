@@ -41,7 +41,7 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     gate_task_summary,
 )
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 class _StartsWith:
@@ -458,7 +458,7 @@ def unit_quality(*, expected, healthy=True, verdicts=None, partial=False, reason
 
 def produce_quality(job: Path) -> None:
     """Use current raw saved rows; a grade-only fixture has unobserved response/trial health."""
-    from nemo_gym.rollout_health import run_health_checks
+    from nemo_gym.rollouts import run_health_checks
 
     run_health_checks(job / "artifacts" / "rollouts.jsonl", workers=1)
 
@@ -2151,7 +2151,7 @@ def test_mcqa_trial_operations_with_unsupported_provenance_are_unproven_not_rais
 )
 def test_collector_projection_preserves_verification_stop_without_regenerating(tmp_path, case):
     from nemo_gym.failure_transport import FailureReportRow
-    from nemo_gym.rollout_collection import _agent_request_failure_row, _collection_failure_report
+    from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row, _collection_failure_report
     from nemo_gym.server_runtime.episode_types import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent
 
@@ -2294,7 +2294,7 @@ def test_projected_explicit_final_model_zero_stays_settled(tmp_path):
 @pytest.mark.parametrize("mode", ["default", "terminal", "explicit_fail"])
 def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, case, mode):
     from nemo_gym.failure_transport import FailureReportRow
-    from nemo_gym.rollout_collection import _agent_request_failure_row, _collection_failure_report
+    from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row, _collection_failure_report
 
     failure = TimeoutError("dispatch did not reach the agent")
     row = _agent_request_failure_row(failure, None)

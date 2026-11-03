@@ -31,9 +31,7 @@ from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.resolved_config import write_resolved_config
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.cli.eval import _finalize_live_exporters
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest, run_health_checks
 from tests.unit_tests.test_export_receipt import _collected_mlflow
 
 
@@ -454,7 +452,7 @@ def test_live_finalizer_rejects_changed_completion_identity(live, monkeypatch, f
 
         client.get_run = wrong_run
     else:
-        from nemo_gym.rollout_recovery import manifest_path_for
+        from nemo_gym.rollouts import manifest_path_for
 
         manifest = RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
         inputs = [orjson.loads(line) for line in artifacts.materialized_inputs_jsonl_fpath.read_bytes().splitlines()]

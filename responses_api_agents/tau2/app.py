@@ -44,7 +44,7 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.core.failure_kinds import EPISODE_FAILED
 from nemo_gym.models import chat_completion_usage_to_response_usage
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,

@@ -34,8 +34,7 @@ from nemo_gym.orchestration.recovery import (
     final_zero_trials,
     select_managed_evidence,
 )
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest
 
 
 POLICY = {"type": "responses_api_models", "name": "policy_model"}

@@ -13,7 +13,7 @@ from nemo_gym.agents.agent_outcome import (
     failure_outcome_policy,
 )
 from nemo_gym.core.failure_kinds import AGENT_INVALID_OUTPUT, MODEL_POLICY_RESPONSE_TIMEOUT, MODEL_TRANSPORT_ERROR
-from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.server_runtime.episode_types import FailureBoundary, ModelFailureDetails
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 
@@ -61,10 +61,10 @@ def test_upload_evidence_roundtrips_in_reports_and_process_projection(complete):
         boundary="model",
         failure_kind="model_request_error",
         failure_reason="observed",
-        request_upload_complete=complete,
+        details=ModelFailureDetails(request_upload_complete=complete),
     )
     report = failure_report_for(event)
     assert FailureHeader.decode(FailureHeader.encode(report)) == report
-    assert rebuild_failure(report).request_upload_complete is complete
+    assert rebuild_failure(report).details.request_upload_complete is complete
     for serializer in [pickle, cloudpickle]:
         assert serializer.loads(serializer.dumps(event)).to_record() == event.to_record()
