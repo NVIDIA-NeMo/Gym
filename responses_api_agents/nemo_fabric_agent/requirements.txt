@@ -1,4 +1,4 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent,nooa,openclaw,openhands,relay]==0.5.0
 # The openhands extra installs the adapter only. These are the OpenHands packages NeMo Fabric 0.5.0 validates.
 openhands-sdk==1.50.0

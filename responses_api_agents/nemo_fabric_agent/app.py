@@ -32,6 +32,7 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -302,13 +303,21 @@ def _atif_trajectories(output: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(artifact, dict) or artifact.get("kind") != "atif" or not artifact.get("path"):
             continue
         try:
-            trajectories.append(json.loads(Path(artifact["path"]).read_text(encoding="utf-8")))
+            trajectory = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             LOG.warning("Could not read Relay ATIF trajectory %s (%s)", artifact["path"], type(error).__name__)
+            continue
+        if isinstance(trajectory, dict):
+            trajectories.append(trajectory)
+        else:
+            LOG.warning("Relay ATIF trajectory %s is not a JSON object", artifact["path"])
     # Relay names the files by session id, so order the trajectories by their first step's timestamp.
-    return sorted(
-        trajectories, key=lambda trajectory: str(_mapping((trajectory.get("steps") or [{}])[0]).get("timestamp"))
-    )
+    return sorted(trajectories, key=_first_step_timestamp)
+
+
+def _first_step_timestamp(trajectory: dict[str, Any]) -> str:
+    steps = trajectory.get("steps")
+    return str(_mapping(steps[0] if isinstance(steps, list) and steps else None).get("timestamp"))
 
 
 def _emitted_arguments(value: Any, call_id: str) -> Optional[str]:
@@ -517,9 +526,12 @@ class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     # Adapters whose model schema has no base_url (Factory Droid reads custom endpoints from its own settings)
     # reject a config that sets it. False leaves models.default.base_url out.
     send_model_base_url: bool = True
+    # Agent sessions keep process-local state, so they require one worker. The host /run path accepts more.
     num_workers: PositiveInt = 1
+    # Provider block for a sandbox this agent creates when Resources lends none. Null requires sandbox_access.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
+    # One budget for starting an owned sandbox and installing the Fabric runtime during seed.
     sandbox_install_timeout_seconds: PositiveInt = 600
 
 
@@ -810,6 +822,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
         if not self.config.send_model_base_url:
             raise AgentSeedRejectedError("Fabric sessions require the Gym model-server URL")
+        if self._token_id_capture_enabled():
+            raise AgentSeedRejectedError("Fabric sessions are evaluation-only; disable token_id_capture")
         authored = self.config.fabric_config
         if authored.get("mcp") or authored.get("skills"):
             raise AgentSeedRejectedError("Fabric sessions do not yet stage MCP configuration or skills")
@@ -830,10 +844,15 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         spec = None
         if owns_sandbox:
             spec_config = {"workdir": "/app", **self.config.sandbox_config}
-            spec_config["metadata"] = resolve_provider_metadata(
-                self.config.sandbox_provider, self.server_client.global_config_dict
-            ) | (spec_config.get("metadata") or {})
-            spec = SandboxSpec(**spec_config)
+            # Provider TTLs outlive this server, so a crash between start and close would otherwise leak the sandbox.
+            spec_config.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
+            try:
+                spec_config["metadata"] = resolve_provider_metadata(
+                    self.config.sandbox_provider, self.server_client.global_config_dict
+                ) | (spec_config.get("metadata") or {})
+                spec = SandboxSpec(**spec_config)
+            except (TypeError, ValueError) as error:
+                raise AgentSeedRejectedError(f"Invalid Fabric sandbox configuration: {error}") from error
         workdir = access.workdir if access else spec.workdir
         path = PurePosixPath(workdir or "")
         if not path.is_absolute() or ".." in path.parts or "\x00" in workdir or str(path) in {"/", "/tmp", "/opt"}:
@@ -843,7 +862,19 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         if self.config.cwd is not None and self.config.cwd != workdir:
             raise AgentSeedRejectedError("Fabric cwd conflicts with the Resources sandbox workdir")
         provider_ref = access.connection.provider_config_ref if access else self.config.sandbox_provider
-        provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
+        try:
+            provider_config = resolve_provider_config(provider_ref, self.server_client.global_config_dict)
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(f"Invalid Fabric sandbox provider: {error}") from error
+        # Fabric calls the Model Server from inside the sandbox, where a loopback URL is the container itself.
+        try:
+            assert_model_url_reachable_from_sandbox(
+                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+                provider_name=next(iter(provider_config), None),
+            )
+        except ValueError as error:
+            raise AgentSeedRejectedError(str(error)) from error
+        provider = create_provider(provider_config)
         try:
             sandbox = (
                 AsyncSandbox(provider)
@@ -939,6 +970,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                     or any(part.get("type") not in {"input_text", "output_text"} for part in content)
                 ):
                     raise HTTPException(422, "Fabric sessions currently accept text-only messages")
+        if not _extract_request_input(body.input)[0]:
+            raise HTTPException(422, "Fabric sessions need a user message")
 
     async def _sandbox_response(
         self, state: FabricSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming
@@ -960,7 +993,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         if state.request.agent_timeout_sec is not None:
             timeout = min(timeout, state.request.agent_timeout_sec)
-        # Gym supervises the deadline, including subprocess cleanup; Fabric gets the same time budget.
+        # Gym supervises the deadline, including subprocess cleanup; Fabric gets the same time budget. Fabric then gives
+        # its adapters a deadline ten seconds earlier, and Claude and Codex report that as a "timeout" error result.
         config["runtime"]["timeout_seconds"] = timeout
         payload = {
             "config": config,
@@ -983,13 +1017,21 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             result = state.session.artifacts
         cleanup = state.session.cleanup
         timed_out = bool(cleanup and cleanup["timed_out"])
+        # The adapter stopped itself at its own deadline: an incomplete rollout to verify, like a supervisor timeout.
+        adapter_timeout = failure is None and _mapping(_mapping(result).get("error")).get("code") == "timeout"
         if cleanup:
             access = state.request.sandbox_access
             state.observations.records.append(
                 SandboxObservation(
                     role="agent",
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
-                    outcome="timeout" if timed_out else "failed" if failure or cleanup["return_code"] else "completed",
+                    outcome=(
+                        "timeout"
+                        if timed_out or adapter_timeout
+                        else "failed"
+                        if failure or cleanup["return_code"]
+                        else "completed"
+                    ),
                     exit_code=cleanup["return_code"],
                 )
             )
@@ -1019,7 +1061,9 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             raise asyncio.CancelledError
         if cleanup and cleanup["return_code"] != 0:
             raise RuntimeError(f"Fabric worker exited unsuccessfully: {cleanup['return_code']}")
-        response, _ = self._response_from_result(body, result, result.get("relay_atif") or [])
+        response, _ = self._response_from_result(
+            body, result, result.get("relay_atif") or [], incomplete=adapter_timeout
+        )
         if not _has_token_usage(_normalized_usage(result, _mapping(result.get("output")))):
             response.usage = None
             state.observations.gaps.append(ObservationGap(code="usage_unavailable"))
@@ -1037,6 +1081,13 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        """Serve /v1/responses as one agent-session activation, or as a host-local Fabric run without a session.
+
+        With an agent-session cookie, run the seeded session's single Fabric activation in its sandbox. An identical
+        retry joins that activation; a different body or rollout, or a closing session, answers 409, and a request
+        control the session path cannot honor answers 422. Without a session (AnySWE, AnyTerminal and the host /run
+        path), run Fabric on the agent-server host.
+        """
         session_id = self._agent_session_id_from_request(request)
         if session_id is not None:
             state = self._require_agent_session(session_id)
@@ -1057,6 +1108,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         return response
 
     async def run(self, request: Request, body: NeMoFabricAgentRunRequest) -> NeMoFabricAgentVerifyResponse:
+        """Compatibility episode: seed Resources, run Fabric on this host, then verify.
+
+        Requires resources_server. Sessions through an Environment Server do not use this route.
+        """
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Fabric /run requires resources_server; compose agent sessions through an Environment Server"

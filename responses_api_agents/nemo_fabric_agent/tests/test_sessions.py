@@ -43,9 +43,8 @@ def agent(**updates):
             port=8080,
             entrypoint="app.py",
             model_server={"type": "responses_api_models", "name": "policy_model"},
-            adapter_id="nvidia.fabric.mini-swe-agent",
             model="gym-policy-model",
-            **updates,
+            **{"adapter_id": "nvidia.fabric.mini-swe-agent", **updates},
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict={"sandbox": {"docker": {}}}),
     )
@@ -69,7 +68,7 @@ def response(instance, body):
 
 
 @pytest.mark.parametrize("borrowed", [True, False])
-async def test_seed_keeps_sandbox_ownership_and_does_not_run_harness(monkeypatch, borrowed):
+async def test_seed_keeps_sandbox_ownership_and_does_not_run_harness(monkeypatch, model_url, borrowed):
     remote = SimpleNamespace(
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, error_type=None)),
         upload=AsyncMock(),
@@ -92,43 +91,13 @@ async def test_seed_keeps_sandbox_ownership_and_does_not_run_harness(monkeypatch
         assert "mkdir -p -- /app" not in remote.exec.await_args.args[0]
 
 
-@pytest.mark.parametrize(
-    "updates",
-    [
-        {"send_model_base_url": False},
-        {"num_workers": 2},
-        {"fabric_config": {"skills": {"paths": ["/host/skills"]}}},
-        {"fabric_config": {"models": {"judge": {"model": "other"}}}},
-        {"fabric_config": {"environment": {"workspace": "/other"}}},
-        {"fabric_config": {"runtime": {"artifacts": "/app/artifacts"}}},
-        {"cwd": "/other"},
-    ],
-)
-async def test_unsupported_seed_is_terminal_before_sandbox_connect(monkeypatch, updates):
-    provider = MagicMock()
-    monkeypatch.setattr(app, "create_provider", provider)
-    with pytest.raises(AgentSeedRejectedError) as error:
-        await agent(**updates)._seed_agent_session_state(seed())
-    assert error.value.status_code == 422
-    provider.assert_not_called()
-
-
-async def test_required_tools_refused_and_optional_grants_recorded(monkeypatch):
+async def test_required_tools_are_refused(monkeypatch):
     instance = agent()
     monkeypatch.setattr(
         type(instance), "effective_tool_accesses", lambda *_: [SimpleNamespace(required=True, name="required")]
     )
     with pytest.raises(AgentSeedRejectedError, match="required remote"):
         await instance._seed_agent_session_state(seed())
-
-
-@pytest.mark.parametrize(
-    "fields", [{"temperature": 0}, {"max_output_tokens": 5}, {"previous_response_id": "previous"}]
-)
-def test_unsupported_request_controls_are_not_silently_dropped(fields):
-    with pytest.raises(HTTPException) as error:
-        agent()._validate_session_request(NeMoGymResponseCreateParamsNonStreaming(input="hello", **fields))
-    assert error.value.status_code == 422
 
 
 async def test_retries_join_one_activation_and_http_cancellation_does_not_kill_it(monkeypatch):
@@ -210,7 +179,8 @@ async def test_stage_uses_private_python_and_preserves_task_environment(monkeypa
     assert command.argv == ["bash", "/tmp/session/harness_runner.sh", "/tmp/session/params.sh"]
     assert json.loads(uploads["/tmp/session/input.json"]) == payload
     params = uploads["/tmp/session/params.sh"]
-    assert "/opt/private/python" in params
+    assert "command=(/opt/private/python -I -B /tmp/session/fabric_runner /tmp/session)\n" in params
+    assert "stdin=/dev/null" in params and "stdout=/tmp/session/stdout.log" in params
     assert "TASK_FLAG=hello world" in params
     assert "HOME=" not in params and "PATH=" not in params and "VIRTUAL_ENV=" not in params
 

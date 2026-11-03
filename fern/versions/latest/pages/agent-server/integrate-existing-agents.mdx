@@ -50,7 +50,17 @@ config_paths:
 
 agent:
   _inherit_from: nemo_fabric_mini_swe_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      # Ceiling for the task's agent timeout. The preset's 600 seconds suits a smoke test.
+      timeout: 3600
+      fabric_config:
+        runtime:
+          # The preset's 8 turns also suit a smoke test, and end most SWE-bench Pro tasks early.
+          max_turns: 100
 ```
+
+Every preset ships smoke-test budgets: `timeout: 600`, and `max_turns` of 8 for mini-SWE-agent and 30 for Claude and Hermes. Size both for the benchmark before you compare scores.
 
 Keep the existing Resources Server, Model Server, sandbox provider and task rows.
 Use `resources_tool_transports: []` and `--allow-unsupported-pairing` for exploration;

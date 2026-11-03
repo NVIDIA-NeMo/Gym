@@ -27,6 +27,13 @@ class Invocation(BaseModel):
     workdir: str
 
 
+def _first_step_timestamp(trajectory: dict[str, JsonValue]) -> str:
+    """Relay names its files by session id, so order trajectories by their first step's timestamp."""
+    steps = trajectory.get("steps")
+    first = steps[0] if isinstance(steps, list) and steps else None
+    return str(first.get("timestamp") if isinstance(first, dict) else None)
+
+
 async def run(directory: Path) -> None:
     """Write Fabric's result atomically, including Relay files before close removes them."""
     invocation = Invocation.model_validate_json((directory / "input.json").read_text())
@@ -51,13 +58,15 @@ async def run(directory: Path) -> None:
         if not isinstance(artifact, dict) or artifact.get("kind") != "atif" or not artifact.get("path"):
             continue
         try:
-            trajectories.append(json.loads(Path(artifact["path"]).read_text()))
+            trajectory = json.loads(Path(artifact["path"]).read_text())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             LOG.warning("Relay trajectory unavailable", exc_info=True)
+            continue
+        # A file of another shape must not stop the worker after Fabric finished, because no result would be written.
+        if isinstance(trajectory, dict):
+            trajectories.append(trajectory)
     if trajectories:
-        mapping["relay_atif"] = sorted(
-            trajectories, key=lambda trajectory: str((trajectory.get("steps") or [{}])[0].get("timestamp"))
-        )
+        mapping["relay_atif"] = sorted(trajectories, key=_first_step_timestamp)
     temporary = directory / "result.tmp"
     temporary.write_text(json.dumps(mapping, default=str))
     temporary.replace(directory / "result.json")

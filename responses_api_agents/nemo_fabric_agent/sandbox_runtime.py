@@ -13,8 +13,8 @@ import tempfile
 from pathlib import Path
 from uuid import uuid4
 
+from nemo_gym.agents import AgentSeedRejectedError
 from nemo_gym.sandbox import AsyncSandbox
-from responses_api_agents.miniswe_sandboxed_agent.bootstrap import cached_download
 
 
 LOG = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ PYTHON_SHA256 = {
 }
 HEALTH = (
     "import sys, importlib.metadata as m; assert sys.version_info[:3] == (3,13,14); "
-    "assert m.version('nemo-fabric') == '0.5.0'; from nemo_fabric import Fabric"
+    f"assert m.version('nemo-fabric') == '{FABRIC_VERSION}'; from nemo_fabric import Fabric"
 )
 
 
@@ -68,12 +68,21 @@ def runtime_archive(requirements: list[str]) -> tuple[bytes, str]:
     return output.getvalue(), fingerprint.hexdigest()
 
 
+def _snapshot(source: Path, destination: Path) -> str:
+    """Copy the verified download to a private file and hash the bytes that will be uploaded."""
+    data = source.read_bytes()
+    destination.write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
+
+
 async def prepare_fabric_runtime(sandbox: AsyncSandbox, *, adapter_id: str, relay: bool, timeout: float) -> str:
     """Reuse or atomically install Python + Fabric outside the task worktree.
 
-    Requires Linux glibc, bash, tar, sha256sum, flock, and a writable /opt and /tmp.
-    Python is downloaded and verified on the controller; pip runs in the private
-    interpreter. The task's Python, PATH, HOME and dependencies are not modified.
+    Requires Linux glibc, a writable /opt and /tmp, and these tools: bash, uname, tee, mkdir, tar, gzip, sha256sum,
+    flock, sleep, mktemp, ln, rm, and a GNU-compatible mv that supports -T.
+    Only the Python archive and the staged requirements file are checksum-verified. Python is downloaded and
+    verified on the controller, and pip then resolves the pinned top-level packages and their dependencies in the
+    private interpreter. The task's Python, PATH, HOME and dependencies are not modified.
     """
     source, fingerprint = runtime_archive(runtime_requirements(adapter_id, relay=relay))
     scratch = f"/tmp/nemo-gym-fabric-setup-{uuid4().hex}"
@@ -83,8 +92,12 @@ async def prepare_fabric_runtime(sandbox: AsyncSandbox, *, adapter_id: str, rela
         await sandbox.upload(Path(__file__).with_name("install_fabric_runtime.sh"), script)
         probe = await sandbox.exec(shlex.join(["bash", script, "probe"]), cwd="/", timeout_s=30)
         target = (probe.stdout or "").strip()
-        if probe.return_code != 0 or probe.error_type or target not in PYTHON_SHA256:
-            raise RuntimeError(f"Unsupported Fabric sandbox platform: {target!r}; {probe.stderr}")
+        if probe.error_type:
+            # The provider failed to run the probe, which a retry can survive.
+            raise RuntimeError(f"Fabric platform probe could not run: {probe.error_type}: {probe.stderr}")
+        if probe.return_code != 0 or target not in PYTHON_SHA256:
+            # The probe ran and refused this image: no retry changes the answer.
+            raise AgentSeedRejectedError(f"Unsupported Fabric sandbox platform: {target!r}; {probe.stderr}")
         arch, libc = target.split("/")
         runtime = f"/opt/nemo-gym-fabric/{fingerprint}-{arch}-{libc}"
         python = f"{runtime}/python/bin/python3"
@@ -99,12 +112,14 @@ async def prepare_fabric_runtime(sandbox: AsyncSandbox, *, adapter_id: str, rela
             "https://github.com/astral-sh/python-build-standalone/releases/download/20260805/"
             f"cpython-3.13.14%2B20260805-{arch}-unknown-linux-{libc}-install_only.tar.gz"
         )
+        # Imported here because the in-sandbox worker imports app.py from a bundle of only nemo_gym and this package.
+        from responses_api_agents.miniswe_sandboxed_agent.bootstrap import cached_download
+
         cached_python = await cached_download(url, sha256=expected)
         with tempfile.TemporaryDirectory(prefix="fabric-runtime-") as temporary:
             directory = Path(temporary)
             python_archive = directory / "python.tar.gz"
-            await asyncio.to_thread(python_archive.write_bytes, cached_python.read_bytes())
-            if hashlib.sha256(python_archive.read_bytes()).hexdigest() != expected:
+            if await asyncio.to_thread(_snapshot, cached_python, python_archive) != expected:
                 raise RuntimeError("Fabric Python upload snapshot failed checksum verification")
             source_archive = directory / "source.tar.gz"
             source_archive.write_bytes(source)
