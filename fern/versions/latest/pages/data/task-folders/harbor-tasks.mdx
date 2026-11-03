@@ -63,14 +63,8 @@ on this page.
 
 ## Write a task
 
-Each task is one folder in the dataset. Add tasks by copying `hello/` or a committed example. Each example under
-`environments/` shows one shape and ships a `solution/` that validates: `hello_world` (a Dockerfile, used below),
-`hello_dataset` (two tasks), `hello_python_verifier`, `hello_verifier_reuse`, `hello_mcp_tool` and
-`hello_parameterized_tasks`.
-
-```bash
-cp -r environments/hello_world my-dataset/hello-world
-```
+Each task is one folder in the dataset. `gym dataset init my-dataset` created your first task called
+`hello` in `my-dataset`.
 
 The snippets below are the scaffold's `hello` files.
 
@@ -213,6 +207,13 @@ harnesses that work inside the task sandbox can take its place: see
 [Harbor Environment Server](/main/agent-interactions/harbor).
 
 ## Bring in existing tasks
+
+### Reuse a local task
+
+To add a task to your dataset, copy an existing task folder into it, then adapt its instruction, verifier and
+reference solution. The examples under `environments/` demonstrate different task structures.
+
+### Pull from the Harbor hub
 
 Pull a dataset from the Harbor hub:
 
