@@ -9,9 +9,12 @@ for what Modal provided and Gym does not: the trained weights reach the separate
 judges read it, the judges and graders (and the agent's own grader, for the two benchmarks that give it an
 OpenAI key, with a key of its own) call an OpenAI-compatible endpoint by its model names, and the verifier
 writes the post-fallback score of ``scripts/collect.py`` as the reward. ``environment/`` changes only in the
-grader model name of those two benchmarks' ``evaluate.py``.
+grader model name of those two benchmarks' ``evaluate.py``, and its Dockerfile starts from one prebuilt image
+for all tasks (see README, Images).
 """
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -36,9 +39,27 @@ TASKS_DIR = DATA_DIR / "tasks" / TASKSET
 ROWS_ROOT = DATA_DIR / "rows"
 ROWS_PATH = ROWS_ROOT / TASKSET / "tasks.jsonl"
 TASKSET_PATH = DATA_DIR / "taskset.json"
-# Images built once for these task folders (see README); copied next to the tasks so prepare reuses them.
-# The builder's two records (see README): the built images, and the configurations with their inputs digests.
-IMAGE_RECORDS = (BENCHMARK_DIR / "built-images.json", BENCHMARK_DIR / "compose-images.json")
+# The prebuilt task and verifier images (see README, Images): each one's reference and the digest of the task
+# files it holds (per benchmark for the task image).
+IMAGES_FILE = BENCHMARK_DIR / "images.json"
+TASK_DOCKERFILE = BENCHMARK_DIR / "image" / "task.Dockerfile"
+VERIFIER_DOCKERFILE = BENCHMARK_DIR / "image" / "verifier.Dockerfile"
+# The images' recorded configurations, copied next to the tasks: the loader reads them, and the registry is private.
+IMAGE_CONFIGS_FILE = BENCHMARK_DIR / "compose-images.json"
+# Where the image holds each benchmark's files; a task's overlay copies its own into place and deletes the rest.
+IMAGE_TASK_FILES = "/opt/ptb"
+# The environment/ files that differ per task, which the overlay writes, and the files upstream's Dockerfile copies
+# out of the workspace to fixed paths (the same for every task).
+PER_TASK_FILES = ("metadata.json", "timer.sh")
+SHARED_FILES = (
+    "entrypoint.sh",
+    "system_monitor.sh",
+    "ptb_collect.sh",
+    "requirements-direct.txt",
+    "contamination_check.py",
+)
+# The tests/ files the verifier image is built from; Gym uploads the rest of tests/ before test.sh runs.
+VERIFIER_FILES = ("Dockerfile", "entrypoint.sh", "system_monitor.sh", "requirements-direct.txt")
 GYM_SCORE_SCRIPT = BENCHMARK_DIR / "gym_score.py"
 
 # Where ptb_collect.sh puts final_model; Gym carries /logs/artifacts into the separate verifier.
@@ -89,22 +110,141 @@ def prepare(
             judge_models={**DEFAULT_JUDGE_MODELS, **(judge_models or {})},
             agent_api_key_env=agent_api_key_env,
         )
-    restore_image_records(TASKS_DIR)
+    images = json.loads(IMAGES_FILE.read_text())
+    for task_dir in sorted(TASKS_DIR.iterdir()):
+        use_images(task_dir, images)
+    shutil.copy2(IMAGE_CONFIGS_FILE, TASKS_DIR / IMAGE_CONFIGS_FILE.name)
     factors = json.loads((source / "scripts/factors.json").read_text())
     return materialize(TASKS_DIR, builds=builds, factors=factors)
 
 
-def restore_image_records(tasks_dir: Path, records: tuple[Path, ...] = IMAGE_RECORDS) -> None:
-    """Put the committed image records where the loader and the builder read them: beside the task folders.
+def image_files(env: Path) -> list[Path]:
+    """The files of a task's ``environment/`` that the task image holds: all but the Dockerfile, the per-task files
+    and hidden files (upstream's .dockerignore, which only keeps the Dockerfile out of the workspace)."""
+    skipped = {"Dockerfile", *PER_TASK_FILES}
+    return [
+        path
+        for path in sorted(env.rglob("*"))
+        if path.is_file()
+        and path.relative_to(env).as_posix() not in skipped
+        and not any(part.startswith(".") for part in path.relative_to(env).parts)
+    ]
 
-    A built image is reused only with both records: built-images.json names it, and compose-images.json holds its
-    configuration and the inputs digest it was built from. One without the other is refused.
+
+def files_digest(root: Path, paths: list[Path]) -> str:
+    """sha256 over the path below ``root`` and the content digest of each of ``paths``, in their order."""
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def image_files_digest(env: Path) -> str:
+    return files_digest(env, image_files(env))
+
+
+def verifier_files_digest(tests: Path) -> str:
+    return files_digest(tests, [tests / name for name in VERIFIER_FILES])
+
+
+def task_benchmark(task_dir: Path) -> str:
+    return json.loads((task_dir / "environment/metadata.json").read_text())["benchmark_id"]
+
+
+def _check_image(task_dir: Path, folder: str, image: str, expected: str | None, actual: str) -> None:
+    if actual != expected:
+        raise ValueError(
+            f"{task_dir.name}: {folder} files have sha256 {actual}, but {image} holds {expected}; "
+            "rebuild the images (README, Images)"
+        )
+
+
+def use_images(task_dir: Path, images: dict[str, Any]) -> None:
+    """Point the task at the prebuilt task and verifier images, which must hold this task's files.
+
+    Upstream builds one task image and one verifier image per task, from ``environment/`` and ``tests/``. The task
+    images differ only in ``metadata.json`` and ``timer.sh``, and the verifier images only in the ``tests/`` they
+    copy, which Gym uploads before ``test.sh`` runs. So the task's Dockerfile becomes an overlay on the task image
+    that does what upstream's last steps do: it puts the benchmark's files into the workspace and ``test_data.json``
+    beside it, writes the two per-task files, and removes the other benchmarks' files. The separate verifier gets
+    a ``[verifier.environment]`` with the task's resources and the verifier image.
     """
-    present = [record for record in records if record.is_file()]
-    if present and len(present) != len(records):
-        raise FileNotFoundError(f"Commit {[r.name for r in records]} together; found only {[r.name for r in present]}")
-    for record in present:
-        shutil.copy2(record, tasks_dir / record.name)
+    env = task_dir / "environment"
+    benchmark = task_benchmark(task_dir)
+    task, verifier = images["task"], images["verifier"]
+    _check_image(task_dir, "environment/", task["image"], task["files_sha256"].get(benchmark), image_files_digest(env))
+    tests_digest = verifier_files_digest(task_dir / "tests")
+    _check_image(task_dir, "tests/", verifier["image"], verifier["files_sha256"], tests_digest)
+    source = f"{IMAGE_TASK_FILES}/benchmarks/{benchmark}"
+    steps = [
+        f"cp -a {source}/workspace/. /home/agent/workspace/",
+        f"cp {source}/test_data.json /home/agent/test_data.json",
+        f"rm -rf {IMAGE_TASK_FILES}",
+    ]
+    for name in PER_TASK_FILES:
+        encoded = base64.b64encode((env / name).read_bytes()).decode()
+        steps.append(f"printf %s {encoded} | base64 -d > /home/agent/workspace/{name}")
+    steps += ["chmod -R a+rw /home/agent/workspace/", "chmod +x /home/agent/workspace/timer.sh"]
+    (env / "Dockerfile").write_text(
+        "# benchmarks/posttrainbench/prepare.py: upstream's task image, prebuilt for all tasks (README, Images).\n"
+        f"FROM {task['image']}\nRUN " + " \\\n    && ".join(steps) + "\n"
+    )
+    toml_path = task_dir / "task.toml"
+    text = toml_path.read_text()
+    resources = tomllib.loads(text)["environment"]
+    settings = "".join(
+        f"{key} = {json.dumps(value)}\n" for key, value in resources.items() if not isinstance(value, dict)
+    )
+    toml_path.write_text(
+        f"{text.rstrip()}\n\n# benchmarks/posttrainbench/prepare.py: upstream's verifier image, prebuilt for all tasks.\n"
+        f"[verifier.environment]\n{settings}docker_image = {json.dumps(verifier['image'])}\n"
+    )
+
+
+def write_image_context(tasks_dir: Path, dest: Path) -> dict[str, Any]:
+    """Write the build contexts of both images from generated tasks, and return the ``files_sha256`` of each.
+
+    ``task/`` is ``image/task.Dockerfile``, the shared files, and ``benchmarks/<benchmark>/`` with the workspace
+    files and ``test_data.json`` of each benchmark. ``verifier/`` is ``image/verifier.Dockerfile`` and the files it
+    copies from ``tests/``. Every task of a benchmark must have the same files, and every task the same verifier files.
+    """
+    if dest.exists():
+        shutil.rmtree(dest)
+    task_context, verifier_context = dest / "task", dest / "verifier"
+    task_context.mkdir(parents=True)
+    verifier_context.mkdir()
+    shutil.copy2(TASK_DOCKERFILE, task_context / "Dockerfile")
+    shutil.copy2(VERIFIER_DOCKERFILE, verifier_context / "Dockerfile")
+    digests: dict[str, str] = {}
+    verifier_digest = None
+    for task_dir in sorted(tasks_dir.iterdir()):
+        if not (task_dir / "environment").is_dir():
+            continue
+        env, tests = task_dir / "environment", task_dir / "tests"
+        benchmark = task_benchmark(task_dir)
+        digest = image_files_digest(env)
+        if digests.setdefault(benchmark, digest) != digest:
+            raise ValueError(f"{task_dir.name}: environment/ files differ from another {benchmark} task")
+        tests_digest = verifier_files_digest(tests)
+        verifier_digest = verifier_digest or tests_digest
+        if tests_digest != verifier_digest:
+            raise ValueError(f"{task_dir.name}: tests/ verifier files differ from another task's")
+        for path in image_files(env):
+            relative = path.relative_to(env).as_posix()
+            if relative in SHARED_FILES:
+                target = task_context / relative
+                if target.exists() and target.read_bytes() != path.read_bytes():
+                    raise ValueError(f"{task_dir.name}: {relative} differs from another benchmark's")
+            elif relative == "test_data.json":
+                target = task_context / "benchmarks" / benchmark / relative
+            else:
+                target = task_context / "benchmarks" / benchmark / "workspace" / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        for name in VERIFIER_FILES:
+            if name != "Dockerfile":
+                shutil.copy2(tests / name, verifier_context / name)
+    return {"task": digests, "verifier": verifier_digest}
 
 
 def _selection(values: list[str] | None, known: tuple[str, ...], kind: str) -> list[str]:
@@ -232,14 +372,14 @@ def adapt_task_toml(
         '[environment.env]\nHF_TOKEN = "${HF_TOKEN}"',
         '[environment.env]\nHF_TOKEN = "${HF_TOKEN}"\nBASH_MAX_TIMEOUT_MS = "36000000"',
     )
-    # Without the table the verifier image is still built from tests/Dockerfile, with the task's resources, which
-    # upstream's table only repeats (one H100, pinned to the H100 type).
+    # Upstream's table gives the verifier one H100. use_images declares the verifier's environment instead: the
+    # prebuilt verifier image with all the task's resources (one H100 too).
     text, dropped = VERIFIER_ENVIRONMENT_TABLES.subn("", text)
     if dropped != 2:
         raise ValueError("Expected [verifier.environment] and its healthcheck in the upstream task")
     parsed = tomllib.loads(text)
     if "environment" in parsed["verifier"] or parsed["environment"].get("gpus") != 1:
-        raise ValueError("The adapted task must verify in the task image on the task's one GPU")
+        raise ValueError("The adapted task must leave the verifier's environment to use_images, on one GPU")
     return text
 
 

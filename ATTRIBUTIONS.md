@@ -230,6 +230,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Vendored at | Upstream |
 |-----------|---------|-------------|---------|
+| PostTrainBench | MIT (original); Apache-2.0 (NVIDIA modifications) | `benchmarks/posttrainbench/image/` (`task.Dockerfile` from upstream `src/harbor_adapter/template/environment/Dockerfile` with its RUN steps grouped and the task files moved under `/opt/ptb`; `verifier.Dockerfile` from `src/harbor_adapter/template/tests/Dockerfile` without its COPY of `tests/`), at `ea8d65bc375e61c8ac77a7aea86effcc995378fb` | https://github.com/aisa-group/PostTrainBench |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |

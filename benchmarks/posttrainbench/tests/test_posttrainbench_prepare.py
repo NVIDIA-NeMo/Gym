@@ -76,29 +76,12 @@ def test_task_toml_hands_off_the_model_and_routes_the_judges() -> None:
         "bash -c 'rm -rf /logs/artifacts/final_model; "
         "PTB_VOLUME_DIR=/logs/artifacts/final_model bash /usr/local/bin/ptb_collect.sh'"
     )
-    # The verifier is built from tests/Dockerfile with the task's own GPU, not upstream's H100-only table.
+    # use_images declares the verifier's environment: the prebuilt verifier image with the task's resources.
     assert "environment" not in adapted["verifier"]
     assert adapted["verifier"]["collect"][0]["timeout_sec"] == 3600.0
     # The Modal-only parts that Gym does not read are left as upstream wrote them.
     assert adapted["environment"]["gpu_types"] == ["H100!"]
     assert adapted["agent"]["timeout_sec"] == 36000.0
-
-
-def test_the_adapted_task_builds_its_verifier_from_tests_on_the_task_gpu(tmp_path: Path) -> None:
-    import tomllib
-
-    from nemo_gym.tasks.harbor.models import HarborTaskConfig
-    from nemo_gym.tasks.harbor.verifier_env import effective_verifier_environment, verifier_build_context
-
-    adapted = prepare.adapt_task_toml(UPSTREAM_TOML, judge_base_url="https://judge.example/v1", judge_api_key_env="K")
-    config = HarborTaskConfig.model_validate(tomllib.loads(adapted))
-    task_dir = tmp_path / "posttrainbench-gsm8k-qwen3-1.7b"
-    (task_dir / "tests").mkdir(parents=True)
-    (task_dir / "tests" / "Dockerfile").write_text("FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04\n")
-
-    # Upstream's tests/Dockerfile is the verifier image, built with the task environment's one GPU.
-    assert verifier_build_context(task_dir, config) == task_dir / "tests"
-    assert effective_verifier_environment(config).gpus == 1
 
 
 @pytest.mark.parametrize("agent_key, expected", [(None, None), ("PTB_AGENT_KEY", "${PTB_AGENT_KEY}")])
@@ -169,35 +152,136 @@ def test_adapt_task_rewrites_the_verifier_side_only(tmp_path: Path) -> None:
     assert test_sh.endswith('echo "=== Verification complete ==="\n')
 
 
-def test_both_image_records_land_where_the_loader_reads_them(tmp_path: Path) -> None:
-    from nemo_gym.tasks.harbor.records import (
-        BUILT_IMAGES_FILE,
-        IMAGE_CONFIGS_FILE,
-        read_built_images,
-        read_image_configs,
+IMAGES = {
+    "task": {"image": "registry.example/ptb-tasks@sha256:" + "0" * 64},
+    "verifier": {"image": "registry.example/ptb-verifier@sha256:" + "1" * 64},
+}
+
+
+def write_generated_task(task_dir: Path, benchmark: str, hours: int) -> Path:
+    """A task as upstream's adapter writes it and prepare adapts it, with stand-in file contents."""
+    from environment_servers.harbor.tests.conftest import write_task
+
+    adapted = prepare.adapt_task_toml(UPSTREAM_TOML, judge_base_url="https://judge.example/v1", judge_api_key_env="K")
+    write_task(task_dir, toml=adapted, dockerfile="FROM nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04\nCOPY . /x/\n")
+    env, tests = task_dir / "environment", task_dir / "tests"
+    (env / "templates").mkdir(parents=True)
+    (env / ".dockerignore").write_text("Dockerfile\n")
+    (env / "metadata.json").write_text(json.dumps({"benchmark_id": benchmark, "num_hours": hours}))
+    (env / "timer.sh").write_text(f"#!/bin/bash\nNUM_HOURS={hours}\n")
+    (env / "evaluate.py").write_text(f"# grades {benchmark}\n")
+    (env / "templates" / "chat.jinja").write_text("{{ messages }}\n")
+    (env / "test_data.json").write_text(json.dumps([{"benchmark": benchmark}]))
+    for name in prepare.SHARED_FILES:
+        (env / name).write_text(f"# shared {name}\n")
+    (tests / "metadata.json").write_text(json.dumps({"baseline_accuracy": 0.12, "num_hours": hours}))
+    for name in prepare.VERIFIER_FILES:
+        (tests / name).write_text(f"# verifier {name}\n")
+    return task_dir
+
+
+def with_digests(task_dir: Path) -> dict:
+    """IMAGES, holding the files of ``task_dir``'s benchmark."""
+    benchmark = prepare.task_benchmark(task_dir)
+    task_files = {benchmark: prepare.image_files_digest(task_dir / "environment")}
+    return {
+        "task": {**IMAGES["task"], "files_sha256": task_files},
+        "verifier": {**IMAGES["verifier"], "files_sha256": prepare.verifier_files_digest(task_dir / "tests")},
+    }
+
+
+def test_the_overlay_lays_out_the_task_as_upstreams_dockerfile_does(tmp_path: Path) -> None:
+    from nemo_gym.tasks.harbor.dockerfile import BaseImageConfig, overlay_image
+
+    tasks_dir = tmp_path / "tasks"
+    write_generated_task(tasks_dir / "posttrainbench-gsm8k-qwen3-1.7b", "gsm8k", 10)
+    task = write_generated_task(tasks_dir / "posttrainbench-gsm8k-gemma3-4b", "gsm8k", 1)
+    write_generated_task(tasks_dir / "posttrainbench-aime2025-qwen3-4b", "aime2025", 10)
+    env = task / "environment"
+    # Upstream's `COPY . /home/agent/workspace/` then `rm -f` of the shared files and test_data.json (its
+    # .dockerignore aside).
+    copied = [p for p in env.rglob("*") if p.is_file() and not p.name.startswith(".")]
+    expected = {
+        p.relative_to(env).as_posix(): p.read_bytes()
+        for p in copied
+        if p.name not in {"Dockerfile", "test_data.json", *prepare.SHARED_FILES}
+    }
+    contexts = tmp_path / "contexts"
+    digests = prepare.write_image_context(tasks_dir, contexts)
+    assert sorted(p.name for p in (contexts / "verifier").iterdir()) == sorted(prepare.VERIFIER_FILES)
+    # The task image holds its build context under /opt/ptb; this test's root stands in for the image's.
+    root = tmp_path / "root"
+    shutil.copytree(contexts / "task", root / "opt/ptb")
+    (root / "home/agent/workspace").mkdir(parents=True)
+
+    images = {
+        "task": {**IMAGES["task"], "files_sha256": digests["task"]},
+        "verifier": {**IMAGES["verifier"], "files_sha256": digests["verifier"]},
+    }
+    prepare.use_images(task, images)
+
+    overlay = overlay_image((env / "Dockerfile").read_text(), BaseImageConfig(workdir="/home/agent/workspace"))
+    assert overlay is not None and overlay.image == IMAGES["task"]["image"] and len(overlay.runs) == 1
+    command = (
+        overlay.runs[0].command.replace("/opt/ptb", f"{root}/opt/ptb").replace("/home/agent", f"{root}/home/agent")
     )
-
-    built = {"hb__abc": {"image": "registry.example/hb__abc", "pushed": True}}
-    configs = {"registry.example/hb__abc": {"os": "linux", "architecture": "amd64", "inputs_digest": "sha256:1"}}
-    records = (tmp_path / BUILT_IMAGES_FILE, tmp_path / IMAGE_CONFIGS_FILE)
-    records[0].write_text(json.dumps(built))
-    records[1].write_text(json.dumps(configs))
-    tasks_dir = tmp_path / "data" / "tasks" / "posttrainbench"
-    (tasks_dir / "posttrainbench-gsm8k-qwen3-1.7b").mkdir(parents=True)
-
-    prepare.restore_image_records(tasks_dir, records)
-
-    # The loader and the builder read both from a task folder's parent.
-    assert read_built_images(tasks_dir) == built
-    assert read_image_configs(tasks_dir) == configs
+    subprocess.run(["bash", "-c", command], check=True)
+    workspace = root / "home/agent/workspace"
+    assert {
+        p.relative_to(workspace).as_posix(): p.read_bytes() for p in workspace.rglob("*") if p.is_file()
+    } == expected
+    assert (root / "home/agent/test_data.json").read_bytes() == (env / "test_data.json").read_bytes()
+    assert os.access(workspace / "timer.sh", os.X_OK)
+    assert not (root / "opt/ptb").exists()
 
 
-def test_one_image_record_without_the_other_is_refused(tmp_path: Path) -> None:
-    records = (tmp_path / "built-images.json", tmp_path / "compose-images.json")
-    records[0].write_text("{}")
+@pytest.mark.parametrize("changed", ["environment/evaluate.py", "tests/Dockerfile"])
+def test_a_task_whose_files_the_images_do_not_hold_is_refused(tmp_path: Path, changed: str) -> None:
+    task = write_generated_task(tmp_path / "posttrainbench-gsm8k-qwen3-1.7b", "gsm8k", 10)
+    images = with_digests(task)
+    # The overlay writes the per-task files itself, and Gym uploads tests/: the images hold only the rest.
+    (task / "environment/timer.sh").write_text("#!/bin/bash\nNUM_HOURS=3\n")
+    (task / "tests/metadata.json").write_text("{}")
+    prepare.use_images(task, images)
 
-    with pytest.raises(FileNotFoundError, match="together"):
-        prepare.restore_image_records(tmp_path, records)
+    (task / changed).write_text("# changed upstream\n")
+    with pytest.raises(ValueError, match="rebuild the images"):
+        prepare.use_images(task, images)
+
+
+def test_the_committed_images_load_from_their_records_without_the_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nemo_gym.tasks.harbor.registry import RegistryClient
+    from nemo_gym.tasks.harbor.task import load_task
+    from nemo_gym.tasks.harbor.verifier_env import effective_verifier_environment, verifier_build_context
+
+    committed = json.loads(prepare.IMAGES_FILE.read_text())
+    assert committed["revision"] == prepare.PTB_REVISION
+    assert sorted(committed["task"]["files_sha256"]) == sorted(prepare.BENCHMARKS)
+    assert all("@sha256:" in committed[kind]["image"] for kind in ("task", "verifier"))
+    tasks_dir = tmp_path / "tasks" / "posttrainbench"
+    task_dir = write_generated_task(tasks_dir / "posttrainbench-gsm8k-qwen3-1.7b", "gsm8k", 10)
+    images = with_digests(task_dir)
+    prepare.use_images(task_dir, {kind: {**images[kind], "image": committed[kind]["image"]} for kind in images})
+    shutil.copy2(prepare.IMAGE_CONFIGS_FILE, tasks_dir / prepare.IMAGE_CONFIGS_FILE.name)
+    monkeypatch.setattr(RegistryClient, "image_config", lambda self, reference: pytest.fail("asked the registry"))
+    monkeypatch.setattr(prepare, "ROWS_ROOT", tmp_path / "rows")
+    monkeypatch.setattr(prepare, "TASKSET_PATH", tmp_path / "taskset.json")
+
+    prepare.materialize(tasks_dir, builds={"enabled": False}, factors=FACTORS)
+
+    task = load_task(task_dir)
+    assert task.image == committed["task"]["image"] and len(task.overlay) == 1
+    assert task.entrypoint == ("/usr/local/bin/entrypoint.sh",)
+    # The verifier starts the verifier image as Harbor starts the one it builds from tests/Dockerfile, with the
+    # task's resources, and nothing is built from tests/.
+    assert task.verifier_image == committed["verifier"]["image"]
+    assert task.verifier_image_config is not None
+    assert task.verifier_image_config.entrypoint == ("/usr/local/bin/entrypoint.sh",)
+    assert verifier_build_context(task_dir, task.config) is None
+    verifier = effective_verifier_environment(task.config)
+    assert verifier.gpus == 1 and verifier.gpu_types == ["H100!"] and verifier.network_mode == "public"
 
 
 def run_adapted_test_sh(tmp_path: Path, model_dir: Path) -> str:

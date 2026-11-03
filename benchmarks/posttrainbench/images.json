@@ -1,0 +1,18 @@
+{
+  "revision": "ea8d65bc375e61c8ac77a7aea86effcc995378fb",
+  "task": {
+    "files_sha256": {
+      "aime2025": "a89840e5e485076fc7172ffde4b017dcc5f0852e7759b501c1c4f29337426a3a",
+      "arenahardwriting": "b23a991916baaf53446ce7d7b59a16a14aeebae6d2457fa69df193dd5e8cd0d7",
+      "gpqamain": "43916d61f16c2138d8ce7ed4c7c9184f2afed7daf2d958b25abed30b5a0a5dc4",
+      "gsm8k": "89d9c45d971e8492a26784962b928dfac9c45f3f3981580f64e6a16627cef74a",
+      "healthbench": "d040117cbbefede90987acfc272aecf6c9bb82963d6278b094600c575bdc9d4a",
+      "humaneval": "f113db171fdd9ee0375d5f9e15c51f01fa0b12cb60063a49aa97af92a93ab623"
+    },
+    "image": "gitlab-master.nvidia.com:5005/dl/joc/competitive_evaluation/frontier-jam-images/posttrainbench-tasks@sha256:0541503c4e208e6986c096a839a64ab40c2321863698995a1c15b408c249dbbd"
+  },
+  "verifier": {
+    "files_sha256": "2f3bd270bc80065d5667fc82e249a656a19acbb56001531a03e61d7a289669b8",
+    "image": "gitlab-master.nvidia.com:5005/dl/joc/competitive_evaluation/frontier-jam-images/posttrainbench-verifier@sha256:0ee4d6faceb3cf8c8fa6a18daadfd0eaa139b70e0f9d7bad7c75a9b427165e72"
+  }
+}

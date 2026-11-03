@@ -32,26 +32,39 @@ Upstream runs the tasks with Harbor on Modal. `prepare.py` changes only what Mod
   it again.
 - **Model tree.** A `final_model` that holds symlinks or special files counts as not submitted (the baseline):
   a link such as `config.json -> /proc/self/environ` would print the verifier's keys into its logs.
-- **Verifier image.** Gym builds the separate verifier from upstream's `tests/Dockerfile`, as Harbor does,
-  with the task's resources (one GPU) instead of upstream's H100-only `[verifier.environment]` table; codex is
-  installed per judge as upstream pins it.
+- **Verifier image.** The separate verifier runs a prebuilt image of upstream's `tests/Dockerfile` without its
+  `COPY` of `tests/`, with the task's resources (one GPU) instead of upstream's H100-only
+  `[verifier.environment]` table. Gym uploads `tests/` before `test.sh` runs, so `/tests` also holds the four
+  build files upstream's image deletes from it. codex is installed per judge as upstream pins it.
 - **Agent.** Gym's `claude_code_agent` runs Claude Code 2.1.219 (the image's pin) against the policy model
   through Gym's `/v1/messages`. Upstream's `CLAUDE_CODE_EFFORT_LEVEL` and `--thinking-display` are not set:
   reasoning is the model server's setting.
 
 ## Images
 
-Each task image is built from its `environment/` folder and each verifier image from `tests/` (Harbor's
-`hb__<hash>` names), `linux/amd64`, about 25 GB with shared layers. The H100 sandboxes must be able to pull them. Build them once on an amd64 host with buildah,
-podman or docker and a registry, then commit both records so later prepares reuse the images (the builder needs
-the image configurations and inputs digests in `compose-images.json` as well as `built-images.json`):
+All 24 tasks run two prebuilt `linux/amd64` images, pinned by digest in `images.json`. Upstream builds a task
+image from each task's `environment/` and a verifier image from its `tests/`. The task images differ only in
+`metadata.json` and `timer.sh`, and the verifier images only in the `tests/` they copy.
 
-```sh
-gym eval prepare --benchmark posttrainbench ++prepare_script_args.builds.repository=<registry>/<path>
-cp benchmarks/posttrainbench/data/tasks/posttrainbench/{built-images,compose-images}.json benchmarks/posttrainbench/
-```
+- The task image (`image/task.Dockerfile`) is upstream's with every benchmark's task files under `/opt/ptb`.
+  Prepare rewrites each task's Dockerfile as an overlay on it: at seed, Gym copies the task's files into the
+  workspace, writes the two per-task files and deletes `/opt/ptb`.
+- The verifier image (`image/verifier.Dockerfile`) is upstream's without the `COPY` of `tests/`. Prepare
+  declares it in each task's `[verifier.environment]`.
 
-Without the records or a builder, prepare stops and names the tasks.
+`compose-images.json` records both configurations, so prepare does not ask the private registry for them. The
+H100 sandboxes must be able to pull both images. The task image holds every benchmark's test data, as upstream's
+task images do, so keep it in a registry that is not public.
+
+If a task's files differ from the files an image holds (`files_sha256`), prepare stops. To rebuild:
+
+1. Run `gym eval prepare --benchmark posttrainbench`. It writes the tasks, then stops on the difference.
+2. Write both build contexts and print their `files_sha256`:
+   `python -c 'from pathlib import Path; from benchmarks.posttrainbench import prepare as p; print(p.write_image_context(p.TASKS_DIR, Path("ptb-images")))'`
+3. Build `ptb-images/task/` and `ptb-images/verifier/` for `linux/amd64` and push them. Put each digest reference
+   and `files_sha256` in `images.json`.
+4. Record both configurations into `compose-images.json` (remove the old entries first) with
+   `nemo_gym.tasks.harbor.image_configs.record_image_configs({image: ["posttrainbench"]}, BENCHMARK_DIR, client=RegistryClient({host: (user, token)}))`.
 
 ## Run
 
