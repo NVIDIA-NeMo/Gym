@@ -51,7 +51,11 @@ droid_agent:
 
 Supply the `policy_model` Model Server, `policy_model_name` and the `sandbox` provider in a
 separate model and provider config, as the
-[Terminal-Bench 2.1 README](../../benchmarks/terminal_bench_2_1/README.md) shows. The sandbox must
+[Terminal-Bench 2.1 README](../../benchmarks/terminal_bench_2_1/README.md) shows. Droid replays its
+assistant history with an empty `reasoning_content` and the model's `<think>` text in `content`; with
+`uses_reasoning_parser: true` the vLLM Model Server then sends both `reasoning` and
+`reasoning_content`, which NVIDIA NIM rejects (`400 duplicate field reasoning_content`). For NIM, set
+`reasoning_field: reasoning_content` on the `policy_model` server. The sandbox must
 reach the Model Server: set `++use_absolute_ip=true` when the Model Server would otherwise
 advertise a loopback address. Seed refuses a loopback Model Server URL for a remote provider.
 Terminal-Bench 2.1 does not list `droid_agent` in its `allowed_agents` yet; until it does, start
@@ -168,6 +172,15 @@ tool call started a subagent (its own transcript stays in Droid's private sessio
 
 ## Limits
 
+- In some container images, Droid kills its own foreground shell commands. On Docker 28.1.1, every
+  foreground `Execute` call in the Terminal-Bench 2.1 images that ship Python
+  (log-summary-date-ranges, openssl-selfsigned-cert, cancel-async-tasks), and on Enroot 3.4.1 in
+  `python:3.13-slim`, returned `Error: Command terminated by signal: SIGKILL`, whatever the command;
+  background `Execute` calls ran. Foreground calls ran normally in configure-git-webserver (Ubuntu
+  24.04 without Python) and on a bare host. Droid 0.251.0, 1.0.0, 1.1.0 and 1.2.0 behave the same;
+  running as non-root, with a TTY or without seccomp did not change it. Models can still finish tasks
+  by running commands in the background, but expect lower scores where this happens. The adapter
+  reports these calls as failed tools with Droid's message as the output.
 - Droid is distributed under Factory's proprietary terms (`UNLICENSED` on npm). The adapter
   downloads the published binary at seed; it vendors nothing.
 - Glibc Linux sandboxes only (x86-64 or arm64).
