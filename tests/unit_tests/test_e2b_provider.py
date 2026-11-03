@@ -619,10 +619,18 @@ class TestResourceHandling:
             await provider.create(_spec(provider_options={"resource_requests": {"cpu": 0.5}}))
         assert FakeSandbox.instances == []
 
-    async def test_non_mapping_resource_requests_are_rejected_before_create(self) -> None:
+    async def test_limits_resource_requests_add_no_scheduling_warning(self, caplog) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        with caplog.at_level("WARNING"):
+            await provider.create(_spec(provider_options={"resource_requests": "limits"}))
+        assert not [r for r in caplog.records if "fixes sandbox resources" in r.message]
+        assert len(FakeSandbox.instances) == 1
+
+    @pytest.mark.parametrize("requests", ["cpu=1", [], 0, False])
+    async def test_invalid_resource_requests_are_rejected_before_create(self, requests: object) -> None:
         provider = E2BProvider(create={"template": "base"})
         with pytest.raises(TypeError, match="resource_requests"):
-            await provider.create(_spec(provider_options={"resource_requests": "cpu=1"}))
+            await provider.create(_spec(provider_options={"resource_requests": requests}))
         assert FakeSandbox.instances == []
 
     async def test_no_warning_without_resource_request(self, caplog) -> None:

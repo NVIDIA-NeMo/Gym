@@ -340,8 +340,9 @@ class E2BProvider:
             raise ValueError(
                 f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. Supported: template, resource_requests"
             )
-        if not isinstance(options.get("resource_requests") or {}, Mapping):
-            raise TypeError("E2B provider option 'resource_requests' must be a mapping")
+        requests = options.get("resource_requests")
+        if requests is not None and requests != "limits" and not isinstance(requests, Mapping):
+            raise TypeError("E2B provider option 'resource_requests' must be a mapping or 'limits'")
         option = options.get("template")
         if option is not None:
             if not isinstance(option, str) or not option:
@@ -378,8 +379,10 @@ class E2BProvider:
             if getattr(resources, name, None) is not None
         }
         # Scheduling hints for other providers (OpenSandbox) are also fixed by the template here.
-        scheduling = (spec.provider_options or {}).get("resource_requests") or {}
-        requested.update({f"resource_requests.{name}": value for name, value in scheduling.items()})
+        # "limits" means requests equal to SandboxSpec.resources, which are already reported above.
+        scheduling = (spec.provider_options or {}).get("resource_requests")
+        if isinstance(scheduling, Mapping):
+            requested.update({f"resource_requests.{name}": value for name, value in scheduling.items()})
         if not requested:
             return
         detail = ", ".join(f"{key}={value}" for key, value in sorted(requested.items()))

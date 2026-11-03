@@ -142,7 +142,7 @@ builds to finish; pass `--continue-on-error` to keep building the remaining imag
 | `metadata` | Passed to E2B as string metadata. |
 | `resources` | Fixed by the template rather than applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
 | `entrypoint` | Unsupported and rejected before allocation; define it in the E2B template. |
-| `provider_options` | Supports `template` and `resource_requests`. Scheduling `resource_requests` (for example from OpenSandbox-oriented agent configs) are treated like `resources`: they warn, or raise when `create.strict_resources` is true. Other keys and invalid values are rejected before allocation. |
+| `provider_options` | Supports `template` and `resource_requests` (a mapping or `"limits"`). Scheduling `resource_requests` (for example from OpenSandbox-oriented agent configs) are treated like `resources`: they warn, or raise when `create.strict_resources` is true. Other keys and invalid values are rejected before allocation. |
 
 The bundled builder controls template CPU count and memory. Disk and GPU requirements need a
 suitable template prepared through E2B tooling.
