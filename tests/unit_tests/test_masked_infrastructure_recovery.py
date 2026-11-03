@@ -280,8 +280,9 @@ def _patch(intact):
         ("session_lost", {"model_patch": None}),
         ("verifier_error", {"model_patch": None}),
         ("verifier_error", _agent_sandbox_verified()),
+        ("verifier_error", {"session_id": "s-1", "sandbox_resource_limit": None}),
     ],
-    ids=["patch-never-collected", "verifier-patch-never-collected", "agent-sandbox-graded"],
+    ids=["patch-never-collected", "verifier-patch-never-collected", "agent-sandbox-graded", "sandboxed-session"],
 )
 def test_a_masked_transcript_without_a_gradeable_artifact_is_an_infrastructure_retry(tmp_path, kind, fields):
     output, _ = _run(tmp_path, [[_masked(kind) | _ANSWER | fields]])
@@ -306,3 +307,15 @@ def test_a_masked_result_with_a_gradeable_answer_is_not_sampled_again(tmp_path, 
     output, _ = _run(tmp_path, [[_masked(kind) | _ANSWER | fields]])
     store = RolloutStore.read(output, import_legacy=False)
     assert store.pending() == []
+
+
+def test_the_store_retries_a_sandboxed_session_row_it_reads_without_its_trajectory(tmp_path):
+    # The recovery reader reads the Store with the trajectory skipped: the session verify response alone must still
+    # say the graded workspace was the agent's own sandbox, so the Store plans the same retry recovery decides.
+    output, _ = _run(
+        tmp_path, [[_masked("verifier_error") | _ANSWER | {"session_id": "s-1", "sandbox_resource_limit": None}]]
+    )
+    store = RolloutStore.read(
+        output, import_legacy=False, skip_keys=frozenset({"ng_trajectory", "ng_agent_observations"})
+    )
+    assert [(row["_ng_task_index"], row["_ng_attempt_index"]) for row in store.pending()] == [(1, 1)]
