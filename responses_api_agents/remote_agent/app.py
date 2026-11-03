@@ -399,7 +399,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 return self._failure_response(
                     record,
                     f"/run exceeded run_timeout_secs={self.config.run_timeout_secs}s "
-                    f"(seed + agent/tool loop + verify) during {active['operation']}",
+                    "(seed + agent/tool loop + verify)",
                     deadline=_Deadline(
                         limit="run_timeout_secs",
                         configured_s=self.config.run_timeout_secs,

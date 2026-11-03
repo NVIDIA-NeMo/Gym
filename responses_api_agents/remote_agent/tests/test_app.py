@@ -1106,7 +1106,8 @@ class TestDeadlineEvidence:
 
         agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=slow_request), run_timeout_secs=0.05)
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
-        assert "during agent" in result["error"]
+        # The message is the one consumers already match; the operation rides on the typed evidence.
+        assert result["error"] == "/run exceeded run_timeout_secs=0.05s (seed + agent/tool loop + verify)"
         self._deadline(
             result,
             observed,
@@ -1131,7 +1132,8 @@ class TestDeadlineEvidence:
 
         server_client.post.side_effect = slow_verify
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
-        assert "during verify" in result["error"]
+        # The message is the one consumers already match; the operation rides on the typed evidence.
+        assert result["error"] == "/run exceeded run_timeout_secs=0.2s (seed + agent/tool loop + verify)"
         self._deadline(
             result,
             observed,
