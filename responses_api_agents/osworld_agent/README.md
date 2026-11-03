@@ -24,6 +24,12 @@ exact patch match. The relaxed mode is only valid within one Python minor and
 must be covered by a real server-registration smoke, not assumed from a
 successful resolver.
 
+For native submissions into a fresh managed environment, set
+`install_optional_runtime_dependencies: true` on the OSWorld agent config.
+On startup, the agent runs its existing optional dependency installer when
+needed, then restarts to load the installed packages. The default remains
+`false`, so installing the optional runtime packages requires explicit opt-in.
+
 ## Request and response contract
 
 The rollout collector sends the complete upstream task under
@@ -62,6 +68,16 @@ prompts may rewrite any earlier token or media position. Parser retries are
 also separate model calls and are not collapsed into the environment step.
 NeMo-RL can therefore reconstruct prefix-contiguous physical traces while one
 logical rollout retains one reward and advantage.
+
+For benchmark rollouts, OSWorld also projects observed policy completions into
+Gym's `ng_trajectory` contract. Each turn refers to its captured model call by
+the actual completion response ID and model-server identity; parser retries
+remain separate turns. Missing call records, IDs, timestamps, or usage remain
+visible as observation gaps. Rollout token usage comes from Gym's policy-call
+accumulator, including finished responses rejected before a turn was recorded.
+Missing or malformed policy usage keeps the total unknown; gaps in trajectory
+records do not overwrite independently measured totals. The OSWorld step
+transitions and evaluator score remain in their existing fields.
 
 Training manifests should supply a model-independent caller-owned identity:
 

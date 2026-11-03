@@ -117,7 +117,12 @@ def test_start_control_requires_explicit_osworld_runtime_setup() -> None:
     assert "gym env prefetch" in text
     assert "install_optional_runtime_deps.sh" in text
     assert "uv pip install" not in text
-    assert "require_optional_runtime_dependencies()" in OSWORLD_AGENT_APP.read_text(encoding="utf-8")
+    agent_text = OSWORLD_AGENT_APP.read_text(encoding="utf-8")
+    assert "install_optional_runtime_dependencies: bool = False" in agent_text
+    assert (
+        "require_optional_runtime_dependencies(install_if_missing=config.install_optional_runtime_dependencies)"
+        in agent_text
+    )
 
 
 def test_managed_osworld_agent_installs_opensandbox_sdk() -> None:

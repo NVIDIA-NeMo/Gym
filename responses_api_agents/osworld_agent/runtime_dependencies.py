@@ -7,7 +7,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
+import os
 import shlex
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -133,10 +135,11 @@ def validate_optional_runtime_dependencies(
 
 def require_optional_runtime_dependencies(
     *,
+    install_if_missing: bool = False,
     venv_path: Path | None = None,
     installer: Path | None = None,
 ) -> None:
-    """Fail an actual OSWorld agent startup with copyable remediation."""
+    """Validate startup dependencies; explicitly opt in to installation and restart."""
 
     problems = validate_optional_runtime_dependencies()
     if not problems:
@@ -148,6 +151,13 @@ def require_optional_runtime_dependencies(
         if installer is None
         else installer.expanduser().resolve()
     )
+    if install_if_missing:
+        subprocess.run(["bash", str(resolved_installer), str(resolved_venv)], check=True)
+        # Validation and earlier imports may have loaded packages that the
+        # installer replaced. Restart before importing or using their native code.
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+        return
+
     details = "\n".join(f"  - {problem}" for problem in problems)
     command = shlex.join(["bash", str(resolved_installer), str(resolved_venv)])
     raise RuntimeError(

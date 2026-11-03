@@ -314,9 +314,14 @@ but repository policy excludes them from managed package and container
 resolution. `skip_venv_if_present: true` in the generated config then lets
 `gym env start` reuse the prepared environment. `tools/start_control.sh` checks
 the same venv and exits before starting Gym with copyable remediation commands
-if the explicit step was skipped; it never installs the packages itself. The
-OSWorld agent entrypoint repeats the non-mutating check, so a direct
-`gym env start` fails early with the scoped installer command as well.
+if the explicit step was skipped; it never installs the packages itself. By
+default, the OSWorld agent entrypoint repeats the non-mutating check, so a
+direct `gym env start` fails early with the scoped installer command as well.
+For native `gym eval submit` preparation and execution, set
+`install_optional_runtime_dependencies: true` in the OSWorld agent config to
+run the same installer on startup when needed. The agent restarts after
+installation so it loads the new packages in a fresh process. This is an
+explicit opt-in; the default managed dependency policy stays unchanged.
 
 OpenSandbox may return path-based gateway endpoints with required routing
 headers rather than directly routable Pod addresses. The adapter creates

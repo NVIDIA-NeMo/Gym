@@ -982,6 +982,7 @@ class NemotronV3NanoOmniAgent:
             try:
                 response = self.call_llm(payload, self.model)
                 model_call_completed = True
+                model_call_record["completion_received"] = True
                 completed_model_calls += 1
                 model_call_record["response"] = _jsonable(response)
                 finish_reason = response.get("finish_reason") if isinstance(response, Mapping) else None
@@ -1028,6 +1029,9 @@ class NemotronV3NanoOmniAgent:
                 # retries or a synthetic policy outcome.
                 raise
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
+                model_call_record["completion_received"] = (
+                    True if model_call_completed else payload.get("_nemo_gym_completion_received")
+                )
                 last_error = str(exc)
                 last_error_type = type(exc).__name__
                 last_failure_stage = "response_parse" if model_call_completed else "model_call"
