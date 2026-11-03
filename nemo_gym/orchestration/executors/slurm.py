@@ -1713,8 +1713,6 @@ class SlurmExecutor(BaseExecutor):
             script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
             script_path = job_dir / f"reverify-{nonce}.sh"
             expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
-            if evidence.source_digests is None:
-                return stopped("saved source snapshot is unavailable")
             config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
             config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
             if not re.fullmatch(r"[0-9a-f]{64}", config_digest):

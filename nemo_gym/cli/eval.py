@@ -752,7 +752,6 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     This is not tracking acceptance. Unknown health exports a known=0 signal, never a healthy rate.
     Scientific aggregate entries and scores remain unchanged; only the reserved run metadata is replaced.
     """
-    import subprocess
     import tempfile
 
     from nemo_gym.artifacts.exporters.base import _artifact_version
