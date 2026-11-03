@@ -14,6 +14,8 @@
 # limitations under the License.
 import asyncio
 import bisect
+import copy
+import fcntl
 import functools
 import glob as glob_module
 import hashlib
@@ -24,6 +26,7 @@ import os
 import re
 import secrets
 import signal
+import tempfile
 import time
 import warnings
 from asyncio import Future, Semaphore
@@ -31,12 +34,12 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from difflib import get_close_matches
 from math import isfinite
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 from uuid import uuid4
 
 import aiohttp
@@ -57,7 +60,13 @@ from nemo_gym.artifacts.rollout_rows import (
     _strip_capture_payloads,
 )
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
-from nemo_gym.batch_status import BatchStatusTracker
+from nemo_gym.batch_status import (
+    BatchStatusTracker,
+    RunStatusTracker,
+    _atomic_write_json,
+    _read_aggregate_entries,
+    disable_run_status,
+)
 from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -128,8 +137,10 @@ from nemo_gym.rollout_recovery import (
 from nemo_gym.rollout_recovery import (
     IncompleteEvaluationError,
     RunManifest,
+    _digest,
     atomic_write_json,
     has_only_intentional_gaps,
+    is_answered_agent_deadline,
     is_terminal_failure,
     load_resubmit_offset,
     manifest_path_for,
@@ -187,6 +198,7 @@ from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
+    batch_status_path_for,
     failures_path_for,
     materialized_path_for,
     resubmit_offset_path_for,
@@ -802,17 +814,46 @@ def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
     return interleaved
 
 
+# A status row names a failure's kind beside its class, and whether the row is the evaluated model's final result
+# (an answered agent deadline, or a failure its producer settled as a scored zero), so run status reports both by kind.
+STATUS_FAILURE_KIND_KEY = "failure_kind"
+STATUS_MODEL_FINAL_KEY = "_ng_model_final"
+
+
+def _status_failure_kind(row: Mapping[str, Any]) -> Optional[str]:
+    """The failure kind a sidecar row carries: top-level, the legacy diagnostic key, or the typed record's."""
+    kind = row.get("failure_kind") or row.get("_ng_failure_kind")
+    if kind is None:
+        record = row.get("_ng_failure_record")
+        failure = record.get("failure") if isinstance(record, Mapping) else None
+        kind = failure.get("failure_kind") if isinstance(failure, Mapping) else None
+    return kind if isinstance(kind, str) and kind else None
+
+
 def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dict]) -> Dict:
-    """Keep status identities and failure classes without retaining rollout payloads."""
+    """Keep status identities, failure classes and kinds without retaining rollout payloads."""
     status_row = {
         key: result[key]
-        for key in (AGENT_REF_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, NG_FAILURE_CLASS_KEY)
+        for key in (
+            AGENT_REF_KEY_NAME,
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            NG_FAILURE_CLASS_KEY,
+            NG_OMITTED_ROLLOUT_KEY,
+            NG_DISPATCH_DRAINED_KEY,
+        )
         if key in result
     }
     if AGENT_REF_KEY_NAME not in status_row:
         key = (result.get(TASK_INDEX_KEY_NAME), result.get(ROLLOUT_INDEX_KEY_NAME))
         if key in agent_refs_by_key:
             status_row[AGENT_REF_KEY_NAME] = agent_refs_by_key[key]
+    if result.get(NG_FAILURE_CLASS_KEY) is not None:
+        kind = _status_failure_kind(result)
+        if kind is not None:
+            status_row[STATUS_FAILURE_KIND_KEY] = kind
+        if result.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True or is_answered_agent_deadline(result):
+            status_row[STATUS_MODEL_FINAL_KEY] = True
     return status_row
 
 
@@ -836,10 +877,9 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         rollout_id = identity.get("rollout_id")
         if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
             return task_id, rollout_id
-    task_id = next(
-        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
-    )
+    task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+    if task_id is None:
+        task_id = str(row[TASK_INDEX_KEY_NAME])
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 
@@ -1358,6 +1398,427 @@ def _attach_ng_perf(
 
 
 get_max_rollout_attempts = _get_max_rollout_attempts  # Public compatibility alias
+
+
+def _names_its_task(row: dict[str, Any]) -> bool:
+    if isinstance(row.get("trajectory_identity"), dict):
+        return True
+    return TASK_INDEX_KEY_NAME in row or any(row.get(key) is not None for key in TASK_ID_FIELDS)
+
+
+async def enrich_run_result(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    capture_dirs: list[Path],
+    observability_enabled: bool,
+    include_payloads: bool = True,
+    rollout_latency_ms: Optional[float] = None,
+    delete_capture: bool = False,
+) -> dict[str, Any]:
+    """Attach a finished rollout's collected evidence to its ``/run`` result, in place.
+
+    These are the per-rollout steps ``ng_collect_rollouts`` runs, shared so a framework that dispatches through
+    ``run_examples`` records the same thing: wait for the model server's in-flight capture writes for this rollout,
+    merge its captured model calls (``ng_model_call_capture``) and join the agent's observations to them, project the
+    standardized ``ng_trajectory``, and assemble ``ng_perf`` when observability is enabled.
+
+    The row's rollout identity is copied onto the result where the result lacks it, because the capture key is read
+    from the record. Harness output and reward are never modified. A row that names no task (no task id field,
+    task index or trajectory identity) gets no ``ng_trajectory`` rather than a guessed task id.
+    ``include_payloads=False`` keeps call metadata only; ``delete_capture`` removes the rollout's capture file once it
+    has been merged, so it requires the payloads to be kept.
+    """
+    if not isinstance(result, dict):
+        return result
+    if delete_capture and not include_payloads:
+        raise ValueError(
+            "delete_capture would drop the model-call bodies that include_payloads=False leaves in the store"
+        )
+    for key in (ROLLOUT_ID_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+        if key in row and key not in result:
+            result[key] = row[key]
+
+    # A try that left no result (interrupted, or never started) joins captured calls only when it returned agent or
+    # verifier evidence, a trajectory, or the failure events of a reported failure: those are saved for recovery, so
+    # the calls behind them are kept as well.
+    no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+    # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
+    # nothing unreadable, and the bodies kept (not redacted).
+    safe_to_delete = False
+    if capture_dirs and (
+        not no_persist
+        or NG_AGENT_OBSERVATIONS_KEY in result
+        or NG_VERIFIER_INVOCATIONS_KEY in result
+        or NG_TRAJECTORY_KEY in result
+        or FailureReportRow.EVENTS in result
+    ):
+        # A cancelled call's capture write runs detached, so drain the claims this
+        # rollout still holds before snapshotting; otherwise a late row is lost.
+        rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
+        quiesced = False
+        if rollout_id_for_capture is not None:
+            quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
+        payloads_kept = include_payloads and not _has_observation_gap(result, "multimodal_history_redacted")
+        merge_model_call_capture_into_record(result, capture_dirs, include_payloads=payloads_kept)
+        capture = result.get("ng_model_call_capture")
+        safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")
+
+    if _names_its_task(row) and (
+        "ng_model_call_capture" in result
+        or NG_AGENT_OBSERVATIONS_KEY in result
+        or NG_TRAJECTORY_KEY in result
+        or NG_VERIFIER_INVOCATIONS_KEY in result
+    ):
+        _attach_trajectory_record(row, result)
+
+    # Assembles ng_perf from ng_trajectory when observability is enabled.
+    _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+
+    if delete_capture and safe_to_delete:
+        clear_model_call_captures_for_rollouts([result], capture_dirs)
+    return result
+
+
+_ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
+
+
+async def _enrich_returned_result(
+    row: dict[str, Any], result: dict[str, Any], rollout_latency_ms: Optional[float], **options: Any
+) -> dict[str, Any]:
+    """``enrich_run_result`` for a result ``run_examples`` returns, keeping its public shape.
+
+    An Environment Server reply to a materialized task is a ``BaseEpisodeResponse`` whose evidence is nested; it is
+    enriched through the record the collector stores, and the enrichment keys are added to the reply's top level.
+    Returns the enriched record.
+    """
+    if _materialized_taskset(row) is not None and _is_episode_response(result):
+        record = _episode_record(copy.deepcopy(result))
+        await enrich_run_result(row, record, rollout_latency_ms=rollout_latency_ms, **options)
+        _reflect_enrichment(result, record)
+        return record
+    await enrich_run_result(row, result, rollout_latency_ms=rollout_latency_ms, **options)
+    return result
+
+
+def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, Any]) -> None:
+    """Stamp the row's identity and routing fields onto the record collection stores, as every reader expects."""
+    row = completed.row
+    if completed.elapsed_s is not None:
+        # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
+        # which resume reads to order dispatch.
+        result[ELAPSED_S_KEY] = completed.elapsed_s
+
+    result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+    result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+    for key in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+        if key in row:
+            result[key] = row[key]
+    if ROLLOUT_ID_KEY_NAME in row:
+        # Capture readback recomputes the id from the finished record.
+        # Preserve an explicit id on the result just like the indices.
+        result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
+    # Every record names the Environment Server that ran it and that server's type,
+    # so readers group by server instead of agent_ref and know which result type they hold.
+    if completed.environment_server is not None:
+        result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
+    elif NG_ENVIRONMENT_SERVER_KEY in row:
+        result[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
+    if completed.environment_server_type is not None:
+        result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
+
+
+@dataclass
+class _CollectedOutcome:
+    """A finished dispatch as collection stores it, with the facts the collector's loop still reads."""
+
+    record: Dict[str, Any]
+    structured_failure: bool
+    diagnostics: Dict[str, Any]
+    metric_result: Dict[str, Any]
+    verification_response: Optional[Dict[str, Any]]
+
+
+def _collected_outcome(
+    completed: "_CompletedRollout", result: Dict[str, Any] | RolloutFailureRecord
+) -> _CollectedOutcome:
+    """Build the record ``ng_collect_rollouts`` stores for a finished dispatch, success or failure.
+
+    ``result`` is ``completed.result`` after the caller's episode translation and legacy sanitizing. A failure, typed
+    or marked, becomes the failures-sidecar row: the typed record's compatibility fields beside the producer's
+    diagnostics and the judge reply it kept, then the identity and routing stamps and the causal failure report.
+    ``_RunRecordWriter`` builds its rows here as well, so an RL shard reads like an eval run.
+    """
+    row = completed.row
+    verification_response = completed.verification_response
+    diagnostics = completed.diagnostics or _failure_diagnostics(result)
+    metric_result = diagnostics
+    if isinstance(result, RolloutFailureRecord) and metric_result.get(NG_FAILURE_CLASS_KEY) is None:
+        # Custom typed dispatchers may provide diagnostics without
+        # legacy routing labels; use the typed failure for those.
+        metric_result = {
+            NG_FAILURE_CLASS_KEY: result.sidecar_failure_class,
+            "_ng_failure_kind": result.failure.failure_kind,
+            "_ng_failure_type": result.exception_type,
+        }
+    if verification_response is None:
+        verification_response = _judge_failure_response(result)
+    # HTTP results were validated at the request boundary. Custom
+    # drivers returning _CompletedRollout own their completed schema.
+    if isinstance(result, dict):
+        if "failure" in result and "episode_id" in result:
+            result = _normalize_rollout_outcome(row, result)
+        elif result.get(NG_FAILURE_CLASS_KEY) is not None:
+            result = _failure_outcome(row, result, "agent")
+    structured_failure = isinstance(result, RolloutFailureRecord)
+    if structured_failure:
+        compatibility = _failure_compatibility_row(result, verification_response)
+        # The canonical alias must agree with the typed record. Keep a distinct
+        # producer class as collector-owned evidence for existing score selectors.
+        legacy_class = diagnostics.get(NG_FAILURE_CLASS_KEY)
+        if isinstance(legacy_class, str) and legacy_class != result.sidecar_failure_class:
+            compatibility[NG_FAILURE_LEGACY_CLASS_KEY] = legacy_class
+        if verification_response is not None and matches_failure_class(
+            compatibility, {"judge_failed", "judge_invalid"}
+        ):
+            compatibility["response"] = verification_response
+        # Keep producer evidence without making it the canonical failure reason.
+        if diagnostics.get("error"):
+            compatibility.pop("error")
+        result = diagnostics | compatibility
+    if _materialized_taskset(row) is not None and isinstance(result, dict):
+        # Result or failure, the record names the inputs it ran (task and dataset digests).
+        for key, value in _task_data_provenance(row).items():
+            result.setdefault(key, value)
+    _stamp_collector_fields(completed, result)
+    if completed.failure_report is not None:
+        result = FailureReportRow.merged_into(result, completed.failure_report)
+    return _CollectedOutcome(result, structured_failure, diagnostics, metric_result, verification_response)
+
+
+_SHARD_IDENTITY_KEYS = (
+    ROLLOUT_ID_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    AGENT_REF_KEY_NAME,
+)
+
+
+def _shard_record(
+    completed: "_CompletedRollout", *, run_id: str, global_config: Any, agent_name: str | None
+) -> Dict[str, Any]:
+    """The record ``ng_collect_rollouts`` would store for ``completed``, for a ``run_examples`` call recording a shard.
+
+    A try that left no result (interrupted, or never started) is a marker, not an outcome: it keeps its identity and
+    the writer turns it into an omitted-rollout row. Anything else goes through ``_collected_outcome``, so a failed
+    ``/run`` is saved as the typed failure row collection saves, never as the marker the dispatcher returned. Every
+    record names the shard's run, as collection stamps its own, so the Store checks it against the shard's manifest.
+    """
+    row, result = completed.row, completed.result
+    if isinstance(result, dict) and result.get(NG_NO_PERSIST_KEY):
+        record = dict(result)
+        for key in _SHARD_IDENTITY_KEYS:
+            if key in row:
+                record.setdefault(key, row[key])
+        record[RUN_ID_KEY] = run_id
+        return record
+    if _materialized_taskset(row) is not None and _is_episode_response(result):
+        result = _native_episode_record(row, result)
+    elif isinstance(result, dict) and _materialized_taskset(row) is None:
+        _sanitize_legacy_result(result)
+    if RUN_ID_KEY not in row:
+        completed = replace(completed, row={**row, RUN_ID_KEY: run_id})
+    record = _collected_outcome(completed, result).record
+    record[RUN_ID_KEY] = run_id
+    _record_policy_model_server(record, global_config, agent_name)
+    return record
+
+
+def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
+    """Add a stored record's enrichment and identity keys to the reply ``run_examples`` returns in its own shape."""
+    if record is result or not isinstance(result, dict):
+        return
+    for key in (*_ENRICHMENT_KEYS, *_SHARD_IDENTITY_KEYS):
+        if key in record and key not in result:
+            result[key] = record[key]
+
+
+_SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs", "_attempts")
+
+
+class _RunRecordWriter:
+    """Writes finished rollouts into a run folder the way ``ng_collect_rollouts`` lays it out, one shard at a time.
+
+    Private: ``run_examples(record_output_dir=..., record_shard=...)`` is the entry point, and it hands this writer
+    the records the collector's own builder produced. A caller writing rows of its own would bypass that builder.
+
+    A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar and, when the rows are
+    given, its materialized inputs, a verified run manifest with every attempt reserved, and its saved progress
+    (``rollouts-<shard>_batch_status.json``) beside it, so a folder of shards is what ``gym eval aggregate``, the run
+    health check, the Store (including resume and recovery) and EvalRDL's reader already read. The caller picks the shard label (for example a training step
+    and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
+    the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
+    sidecar as an omitted-rollout row only when ``record_omitted_rollouts`` is set. Opening a shard replaces what an
+    earlier run wrote under the same label, so a replayed step does not duplicate rows.
+    """
+
+    def __init__(
+        self,
+        record_output_dir: Path | str,
+        shard: str,
+        *,
+        record_omitted_rollouts: bool = False,
+        rows: Optional[List[Dict[str, Any]]] = None,
+        run_id: Optional[str] = None,
+        status_rows: Optional[List[Dict[str, Any]]] = None,
+        source_rows: Optional[List[Dict[str, Any]]] = None,
+        config_identity: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not _SHARD_LABEL.fullmatch(shard):
+            raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
+        if shard.endswith(_RESERVED_SHARD_ENDINGS):
+            # `rollouts-x_failures.jsonl` is shard `x`'s failures sidecar, and readers skip all three endings.
+            raise ValueError(f"shard label {shard!r} must not end with {' or '.join(_RESERVED_SHARD_ENDINGS)}")
+        self.rollouts_fpath = Path(record_output_dir) / f"rollouts-{shard}.jsonl"
+        self.failures_fpath = failures_path_for(self.rollouts_fpath)
+        self.materialized_fpath = materialized_path_for(self.rollouts_fpath)
+        self.manifest_fpath = manifest_path_for(self.rollouts_fpath)
+        self.status_fpath = batch_status_path_for(self.rollouts_fpath)
+        self.record_omitted_rollouts = record_omitted_rollouts
+        # The run this shard's typed failure records belong to, named by the shard's run manifest. The rows and
+        # records stay untagged, as in an eval run written before run manifests, which the Store imports as well.
+        self.run_id = run_id or uuid4().hex
+        self.rollouts_fpath.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_fpath = self.rollouts_fpath.with_name(f".{self.rollouts_fpath.name}.lock")
+        with self._locked() as lock:
+            self.failures_fpath.unlink(missing_ok=True)
+            self.materialized_fpath.unlink(missing_ok=True)
+            self.manifest_fpath.unlink(missing_ok=True)
+            self.status_fpath.unlink(missing_ok=True)
+            # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
+            # found by readers that discover shards by it. A new file (not a truncation) gives this writer its own
+            # inode, which write() checks to notice a later writer of the same shard.
+            fd, partial = tempfile.mkstemp(dir=self.rollouts_fpath.parent, prefix=f".{self.rollouts_fpath.name}.")
+            os.close(fd)
+            Path(partial).replace(self.rollouts_fpath)
+            self._generation = self.rollouts_fpath.stat().st_ino
+            # The lock file names the writer that opened the shard last. An inode number can come back to a later
+            # reopening of the same label, so every append checks this token under the lock, not the inode alone.
+            self._writer_token = secrets.token_hex(16)
+            lock.seek(0)
+            lock.truncate()
+            lock.write(self._writer_token)
+            lock.flush()
+            # As in a collection run, the failures sidecar exists from the start, the rows this call dispatches are
+            # the shard's materialized inputs, and the run manifest names the run the typed failure records belong
+            # to: what the Store and the health check expect to find.
+            self.failures_fpath.touch()
+            if rows is not None:
+                with self.materialized_fpath.open("wb") as file:
+                    for row in rows:
+                        file.write(orjson.dumps(row) + b"\n")
+                # A verified run manifest with every row's attempt reserved before the first request, as collection
+                # writes its own: resume and recovery accept the shard, and the Store checks each record's identity
+                # against it. ``rows`` are the copies as dispatched (run id and attempt index stamped).
+                self.manifest = RunManifest(
+                    max_rollout_attempts=get_max_rollout_attempts(),
+                    run_id=self.run_id,
+                    source_digest=_digest(source_rows if source_rows is not None else rows),
+                    materialized_digest=_digest(rows),
+                    config_digest=_digest(config_identity or {}),
+                    next_attempt={logical_rollout_id(row): row.get(ATTEMPT_INDEX_KEY_NAME, 0) + 1 for row in rows},
+                )
+                self.manifest.write(self.manifest_fpath)
+            # The shard's own saved progress, `rollouts-<shard>_batch_status.json`, read by `gym eval status` and
+            # marked by aggregation like any run's. It counts the records this writer writes, which are what the
+            # Store reads back, and is best-effort: an error disables it with its reason.
+            self._status: Optional[RunStatusTracker] = None
+            self._status_agent_refs: Dict[Tuple[int, int], Dict] = {}
+            self._status_completed: List[Dict] = []
+            self._status_failures: List[Dict] = []
+            # Status writes are throttled as collection's are; the write after the last expected record, and
+            # flush_status() when the caller stops early, are forced so the file ends current.
+            self._status_expected = len(rows) if rows is not None else None
+            self._status_written = 0
+            if status_rows is not None:
+                try:
+                    self._status_agent_refs = {
+                        (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
+                        for row in status_rows
+                    }
+                    self._status = RunStatusTracker(self.status_fpath, status_rows)
+                    self._status.write_status([], [], force=True)
+                except Exception as error:
+                    disable_run_status(self.status_fpath, error)
+                    self._status = None
+
+    @contextmanager
+    def _locked(self) -> Iterator[Any]:
+        """Hold the shard's lock across processes, so opening and each write never interleave with another's.
+
+        The lock file is never unlinked or replaced, so every writer of a label locks the same object; it also holds
+        the token of the writer that opened the shard last.
+        """
+        with self._lock_fpath.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield lock
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def write(self, result: Mapping[str, Any]) -> Optional[Path]:
+        """Append one finished rollout's record; returns the file written, or None for an omitted row not kept.
+
+        Raises:
+            RuntimeError: Another writer opened the same shard since this one did.
+        """
+        self._status_written += 1
+        if result.get(NG_NO_PERSIST_KEY):
+            if not self.record_omitted_rollouts:
+                return None
+            fpath, line = self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
+        elif result.get(NG_FAILURE_CLASS_KEY) is not None:
+            # The cap this attempt ran under travels with it, as collection stamps it from the run manifest.
+            fpath = self.failures_fpath
+            line = orjson.dumps(
+                result
+                if NG_FAILURE_MAX_ATTEMPTS_KEY in result
+                else {**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()}
+            )
+        else:
+            fpath, line = self.rollouts_fpath, orjson.dumps(result)
+        with self._locked() as lock:
+            lock.seek(0)
+            if lock.read() != self._writer_token:
+                raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
+            try:
+                current = self.rollouts_fpath.stat().st_ino
+            except FileNotFoundError:
+                current = None
+            if current != self._generation:
+                raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
+            with fpath.open("ab") as f:
+                f.write(line + b"\n")
+            # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
+            # writer's counts.
+            if self._status is not None and self._status.enabled:
+                status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
+                (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
+                last = self._status_expected is not None and self._status_written >= self._status_expected
+                self._status.write_status(self._status_completed, self._status_failures, force=last)
+        return fpath
+
+    def flush_status(self) -> None:
+        """Write the shard's status as it stands, for a caller that stops consuming before every row is in."""
+        if self._status is None or not self._status.enabled:
+            return
+        with self._locked() as lock:
+            lock.seek(0)
+            if lock.read() != self._writer_token:
+                return  # another writer owns the shard now; its status stands
+            self._status.write_status(self._status_completed, self._status_failures, force=True)
 
 
 def _normalize_health_check_ignored_checks(value) -> List[str]:
@@ -2669,6 +3130,37 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
+def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_fpath: Optional[Path]) -> None:
+    """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
+
+    EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
+    """
+    entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+    for path in input_paths:
+        status_fpath = batch_status_path_for(Path(path))
+        # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
+        # reason to fail the aggregation or hide its own error.
+        try:
+            status = orjson.loads(status_fpath.read_bytes())
+            members = status.get("members")
+            if status.get("tracking") != "enabled" or not isinstance(members, dict):
+                continue
+            for agent, member in members.items():
+                entry = entries.get(agent)
+                failed = (
+                    aggregate_metrics_fpath is None
+                    or artifact_error
+                    or entry is None
+                    or AGGREGATION_ERROR_KEY in entry
+                )
+                member["aggregation_status"] = "error" if failed else "complete"
+            _atomic_write_json(status_fpath, status)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            logger.warning(f"Could not update the run status at {status_fpath}.", exc_info=True)
+
+
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
     """The last failed attempt recorded for each rollout across the failures sidecars.
 
@@ -3135,9 +3627,22 @@ class _RowResultIterator:
     direct caller can stop collecting and cancel the rollouts still in flight.
     """
 
-    def __init__(self, completions: Iterator[Future]):
+    def __init__(
+        self,
+        completions: Iterator[Future],
+        enrich: Optional[Callable[["_CompletedRollout"], Awaitable[Any]]] = None,
+        on_close: Optional[Callable[[], None]] = None,
+    ):
         self._completions = completions
+        self._enrich = enrich
+        self._on_close = on_close
         self._closed = False
+
+    def _finish(self) -> None:
+        """Run the close hook once, after the outcomes a close still delivers have been enriched."""
+        on_close, self._on_close = self._on_close, None
+        if on_close is not None:
+            on_close()
 
     def __iter__(self):
         return self
@@ -3147,9 +3652,10 @@ class _RowResultIterator:
             raise StopIteration
         return self._without_metadata(next(self._completions))
 
-    @staticmethod
-    async def _without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
+    async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
         completed = await future
+        if self._enrich is not None:
+            await self._enrich(completed)
         return completed.row, completed.result
 
     async def aclose(self) -> None:
@@ -3169,6 +3675,7 @@ class _RowResultIterator:
         """
         self._closed = True
         await self._completions.aclose()
+        self._finish()
 
     async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict | RolloutFailureRecord]]]:
         """Stop admission, cancel unfinished client tasks, and preserve completed outcomes.
@@ -3203,8 +3710,17 @@ class _RowResultIterator:
                 outcome.exception()
             else:
                 result = task.result()
+                if self._enrich is not None:
+                    try:
+                        await self._enrich(result)
+                    except Exception as enrich_error:
+                        outcome.set_exception(enrich_error)
+                        outcome.exception()
+                        outcomes.append(outcome)
+                        continue
                 outcome.set_result((result.row, result.result))
             outcomes.append(outcome)
+        self._finish()
         return outcomes
 
 
@@ -3912,6 +4428,32 @@ class RolloutCollectionHelper(BaseModel):
                 batch_agent_refs = {
                     (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME] for row in rows
                 }
+                return
+            # Every other run reports its saved progress too, best-effort: a tracker that cannot be built records
+            # why it is disabled and collection goes on. A row routed by Environment Server names its dispatch
+            # target as the member. Rows are compacted as they are read, so no task payload is retained.
+            status_fpath = batch_status_path_for(output_fpath)
+            agent_refs: Dict[Tuple[int, int], Dict] = {}
+
+            def status_rows():
+                for row in rows:
+                    status_row = _batch_status_row(row, {})
+                    if AGENT_REF_KEY_NAME not in status_row:
+                        status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
+                    agent_refs[(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])] = status_row[
+                        AGENT_REF_KEY_NAME
+                    ]
+                    yield status_row
+
+            try:
+                if not config.resume_from_cache:
+                    # Do not present a previous run's counts if tracker setup fails.
+                    status_fpath.unlink(missing_ok=True)
+                batch_tracker = RunStatusTracker(status_fpath, status_rows())
+                batch_agent_refs = agent_refs
+            except Exception as error:
+                disable_run_status(status_fpath, error)
+                batch_tracker = None
 
         if config.resume_from_cache and config.batch_manifest_fpath:
             if config.materialized_jsonl_fpath.exists() and output_fpath.exists():
@@ -3977,15 +4519,26 @@ class RolloutCollectionHelper(BaseModel):
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
         if batch_tracker is not None:
-            # The manifest selects the current attempt. Reading raw JSONL here
-            # could turn an older success into completed work after a newer retry.
-            batch_completed_rows = [
-                _batch_status_row(record.read(), batch_agent_refs)
-                for record in store.selected_records("success").values()
-            ]
-            batch_failure_rows = [_batch_status_row(row, batch_agent_refs) for row in store.failures()]
-            batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
-            print(f"Validated batch manifest and initialized status at {batch_tracker.status_fpath}")
+            # The Store selects the current attempt of every rollout. Reading raw JSONL here could turn an older
+            # success into completed work after a newer retry, so status starts from what the Store selected.
+            try:
+                batch_completed_rows = [
+                    _batch_status_row(record.read(), batch_agent_refs)
+                    for record in store.selected_records("success").values()
+                ]
+                batch_failure_rows = [_batch_status_row(row, batch_agent_refs) for row in store.failures()]
+                written = batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
+            except Exception as error:
+                if config.batch_manifest_fpath:
+                    raise
+                # Run status without a manifest is best-effort: record why it is disabled and go on.
+                disable_run_status(batch_tracker.status_fpath, error)
+                batch_tracker = None
+            else:
+                if config.batch_manifest_fpath:
+                    print(f"Validated batch manifest and initialized status at {batch_tracker.status_fpath}")
+                elif written:
+                    print(f"Initialized run status at {batch_tracker.status_fpath}")
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
@@ -4096,6 +4649,7 @@ class RolloutCollectionHelper(BaseModel):
         completed_count = 0
         sources_dropped = False
         collection_succeeded = False
+        final_status_written = False
         latency_tracker = DispatchLatencyTracker()
         run_timing: Optional[RunTimingReport] = None
         if config.dispatch_start_report_within_s is not None:
@@ -4134,6 +4688,18 @@ class RolloutCollectionHelper(BaseModel):
             if owned_token_source is not None:
                 output_files.push_async_callback(owned_token_source.close)
             output_files.enter_context(store)
+
+            def write_final_status() -> None:
+                # A run that stops before its final status write, during collection or in a step after it, would
+                # otherwise leave the results persisted inside the write throttle out of the status file.
+                if final_status_written or batch_tracker is None:
+                    return
+                try:
+                    batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
+                except Exception:
+                    logger.warning("Could not write the final run status.", exc_info=True)
+
+            output_files.callback(write_final_status)
             if not config.retain_results_in_memory and config.upload_rollouts and exporters_enabled:
                 output_files.callback(
                     lambda: None if collection_succeeded else upload_spool_fpath.unlink(missing_ok=True)
@@ -4225,78 +4791,15 @@ class RolloutCollectionHelper(BaseModel):
                     continue
                 if isinstance(result, dict) and _materialized_taskset(row) is None:
                     _sanitize_legacy_result(result)
-                verification_response = completed.verification_response
-                diagnostics = completed.diagnostics or _failure_diagnostics(result)
-                metric_result = diagnostics
-                if isinstance(result, RolloutFailureRecord) and metric_result.get(NG_FAILURE_CLASS_KEY) is None:
-                    # Custom typed dispatchers may provide diagnostics without
-                    # legacy routing labels; use the typed failure for those.
-                    metric_result = {
-                        NG_FAILURE_CLASS_KEY: result.sidecar_failure_class,
-                        "_ng_failure_kind": result.failure.failure_kind,
-                        "_ng_failure_type": result.exception_type,
-                    }
-                if verification_response is None:
-                    verification_response = _judge_failure_response(result)
                 # Custom dispatch implementations may return an already-completed
                 # future. Associate those outcomes too; normal HTTP dispatch records
                 # its event before the request through on_dispatch above.
                 store.record_dispatch(row)
-                # HTTP results were validated at the request boundary. Custom
-                # drivers returning _CompletedRollout own their completed schema.
-                if isinstance(result, dict):
-                    if "failure" in result and "episode_id" in result:
-                        result = _normalize_rollout_outcome(row, result)
-                    elif result.get(NG_FAILURE_CLASS_KEY) is not None:
-                        result = _failure_outcome(row, result, "agent")
-                structured_failure = isinstance(result, RolloutFailureRecord)
-                if structured_failure:
-                    compatibility = _failure_compatibility_row(result, verification_response)
-                    # The canonical alias must agree with the typed record. Keep a distinct
-                    # producer class as collector-owned evidence for existing score selectors.
-                    legacy_class = diagnostics.get(NG_FAILURE_CLASS_KEY)
-                    if isinstance(legacy_class, str) and legacy_class != result.sidecar_failure_class:
-                        compatibility[NG_FAILURE_LEGACY_CLASS_KEY] = legacy_class
-                    if verification_response is not None and matches_failure_class(
-                        compatibility, {"judge_failed", "judge_invalid"}
-                    ):
-                        compatibility["response"] = verification_response
-                    # Keep producer evidence without making it the canonical failure reason.
-                    if diagnostics.get("error"):
-                        compatibility.pop("error")
-                    result = diagnostics | compatibility
-                if _materialized_taskset(row) is not None and isinstance(result, dict):
-                    # Result or failure, the record names the inputs it ran (task and dataset digests).
-                    for key, value in _task_data_provenance(row).items():
-                        result.setdefault(key, value)
-                if completed.elapsed_s is not None:
-                    # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
-                    # which resume reads to order dispatch.
-                    result[ELAPSED_S_KEY] = completed.elapsed_s
-
-                result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-                result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-                if AGENT_REF_KEY_NAME in row:
-                    result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                collected = _collected_outcome(completed, result)
+                result = collected.record
+                structured_failure = collected.structured_failure
+                metric_result = collected.metric_result
                 result[RUN_ID_KEY] = store.manifest.run_id
-                if TASK_SOURCE_KEY_NAME in row:
-                    result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
-                if SKILLS_REF_KEY_NAME in row:
-                    result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-                if ATTEMPT_INDEX_KEY_NAME in row:
-                    result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
-                if ROLLOUT_ID_KEY_NAME in row:
-                    # Capture readback recomputes the id from the finished record.
-                    # Preserve an explicit id on the result just like the indices.
-                    result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-                if completed.environment_server is not None:
-                    result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
-                elif NG_ENVIRONMENT_SERVER_KEY in row:
-                    result[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
-                if completed.environment_server_type is not None:
-                    result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
-                if completed.failure_report is not None:
-                    result = FailureReportRow.merged_into(result, completed.failure_report)
 
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
@@ -4308,38 +4811,14 @@ class RolloutCollectionHelper(BaseModel):
                 _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
-                # when capture is off). Never alters the harness output/reward already in `result`.
-                # Preserve failure captures even without observations. Explicit agent or verifier evidence also
-                # survives legacy no-persist markers, since reported failures are saved for recovery.
-                if capture_dirs and (
-                    not no_persist
-                    or NG_AGENT_OBSERVATIONS_KEY in result
-                    or NG_VERIFIER_INVOCATIONS_KEY in result
-                    or NG_TRAJECTORY_KEY in result
-                    or FailureReportRow.EVENTS in result
-                ):
-                    # A cancelled call's capture write runs detached, so drain the claims this
-                    # rollout still holds before snapshotting; otherwise a late row is lost.
-                    rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
-                    if rollout_id_for_capture is not None:
-                        await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
-                    merge_model_call_capture_into_record(
-                        result,
-                        capture_dirs,
-                        include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
-                    )
-
-                if (
-                    "ng_model_call_capture" in result
-                    or NG_AGENT_OBSERVATIONS_KEY in result
-                    or NG_TRAJECTORY_KEY in result
-                    or NG_VERIFIER_INVOCATIONS_KEY in result
-                ):
-                    _attach_trajectory_record(row, result)
-
-                # Assembles ng_perf from ng_trajectory when observability is enabled.
-                _attach_ng_perf(
-                    result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms
+                # when capture is off), project ng_trajectory and assemble ng_perf. Never alters the
+                # harness output/reward already in `result`.
+                await enrich_run_result(
+                    row,
+                    result,
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
+                    rollout_latency_ms=rollout_latency_ms,
                 )
 
                 # Freeze and rebuild tokens only for participating agents.
@@ -4477,7 +4956,7 @@ class RolloutCollectionHelper(BaseModel):
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
 
-                if batch_tracker is not None:
+                if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
 
                 agent_name = dispatch_name
@@ -4679,7 +5158,7 @@ class RolloutCollectionHelper(BaseModel):
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
             )
 
-        if batch_tracker is not None:
+        if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
             batch_tracker.write_status(
                 batch_completed_rows,
                 batch_failure_rows,
@@ -4687,6 +5166,7 @@ class RolloutCollectionHelper(BaseModel):
                 aggregation_deferred=config.disable_aggregation,
                 force=True,
             )
+            final_status_written = True
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
@@ -5522,6 +6002,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
+        enrich_results: bool = False,
+        include_model_call_payloads: bool = True,
+        delete_model_call_capture: bool = False,
+        record_output_dir: Optional[Path | str] = None,
+        record_shard: Optional[str] = None,
+        record_omitted_rollouts: bool = False,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5584,22 +6070,123 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
-        """
 
-        return _RowResultIterator(
-            self._run_examples_with_metadata(
-                examples,
-                head_server_config=head_server_config,
-                semaphore=semaphore,
-                route_failures_to_sidecar=route_failures_to_sidecar,
-                environment_server_name=environment_server_name,
-                max_resident_tasks=max_resident_tasks,
-                dispatch_budget_s=dispatch_budget_s,
-                drain_margin_s=drain_margin_s,
-                latency_tracker=latency_tracker,
-                **({"retry_requests": False} if not retry_requests else {}),
-            )
+        ``enrich_results`` runs :func:`enrich_run_result` on each result before it is returned, so the caller receives
+        what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
+        (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
+        the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
+        enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
+        is merged, and needs the payloads kept. With ``enrich_results`` the rows are dispatched as collection
+        dispatches them, on copies that name this call's run: results are validated, and under
+        ``route_failures_to_sidecar`` a failed `/run` comes back as the typed ``RolloutFailureRecord``, as
+        ``run_outcomes`` returns it; rows without a rollout identity keep the plain dispatch. With ``enrich_results``
+        off, results are exactly what `/run` returned.
+
+        ``record_output_dir`` with ``record_shard`` also writes each rollout to that run folder through
+        :class:`_RunRecordWriter`, as ``ng_collect_rollouts`` would: ``rollouts-<shard>.jsonl``, its failures sidecar
+        with the typed failure rows collection writes, the rows as the shard's materialized inputs, its run manifest
+        and its saved progress for ``gym eval status`` (omitted-rollout rows with ``record_omitted_rollouts``). It
+        implies ``enrich_results``, dispatches as collection does (typed
+        failure records under ``route_failures_to_sidecar``, validated results) on copies of the rows that name the
+        shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
+        """
+        if record_output_dir is not None and not record_shard:
+            raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
+        enrich_results = enrich_results or record_output_dir is not None
+        if delete_model_call_capture and not include_model_call_payloads:
+            raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
+        enrich = None
+        if enrich_results:
+            global_config = self.setup_server_client(head_server_config).global_config_dict
+            capture_dirs = model_call_capture_dirs_from_config(global_config)
+            observability_enabled = observability_enabled_from_config(global_config)
+
+            async def enrich(completed: _CompletedRollout) -> None:
+                options = dict(
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
+                    include_payloads=include_model_call_payloads,
+                    delete_capture=delete_model_call_capture,
+                )
+                if writer is None:
+                    await _enrich_returned_result(
+                        completed.row, completed.result, completed.rollout_latency_ms, **options
+                    )
+                    return
+                # The shard holds what collection would store: the stamped record, or the typed failure row for a
+                # failed /run, with the same enrichment, so the Store and the health check read it like an eval run.
+                record = _shard_record(
+                    completed,
+                    run_id=writer.run_id,
+                    global_config=global_config,
+                    agent_name=self._agent_name_for_row(completed.row, global_config),
+                )
+                await enrich_run_result(
+                    completed.row, record, rollout_latency_ms=completed.rollout_latency_ms, **options
+                )
+                _reflect_enrichment(completed.result, record)
+                writer.write(record)
+
+        dispatched = examples
+        run_id = None
+        if record_output_dir is not None:
+            # Recording needs the indices every reader keys on. Refuse before any existing shard is replaced.
+            for index, row in enumerate(examples):
+                missing = [key for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME) if key not in row]
+                if missing:
+                    raise ValueError(f"Recording row {index} is missing required fields: {', '.join(missing)}")
+        if enrich_results and all(maybe_rollout_id_from_run_body(row) is not None for row in examples):
+            # Enriched or recorded, the rows are dispatched as collection dispatches: typed failure records under
+            # route_failures_to_sidecar and validated results, on copies that all name this call's run (a row reused
+            # from an earlier run included), so a recorded shard's records check against its manifest. The caller's
+            # rows are not modified. Rows without a rollout identity keep the plain dispatch and its legacy rows.
+            run_id = uuid4().hex
+            dispatched = [
+                dict(row, **{RUN_ID_KEY: run_id, ATTEMPT_INDEX_KEY_NAME: row.get(ATTEMPT_INDEX_KEY_NAME, 0)})
+                for row in examples
+            ]
+        completions = self._run_examples_with_metadata(
+            dispatched,
+            head_server_config=head_server_config,
+            semaphore=semaphore,
+            route_failures_to_sidecar=route_failures_to_sidecar,
+            environment_server_name=environment_server_name,
+            max_resident_tasks=max_resident_tasks,
+            dispatch_budget_s=dispatch_budget_s,
+            drain_margin_s=drain_margin_s,
+            latency_tracker=latency_tracker,
+            **({"retry_requests": False} if not retry_requests else {}),
+            **({"typed_outcomes": route_failures_to_sidecar, "validate_results": True} if run_id is not None else {}),
         )
+        # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
+        writer = None
+        if record_output_dir is not None:
+            # The shard's status members, as collection names them: the agent, or the Environment Server a row
+            # is routed to.
+            status_rows = []
+            for row in examples:
+                status_row = _batch_status_row(row, {})
+                if AGENT_REF_KEY_NAME not in status_row:
+                    status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
+                status_rows.append(status_row)
+            writer = _RunRecordWriter(
+                record_output_dir,
+                record_shard,
+                record_omitted_rollouts=record_omitted_rollouts,
+                rows=dispatched,
+                run_id=run_id,
+                status_rows=status_rows,
+                source_rows=examples,
+                config_identity={
+                    "run_examples": {
+                        "route_failures_to_sidecar": route_failures_to_sidecar,
+                        "record_omitted_rollouts": record_omitted_rollouts,
+                        "include_model_call_payloads": include_model_call_payloads,
+                        "retry_requests": retry_requests,
+                    }
+                },
+            )
+        return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         """Return a client for the head server, reusing the cached one when the helper opted in.
@@ -6048,6 +6635,8 @@ class RolloutAggregationHelper(BaseModel):
                 aggregate_metrics_fpath=aggregate_metrics_fpath,
                 force=True,
             )
+        else:
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
