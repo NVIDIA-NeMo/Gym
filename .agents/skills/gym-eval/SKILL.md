@@ -54,7 +54,10 @@ needs only the `mlflow` extra, which the MLflow delivery check in `--inspect` us
 1. Pin Gym: `driver.gym_install.ref` is a full commit, not a branch. Recovery reads a run with the Gym
    that wrote it and refuses an unpinned ref.
 2. Make every long benchmark resumable under `driver.benchmarks.<name>`: `resumable: true`, or
-   `resumable: {max_retries: N, max_walltime: "D-HH:MM:SS"}`.
+   `resumable: {max_retries: N, max_walltime: "D-HH:MM:SS"}`. `max_walltime` is the whole chain's budget, not
+   one job's: set it to the total the run may use (for example 3 x `compute.cluster.walltime`). Equal to the
+   job walltime, the first job that times out spends it all, and the next one stops at once with a
+   walltime-cap stop until you run `--recover --max-walltime` (step 4). Gym never adds time on its own.
 3. Check without submitting:
 
    ```bash
@@ -116,9 +119,9 @@ job of the run is live.
 
 While the chain runs, read its progress with the read-only inspection of step 3 (`gym eval resubmit
 "$GYM_JOB_ID" <benchmark> --recover --inspect`, which reports `RUNNING` while a job is live) or from the run
-directory: `artifacts/rollouts_coverage.json` holds the completed and expected rollouts. A `gym eval status`
-command that prints this from the Store without taking the run lock comes with the Store status layer; it is
-not part of this version.
+directory: the line count of `artifacts/rollouts.jsonl` is the results saved so far, and
+`artifacts/rollouts_coverage.json` holds the expected count; its completion fields are final only after
+the chain stops or the run ends.
 
 ## 3. Inspect first, always
 
@@ -147,7 +150,8 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   stays. The report says which (`pin_plan`, and a warning "planned on <installed> for a run pinned at
   <old>"), and `--inspect` shows the same decision. `--no-auto-repin` keeps the pin and refuses that case,
   naming `--repin`; `--repin <full commit> --repin-reason "<why>"` stays the explicit way to move a run,
-  and the repin target must be the Gym that runs the command.
+  and the repin target must be the Gym that runs the command. Runs you compare stay on one Gym commit:
+  inspect each with `--no-auto-repin`, or repin every run of the comparison together.
 - **`UNKNOWN`, "nothing was read or decided"** (heavy readers run as a Slurm step; `NEMO_GYM_REMOTE_READER_SRUN`
   holds the extra `srun` arguments of that step, for example
   `export NEMO_GYM_REMOTE_READER_SRUN='-p <cpu partition> -q <qos> -c 4 --mem=128G'`, and a launcher may set it
@@ -217,7 +221,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | The inspection says | Do |
 | --- | --- |
 | NOOP, `RUNNING` (`continuation <job> live`) | Wait for the job to end, then inspect again. |
-| Eligible work, `PLANNED` | Run it, with the variables the saved config forwards (`compute.cluster.forward_env`, `HF_TOKEN`) set in that shell; a missing one stops the dispatch. |
+| Eligible work, `PLANNED` | Run it, with the variables the saved config forwards (`compute.cluster.forward_env`) set in that shell; a missing one stops the dispatch. A run submitted from the login node usually forwards none: its credentials are the `runtime:` entries of the saved `resolved-config.yaml`, which the dispatch does not check, so set those variables (an `HF_TOKEN`, say) in the dispatching shell too, or the resumed job starts without them. |
 | `reverify`, `PLANNED` (only rows with a saved answer remain: a judge failure, or a verify call lost in transport) | Run it: the saved answers are judged again and the policy is not called. A run that served its own model, and nothing else beside it, gets a judge-only job on one CPU node. Its partition is the first of: `--judge-partition <partition>`, a node pool of the saved config with `gpus_per_node: 0`, or the partition `NEMO_GYM_REMOTE_READER_SRUN` names. Its QOS is the first of: `--judge-qos <qos>`, the QOS of the saved CPU pool, the `-q`/`--qos` of `NEMO_GYM_REMOTE_READER_SRUN` when it names this partition or none, the partition's default. Slurm refuses a GPU QOS on a CPU partition (`QOSMinGRES`): pass `--judge-qos`. With no CPU pool and no reader placement, pass `--judge-partition`, or the recovery stops with nothing queued (next row). A run that serves its judge on a node pool of its own gets a judge-only job on that saved pool instead and keeps the run's QOS; `--judge-partition` and `--judge-qos` are not used (when you pass them the report says `--judge-partition/--judge-qos apply to the CPU judge profile only; not used`). A run with both judge failures and policy work is resubmitted; it re-judges the saved failures before its policy work and again at the end. |
 | STOP on a `reverify` of a GPU-served run: `... has no existing CPU-only judge execution profile and none can be derived: no CPU partition is known` | Nothing was queued and no row was lost. Run it again with `--judge-partition <cpu partition>` (and `--judge-qos <qos>` on `QOSMinGRES`). If the message says `this submission has no served-judge execution profile: service(s) <names> run on the policy's nodes (...)`, no partition helps: the judge-only job does not start the policy's allocation and policy services are not restarted. Give each of those services a node pool of its own, beside the policy's, in the submission config, or report that the saved answers cannot be re-judged. |
 | STOP on a `reverify`: `the last 2 judge-only job(s) (<ids>) ended without settling a saved answer; read their receipts and logs ...` | Nothing was queued. Read those jobs' receipts and logs under `<job dir>/reverification` (the message prints the path; in a finished run it is
@@ -233,7 +237,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | A Gym fix is needed to continue, or the launcher's Gym differs from the run's pin | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | STOP: N completed result(s) are masked and not measured | They are kept and a resume would run nothing; the run is not complete. Report the count and the reason. Nothing re-grades a masked row that has a saved answer but neither a gradeable artifact (no intact patch, say) nor a recorded grade; `--inspect` names those rows apart ("without a gradeable artifact") and keeps them masked. Only when the operator wants them sampled again: `--recover --rerun-masked-without-artifact --rerun-reason "<why>"` (below the table). |
 | `fresh-restart` (no task inventory) | Step 8. |
-| NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (warning `MLflow delivery <state>: <reasons>`) | The results are complete; delivery is reported beside the gate, never inside it. Close it: `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values from the run's `artifacts/rollouts_resolved_config.yaml`, and the token as `+mlflow_tracking_token=<token>` or `MLFLOW_TRACKING_TOKEN`. A repeat on an exported run verifies without touching the run lock; `--recover` on a complete run that requires tracking and has no receipt runs the export too. "although the saved config snapshot names a tracking URI...": tracking was required and the export did not finish: read the exporter's failure in the driver log, repair, export. "does not name all of the tracking URI, experiment and run name": nothing tracked the run; set `mlflow_tracking_required: false` next time. From a host without access to the tracking server the inspect reports `unverified` with `status query failed: ...`: inspect with `--mlflow-run-id <receipt run_id> --mlflow-status FINISHED` once you observed that status yourself (`GET <tracking uri>/api/2.0/mlflow/runs/get?run_id=<id>`, field `info.status`); `ModuleNotFoundError` means the reader's environment lacks `mlflow`. |
+| NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (warning `MLflow delivery <state>: <reasons>`) | The results are complete; delivery is reported beside the gate, never inside it. Close it: `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values from the run's `artifacts/rollouts_resolved_config.yaml`, and the token as `+mlflow_tracking_token=<token>` or `MLFLOW_TRACKING_TOKEN`. A repeat on an exported run verifies without touching the run lock; `--recover` on a complete run that requires tracking and has no receipt runs the export too. "although the saved config snapshot names a tracking URI...": tracking was required and the export did not finish: read the exporter's failure in the driver log, repair, export. "does not name all of the tracking URI, experiment and run name": nothing tracked the run; set `mlflow_tracking_required: false` next time. From a host without access to the tracking server the inspect reports `unverified` with `status query failed: ...`: inspect with `--mlflow-run-id <receipt run_id> --mlflow-status FINISHED` once you observed that status yourself (`GET <tracking uri>/api/2.0/mlflow/runs/get?run_id=<id>`, field `info.status`); `ModuleNotFoundError` means the reader's environment lacks `mlflow`. When the reason says the rollouts were not uploaded and the run sets `upload_rollouts: false`, the delivery stays `unverified` by configuration: report it; an export does not change it. |
 | `SUCCESS` | Done. Keep the run directory as the record. Nothing needs cancelling: the finishing job cancelled its successor and sentinel (`chain-end-journal.jsonl`). |
 
 Three limits, each counting something different: the **chain cap** (`max_walltime`, summed over
@@ -259,7 +263,8 @@ decision). The action comes from the failure's HTTP status, else its kind, else 
 retried; every other saved failure is retried (`default_action: retry`). Settled results are final and
 never reopened: a scored answer or zero (including a typed answer failure: truncated, empty or
 malformed), and a clean agent timeout, which is the model's result under the benchmark's own time limit.
-An `agent_timeout` that kept no answer is a saved failure the policy decides, retried by default. A
+An `agent_timeout` that kept no answer is a saved failure the policy decides, retried by default
+(`recovery_outcome_policy: {by_failure_kind: {agent_timeout: fail}}` keeps it final instead). A
 failure the Environment Server marked terminal (a typed model failure such as `model_context_limit`) is
 never retried. `--inspect` lists the identities in each state and the policy in force (`outcome_policy`,
 with its `source`: `default`, `config` or `python`).
@@ -336,7 +341,9 @@ evaluation's identity. The model section is yours
 ([gym-add-model-config](../gym-add-model-config/SKILL.md)). A slow deployment produces timeouts and
 truncated answers that count as model failures: a policy-model response timeout is the model's unless
 the call sets `--policy-timeout-counts-as-model false` (for a self-hosted evaluation that owns its
-serving; it moves the timeout to the evaluation side and changes nothing else).
+serving; it moves the timeout to the evaluation side and changes nothing else). Keep the default whenever
+two checkpoints, or a checkpoint and its quantized export, are compared: the deployment is part of what is
+measured.
 
 - The verdict is the inspection's output line. The persisted health record is `_ng_run_health_metrics` in
   the first entry of `artifacts/rollouts_aggregate_metrics.json`; `quality_summary.json` is the per-rollout
@@ -420,7 +427,8 @@ run to a new location: a fresh `gym eval run` at an existing output path replace
 To stop a chain: `scancel` the running job, its successor (in `.gym_followup_queued.<job id>`) and the
 sentinels (`.gym_followup_sentinel.<job id>`, and the one its predecessor queued for it, which becomes
 eligible when you cancel the job; `squeue --me -o '%i %j %T %E'` shows it by its dependency). A successor
-left to start sees `CANCELLED`, writes the stop to `.gym_chain_incomplete` and exits, after it got an
+left to start sees `CANCELLED`, writes the stop to `.gym_chain_incomplete` and exits (it ends `FAILED`,
+exit 1, by design: that is the stop, not a fault), after it got an
 allocation; cancelling the successor and the sentinels saves that allocation and leaves no stop record
 (the inspection reads the state from the scheduler either way). Then inspect (step 3) before deciding
 anything else, and keep the run directory.

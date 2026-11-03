@@ -73,6 +73,29 @@ def test_a_real_error_beside_unverified_health_is_failed():
     assert any(w.startswith("response/trial health unknown") for w in task["warnings"])
 
 
+def test_an_unread_score_of_an_incomplete_run_names_the_run_not_the_score_options():
+    from nemo_gym.orchestration.recovery import IdentityState, RecoveryAction, RecoveryDecision
+
+    # Both score options were passed; the run is half done, so there is no aggregate to read yet.
+    decision = RecoveryDecision(
+        action=RecoveryAction.RESUBMIT,
+        reason="78 identities need the policy again",
+        expected=160,
+        counts={IdentityState.SCORED.value: 82, IdentityState.MISSING.value: 78},
+        identities={IdentityState.MISSING.value: [(task, 0) for task in range(82, 160)]},
+        evidence=[],
+    )
+    task = gate_task_summary(
+        decision, score=None, summary_valid=True, summary_reasons=[], health_passed=None, health_reasons=[]
+    )
+
+    assert (
+        "score unavailable: the run is not complete (82/160 rollouts settled); "
+        "the score is read once every rollout is settled"
+    ) in task["errors"]
+    assert not any("--score-key" in error for error in task["errors"])
+
+
 def test_missing_mlflow_delivery_beside_unverified_health_is_a_fact_not_a_failure():
     collected = _uncovered(_run(100))
     collected.score = 0.9

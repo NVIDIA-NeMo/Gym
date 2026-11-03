@@ -9,7 +9,8 @@ A clean agent timeout is the model's result under the benchmark's own time limit
 records its agent deadline as a graded zero has settled it. For Terminal-Bench 4.0, 8 h per task is the
 official agent budget (TB 4.0 release notes, "Calibrating resources"), and Gym's default
 `agent_timeout_sec` of 28800 matches it. An `agent_timeout` that kept no answer is a saved failure the
-recovery policy decides, retried by default.
+recovery policy decides, retried by default; `by_failure_kind: {agent_timeout: fail}` in the benchmark's
+`resumable.recovery_outcome_policy` keeps it final instead.
 
 ## GDP-PDF: incomplete answers and input limits
 
