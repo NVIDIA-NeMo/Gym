@@ -24,6 +24,7 @@ from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxHandle
 from nemo_gym.sandbox.providers.opensandbox import provider as module
+from nemo_gym.sandbox.providers.opensandbox.failures import opensandbox_failure
 from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 
 
@@ -39,7 +40,7 @@ class HttpError(Exception):
 
 def test_causal_chain_roundtrips_sandbox_evidence_and_origin_ids():
     sdk = HttpError(502)
-    inner = sandbox_failure(operation="command status", sandbox_id="sb", execution_id="exec-1", cause=sdk)
+    inner = opensandbox_failure(operation="command status", sandbox_id="sb", execution_id="exec-1", cause=sdk)
     try:
         raise inner from sdk
     except NgFailureEvent as cause:
@@ -66,10 +67,10 @@ def test_policy_overrides_merge_and_do_not_change_failure_facts():
         }
     )
     assert policy.by_status_code[429] == OutcomeAction.RETRY
-    error = sandbox_failure(operation="status", sandbox_id="sb", cause=HttpError(502))
+    error = opensandbox_failure(operation="status", sandbox_id="sb", cause=HttpError(502))
     before = error.to_record()
     assert failure_outcome_policy(error, config=policy) == OutcomeAction.RETRY
-    error503 = sandbox_failure(operation="status", sandbox_id="sb", cause=HttpError(503))
+    error503 = opensandbox_failure(operation="status", sandbox_id="sb", cause=HttpError(503))
     assert failure_outcome_policy(error503, config=policy) == OutcomeAction.FAIL
     assert error.to_record() == before
     with pytest.raises(ValidationError):
@@ -80,7 +81,7 @@ def test_policy_overrides_merge_and_do_not_change_failure_facts():
 
 @pytest.mark.parametrize("message", ["HTTP 401 OOMKilled", "exit 137", "command timeout"])
 def test_text_cannot_establish_cause_or_status(message):
-    failure = sandbox_failure(operation="run", sandbox_id="sb", cause=RuntimeError(message))
+    failure = opensandbox_failure(operation="run", sandbox_id="sb", cause=RuntimeError(message))
     assert failure.failure_kind == PROVIDER_REQUEST_FAILED
     assert failure.http_status is None
     assert failure.sandbox.evidence_source is None
@@ -310,7 +311,7 @@ def test_unknown_wrapper_does_not_borrow_transport_or_http_facts():
     for cause in (httpx.ReadTimeout("timeout"), SandboxApiException("denied", status_code=401)):
         wrapper = RuntimeError("wrapper")
         wrapper.__cause__ = cause
-        failure = sandbox_failure(operation="get_info", sandbox_id="sb", cause=wrapper)
+        failure = opensandbox_failure(operation="get_info", sandbox_id="sb", cause=wrapper)
         assert failure.failure_kind == "provider_request_failed"
         assert failure.http_status is None
 
@@ -319,7 +320,7 @@ def test_sdk_message_survives_event_serialization():
     from opensandbox.exceptions import SandboxApiException
 
     cause = SandboxApiException("explicit provider diagnostic", status_code=403)
-    failure = sandbox_failure(operation="create", cause=cause)
+    failure = opensandbox_failure(operation="create", cause=cause)
     report = failure.to_record()
     event = report["failure_events"][failure.event_id]
     assert event["foreign_error"]["message"] == "explicit provider diagnostic"
@@ -364,7 +365,7 @@ def test_broken_exception_formatter_does_not_hide_observed_failure():
             raise RuntimeError("broken formatter")
 
     cause = BadMessage()
-    failure = sandbox_failure(operation="get_info", sandbox_id="sb", cause=cause)
+    failure = opensandbox_failure(operation="get_info", sandbox_id="sb", cause=cause)
     assert failure.failure_kind == "provider_unavailable" and failure.http_status == 503
     assert failure.__cause__ is cause
     assert failure.foreign_error.message == ""
@@ -385,7 +386,7 @@ async def test_structured_endpoint_availability_controls_create_retries(code, ex
     response = SimpleNamespace(status_code=404, headers={}, parsed=SimpleNamespace(code=code, message="same text"))
     with pytest.raises(SandboxApiException) as sdk_error:
         handle_api_error(response, "Get endpoint")
-    failure = sandbox_failure(operation="create", cause=sdk_error.value)
+    failure = opensandbox_failure(operation="create", cause=sdk_error.value)
     assert failure.failure_kind == expected
     assert failure.http_status == 404
     handle = SandboxHandle("sb", "opensandbox", None)
@@ -407,7 +408,7 @@ def test_creation_uses_sdk_readiness_evidence_not_message_markers(message):
     from opensandbox.exceptions import SandboxReadyTimeoutException, SandboxUnhealthyException
 
     for sdk_error in (SandboxReadyTimeoutException(message), SandboxUnhealthyException(message)):
-        failure = sandbox_failure(operation="create", cause=sdk_error)
+        failure = opensandbox_failure(operation="create", cause=sdk_error)
         assert module._is_retryable_create_error(failure)
     assert not module._is_retryable_create_error(RuntimeError(message))
 
@@ -421,9 +422,9 @@ def test_retry_after_does_not_search_other_events_causes():
     sdk_error = ExceptionConverter.to_sandbox_exception(
         httpx.HTTPStatusError("busy", request=request, response=response)
     )
-    failure = sandbox_failure(operation="status", cause=sdk_error)
+    failure = opensandbox_failure(operation="status", cause=sdk_error)
     assert module._retry_delay(failure, fallback=1) == 27
-    outer = sandbox_failure(operation="create", cause=failure, http_status=429)
+    outer = opensandbox_failure(operation="create", cause=failure, http_status=429)
     assert module._retry_delay(outer, fallback=1) == 1
     response.headers["Retry-After"] = "invalid"
     assert module._retry_delay(failure, fallback=1) == 1
@@ -449,3 +450,20 @@ async def test_retry_after_cannot_extend_status_recovery_budget(monkeypatch):
     assert caught.value.__cause__.http_status == 429
     commands.get_command_status.assert_awaited_once()
     commands.run.assert_awaited_once()
+
+
+def test_shared_constructor_keeps_provider_selected_facts_and_child_evidence():
+    child = opensandbox_failure(operation="status", sandbox_id="sb", cause=HttpError(503))
+    outer = sandbox_failure(
+        operation="create",
+        failure_kind=PROVIDER_REQUEST_FAILED,
+        cause=child,
+    )
+    assert outer.failure_kind == PROVIDER_REQUEST_FAILED
+    assert outer.http_status is None
+    assert outer.foreign_error is None
+    assert outer.sandbox is None
+    restored = NgFailureEvent.from_record(outer.to_record())
+    assert restored.__cause__.event_id == child.event_id
+    assert restored.__cause__.http_status == 503
+    assert restored.__cause__.sandbox.sandbox_id == "sb"
