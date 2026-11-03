@@ -238,3 +238,104 @@ async def test_report_without_selected_failure_follows_outcome_policy():
     (verify,) = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
     assert verify["response"]["status"] == "failed"
     assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+async def test_session_verification_forwards_canonical_observations_without_changing_success(omitted):
+    from nemo_gym.core import (
+        PROVIDER_IO_TIMEOUT,
+        PROVIDER_OOM_KILLED,
+        FailureReport,
+        NgFailureEvent,
+        RequestFailureLog,
+        SandboxFailureDetails,
+        observe_failure,
+    )
+
+    environment, client = _environment_server()
+    cause = NgFailureEvent(boundary="sandbox", failure_kind=PROVIDER_IO_TIMEOUT, failure_reason="Read failed")
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Current workload OOMKilled",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="sandbox-1"),
+    )
+    failure.__cause__ = cause
+    with RequestFailureLog.capture() as log:
+        if omitted:
+            log.MAX_EVENTS = 1
+        observe_failure(failure)
+        result = await environment.run_request(_request())
+
+    assert result.failure is None
+    assert result.result.reward == 1.0
+    [verify] = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
+    report = FailureReport.model_validate(verify["failure_report"])
+    assert report.failure_id is None
+    assert report.omitted is omitted
+    if omitted:
+        assert failure.event_id not in report.events
+    else:
+        assert report.events[failure.event_id].cause_id == cause.event_id
+        assert report.events[failure.event_id].details.sandbox_id == "sandbox-1"
+
+
+@pytest.mark.parametrize("omitted", [False, True])
+async def test_checkpoint_restores_failure_reference_and_report_before_verification(omitted):
+    from nemo_gym.core import (
+        PROVIDER_OOM_KILLED,
+        FailureReport,
+        NgFailureEvent,
+        RequestFailureLog,
+        SandboxFailureDetails,
+        observe_failure,
+    )
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Current workload OOMKilled",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="sandbox-1"),
+    )
+    observation = SandboxObservation(role="agent", phase="agent_execution", outcome="oom", failure_id=failure.event_id)
+    with RequestFailureLog.capture() as original:
+        observe_failure(failure)
+        report = original.report.model_copy(update={"omitted": omitted})
+    response = _agent_response().model_copy(
+        update={
+            "failure_report": report.model_dump(mode="json"),
+            "metadata": {NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
+        }
+    )
+    environment, client = _environment_server()
+    request = _request()
+    record = EpisodeRecord(
+        episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
+        task_digest=task_digest(request.task.model_dump(mode="json")),
+        boundary={
+            "next": "verify",
+            "handles": {"resources_session_id": "resources-session", "agent_session_id": "agent-session"},
+            "response": response.model_dump(mode="json"),
+        },
+    )
+    participant = EnvironmentParticipant(mode="exported")
+    participant.restore_records([EpisodeRecord.model_validate_json(record.model_dump_json())])
+    environment._checkpoint = participant
+    del client.responses[:4]
+    with RequestFailureLog.capture() as restored:
+        assert not restored.report.events
+        result = await environment.run_request(request)
+        assert failure.event_id in restored.report.events
+    assert result.failure is None
+    [verify] = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
+    forwarded = FailureReport.model_validate(verify["failure_report"])
+    reference = SandboxObservation.model_validate_json(
+        verify["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY]
+    )
+    assert forwarded.failure_id is None
+    assert forwarded.omitted is omitted
+    assert reference.failure_id == failure.event_id
+    assert forwarded.events[reference.failure_id].details.sandbox_id == "sandbox-1"
+    assert [path for _, path, _ in client.calls] == ["/verify", "/close_session"]
