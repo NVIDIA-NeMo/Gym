@@ -19,10 +19,13 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentContinuationRequirements,
 )
-from nemo_gym.core import PROVIDER_OOM_KILLED, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_runtime import SandboxFailureDetails
+from nemo_gym.core import (
+    PROVIDER_OOM_KILLED,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    SandboxFailureDetails,
+)
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401

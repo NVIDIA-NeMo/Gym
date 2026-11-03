@@ -48,8 +48,8 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    verification_failure_fields,
 )
-from nemo_gym.agents.agent_tools import verification_failure_fields
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
@@ -66,8 +66,10 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    observe_failure,
 )
-from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -77,7 +79,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     upload_text,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess, SandboxFailureDetails
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentEpisode,
@@ -88,7 +90,6 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,
@@ -650,7 +651,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
             if state.is_continuation:
-                return await self.activate_agent_session(request, body)
+                response = await self.activate_agent_session(request, body)
+                verification_failure_fields(response)
+                return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
             prompt, system = self._session_input(body)
@@ -661,7 +664,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
-            return (await asyncio.shield(state.task)).model_copy(deep=True)
+            response = (await asyncio.shield(state.task)).model_copy(deep=True)
+            verification_failure_fields(response)
+            return response
         # Only genuinely unseeded calls reach local execution; invalid or closed
         # session markers are rejected above, never retried on the host.
         path_params = getattr(request, "path_params", None)
@@ -720,7 +725,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json} | verification_failure_fields(),
+                json=body.model_dump()
+                | {"response": agent_resp_json}
+                | verification_failure_fields(NeMoGymResponse.model_validate(agent_resp_json)),
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
@@ -1231,7 +1238,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     else None,
                 }
             )
-        return response
+        fields = verification_failure_fields()
+        return response.model_copy(update=fields) if fields["failure_report"] is not None else response
 
     async def _session_response(
         self,

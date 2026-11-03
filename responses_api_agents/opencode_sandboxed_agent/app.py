@@ -45,11 +45,16 @@ from nemo_gym.agents import (
     restricted_network_policy,
     sandbox_server_url,
     seed_mcp_servers,
+    verification_failure_fields,
     verify_agent_response,
 )
 from nemo_gym.client import SESSION_ID_KEY, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_ROUTE_FAILED,
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_OOM_KILLED,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -64,9 +69,9 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
     NgFailureEvent,
+    SandboxFailureDetails,
+    observe_failure,
 )
-from nemo_gym.core.failure_kinds import AGENT_INVALID_OUTPUT, PROVIDER_IO_TIMEOUT, PROVIDER_OOM_KILLED
-from nemo_gym.failure_transport import observe_failure
 from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -77,13 +82,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.sandbox.providers.opensandbox.provider import DELETED_OUTPUT_NOTE
-from nemo_gym.server_runtime import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SandboxFailureDetails,
-)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentInvocation,
@@ -1143,7 +1142,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     gaps=[ObservationGap(code="observation_capture_failed")],
                 ),
             }
-            return NeMoGymResponse(
+            response = NeMoGymResponse(
                 id=f"resp_{uuid4().hex}",
                 created_at=int(time()),
                 model=body.model or self.config.model_server.name,
@@ -1155,6 +1154,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 parallel_tool_calls=body.parallel_tool_calls,
                 metadata={NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
             )
+            fields = verification_failure_fields()
+            return response.model_copy(update=fields) if fields["failure_report"] is not None else response
         except Exception as error:
             # A provider exception does not establish how the command ended: report it at the agent boundary, with
             # the sandbox facts known here, rather than grade a substituted partial run.
@@ -1180,16 +1181,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 operation="opencode.execute",
             )
         result_stdout = result.stdout or ""
-        if DELETED_OUTPUT_NOTE in (result.stderr or ""):
+        stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
+        if len(stdout_parts) < 2:
             raise NgFailureEvent(
                 boundary="harness",
                 failure_kind=AGENT_INVALID_OUTPUT,
                 operation="opencode.capture",
-                failure_reason="OpenCode command output was deleted before agent result capture",
+                failure_reason="OpenCode command output is missing its launch marker",
             )
-        stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
         if result.return_code == 0 and (
-            result.error_type is not None or len(stdout_parts) < 2 or "OpenCode run finished" not in stdout_parts[1]
+            result.error_type is not None or "OpenCode run finished" not in stdout_parts[1]
         ):
             raise NgFailureEvent(
                 boundary="harness",
