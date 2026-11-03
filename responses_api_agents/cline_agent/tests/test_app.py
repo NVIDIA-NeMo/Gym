@@ -43,6 +43,12 @@ from responses_api_agents.cline_agent.app import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _installed_cline(monkeypatch):
+    """Host calls install Cline on first use; these tests drive the subprocesses themselves."""
+    monkeypatch.setattr("responses_api_agents.cline_agent.app.ensure_cline", MagicMock())
+
+
 def _config(**kwargs) -> ClineAgentConfig:
     return ClineAgentConfig(
         host="0.0.0.0",
@@ -55,10 +61,7 @@ def _config(**kwargs) -> ClineAgentConfig:
 
 
 def _make_agent(**kwargs) -> ClineAgent:
-    with patch("responses_api_agents.cline_agent.app.ClineAgent.model_post_init"):
-        agent = ClineAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    return ClineAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _make_model_server_agent(**kwargs) -> ClineAgent:
@@ -624,8 +627,21 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    def test_session_config_yaml_parses(self) -> None:
+        # The Environment Server supplies the benchmark and its sandbox, so the session config binds neither.
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "cline_agent.yaml"
+        inner = yaml.safe_load(cfg_path.read_text())["cline_agent"]["responses_api_agents"]["cline_agent"]
+        assert inner["resources_server"] is None
+        assert inner["num_workers"] == 1
+        assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+        assert set(inner) <= set(ClineAgentConfig.model_fields)
+        # Sessions install this version only with checksums the adapter pins for it.
+        from responses_api_agents.cline_agent.sandbox import CLINE_RUNTIME_SHA512
+
+        assert inner["cline_version"] in CLINE_RUNTIME_SHA512
+
+    def test_config_yaml_parses(self) -> None:
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "cline_local_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "cline_agent" in data
         inner = data["cline_agent"]["responses_api_agents"]["cline_agent"]

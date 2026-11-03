@@ -17,26 +17,41 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
 from asyncio import Semaphore
-from pathlib import Path
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
-from fastapi import Request
-from pydantic import ConfigDict, Field
+from fastapi import HTTPException, Request
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionSetupError,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -48,7 +63,17 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
+from responses_api_agents.cline_agent.observability import build_cline_observations
+from responses_api_agents.cline_agent.sandbox import CLINE_RUNTIME_SHA512, ClineArtifacts, ClineSandboxSession
 from responses_api_agents.cline_agent.setup_cline import ensure_cline
 
 
@@ -58,6 +83,95 @@ LOG = logging.getLogger(__name__)
 # accepts a base URL for the OpenAI and OpenAI-compatible providers, and every Gym model server
 # speaks the OpenAI Chat Completions dialect, so this is the provider that can be pointed at one.
 OPENAI_COMPATIBLE_PROVIDER = "openai-compatible"
+# Linux limits one argv string to 128 KiB (MAX_ARG_STRLEN), and Cline 3.0.55 reads a prompt only from argv or a pipe.
+MAX_PROMPT_BYTES = 128 * 1024 - 1
+SESSION_ROOT = "/tmp/nemo-gym-cline-sessions"
+RUNTIME_PREFIX = "/tmp/nemo-gym-cline-runtime-"
+# Errors Cline 3.0.55 reports when a model request never got an HTTP response: a refused or dropped
+# connection, and its runtime's 300-second request timeout.
+_TRANSPORT_ERRORS = ("Cannot connect to API", "The operation timed out.")
+# Cline 3.0.55 ends the run with this error when a model call stops at its output-token cap.
+_OUTPUT_LIMIT_ERROR = "Model reached the maximum output token limit"
+
+
+def _cline_state_env(data_dir: str) -> dict[str, str]:
+    """Pin every Cline state path into one run's data dir; see ClineAgent._env."""
+    return {
+        "CLINE_DATA_DIR": data_dir,
+        "CLINE_PROVIDER_SETTINGS_PATH": f"{data_dir}/settings/providers.json",
+        "CLINE_GLOBAL_SETTINGS_PATH": f"{data_dir}/settings/global-settings.json",
+        "CLINE_MCP_SETTINGS_PATH": f"{data_dir}/settings/cline_mcp_settings.json",
+        "CLINE_SESSION_DATA_DIR": f"{data_dir}/sessions",
+        "CLINE_DB_DATA_DIR": f"{data_dir}/db",
+        "CLINE_TEAM_DATA_DIR": f"{data_dir}/teams",
+        "CLINE_HOOKS_LOG_PATH": f"{data_dir}/logs/hooks.jsonl",
+        # Local session backend: a shared hub daemon would hand concurrent rollouts the same
+        # process and state, which is exactly what the per-run data dir is avoiding.
+        "CLINE_SESSION_BACKEND_MODE": "local",
+        # Cline otherwise ends every call by spawning a detached `npm update -g cline`, which
+        # replaces the pinned cline_version mid-collection and briefly removes the binary from
+        # under concurrent spawns. Only the exact value "1" disables it.
+        "CLINE_NO_AUTO_UPDATE": "1",
+    }
+
+
+def _session_usage(stdout: str) -> Optional[NeMoGymResponseUsage]:
+    """Usage from Cline's final ``run_result`` in a sandbox session, or None without one.
+
+    A run stopped before its result has only running totals, which can lag calls the Model Server
+    already answered, so its usage stays unknown. The sandbox path always uses the
+    ``openai-compatible`` provider, whose ``inputTokens`` already include the prompt's cache reads
+    (checked against Gym's captured calls: inputTokens is the prompt total and cacheReadTokens its
+    cached part), so cache reads are a detail, not an addition. Cline 3.0.55 reports no reasoning count
+    for this provider, so that stays unknown unless it does.
+    """
+    totals: Optional[tuple[Any, Any, Any, Optional[int]]] = None
+    for line in stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") == "run_result":
+            usage = record.get("aggregateUsage") or record.get("usage")
+            if isinstance(usage, dict) and usage:
+                reasoning = usage.get("reasoningTokens") if "reasoningTokens" in usage else None
+                totals = (usage.get("inputTokens"), usage.get("cacheReadTokens"), usage.get("outputTokens"), reasoning)
+    if totals is None or not all(type(value) is int and value >= 0 for value in (totals[0], totals[2])):
+        return None
+    input_tokens, cached_tokens, output_tokens, reasoning = totals
+    return NeMoGymResponseUsage(
+        input_tokens=input_tokens,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(
+            cached_tokens=cached_tokens if type(cached_tokens) is int and cached_tokens >= 0 else None
+        ),
+        output_tokens=output_tokens,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(
+            reasoning_tokens=reasoning if type(reasoning) is int and reasoning >= 0 else None
+        ),
+        total_tokens=input_tokens + output_tokens,
+    )
+
+
+def _terminal_error(stdout: str) -> dict[str, Any]:
+    """The last `error` agent event of a `cline --json` stream: its error and Cline's error class."""
+    terminal: dict[str, Any] = {}
+    for line in stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        event = record.get("event")
+        if record.get("type") == "agent_event" and isinstance(event, dict) and event.get("type") == "error":
+            error = event.get("error")
+            terminal = {
+                "error": error if isinstance(error, dict) else {"message": str(error)},
+                "errorClass": event.get("errorClass"),
+            }
+    return terminal
 
 
 def _message(index: int, text: str) -> NeMoGymResponseOutputMessage:
@@ -360,7 +474,9 @@ def quote_prompt(prompt: str) -> str:
 
 
 class ClineAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    # Only the host /run path calls the Resources Server. Agent sessions receive the task sandbox from
+    # the Environment Server instead.
+    resources_server: Optional[ResourcesServerRef] = None
     # When set, Cline's model calls go through this Gym model server instead of straight to a
     # provider, so they are captured. The agent then configures Cline's `openai-compatible`
     # provider with the server's URL, and `model` is the bare model name that server serves.
@@ -407,8 +523,14 @@ class ClineAgentConfig(BaseResponsesAPIAgentConfig):
     command_permissions: dict[str, Any] = Field(default_factory=dict)
     # npm version of the `cline` package installed on a clean machine (the parser was validated
     # against the pinned version, so treat a bump as a deliberate, retested change). None installs
-    # @latest.
+    # @latest on the host path; agent sessions require an exact version with pinned checksums.
     cline_version: Optional[str] = None
+    # Agent sessions only: the provider block for an agent-owned sandbox, used when the Resources
+    # Server supplies no sandbox_access, and the SandboxSpec fields for it.
+    sandbox_provider: Optional[str] = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    # Seconds for preparing the session and installing (or reusing) Cline inside the task sandbox.
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -429,21 +551,38 @@ class ClineAgent(SimpleResponsesAPIAgent):
     """Runs the Cline CLI headlessly (``cline --json``).
 
     Cline runs its own tools internally; its newline-delimited JSON event stream is parsed into Gym
-    format and the resources server verifies the result. Cline's model calls go through
-    ``model_server`` when one is set — see that field. Eval-only either way: token IDs and logprobs
-    are not wired up.
+    format and the resources server verifies the result. An agent session runs Cline inside the task
+    sandbox the Environment Server hands it; a call without a session runs Cline on this host. Cline's
+    model calls go through ``model_server`` when one is set — see that field. Eval-only either way:
+    token IDs and logprobs are not wired up.
     """
 
     config: ClineAgentConfig
+    # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        ensure_cline(self.config.cline_version)
+
+    async def _ensure_local_cline(self) -> None:
+        """Install Cline on this host on the first host call; agent sessions never need it here."""
+        if self._local_setup_task is None:
+            self._local_setup_task = asyncio.create_task(asyncio.to_thread(ensure_cline, self.config.cline_version))
+        setup_task = self._local_setup_task
+        try:
+            # Concurrent calls share one installation; a cancelled caller must not start a second one.
+            await asyncio.shield(setup_task)
+        except Exception:
+            # A failed installation surfaces to its callers, and the next call retries it.
+            if self._local_setup_task is setup_task:
+                self._local_setup_task = None
+            raise
         command = self.config.command_parts[0] if self.config.command_parts else ""
         if not command or shutil.which(command) is None:
-            LOG.warning("cline command %r is not on PATH yet", self.config.command)
+            LOG.warning("cline command %r is not on PATH", self.config.command)
 
     def _workspace_root(self) -> Path:
         root = Path(self.config.workspace_root).expanduser() / f"cline_{uuid4().hex[:8]}"
@@ -481,25 +620,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
         concurrent rollouts. Pinning them here keeps each run's provider config, sessions, and
         logs inside its own directory, and never touches the user's ``~/.cline``.
         """
-        data = str(data_dir)
-        env = {
-            **os.environ,
-            "CLINE_DATA_DIR": data,
-            "CLINE_PROVIDER_SETTINGS_PATH": str(data_dir / "settings" / "providers.json"),
-            "CLINE_GLOBAL_SETTINGS_PATH": str(data_dir / "settings" / "global-settings.json"),
-            "CLINE_MCP_SETTINGS_PATH": str(data_dir / "settings" / "cline_mcp_settings.json"),
-            "CLINE_SESSION_DATA_DIR": str(data_dir / "sessions"),
-            "CLINE_DB_DATA_DIR": str(data_dir / "db"),
-            "CLINE_TEAM_DATA_DIR": str(data_dir / "teams"),
-            "CLINE_HOOKS_LOG_PATH": str(data_dir / "logs" / "hooks.jsonl"),
-            # Local session backend: a shared hub daemon would hand concurrent rollouts the same
-            # process and state, which is exactly what the per-run data dir is avoiding.
-            "CLINE_SESSION_BACKEND_MODE": "local",
-            # Cline otherwise ends every call by spawning a detached `npm update -g cline`, which
-            # replaces the pinned cline_version mid-collection and briefly removes the binary from
-            # under concurrent spawns. Only the exact value "1" disables it.
-            "CLINE_NO_AUTO_UPDATE": "1",
-        }
+        env = {**os.environ, **_cline_state_env(str(data_dir))}
         # A Gym model server wins over openai_base_url, so a config carrying both cannot point the
         # subprocess at the provider the model server is meant to replace.
         base_url = model_base_url or self.config.openai_base_url
@@ -560,21 +681,28 @@ class ClineAgent(SimpleResponsesAPIAgent):
             str(data_dir),
             "--timeout",
             str(self.config.timeout),
+            *self._run_flags(),
+            *self.config.extra_args,
+            "--",
+            quote_prompt(prompt),
         ]
-        if self.config.model:
-            cmd += ["-m", self.config.model]
-        cmd += ["-P", self._effective_provider()]
-        if self.config.thinking:
-            cmd += ["--thinking", self.config.thinking]
-        if self.config.compaction:
-            cmd += ["--compaction", self.config.compaction]
-        if self.config.retries is not None:
-            cmd += ["--retries", str(self.config.retries)]
-        if self.config.system_prompt_override:
-            cmd += ["-s", self.config.system_prompt_override]
-        cmd.extend(self.config.extra_args)
-        cmd += ["--", quote_prompt(prompt)]
         return cmd
+
+    def _run_flags(self) -> list[str]:
+        """Model, provider and loop settings shared by the host and sandbox command lines."""
+        flags = []
+        if self.config.model:
+            flags += ["-m", self.config.model]
+        flags += ["-P", self._effective_provider()]
+        if self.config.thinking:
+            flags += ["--thinking", self.config.thinking]
+        if self.config.compaction:
+            flags += ["--compaction", self.config.compaction]
+        if self.config.retries is not None:
+            flags += ["--retries", str(self.config.retries)]
+        if self.config.system_prompt_override:
+            flags += ["-s", self.config.system_prompt_override]
+        return flags
 
     @staticmethod
     def _kill_process_group(proc: "asyncio.subprocess.Process") -> None:
@@ -614,6 +742,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
         self, instruction: str, system_prompt: Optional[str], rollout_id: Optional[str] = None
     ) -> tuple[list[Any], dict[str, Any], str]:
         """Run one headless cline task. Returns (output_items, metadata, model_name)."""
+        await self._ensure_local_cline()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
@@ -646,11 +775,355 @@ class ClineAgent(SimpleResponsesAPIAgent):
             # the project elsewhere), so nothing survives to leak into the next rollout.
             shutil.rmtree(work_dir, ignore_errors=True)
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read the terminal error event of a Cline 3.0.55 run.
+
+        Cline names a context overflow itself (``ContextWindowOverflowError``, error class
+        ``context_window_exceeded``). Its other model errors carry no HTTP status, only the provider's
+        message, so they stay ``unknown`` apart from a request that never got a response.
+        """
+        error = native_result.get("error") or {}
+        if error.get("name") == "ContextWindowOverflowError" or native_result.get("errorClass") == (
+            "context_window_exceeded"
+        ):
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if str(error.get("message") or "").startswith(_TRANSPORT_ERRORS):
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return AgentOutcome(failure_kind="unknown")
+
+    def _reached_model_limit(self, terminal: Mapping[str, Any]) -> bool:
+        """Whether Cline's terminal error is the model's context window or its output-token cap."""
+        message = str((terminal.get("error") or {}).get("message") or "")
+        return self.classify_outcome(terminal).failure_kind == MODEL_CONTEXT_LIMIT or message.startswith(
+            _OUTPUT_LIMIT_ERROR
+        )
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ClineSandboxSession:
+        """Install or reuse the pinned Cline runtime in the task sandbox before the activation."""
+        required = sorted(access.name for access in self.effective_tool_accesses(body) if access.required)
+        if required:
+            raise AgentSeedRejectedError(
+                "Cline sandbox sessions use Cline's built-in tools; required tool grants are unsupported: "
+                + ", ".join(required)
+            )
+        version = self.config.cline_version
+        if not version or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+            raise AgentSeedRejectedError("Cline sandbox sessions require an exact cline_version, for example 3.0.55")
+        if version not in CLINE_RUNTIME_SHA512:
+            raise AgentSeedRejectedError(
+                f"Cline {version} has no pinned runtime checksums; supported: {', '.join(sorted(CLINE_RUNTIME_SHA512))}"
+            )
+        if self.config.model_server is None or not self.config.model:
+            raise AgentSeedRejectedError("Cline sandbox sessions require a Gym model_server and its model name")
+        host_only = [
+            name
+            for name in ("env", "extra_args", "repo_dir", "openai_api_key", "openai_base_url")
+            if getattr(self.config, name)
+        ]
+        if self.config.command != "cline":
+            host_only.append("command")
+        if host_only:
+            raise AgentSeedRejectedError(
+                "Cline sandbox sessions do not support these host settings: " + ", ".join(host_only)
+            )
+        access = body.sandbox_access
+        owns_sandbox = access is None
+        if owns_sandbox:
+            if not self.config.sandbox_provider:
+                raise AgentSeedRejectedError("Cline requires sandbox_access or a configured sandbox_provider")
+            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            workdir, provider_ref = spec.workdir, self.config.sandbox_provider
+        else:
+            if not isinstance(access.connection, DirectSandboxConnection):
+                raise AgentSeedRejectedError("Cline supports only direct SandboxAccess")
+            workdir, provider_ref = access.workdir, access.connection.provider_config_ref
+        path = PurePosixPath(workdir or "")
+        if (
+            not path.is_absolute()
+            or ".." in path.parts
+            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or str(path).startswith((SESSION_ROOT, RUNTIME_PREFIX))
+        ):
+            raise AgentSeedRejectedError(
+                "Cline sandbox workdir must be absolute and separate from its session storage"
+            )
+
+        provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+        state = ClineSandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox,
+                session_dir=f"{SESSION_ROOT}/{uuid4().hex}",
+                workdir=str(path),
+                owns_sandbox=owns_sandbox,
+                harness="Cline",
+            ),
+            runtime=f"{RUNTIME_PREFIX}{version}",
+        )
+        try:
+            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                if owns_sandbox:
+                    await sandbox.start(spec)
+                    # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
+                    created = await sandbox.exec(f"mkdir -p -- {shlex.quote(str(path))}", cwd="/", timeout_s=30)
+                    if created.return_code != 0 or created.error_type:
+                        raise RuntimeError(f"Cannot create the Cline sandbox workdir {path}: {created.stderr}")
+                await state.prepare(timeout=self.config.sandbox_install_timeout_seconds)
+                await state.install_runtime(version=version, timeout=self.config.sandbox_install_timeout_seconds)
+        except BaseException as error:
+            try:
+                await state.close(self.config.session_close_timeout_seconds)
+            except BaseException:
+                LOG.exception("Cline seed cleanup failed; retaining session %s", body.agent_session_id)
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
+        return state
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        """Stop Cline before verification; a borrowed sandbox stays with its Resources Server."""
+        assert isinstance(state, ClineSandboxSession)
+        await state.close(self.config.session_close_timeout_seconds)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=state.observations
+            or AgentObservationBundle(source="cline", gaps=[ObservationGap(code="observation_capture_failed")]),
+        )
+
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, ClineSandboxSession) else None
+
+    def _validate_session_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Accept only the controls a sandbox session applies; Cline has no per-request sampling flags."""
+        supported = {"input", "instructions", "model"}
+        for name, field in type(body).model_fields.items():
+            value = getattr(body, name)
+            if name in supported or (name in ("stream", "background") and value is False):
+                continue
+            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
+            if value != field.get_default(call_default_factory=True):
+                raise HTTPException(422, f"Cline sandbox sessions do not support request field {name}")
+        models = {None, "", self.config.model, self.config.model_server.name if self.config.model_server else None}
+        if body.model not in models:
+            raise HTTPException(422, "Cline's model is selected by the agent configuration")
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        if [getattr(item, "role", None) for item in items] not in (["user"], ["system", "user"]):
+            raise HTTPException(422, "Cline accepts one text user prompt with an optional system message")
+        for item in items:
+            if not isinstance(item.content, str) and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
+                for part in item.content
+            ):
+                raise HTTPException(422, "Cline only supports text input")
+        return body.model_copy(update={"input": items}).model_copy(deep=True)
+
+    def _session_prompt(self, body: NeMoGymResponseCreateParamsNonStreaming) -> str:
+        """The one user prompt Cline receives, built as on the host path; Cline keeps its own system prompt."""
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        user_message, input_system = _extract_instruction(items)
+        system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
+        prompt = f"{system}\n\n{user_message}" if system else user_message
+        if len(prompt.encode()) > MAX_PROMPT_BYTES:
+            raise HTTPException(422, f"Cline's prompt exceeds the {MAX_PROMPT_BYTES}-byte argv limit")
+        return prompt
+
+    async def _sandbox_response(
+        self, state: ClineSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        prompt = self._session_prompt(body)
+        invocation_id = state.request.episode_id.capture_key
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        providers = {
+            "version": 1,
+            "lastUsedProvider": OPENAI_COMPATIBLE_PROVIDER,
+            "providers": {
+                OPENAI_COMPATIBLE_PROVIDER: {
+                    "settings": {
+                        "provider": OPENAI_COMPATIBLE_PROVIDER,
+                        # The Gym model server does not check the key; the real credential stays there.
+                        "apiKey": "EMPTY",  # pragma: allowlist secret
+                        "model": self.config.model,
+                        "baseUrl": self.resolve_model_base_url(self.config.model_server.name, invocation_id),
+                        # Owns every attempt, including ones that fail without a response ID.
+                        "headers": {"x-session-id": invocation_id},
+                    },
+                    "updatedAt": "1970-01-01T00:00:00.000Z",
+                    "tokenSource": "manual",
+                }
+            },
+        }
+        env = _cline_state_env(state.data_dir)
+        if self.config.command_permissions:
+            env["CLINE_COMMAND_PERMISSIONS"] = json.dumps(self.config.command_permissions)
+        # No --timeout: Cline 3.0.55 does not bound a --json run with it. The supervisor enforces the deadline.
+        command = [
+            state.executable,
+            "--json",
+            "--auto-approve",
+            "true",
+            "--cwd",
+            state.session.workdir,
+            "--config",
+            state.config_dir,
+            "--data-dir",
+            state.data_dir,
+            *self._run_flags(),
+            "--",
+            quote_prompt(prompt),
+        ]
+        failure: BaseException | None = None
+        try:
+            async with self.sem:
+                await state.session.execute(
+                    stage_activation=lambda: state.stage_activation(
+                        command=command,
+                        env=env,
+                        providers=providers,
+                        # Keep telemetry and update checks out of evaluation sandboxes.
+                        global_settings={"telemetryOptOut": True, "autoUpdateEnabled": False},
+                    ),
+                    collect=state.collect_artifacts,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
+        except BaseException as error:
+            failure = error
+        artifacts: ClineArtifacts | None = state.session.artifacts
+        cleanup = state.session.cleanup
+        timed_out = cleanup is not None and cleanup["timed_out"]
+        if isinstance(failure, TimeoutError) and timed_out and artifacts is not None:
+            # The provider stopped waiting just as the supervisor stopped Cline at its deadline: still a timeout.
+            LOG.warning("The sandbox provider stopped waiting for Cline's supervisor after Cline's deadline")
+            failure = None
+        stdout = artifacts.stdout if artifacts is not None else ""
+        output_items, metadata = parse_cline_events(stdout)
+        terminal = _terminal_error(stdout)
+        finish = metadata.get("finish_reason")
+        exit_code = cleanup["return_code"] if cleanup is not None and not timed_out else None
+        # Cline exits 0 only for finishReason "completed"; its error event names what ended any other run.
+        crash: str | None = None
+        error_message: str | None = None
+        if failure is not None:
+            status = "incomplete" if isinstance(failure, asyncio.CancelledError) else "failed"
+        elif timed_out:
+            status = "incomplete"
+        elif exit_code == HARNESS_RUNNER_FAILED or exit_code in HARNESS_COMMAND_NOT_STARTED or finish is None:
+            status, crash = "failed", f"Cline produced no run result (exit {exit_code})"
+        elif finish == "completed":
+            status = "completed"
+        elif finish == "error" and not self._reached_model_limit(terminal):
+            status = "failed"
+            error_message = str((terminal.get("error") or {}).get("message") or metadata.get("error") or "Cline error")
+        else:
+            # A context or output-token limit, an abort or another harness limit: the partial work stays gradable.
+            status = "incomplete"
+        try:
+            state.observations = build_cline_observations(
+                stdout,
+                invocation_id,
+                status=status,
+                error_type=finish if status != "completed" else None,
+                sandbox_id=state.session.sandbox.sandbox_id,
+                conversation=[NeMoGymEasyInputMessage(role="user", content=prompt), *output_items],
+                unfinished_tool_status="timeout"
+                if timed_out
+                else "cancelled"
+                if isinstance(failure, asyncio.CancelledError)
+                else "incomplete",
+            )
+        except Exception:
+            LOG.exception("failed to build Cline observations")
+            state.observations = AgentObservationBundle(
+                source="cline", gaps=[ObservationGap(code="observation_parse_failed")]
+            )
+        if artifacts is None:
+            state.observations.gaps.append(ObservationGap(code="agent_artifact_unavailable"))
+        if state.runtime_info is None:
+            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if cleanup is not None:
+            access = state.request.sandbox_access
+            state.observations.records.append(
+                SandboxObservation(
+                    role="agent",
+                    provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
+                    sandbox_id=state.session.sandbox.sandbox_id,
+                    outcome="timeout" if timed_out else "completed" if exit_code == 0 else "failed",
+                    exit_code=cleanup["return_code"],
+                    wall_time_s=artifacts.wall_time_s if artifacts is not None else None,
+                )
+            )
+        if failure is not None:
+            raise failure
+        if crash:
+            stderr = artifacts.stderr if artifacts is not None else ""
+            raise RuntimeError(f"{crash}: {stderr[-4000:]}")
+        usage = _session_usage(stdout)
+        if usage is None:
+            state.observations.gaps.append(
+                ObservationGap(code="model_call_usage_unavailable", detail="Cline reported no final run result")
+            )
+        elif usage.output_tokens_details.reasoning_tokens is None:
+            state.observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
+        runtime = state.runtime_info
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self.config.model,
+            object="response",
+            output=output_items,
+            status=status,
+            error={"code": "server_error", "message": error_message} if error_message else None,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            usage=usage,
+            metadata={
+                "harness_execution": "sandbox",
+                "cline_version": self.config.cline_version,
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
+                **({"finish_reason": finish} if finish else {}),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+            },
+        )
+        return self.report_rollout_stop(self.report_outcome(response, terminal), state.session)
+
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is not None:
+            state = self._require_agent_session(session_id)
+            assert isinstance(state, ClineSandboxSession)
+            if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+                raise HTTPException(409, "Cline activation does not match the seeded session and rollout route")
+            if state.session.closing:
+                raise HTTPException(409, "Cline session is closing")
+            body = self._validate_session_request(body)
+            if state.task is None:
+                # Bind the request before the first await so retries join one invocation.
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(self._sandbox_response(state, state.activation_request))
+            elif body != state.activation_request:
+                raise HTTPException(409, "Cline sandbox sessions support one activation; retry the same request")
+            # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
+
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -703,6 +1176,12 @@ class ClineAgent(SimpleResponsesAPIAgent):
         )
 
     async def run(self, request: Request, body: ClineAgentRunRequest) -> ClineAgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Cline sandbox sessions run through an Environment Server's /run")
+        if self.config.resources_server is None:
+            raise HTTPException(
+                422, "Cline /run requires resources_server; sandbox sessions use an Environment Server"
+            )
         async with self.sem:
             cookies = request.cookies
 
