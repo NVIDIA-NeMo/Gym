@@ -167,11 +167,12 @@ class TestListBenchmarks:
     def test_json_output(self, capsys) -> None:
         import json
 
-        bench = MagicMock(agent_name="my_agent", num_repeats=4, environment_server=None)
+        bench = MagicMock(
+            agent_name="my_agent", num_repeats=4, environment_server=None, domain="math", description="a description"
+        )
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"json": True})),
             patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"my_bench": bench}),
-            patch("nemo_gym.cli.eval.read_config_metadata", return_value=("math", "a description")),
         ):
             list_benchmarks()
         assert json.loads(capsys.readouterr().out) == [
@@ -196,7 +197,9 @@ class TestListBenchmarks:
         assert json.loads(capsys.readouterr().out) == []
 
     def test_inspect_benchmark_by_name(self, capsys) -> None:
-        bench = MagicMock(agent_name="my_agent", num_repeats=8, environment_server=None)
+        bench = MagicMock(
+            agent_name="my_agent", num_repeats=8, environment_server=None, domain="math", description="AIME desc"
+        )
         bench.path = Path("benchmarks/aime24/config.yaml")
         bench.dataset.jsonl_fpath = Path("benchmarks/aime24/data/aime24.jsonl")
         bench.dataset.prepare_script = Path("benchmarks/aime24/prepare.py")
@@ -206,7 +209,6 @@ class TestListBenchmarks:
                 return_value=_mock_global_config({"component_name": "aime24"}),
             ),
             patch("nemo_gym.cli.eval.discover_benchmarks", return_value={"aime24": bench}),
-            patch("nemo_gym.cli.eval.read_config_metadata", return_value=("math", "AIME desc")),
         ):
             list_benchmarks()
         out = capsys.readouterr().out
@@ -420,6 +422,87 @@ class TestBenchmarkConfigStrictParsing:
         assert tolerated is None
 
 
+@pytest.mark.parametrize("mode", ["list", "search", "inspect"])
+@pytest.mark.parametrize(
+    "inline, inherited, expected",
+    [
+        ({}, {"domain": "math", "description": "Inherited"}, ("math", "Inherited")),
+        (
+            {"domain": "coding", "description": "Inline"},
+            {"domain": "math", "description": "Inherited"},
+            ("coding", "Inline"),
+        ),
+        ({"domain": "coding"}, {"domain": "math", "description": "Inherited"}, ("coding", "Inherited")),
+        ({"description": "Inline"}, {"domain": "math"}, ("math", "Inline")),
+        ({}, {}, ("", "")),
+    ],
+)
+def test_benchmark_metadata_uses_one_resolution(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    inline: dict[str, str],
+    inherited: dict[str, str],
+    expected: tuple[str | None, str | None],
+) -> None:
+    from nemo_gym.config.global_config import GlobalConfigDictParser
+
+    included = tmp_path / "included.yaml"
+    OmegaConf.save(
+        {"inherited_agent": {"responses_api_agents": {"impl": {"entrypoint": "app.py", **inherited}}}},
+        included,
+    )
+    benchmark_dir = tmp_path / "benchmarks" / "sample"
+    benchmark_dir.mkdir(parents=True)
+    OmegaConf.save(
+        {
+            "config_paths": [str(included)],
+            "agent": {
+                "responses_api_agents": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        **inline,
+                        "datasets": [
+                            {
+                                "name": "sample",
+                                "type": "benchmark",
+                                "jsonl_fpath": "data.jsonl",
+                                "prepare_script": "prepare.py",
+                            }
+                        ],
+                    }
+                }
+            },
+            "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}},
+        },
+        benchmark_dir / "config.yaml",
+    )
+    config = {"json": True}
+    if mode == "search":
+        config["query"] = expected[1] or expected[0] or "sample"
+    elif mode == "inspect":
+        config["component_name"] = "sample"
+
+    with (
+        patch("nemo_gym.discovery.component_search_roots", return_value=[tmp_path]),
+        patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+        patch.object(
+            GlobalConfigDictParser,
+            "parse_no_environment",
+            autospec=True,
+            side_effect=GlobalConfigDictParser.parse_no_environment,
+        ) as parse,
+    ):
+        list_benchmarks()
+    payload = json.loads(capsys.readouterr().out)
+    result = payload if mode == "inspect" else payload[0]
+    assert result["name"] == "sample"
+    if mode == "inspect" and expected == ("", ""):
+        expected = (None, None)
+    assert (result["domain"], result["description"]) == expected
+    assert parse.call_count == 1
+
+
 class TestSearchBenchmarks:
     # Map each benchmark name to the `domain` its config would resolve to.
     DOMAINS = {
@@ -435,7 +518,9 @@ class TestSearchBenchmarks:
     def _bench(self, key: str):
         bench = MagicMock(agent_name="my_agent", num_repeats=1)
         bench.name = key  # `dataset.name`; also fuzzy-matched by `gym search`
-        bench.path = key  # the patched read_config_metadata keys off the path to find the domain
+        bench.path = key
+        bench.domain = self.DOMAINS[key]
+        bench.description = self.DESCRIPTIONS[key]
         return bench
 
     def _benchmarks(self) -> dict:
@@ -445,10 +530,6 @@ class TestSearchBenchmarks:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config({"query": query})),
             patch("nemo_gym.cli.eval.discover_benchmarks", return_value=benchmarks),
-            patch(
-                "nemo_gym.cli.eval.read_config_metadata",
-                side_effect=lambda path: (self.DOMAINS[path], self.DESCRIPTIONS[path]),
-            ),
         ):
             list_benchmarks()
         return capsys.readouterr().out

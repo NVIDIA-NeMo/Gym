@@ -118,7 +118,6 @@ from nemo_gym.data.tasks.harbor.validation_report import (
     _validation_rows,
     summarize_validation,
 )
-from nemo_gym.discovery import read_config_metadata
 from nemo_gym.eval_plan import (
     PlanBenchmark,
     PlanGym,
@@ -152,7 +151,6 @@ def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
         exit_unknown_component(name, benchmarks, "benchmark")
         return
 
-    domain, description = read_config_metadata(bench.path)
     details = {
         "config": str(bench.path.resolve()),
         "agent": bench.agent_name or "",
@@ -165,8 +163,8 @@ def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
         json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
         name=name,
         type_noun="benchmark",
-        domain=domain,
-        description=description,
+        domain=bench.domain,
+        description=bench.description,
         details=details,
         usage=f"gym eval prepare --benchmark {name}\ngym eval run --benchmark {name} --model-type vllm_model",
     )
@@ -177,7 +175,7 @@ def list_benchmarks() -> None:
     by a `query` (the `gym search` entry point).
 
     A benchmark is a specific kind of environment, so it shares `gym list environments`' columns (name,
-    domain, description) and reads them through the same `read_config_metadata` helper. ``--search-dir``
+    domain, description) from the configuration resolved during discovery. ``--search-dir``
     adds extra roots to scan on top of the cwd and built-ins.
     """
     global_config_dict = get_global_config_dict(
@@ -194,10 +192,6 @@ def list_benchmarks() -> None:
         _inspect_benchmark(name, benchmarks, global_config_dict)
         return
 
-    # Resolve domain + description once per benchmark, via the shared component-metadata reader —
-    # the same one `gym list environments` uses — for the columns and `gym search`.
-    metadata = {name: read_config_metadata(bench.path) for name, bench in benchmarks.items()}
-
     # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches
     # across the benchmark config name, its dataset name, domain, and description.
     query = global_config_dict.get(QUERY_KEY_NAME)
@@ -205,7 +199,7 @@ def list_benchmarks() -> None:
         benchmarks = {
             name: bench
             for name, bench in benchmarks.items()
-            if fuzzy_matches(query, name, bench.name, metadata[name][0] or "", metadata[name][1] or "")
+            if fuzzy_matches(query, name, bench.name, bench.domain or "", bench.description or "")
         }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
@@ -214,9 +208,9 @@ def list_benchmarks() -> None:
                 "name": name,
                 "agent_name": bench.agent_name,
                 "environment_server": bench.environment_server,
-                "domain": metadata[name][0] or "",
+                "domain": bench.domain or "",
                 "num_repeats": bench.num_repeats,
-                "description": metadata[name][1] or "",
+                "description": bench.description or "",
             }
             for name, bench in benchmarks.items()
         ]
@@ -241,10 +235,9 @@ def list_benchmarks() -> None:
     table.add_column("Num repeats")
 
     for name, bench in benchmarks.items():
-        domain, description = metadata[name]
         # A taskset routed to a server that fronts several agents has no single agent; name the server instead.
         agent = bench.agent_name or f"{bench.environment_server} (environment server)"
-        table.add_row(name, domain or "", description or "", agent, str(bench.num_repeats))
+        table.add_row(name, bench.domain or "", bench.description or "", agent, str(bench.num_repeats))
 
     print_rich_table(table)
 
