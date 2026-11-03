@@ -36,7 +36,6 @@ services:
       CUDA_VISIBLE_DEVICES: runtime:CUDA_VISIBLE_DEVICES
 
 driver:
-  policy_model: vllm_model
   container: python:3.12
   gym_install:
     ref: main

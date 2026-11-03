@@ -54,44 +54,204 @@ def test_invalid_placement_raises():
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "placement": "nonexistent"}}))
 
 
-def test_valid_policy_model():
-    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "policy_model": "svc"}))
-    assert config.driver.policy_model == "svc"
+def _policy_driver(*, run=None, command=None):
+    bench = {"command": command} if command else {"run": run or {}}
+    return {**DRIVER, "benchmarks": {"gsm8k": bench}}
 
 
-def test_invalid_policy_model_raises():
-    with pytest.raises(ValidationError, match="does not match any service"):
-        SubmitConfig.model_validate(_config(driver={**DRIVER, "policy_model": "nonexistent"}))
+def _gsm8k(config):
+    return config.driver.benchmarks["gsm8k"]
 
 
-def test_no_policy_model():
-    config = SubmitConfig.model_validate(_config())
-    assert config.driver.policy_model is None
+@pytest.mark.parametrize(
+    "field, value, match",
+    [
+        ("policy_model", "svc", "driver.policy_model was removed.*service:<name>"),
+        ("policy_host", "localhost", "driver.policy_host was removed.*HEAD_NODE_IP"),
+        ("policy_model_type", "vllm_model", "driver.policy_model_type was removed.*--model-type"),
+    ],
+)
+def test_removed_policy_fields_get_a_tailored_error(field, value, match):
+    with pytest.raises(ValidationError, match=match):
+        SubmitConfig.model_validate(_config(driver={**DRIVER, field: value}))
 
 
-def test_policy_model_injects_run_args():
-    config = SubmitConfig.model_validate(_config(driver={**DRIVER, "policy_model": "svc"}))
-    benchmark = config.driver.benchmarks["gsm8k"]
+def test_the_sole_model_service_is_bound_as_the_policy_implicitly():
+    benchmark = _gsm8k(SubmitConfig.model_validate(_config()))
+    assert benchmark.policy_service == "svc"
+    assert benchmark.policy_model_type == "openai_model"
+    assert benchmark.run["policy_model"] == {
+        "responses_api_models": {
+            "openai_model": {
+                "openai_base_url": "http://localhost:8000/v1",
+                "openai_model": "org/model",
+                "openai_api_key": "dummy",  # pragma: allowlist secret
+            }
+        }
+    }
     assert benchmark.run["policy_base_url"] == "http://localhost:8000/v1"
     assert benchmark.run["policy_model_name"] == "org/model"
     assert benchmark.run["policy_api_key"] == "dummy"  # pragma: allowlist secret
 
 
-def test_policy_model_injects_served_model_name_when_set():
+def test_the_implicit_policy_uses_the_served_model_name():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "served_model_name": "my-model"}}))
+    assert _gsm8k(config).run["policy_model_name"] == "my-model"
+
+
+def test_declarative_and_ray_services_are_not_implicit_policy_candidates():
+    ray = {"type": "ray", "container": "c", "node_pools": ["main"]}
+    config = SubmitConfig.model_validate(_config(compute=POOLS, services={"svc": SERVICE, "judge": JUDGE, "r": ray}))
+    assert _gsm8k(config).policy_service == "svc"
+
+
+def test_no_model_service_means_no_policy():
+    benchmark = _gsm8k(SubmitConfig.model_validate(_config(services={"judge": JUDGE})))
+    assert benchmark.policy_service is None
+    assert "policy_model" not in benchmark.run
+    assert "policy_base_url" not in benchmark.run
+
+
+def test_several_model_services_need_an_explicit_policy():
+    with pytest.raises(ValidationError, match=r"Benchmark 'gsm8k' has no policy_model.*\(svc, other\)"):
+        SubmitConfig.model_validate(_config(services={"svc": SERVICE, "other": {**SERVICE, "port": 8001}}))
+
+
+def test_an_explicit_policy_reference_picks_among_several_and_keeps_its_type():
+    run = {"policy_model": {"responses_api_models": {"vllm_model": "service:other"}}}
     config = SubmitConfig.model_validate(
         _config(
-            services={"svc": {**SERVICE, "served_model_name": "my-model"}},
-            driver={**DRIVER, "policy_model": "svc"},
+            services={"svc": SERVICE, "other": {**SERVICE, "port": 8001, "model": "org/other"}},
+            driver=_policy_driver(run=run),
         )
     )
-    benchmark = config.driver.benchmarks["gsm8k"]
-    assert benchmark.run["policy_model_name"] == "my-model"
+    benchmark = _gsm8k(config)
+    assert (benchmark.policy_service, benchmark.policy_model_type) == ("other", "vllm_model")
+    assert benchmark.run["policy_model"]["responses_api_models"]["vllm_model"]["base_url"] == (
+        "http://localhost:8001/v1"
+    )
+    assert benchmark.run["policy_model_name"] == "org/other"
 
 
-def test_policy_model_conflict_raises():
-    driver = {**DRIVER, "policy_model": "svc", "benchmarks": {"gsm8k": {"run": {"policy_base_url": "http://other"}}}}
-    with pytest.raises(ValidationError, match="already sets"):
+def test_an_empty_policy_model_opts_out():
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": SERVICE, "other": {**SERVICE, "port": 8001}},
+            driver=_policy_driver(run={"policy_model": {}}),
+        )
+    )
+    benchmark = _gsm8k(config)
+    assert benchmark.policy_service is None
+    assert benchmark.run == {}
+
+
+def test_a_policy_node_without_a_reference_adds_nothing():
+    node = {"responses_api_models": {"openai_model": {"openai_base_url": "http://elsewhere/v1"}}}
+    benchmark = _gsm8k(SubmitConfig.model_validate(_config(driver=_policy_driver(run={"policy_model": node}))))
+    assert benchmark.run == {"policy_model": node}
+    assert benchmark.policy_model_type is None
+
+
+def test_a_policy_model_that_is_not_a_mapping_is_rejected():
+    with pytest.raises(ValidationError, match="policy_model must be a mapping"):
+        SubmitConfig.model_validate(_config(driver=_policy_driver(run={"policy_model": "service:svc"})))
+
+
+def test_a_declarative_service_can_be_the_policy_explicitly():
+    run = {"policy_model": {"responses_api_models": {"openai_model": "service:judge"}}}
+    config = SubmitConfig.model_validate(_config(services={"judge": JUDGE}, driver=_policy_driver(run=run)))
+    benchmark = _gsm8k(config)
+    assert (benchmark.policy_service, benchmark.policy_model_type) == ("judge", "openai_model")
+    assert benchmark.run["policy_model"]["responses_api_models"]["openai_model"] == {
+        "openai_base_url": JUDGE["base_url"],
+        "openai_model": JUDGE["model"],
+        "openai_api_key": "dummy",  # pragma: allowlist secret
+    }
+    assert (benchmark.run["policy_base_url"], benchmark.run["policy_model_name"]) == (
+        JUDGE["base_url"],
+        JUDGE["model"],
+    )
+    assert config.policy_service == "judge"
+
+
+def test_an_explicit_policy_naming_an_unknown_service_names_the_benchmark():
+    run = {"policy_model": {"responses_api_models": {"openai_model": "service:nope"}}}
+    with pytest.raises(ValidationError, match="Benchmark 'gsm8k' run config: .*does not match any service"):
+        SubmitConfig.model_validate(_config(driver=_policy_driver(run=run)))
+
+
+def test_policy_variables_set_by_the_benchmark_are_kept():
+    config = SubmitConfig.model_validate(_config(driver=_policy_driver(run={"policy_base_url": "http://other"})))
+    assert _gsm8k(config).run["policy_base_url"] == "http://other"
+
+
+def test_a_command_benchmark_gets_the_policy_variables_but_no_node():
+    benchmark = _gsm8k(SubmitConfig.model_validate(_config(driver=_policy_driver(command="./run.sh"))))
+    assert benchmark.policy_service == "svc"
+    assert benchmark.policy_model_type is None
+    assert benchmark.run["policy_base_url"] == "http://localhost:8000/v1"
+    assert "policy_model" not in benchmark.run
+
+
+def test_a_command_benchmark_with_several_model_services_gets_no_policy():
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": SERVICE, "other": {**SERVICE, "port": 8001}}, driver=_policy_driver(command="./run.sh")
+        )
+    )
+    assert _gsm8k(config).policy_service is None
+    assert _gsm8k(config).run == {}
+
+
+def test_the_policy_binding_is_derived_and_cannot_be_written():
+    driver = _policy_driver(run={})
+    driver["benchmarks"]["gsm8k"]["policy_service"] = "svc"
+    with pytest.raises(ValidationError, match="policy_service is set by submit"):
         SubmitConfig.model_validate(_config(driver=driver))
+
+
+@pytest.mark.parametrize(
+    "run, services",
+    [
+        ({}, {"svc": SERVICE}),
+        ({"policy_model": {}}, {"svc": SERVICE}),
+        ({"policy_model": {"responses_api_models": {"vllm_model": "service:svc"}}}, {"svc": SERVICE}),
+        (
+            {"policy_model": {"responses_api_models": {"openai_model": "service:judge"}}},
+            {"judge": {"type": "openai_compatible", "base_url": "https://j.example.com/v1", "model": "m"}},
+        ),
+    ],
+    ids=["implicit", "opt_out", "explicit", "declarative"],
+)
+def test_a_saved_config_reloads_to_the_same_policy_binding(run, services):
+    config = SubmitConfig.model_validate(_config(services=services, driver=_policy_driver(run=run)))
+    saved = config.model_dump(mode="json")
+    reloaded = SubmitConfig.model_validate(saved, context={SAVED_CONFIG: True})
+    before, after = _gsm8k(config), _gsm8k(reloaded)
+    assert (after.policy_service, after.policy_model_type, after.run) == (
+        before.policy_service,
+        before.policy_model_type,
+        before.run,
+    )
+
+
+def test_a_saved_command_benchmark_keeps_its_policy_variables():
+    config = SubmitConfig.model_validate(_config(driver=_policy_driver(command="./run.sh")))
+    reloaded = SubmitConfig.model_validate(config.model_dump(mode="json"), context={SAVED_CONFIG: True})
+    assert _gsm8k(reloaded).run == _gsm8k(config).run
+    assert _gsm8k(reloaded).policy_service == "svc"
+
+
+def test_a_server_per_node_service_is_the_implicit_policy_through_vllm_model():
+    pools = {
+        "cluster": {**POOLS["cluster"], "node_pools": {"main": {"partition": "p", "nodes": 2, "gpus_per_node": 8}}}
+    }
+    service = {**SERVICE, "node_pool": "main", "server_per_node": True}
+    benchmark = _gsm8k(SubmitConfig.model_validate(_config(compute=pools, services={"svc": service})))
+    urls = [f"http://${{oc.env:GYM_POOL_MAIN_NODE_{i}}}:8000/v1" for i in range(2)]
+    assert benchmark.policy_model_type == "vllm_model"
+    assert benchmark.run["policy_model"]["responses_api_models"]["vllm_model"]["base_url"] == urls
+    assert benchmark.run["policy_base_url"] == urls
 
 
 def test_service_env_accepted():
@@ -568,7 +728,13 @@ def test_a_server_per_node_service_references_every_nodes_url():
 
 
 def test_unreferenced_pinned_service_defers_nothing():
-    config = SubmitConfig.model_validate(_config(compute=POOLS, services={"svc": {**SERVICE, "node_pool": "aux"}}))
+    config = SubmitConfig.model_validate(
+        _config(
+            compute=POOLS,
+            services={"svc": {**SERVICE, "node_pool": "aux"}},
+            driver=_policy_driver(run={"policy_model": {}}),
+        )
+    )
     assert config.deferred_host_services == []
 
 
@@ -639,15 +805,13 @@ def test_declarative_service_rejects_values_hydra_cannot_carry(field, value):
 def test_two_referenced_pinned_services_sharing_a_host_variable_are_rejected():
     pinned = {**SERVICE, "node_pool": "aux"}
     services = {"a-b": pinned, "a_b": {**pinned, "port": 8001}}
-    cfg = _run(p="service:a-b.url", q="service:a_b.url")
+    cfg = _run(p="service:a-b.url", q="service:a_b.url", policy_model={})
     with pytest.raises(ValidationError, match="GYM_SERVICE_A_B_HOST"):
         SubmitConfig.model_validate({**cfg, "compute": POOLS, "services": services})
 
 
 def test_service_references_resolve_alongside_policy_injection():
-    cfg = _config(
-        driver={**DRIVER, "policy_model": "svc", "benchmarks": {"gsm8k": {"run": {"u": "service:judge.url"}}}}
-    )
+    cfg = _config(driver=_policy_driver(run={"u": "service:judge.url"}))
     config = SubmitConfig.model_validate({**cfg, "services": {"svc": SERVICE, "judge": JUDGE}})
     run = config.driver.benchmarks["gsm8k"].run
     assert run["u"] == JUDGE["base_url"]

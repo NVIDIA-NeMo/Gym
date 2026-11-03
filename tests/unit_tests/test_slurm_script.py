@@ -30,6 +30,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import (
+    SAVED_CONFIG,
     DeclarativeServiceConfig,
     NodePool,
     RayServiceConfig,
@@ -65,6 +66,10 @@ from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_
 # ---------------------------------------------------------------------------
 # flatten_run_args
 # ---------------------------------------------------------------------------
+
+
+def _policy_run(service: str = "policy") -> dict:
+    return {"policy_model": {"responses_api_models": {"openai_model": f"service:{service}"}}}
 
 
 def test_scalar_values():
@@ -695,34 +700,38 @@ def test_render_gym_cmd_prepare():
 # ---------------------------------------------------------------------------
 
 
-def test_driver_policy_model_type_defaults_to_openai_model(submit_config, bench_dir):
-    submit_config.driver.policy_model = "vllm_model"
-    benchmark = submit_config.driver.benchmarks["gsm8k"]
-    compute = next(iter(submit_config.compute.values()))
-    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+def _script_with_run(run):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {"run": run}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    compute = next(iter(config.compute.values()))
+    return build_sbatch_script(config, "gsm8k", config.driver.benchmarks["gsm8k"], compute, Path("/remote/jobs/gsm8k"))
+
+
+def test_implicit_policy_model_type_is_openai_model():
+    script = _script_with_run({})
     assert "--model-type openai_model" in script
+    assert "+policy_model.responses_api_models.openai_model.openai_base_url=http://localhost:8000/v1" in script
 
 
-def test_driver_policy_model_type_is_configurable(submit_config, bench_dir):
-    # Every certified NEL run of these benchmarks serves the policy as
-    # vllm_model, and lmarena_v3 ships its own vllm_model policy that a second
-    # composed server would collide with.
-    submit_config.driver.policy_model = "vllm_model"
-    submit_config.driver.policy_model_type = "vllm_model"
-    benchmark = submit_config.driver.benchmarks["gsm8k"]
-    compute = next(iter(submit_config.compute.values()))
-    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+def test_explicit_policy_reference_sets_the_model_type_to_the_key_written():
+    # lmarena_v3 ships its own vllm_model policy that a second composed server would collide with.
+    script = _script_with_run({"policy_model": {"responses_api_models": {"vllm_model": "service:vllm_model"}}})
     assert "--model-type vllm_model" in script
     assert "--model-type openai_model" not in script
+    assert "+policy_model.responses_api_models.vllm_model.base_url=http://localhost:8000/v1" in script
 
 
-def test_driver_policy_model_type_empty_composes_nothing(submit_config, bench_dir):
-    submit_config.driver.policy_model = "vllm_model"
-    submit_config.driver.policy_model_type = ""
-    benchmark = submit_config.driver.benchmarks["gsm8k"]
-    compute = next(iter(submit_config.compute.values()))
-    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+def test_empty_policy_model_composes_nothing():
+    script = _script_with_run({"policy_model": {}})
     assert "--model-type" not in script
+    assert "policy_model" not in script
+    assert "policy_base_url" not in script
 
 
 def test_render_driver_entrypoint_no_install_no_prepare():
@@ -1740,7 +1749,7 @@ def submit_config_with_policy():
         {
             "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
             "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "policy_model": "vllm_model", "benchmarks": {"gsm8k": {}}},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
             "job": {"output_path": "/remote/jobs"},
         }
     )
@@ -1848,7 +1857,6 @@ def _command_config(tmp_path, command, **driver):
             },
             "driver": {
                 "container": "efb:latest",
-                "policy_model": "policy",
                 "benchmarks": {"osworld": {"command": command}},
                 **driver,
             },
@@ -1950,7 +1958,10 @@ def _placement_config(tmp_path, services, pools):
         {
             "services": services,
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
-            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
+            "driver": {
+                "container": "gym:latest",
+                "benchmarks": {"b": {"run": _policy_run() if "policy" in services else {}}},
+            },
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )
@@ -2132,7 +2143,7 @@ def _pd_config(tmp_path, services=None, pools=None):
         {
             "services": services if services is not None else _pd_services(),
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools or _PD_POOLS}},
-            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "driver": {"container": "img", "benchmarks": {"b": {"run": _policy_run()}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )
@@ -2241,7 +2252,7 @@ def test_a_pd_service_renders_the_three_service_form_it_replaced(per_node):
         {
             "services": {"policy": pd},
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PD_POOLS}},
-            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"swebench_pro": {"run": {}}}},
+            "driver": {"container": "img", "benchmarks": {"swebench_pro": {"run": {}}}},
             "job": {"output_path": "/jobs"},
         }
     )
@@ -2309,7 +2320,7 @@ def test_a_pd_service_is_recorded_as_written(tmp_path):
     assert list(dumped["services"]) == ["policy"]
     for benchmark in dumped["driver"]["benchmarks"].values():
         benchmark["run"] = {}
-    reloaded = SubmitConfig.model_validate(dumped)
+    reloaded = SubmitConfig.model_validate(dumped, context={SAVED_CONFIG: True})
     assert list(reloaded.deployed_services) == ["policy-prefill", "policy-decode", "policy"]
     assert reloaded.deployed_services["policy-decode"].kv_transfer_config["kv_role"] == "kv_consumer"
 
@@ -2328,7 +2339,7 @@ def test_a_reloaded_pd_config_keeps_the_derived_tier_values_out(tmp_path):
     for benchmark in dumped["driver"]["benchmarks"].values():
         benchmark["run"] = {}
     dumped["services"]["policy"]["nixl_side_channel_port"] = 8000
-    decode = SubmitConfig.model_validate(dumped).deployed_services["policy-decode"]
+    decode = SubmitConfig.model_validate(dumped, context={SAVED_CONFIG: True}).deployed_services["policy-decode"]
     assert (decode.nixl_side_channel_port, decode.server_per_node) == (8001, True)
 
 
@@ -2427,7 +2438,7 @@ def test_a_plain_vllm_service_gets_no_kv_transfer_config(tmp_path):
         {
             "services": services,
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
-            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "driver": {"container": "img", "benchmarks": {"b": {"run": _policy_run()}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )
@@ -2503,7 +2514,7 @@ def test_the_ray_head_follows_the_driver_to_a_later_pool(tmp_path):
                 "ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"]},
             },
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
-            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": _policy_run()}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )
@@ -2538,7 +2549,7 @@ def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):
                 "policy": _vllm(8000, "aux", tensor_parallel_size=4),
             },
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
-            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": _policy_run()}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )
@@ -2600,23 +2611,21 @@ def test_the_router_answers_on_localhost(tmp_path):
     assert "--host 0.0.0.0" in router and "$(hostname)" not in router
 
 
-def test_the_policy_host_can_be_routable(tmp_path):
+def test_a_routable_policy_address_is_written_in_the_policy_node(tmp_path):
     # An agent in a remote sandbox cannot reach the driver's localhost.
+    node = {"responses_api_models": {"openai_model": {"openai_base_url": "http://${oc.env:HEAD_NODE_IP}:8000/v1"}}}
     config = SubmitConfig.model_validate(
         {
             "services": _per_node_services(),
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PD_POOLS}},
-            "driver": {
-                "container": "img",
-                "policy_model": "policy",
-                "policy_host": "${oc.env:HEAD_NODE_IP}",
-                "benchmarks": {"b": {"run": {}}},
-            },
+            "driver": {"container": "img", "benchmarks": {"b": {"run": {"policy_model": node}}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )
-    assert config.driver.benchmarks["b"].run["policy_base_url"] == "http://${oc.env:HEAD_NODE_IP}:8000/v1"
-    assert _pd_config(tmp_path).driver.benchmarks["b"].run["policy_base_url"] == "http://localhost:8000/v1"
+    run = config.driver.benchmarks["b"].run
+    assert run["policy_model"] == node
+    assert config.driver.benchmarks["b"].policy_model_type is None
+    assert run.get("policy_base_url") is None
 
 
 # ---------------------------------------------------------------------------
@@ -2629,7 +2638,7 @@ def _driver_on_aux(tmp_path, services):
         {
             "services": {"policy": _vllm(8000, "aux", tensor_parallel_size=4), **services},
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
-            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": _policy_run()}}},
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )
@@ -2652,7 +2661,7 @@ def _traced_script(tmp_path, services, pools, policy="policy"):
         {
             "services": services,
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
-            "driver": {"container": "gym:latest", "policy_model": policy, "benchmarks": {"b": {"run": {}}}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": _policy_run(policy)}}},
             "job": {"output_path": str(tmp_path / "jobs")},
             "otel": _TRACED_OTEL,
         }
@@ -2733,7 +2742,7 @@ def test_an_unpinned_service_is_probed_on_the_drivers_node(tmp_path):
     # The probe runs on node 0, but an unpinned single-node service runs beside the
     # driver, here on the decode pool's first node.
     config = _pd_config(tmp_path)
-    config.driver.policy_model = "policy-decode"
+    config.driver.benchmarks["b"].policy_service = "policy-decode"
     script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
     assert '--nodelist="${gym_nodes[4]}"' in _step(script, "policy")
     assert "Waiting for policy at http://${gym_nodes[4]}:8000" in script
@@ -2773,7 +2782,7 @@ def per_node_config(tmp_path, pool_size):
             {
                 "services": {"policy": service},
                 "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": {"gpu": pool}}},
-                "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+                "driver": {"container": "img", "benchmarks": {"b": {"run": {}}}},
                 "job": {"output_path": str(tmp_path / "jobs")},
             }
         )
@@ -3011,7 +3020,10 @@ def test_a_referenced_pinned_service_host_reaches_the_driver_and_the_hydra_overr
                 "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
             },
             "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
-            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {"judge_url": "service:scorer.url"}}}},
+            "driver": {
+                "container": "gym:latest",
+                "benchmarks": {"b": {"run": {"judge_url": "service:scorer.url", "policy_model": {}}}},
+            },
             "job": {"output_path": str(tmp_path / "jobs")},
         }
     )

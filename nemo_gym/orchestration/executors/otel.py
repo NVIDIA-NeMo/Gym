@@ -155,12 +155,8 @@ def collector_config_path(remote_bench_dir: Path) -> Path:
 
 
 def _policy_model_name(config: SubmitConfig) -> str | None:
-    if config.driver.policy_model is None:
-        return None
-    service = config.services[config.driver.policy_model]
-    if not isinstance(service, BaseModelServiceConfig):
-        return None
-    return service.served_model_name or service.model
+    name = config.policy_service
+    return config.services[name].accessors(name).model if name in config.services else None
 
 
 def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path) -> str:

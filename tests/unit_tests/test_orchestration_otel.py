@@ -46,13 +46,16 @@ def _config(**overrides):
     base = {
         "services": {"policy": {"type": "vllm", "container": "vllm:latest", "model": "/checkpoint", "port": 8000}},
         "compute": {"cluster-a": {"type": "slurm", "account": "acct", "hostname": None}},
-        "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {}}},
+        "driver": {"container": "gym:latest", "benchmarks": {"scicode": {}}},
         "job": {"output_path": "/remote/jobs"},
         "otel": {"endpoint": "https://otlp.example.com", "service_name": "my-registered-service"},
     }
     if "otel" in overrides:
         overrides = {**overrides, "otel": {**base["otel"], **overrides["otel"]}}
     return SubmitConfig.model_validate({**base, **overrides})
+
+
+_NO_POLICY_DRIVER = {"container": "gym:latest", "benchmarks": {"scicode": {"run": {"policy_model": {}}}}}
 
 
 def _script(config, bench_dir=BENCH_DIR):
@@ -120,7 +123,8 @@ def test_scrape_targets_are_the_model_services():
             "policy": {"type": "vllm", "container": "vllm:latest", "model": "m", "port": 8000},
             "judge": {"type": "vllm", "container": "vllm:latest", "model": "j", "port": 8100},
             "head": {"type": "ray", "container": "ray:latest"},
-        }
+        },
+        driver=_NO_POLICY_DRIVER,
     )
     assert scrape_targets(config) == {"policy": 8000, "judge": 8100}
 
@@ -237,7 +241,8 @@ def test_collector_scrapes_every_model_service_on_localhost():
         services={
             "policy": {"type": "vllm", "container": "vllm:latest", "model": "m", "port": 8000},
             "judge": {"type": "vllm", "container": "vllm:latest", "model": "j", "port": 8100},
-        }
+        },
+        driver=_NO_POLICY_DRIVER,
     )
     scrapes = _rendered(config)["receivers"]["prometheus"]["config"]["scrape_configs"]
     by_job = {s["job_name"]: s for s in scrapes}
@@ -322,7 +327,7 @@ def test_collector_model_label_prefers_served_model_name():
 
 
 def test_collector_omits_model_label_without_a_policy_model():
-    config = _config(driver={"container": "gym:latest", "benchmarks": {"scicode": {}}})
+    config = _config(driver=_NO_POLICY_DRIVER)
     assert "model" not in _attrs(_rendered(config))
 
 
@@ -518,7 +523,6 @@ def _driver_line(script):
 
 _DRIVER_WITH_INSTALL = {
     "container": "gym:latest",
-    "policy_model": "policy",
     "benchmarks": {"scicode": {}},
     "gym_install": {"ref": "main"},
 }
@@ -704,7 +708,7 @@ def _install(monkeypatch, conn, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
 
-_DRIVER_WITHOUT_INSTALL = {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {}}}
+_DRIVER_WITHOUT_INSTALL = {"container": "gym:latest", "benchmarks": {"scicode": {}}}
 
 
 def _executor_config(tmp_path, **overrides):
