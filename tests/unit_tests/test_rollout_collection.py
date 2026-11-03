@@ -13440,14 +13440,23 @@ class TestRunExamplesMaterializedTasks:
         ("envelope", "outcome"),
         [
             (False, {"reward": 1.0, "response": {"id": "r"}}),
+            (False, []),
+            (True, {"episode_id": None, "result": {"reward": 1.0}}),
             (True, {}),
             (True, {"result": {"reward": "1.0"}}),
             (True, {"result": {"reward": None}}),
         ],
-        ids=["not an episode response", "neither result nor failure", "string reward", "null reward"],
+        ids=[
+            "not an episode response",
+            "not an object",
+            "null episode id",
+            "neither result nor failure",
+            "string reward",
+            "null reward",
+        ],
     )
     async def test_episode_records_reject_a_reply_gym_eval_run_rejects(
-        self, monkeypatch: pytest.MonkeyPatch, envelope: bool, outcome: dict
+        self, monkeypatch: pytest.MonkeyPatch, envelope: bool, outcome: object
     ) -> None:
         self._install(monkeypatch, self._reply(**outcome) if envelope else outcome)
 

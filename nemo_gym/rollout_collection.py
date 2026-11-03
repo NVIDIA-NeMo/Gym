@@ -701,9 +701,9 @@ def _caller_episode_record(row: Mapping[str, Any], result: Any) -> Any:
     of scoring it. That covers a handled failure, whose class is its ``failure_kind`` when it names one, and a
     result marked ``judge_failed``.
     """
-    if _materialized_taskset(row) is None or not isinstance(result, dict):
+    if _materialized_taskset(row) is None or isinstance(result, RolloutFailureRecord):
         return result
-    from_environment_server = not _is_gym_built_result(result)
+    from_environment_server = not (isinstance(result, dict) and _is_gym_built_result(result))
     if from_environment_server:
         result = _native_episode_record(row, result)
         reward = result.get("reward")
