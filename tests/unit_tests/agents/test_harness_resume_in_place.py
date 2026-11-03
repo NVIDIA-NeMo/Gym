@@ -14,12 +14,13 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic
 from unittest.mock import AsyncMock
 
 import pytest
 
 from nemo_gym.agents.utils.run_until_parked import Finished, run_until_parked
-from nemo_gym.agents.utils.sandbox_session import SandboxSession
+from nemo_gym.agents.utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     CONTINUE_REQUEST_FILE,
@@ -421,3 +422,125 @@ async def test_an_adopted_launch_pauses_again_at_the_next_checkpoint(tmp_path: P
     assert launch.ticks("worker") > ticking, "a hold pause leaves the harness running"
     activation.resume.set()
     assert await asyncio.wait_for(running, 30) == Finished("artifacts")
+
+
+# -- a launch whose connection is lost ---------------------------------------------------------------------------------
+
+
+class DroppingSandbox(LocalSandbox):
+    """Loses the launch command's connection, as a provider stream that drops; the launch itself runs on.
+
+    With ``start=True`` the launch runs in the background and the connection drops once its supervisor wrote its pid;
+    with ``start=False`` it drops before the launch ever ran.
+    """
+
+    def __init__(self, session_dir: Path, *, start: bool) -> None:
+        self.session_dir = session_dir
+        self.start = start
+        self.launch: asyncio.Task | None = None
+
+    async def exec(self, command, *, cwd=None, timeout_s=30, **kwargs):
+        if "--receipt" in command and "--abandon" not in command and self.launch is None:
+            if not self.start:
+                self.launch = asyncio.get_running_loop().create_future()
+                raise TimeoutError("Request timed out")
+            self.launch = asyncio.create_task(super().exec(command, cwd=cwd, timeout_s=timeout_s))
+            async with asyncio.timeout(15):
+                while not (self.session_dir / "supervisor.pid").exists():
+                    await asyncio.sleep(0.02)
+            raise TimeoutError("Request timed out")
+        return await super().exec(command, cwd=cwd, timeout_s=timeout_s, **kwargs)
+
+
+def _dropping_session(tmp_path: Path, *, start: bool) -> tuple[SandboxSession, DroppingSandbox]:
+    sandbox = DroppingSandbox(tmp_path / "launch-1", start=start)
+    session = SandboxSession(
+        sandbox=sandbox,  # type: ignore[arg-type]
+        session_dir=str(tmp_path / "launch-1"),
+        workdir=str(tmp_path),
+        harness="test",
+        pausable=True,
+    )
+    return session, sandbox
+
+
+def _worker_stage(session_dir: Path, *, ticks: int = 60):
+    async def stage() -> SandboxCommand:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        worker = f"for _ in $(seq 1 {ticks}); do printf . >> ticks; sleep 0.02; done; exit 4"
+        return SandboxCommand(argv=["bash", "-c", f"cd {session_dir} && {worker}"])
+
+    return stage
+
+
+async def test_a_lost_launch_connection_is_finished_from_the_supervisors_receipt(tmp_path: Path, caplog) -> None:
+    session, sandbox = _dropping_session(tmp_path, start=True)
+    collect = AsyncMock(return_value="artifacts")
+
+    result = await asyncio.wait_for(
+        session.execute(
+            stage_activation=_worker_stage(tmp_path / "launch-1"), collect=collect, timeout=60, close_timeout=3
+        ),
+        30,
+    )
+
+    assert result == "artifacts" and collect.await_count == 1
+    assert len((tmp_path / "launch-1" / "ticks").read_text()) == 60, "the harness ran to its end"
+    assert session.cleanup is not None and session.cleanup["return_code"] == 4
+    assert "launch connection lost" in caplog.text
+    await sandbox.launch
+
+
+async def test_a_launch_whose_supervisor_never_started_fails_at_once(tmp_path: Path) -> None:
+    session, _ = _dropping_session(tmp_path, start=False)
+    with pytest.raises(TimeoutError, match="Request timed out"):
+        await asyncio.wait_for(
+            session.execute(
+                stage_activation=_worker_stage(tmp_path / "launch-1"),
+                collect=AsyncMock(return_value="artifacts"),
+                timeout=60,
+                close_timeout=3,
+            ),
+            15,
+        )
+
+
+async def test_cancelling_the_wait_for_a_lost_launchs_receipt_stops_the_harness(tmp_path: Path) -> None:
+    session, sandbox = _dropping_session(tmp_path, start=True)
+    running = asyncio.create_task(
+        session.execute(
+            stage_activation=_worker_stage(tmp_path / "launch-1", ticks=1500),
+            collect=AsyncMock(return_value="artifacts"),
+            timeout=60,
+            close_timeout=3,
+        )
+    )
+    async with asyncio.timeout(15):
+        while sandbox.launch is None or not (tmp_path / "launch-1" / "ticks").exists():
+            await asyncio.sleep(0.02)
+    await asyncio.sleep(0.2)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert session.cleanup is not None and session.cleanup["stopped"] is True
+    await asyncio.wait_for(sandbox.launch, 15)
+
+
+async def test_a_raised_receipt_poll_is_one_failed_poll() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        ConnectionError("stream lost"),
+        SandboxExecResult(stdout=json.dumps({"return_code": 3}), stderr=None, return_code=0),
+    ]
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    assert result.return_code == 3 and sandbox.exec.await_count == 2
+
+
+async def test_five_raised_receipt_polls_give_up() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = ConnectionError("sandbox gone")
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    assert (result.return_code, result.error_type) == (-1, "poll_failed") and sandbox.exec.await_count == 5
+    assert "sandbox gone" in (result.stderr or "")
