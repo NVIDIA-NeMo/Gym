@@ -14,9 +14,9 @@ from nemo_gym.agents import (
     AGENT_SESSION_COOKIE_KEY,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
-    HarnessTerminationError,
     SandboxSession,
     check_agent_seed_rejected,
+    harness_termination_failure,
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
@@ -388,7 +388,7 @@ async def test_close_releases_a_borrowed_sandbox_and_reports_termination(confirm
     if confirmed:
         session.cleanup = receipt
     else:
-        session.termination_error = HarnessTerminationError(harness="OpenHands", receipt=receipt)
+        session.termination_error = harness_termination_failure(harness="OpenHands", receipt=receipt)
     state = adapter.OpenHandsSandboxSession(request=seed(), session=session)
     close = await agent()._close_agent_session_state(state)
     remote.disconnect.assert_awaited_once()
