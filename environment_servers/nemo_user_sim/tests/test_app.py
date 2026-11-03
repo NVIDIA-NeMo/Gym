@@ -32,11 +32,10 @@ from environment_servers.nemo_user_sim.app import (
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef, ResourcesServerRef
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.data import materialize_task
 from nemo_gym.rollouts.rollout_collection import _episode_record
-from nemo_gym.server_runtime import MaterializedTask
-from nemo_gym.server_runtime.base_environment_server import is_handled_episode_failure
+from nemo_gym.server_runtime import is_handled_episode_failure
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,

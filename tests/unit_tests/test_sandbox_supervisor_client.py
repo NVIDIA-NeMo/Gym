@@ -29,9 +29,9 @@ from nemo_gym.agents.utils.supervisor_client import (
     supervised_launch_command,
     supervision_timeouts,
 )
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
-from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 class LocalSandbox:

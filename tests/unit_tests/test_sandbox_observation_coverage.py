@@ -134,7 +134,7 @@ def test_a_grading_sandbox_failure_leaves_the_trial_unobserved(sandbox):
 @pytest.mark.parametrize("error", [TimeoutError(), ConnectionError("refused")], ids=["timeout", "connection"])
 async def test_a_verifier_sandbox_whose_close_failed_after_grading_keeps_the_trial_observed(error):
     """End to end from the producer: a real sandbox whose provider close fails, as lifecycle_observation records it."""
-    from tests.unit_tests.test_sandbox_lifecycle_observation import FakeSandboxProvider
+    from tests.unit_tests.agents.test_sandbox_lifecycle_observation import FakeSandboxProvider
 
     provider = FakeSandboxProvider()
     provider.close = AsyncMock(side_effect=error)

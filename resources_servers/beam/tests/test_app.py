@@ -31,12 +31,11 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
 from nemo_gym.server_runtime import ReverifyMode
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification import is_judge_failure, judge_failsafe
 from nemo_gym.verification import judge as judge_module
-from nemo_gym.verification import judge_failsafe
-from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.beam.app import (
     ABILITIES,
     BEAMResourcesServer,
@@ -588,8 +587,7 @@ def test_compute_metrics_runs_keyed_by_rollout_index() -> None:
 
 async def test_task_group_keeps_unrelated_canonical_failures():
     """A failure that is not a judge failure leaves the task group as itself, not as a judge failure."""
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import FailureBoundary, NgFailureEvent
 
     unrelated = NgFailureEvent(
         boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
@@ -607,9 +605,7 @@ async def test_task_group_keeps_a_judge_failures_own_cause_and_cancels_siblings(
     """The first judge failure leaves the task group with its own cause, and its siblings are cancelled."""
     import asyncio
 
-    from nemo_gym.core import JUDGE_FAILED
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import failure_report_for
+    from nemo_gym.core import JUDGE_FAILED, FailureBoundary, failure_report_for
 
     model = NgFailureEvent(
         boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
