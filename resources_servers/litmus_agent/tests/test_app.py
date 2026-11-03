@@ -1156,6 +1156,23 @@ class TestResourcesSessions:
         assert provider.closed == 1
         assert server._sessions == {}
 
+    def test_typed_seed_cannot_take_over_existing_cookie_sandbox(self) -> None:
+        server, client = _session_client()
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "value = 42"}).status_code == 200
+        [session_id] = server._sessions
+        session = server._sessions[session_id]
+        provider = _LocalFakeProvider.instances[-1]
+        try:
+            assert client.post("/seed_session", json=_seed(session_id)).status_code == 409
+            assert server._session_episodes == {}
+            assert server._sessions[session_id] is session
+            assert provider.created == 1 and provider.closed == 0
+            assert client.post("/stateful_python_code_exec", json={"code": "print(value)"}).text.strip() == "42"
+        finally:
+            assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
+        assert server._sessions == {} and provider.closed == 1
+
     def test_legacy_seed_keeps_working(self):
         server, client = _session_client()
 
