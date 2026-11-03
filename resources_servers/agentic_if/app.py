@@ -41,6 +41,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.agentic_if.episode import bundle
 from resources_servers.agentic_if.episode.agent_user import is_root_agent_user
 from resources_servers.agentic_if.episode.artifacts import (
@@ -674,7 +675,9 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             # the rollout's model-call capture, where every call needs an agent invocation owner.
             with rollout_context(None):
                 reply = asyncio.run_coroutine_threadsafe(request, loop).result()
-        except JudgeError as error:
+        except JUDGE_FAILURES as error:
+            if not is_judge_failure(error):
+                raise
             ledger.failed(prompt, error)
             raise
         ledger.replied(prompt, reply)

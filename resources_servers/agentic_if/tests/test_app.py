@@ -34,6 +34,7 @@ from nemo_gym.server_runtime import (
     check_resources_session_contract,
 )
 from nemo_gym.verification import JudgeError
+from nemo_gym.verification import judge as verification_judge
 from resources_servers.agentic_if import app as app_module
 from resources_servers.agentic_if import opencode_bundle
 from resources_servers.agentic_if.app import (
@@ -141,6 +142,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_bundle, "stage_bundle", stage_bundle)
     monkeypatch.setattr(opencode_bundle, "collect_bundle", collect_bundle)
     monkeypatch.setattr(judge_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(verification_judge, "_judge_retry_wait_s", lambda attempt: 0)
     state.server = make_server(state.artifacts, backends)
     return state
 
@@ -651,9 +653,9 @@ async def test_an_unreachable_judge_raises_judge_error_after_persisting_the_epis
     assert body.deliverables_dir is not None
     record = load_episode_record(Path(body.deliverables_dir))
     assert record.verdict.reward == 1.0
-    # The calls that got no reply are kept with the episode: no reply ID, no tokens, and why.
+    # The calls that got no reply are kept with the episode: no reply ID, no tokens, and why. call_judge tried each.
     attempts = [call for call in world.backends.calls if call["server_name"] == "judge"]
-    assert len(record.judge_calls) == len(attempts) > 0
+    assert len(record.judge_calls) * verification_judge.JUDGE_CALL_MAX_ATTEMPTS == len(attempts) > 0
     assert all(call.response_id is None and call.total_tokens is None for call in record.judge_calls)
     assert {call.error for call in record.judge_calls} == {"ClientConnectionError"}
     world.backends.judge_error = None
@@ -674,7 +676,8 @@ async def test_a_verify_retried_after_a_judge_outage_grades_the_episode_again(wo
     _, session_id = await seed(world, row)
     with pytest.raises(JudgeError):
         await verify(world, row, session_id)
-    unanswered = len([call for call in world.backends.calls if call["server_name"] == "judge"])
+    attempts = len([call for call in world.backends.calls if call["server_name"] == "judge"])
+    unanswered = attempts // verification_judge.JUDGE_CALL_MAX_ATTEMPTS  # call_judge tried each call
     world.backends.judge_error = None
     result = await verify(world, row, session_id)
     assert result.if_result.if_all == 1 and result.mask_sample is False
@@ -725,7 +728,8 @@ async def test_each_judge_call_s_reply_id_and_usage_are_reported_and_kept_with_t
 
 @pytest.mark.asyncio
 async def test_a_call_that_got_no_reply_and_a_reply_without_usage_are_reported_as_such(world):
-    world.backends.judge_error = [ClientConnectionError("judge unreachable")]  # the first call only
+    tries = verification_judge.JUDGE_CALL_MAX_ATTEMPTS
+    world.backends.judge_error = [ClientConnectionError("judge unreachable")] * tries  # every try of the first call
     world.backends.judge_usage = None
     row = swe_row(checks=JUDGED)
     _, session_id = await seed(world, row)
@@ -1111,8 +1115,9 @@ async def test_a_judge_outage_on_the_prefix_question_alone_is_a_judge_failure(wo
     _, row, session_id, _, _ = await seed_continuation(world, tmp_path, monkeypatch, checks)
     config = load_config()
     votes, attempts = votes_for(config, "run"), config["model"]["attempts"]
+    tries = votes * attempts * verification_judge.JUDGE_CALL_MAX_ATTEMPTS
     # The whole session's votes are answered; every attempt on the prefix question fails to connect.
-    world.backends.judge_error = [None] * votes + [ClientConnectionError("judge unreachable")] * (votes * attempts)
+    world.backends.judge_error = [None] * votes + [ClientConnectionError("judge unreachable")] * tries
     with pytest.raises(JudgeError, match="check polite"):
         await verify(world, row, session_id)
     world.backends.judge_error = None

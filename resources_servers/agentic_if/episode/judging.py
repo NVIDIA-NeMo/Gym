@@ -8,9 +8,11 @@ vote without a verdict into an ``error`` decision, whatever the cause.
 The Resources Server asks the judge outside the rollout's context, so the judge's calls are not in the rollout's
 model-call capture: the ledger is their only record. Per grade, it keeps every call's reply ID, the model that
 answered (a model server may serve another model than the judge configuration names) and token usage, or why
-the call got no reply, and which judge questions any request reached. A check that errored on a question no request
-reached is a judge outage: verify raises ``JudgeError`` so ``judge_failsafe`` records ``judge_failed``, which
-re-verification recovers. An unparseable reply stays a graded check outcome.
+the call got no reply, and which judge questions any request reached. A call is one ``call_judge``, which tries a
+lost connection, a timeout or a 408, 429 or 5xx reply again itself, so a call without a reply failed every attempt.
+A check that errored on a question no request reached is a judge outage: verify raises ``JudgeError`` so
+``judge_failsafe`` records ``judge_failed``, which re-verification recovers. An unparseable reply stays a graded check
+outcome.
 """
 
 import hashlib
@@ -23,7 +25,6 @@ from aiohttp import ClientError, ClientResponseError
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.verification import JudgeError
 from resources_servers.agentic_if.if_grading.contracts import IFResult
 
 
@@ -37,12 +38,15 @@ def judge_prompt(body: Mapping[str, Any]) -> str:
     return str(body["input"][0]["content"])
 
 
-def judge_unreachable(error: JudgeError) -> bool:
-    """A failed call (transport, timeout, HTTP status), not a reply that could not be parsed."""
+def judge_unreachable(error: Exception) -> bool:
+    """A failed call (transport, timeout, HTTP status), not a reply that could not be parsed.
+
+    ``error`` is the judge failure a call raised: a ``judge_failed`` event or a ``JudgeError``, raised from what failed.
+    """
     return isinstance(error.__cause__, (ClientError, TimeoutError, OSError))
 
 
-def _failure(error: JudgeError) -> str:
+def _failure(error: Exception) -> str:
     """Why a call got no reply: the exception type, and the HTTP status of a failed call; never an error body."""
     cause = error.__cause__ if error.__cause__ is not None else error
     if isinstance(cause, ClientResponseError):
@@ -129,7 +133,7 @@ class JudgeLedger:
         )
         self._record(prompt, call, reached=True)
 
-    def failed(self, prompt: str, error: JudgeError) -> None:
+    def failed(self, prompt: str, error: Exception) -> None:
         """Record a call for ``prompt`` that got no usable reply."""
         call = JudgeCall(prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(), error=_failure(error))
         self._record(prompt, call, reached=not judge_unreachable(error))
