@@ -652,6 +652,29 @@ class TestSession:
         assert _TEST_SESSION_ID not in server._data_storage
 
     @pytest.mark.asyncio
+    async def test_verify_after_close_is_masked(self) -> None:
+        server = _make_server()
+        seed = _typed_seed()
+        await server.seed_session(_mock_request(), seed)
+        await server.close_resources_session(_close(seed))
+        response = NeMoGymResponse(
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+
+        masked = await server.verify(_mock_request(), _make_verify_request(response, expected_answer="$391.0 billion"))
+
+        assert masked.mask_sample is True
+        assert masked.failure_kind == "session_lost"
+        assert masked.reward == 0.0
+
+    @pytest.mark.asyncio
     async def test_close_for_another_episode_is_refused(self) -> None:
         server = _make_server()
         await server.seed_session(_mock_request(), _typed_seed())
