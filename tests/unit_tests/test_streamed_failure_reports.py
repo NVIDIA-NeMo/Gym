@@ -208,6 +208,12 @@ def test_a_large_event_is_omitted_only_when_it_carries_a_report(chunk_size: int 
         + b"\n"
     )
     carrying = b"data: " + json.dumps({"type": "response.completed", "text": large, field: {}}).encode() + b"\n"
+    # A successful event whose answer text only mentions the field name carries no report.
+    mentions = (
+        b"data: "
+        + json.dumps({"type": "response.completed", "text": f'{large} "{field}": {{}} and {field}'}).encode()
+        + b"\n"
+    )
 
     def read(body: bytes) -> StreamFailureReportReader:
         reader = StreamFailureReportReader()
@@ -220,6 +226,7 @@ def test_a_large_event_is_omitted_only_when_it_carries_a_report(chunk_size: int 
     assert read(clean + b"data: [DONE]\n").report is None
     assert read(clean + terminal).report == reported
     assert read(carrying).report.omitted
+    assert read(mentions + b"data: [DONE]\n").report is None
     # The field split across two chunks, after the line went over the bound, is still found.
     split = StreamFailureReportReader()
     cut = carrying.index(field.encode()) + 3
