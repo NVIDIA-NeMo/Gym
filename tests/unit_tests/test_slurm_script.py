@@ -1872,6 +1872,36 @@ def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
     assert "NEMO_GYM_POLICY_BASE_URL=http://localhost:8000/v1" in script
     assert "NEMO_GYM_POLICY_MODEL_NAME=super" in script
     assert "NEMO_GYM_POLICY_API_KEY=dummy" in script
+    # The capture directory `gym eval run` would get; the command's own Gym processes read it as their default.
+    assert f"NEMO_GYM_MODEL_CALL_CAPTURE_DIR={bench_dir / 'model-calls'}" in script
+
+
+@pytest.mark.parametrize(
+    ("declared", "exported"),
+    [
+        pytest.param("lit:", {"", "''"}, id="empty turns capture off"),
+        pytest.param("lit:/scratch/calls", {"/scratch/calls"}, id="a declared directory wins"),
+    ],
+)
+def test_a_command_driver_env_overrides_the_capture_dir(tmp_path, declared, exported):
+    script = _render_command(tmp_path, "harness", env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": declared})
+
+    values = re.findall(r"\bNEMO_GYM_MODEL_CALL_CAPTURE_DIR=(\S*)", script)
+    assert values and set(values) <= exported
+
+
+def test_a_run_benchmark_gets_no_capture_dir_variable(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+    )
+
+    # `gym eval run` gets its capture directory as a config override, not from the environment.
+    assert "model_call_capture_dir=" in script
+    assert "NEMO_GYM_MODEL_CALL_CAPTURE_DIR" not in script
 
 
 def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
