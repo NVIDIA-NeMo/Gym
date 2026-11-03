@@ -326,7 +326,13 @@ async def test_close_without_recovered_root_preserves_activation(
     }
     assert observations["gaps"] == [
         *retained["gaps"],
-        {"code": "agent_artifact_unavailable", "invocation_id": None, "detail": None},
+        {
+            "code": "agent_artifact_unavailable",
+            "invocation_id": None,
+            "agent_instance": None,
+            "span_id": None,
+            "detail": None,
+        },
     ]
     assert (receipt.trajectory.model_dump(mode="json") if receipt.trajectory is not None else None) == trajectory
     assert receipt.cleanup_confirmed is True

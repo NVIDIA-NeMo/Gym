@@ -32,8 +32,8 @@ if TYPE_CHECKING:
         RolloutCollectionConfig,
         RolloutCollectionHelper,
         SharedRolloutCollectionConfig,
-        get_max_rollout_attempts,
         enrich_run_result,
+        get_max_rollout_attempts,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord

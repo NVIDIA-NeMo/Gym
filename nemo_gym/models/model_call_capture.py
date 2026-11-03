@@ -99,6 +99,7 @@ class ModelCallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
     observability_enabled: bool = False
+    trajectory_schema_version: Literal["1.0", "2.0"] = "1.0"
     model_call_capture_dir: Optional[Path] = None
 
     @model_validator(mode="after")

@@ -101,16 +101,20 @@ def _parse_opencode_session(
 
     # Count across the full persisted session, not an activation slice: normalization remains
     # stable when a resumed session reuses a native call ID in a later response.
-    native_ids = Counter(
-        (row["session_id"], _load_json(row["data"]).get("callID"))
-        for row in part_rows if _load_json(row["data"]).get("type") == "tool"
-    )
+    decoded_parts = {row["id"]: _load_json(row["data"]) for row in part_rows}
+    tool_parts = [row for row in part_rows if decoded_parts[row["id"]].get("type") == "tool"]
+    native_by_part = {
+        row["id"]: value if isinstance(value := decoded_parts[row["id"]].get("callID"), str) and value else None
+        for row in tool_parts
+    }
+    native_ids = Counter((row["session_id"], native_by_part[row["id"]]) for row in tool_parts)
     normalized_ids = {
         row["id"]: (
-            f"{_load_json(row['data']).get('callID') or 'call'}:{row['id']}"
-            if native_ids[(row["session_id"], _load_json(row["data"]).get("callID"))] > 1
-            else _load_json(row["data"]).get("callID") or f"call:{row['id']}"
-        ) for row in part_rows if _load_json(row["data"]).get("type") == "tool"
+            f"{native_by_part[row['id']] or 'call'}:{row['id']}"
+            if native_ids[(row["session_id"], native_by_part[row["id"]])] > 1
+            else native_by_part[row["id"]] or f"call:{row['id']}"
+        )
+        for row in tool_parts
     }
     all_part_rows = part_rows
     if message_ids is not None:
@@ -262,37 +266,56 @@ def _parse_opencode_session(
 
             started_at = _milliseconds(opencode_time.get("start"))
             completed_at = _milliseconds(opencode_time.get("end"))
-            duration_ms = ((completed_at - started_at) * 1000
-                           if started_at is not None and completed_at is not None else None)
+            duration_ms = (
+                float(opencode_time["end"]) - float(opencode_time["start"])
+                if started_at is not None and completed_at is not None
+                else None
+            )
             timing, timing_gaps = normalize_operation_timing(
-                boundary="lifecycle", timing_source="opencode.tool_part", started_at=started_at,
-                completed_at=completed_at, duration_ms=duration_ms,
+                boundary="lifecycle",
+                timing_source="opencode.tool_part",
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
                 duration_source="wall_clock" if duration_ms is not None else None,
             )
             producer_id = f"opencode:{fallback_invocation_id}"
             span_id = tool_attempt_id(producer_id=producer_id, invocation_id=session_id, operation_key=row["id"])
-            tools.append(ToolCallObservation(
-                invocation_id=session_id, agent_instance=agent_instance, tool_call_id=call_id,
-                native_tool_call_id=observed_call_id, span_id=span_id, producer_id=producer_id,
-                source_message_id=message_id, source_model_ref=model_ref,
-                tool_name=part.get("tool") if isinstance(part.get("tool"), str) else None,
-                timings=[timing] if timing is not None else [], status=outcome.status, error_type=outcome.error_type,
-            ))
+            tools.append(
+                ToolCallObservation(
+                    invocation_id=session_id,
+                    agent_instance=agent_instance,
+                    tool_call_id=call_id,
+                    native_tool_call_id=observed_call_id,
+                    span_id=span_id,
+                    producer_id=producer_id,
+                    source_message_id=message_id,
+                    source_model_ref=model_ref,
+                    tool_name=part.get("tool") if isinstance(part.get("tool"), str) else None,
+                    timings=[timing] if timing is not None else [],
+                    status=outcome.status,
+                    error_type=outcome.error_type,
+                )
+            )
             if observed_call_id is None:
                 timing_gaps.append("tool_call_identity_unavailable")
             if started_at is None:
                 timing_gaps.append("tool_start_unavailable")
             if completed_at is None:
                 timing_gaps.append("tool_completion_unavailable")
-            gaps.extend(ObservationGap(code=code, invocation_id=session_id, agent_instance=agent_instance,
-                                       span_id=span_id) for code in timing_gaps)
+            gaps.extend(
+                ObservationGap(code=code, invocation_id=session_id, agent_instance=agent_instance, span_id=span_id)
+                for code in timing_gaps
+            )
             metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
             if not metadata and isinstance(part.get("metadata"), dict):
                 metadata = part["metadata"]
             child_id = metadata.get("sessionId")
             if isinstance(child_id, str) and observed_call_id is not None:
                 child_tools.setdefault(child_id, set()).add(call_id)
-                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(outcome.status, outcome.status)
+                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(
+                    outcome.status, outcome.status
+                )
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
@@ -392,7 +415,9 @@ def _parse_opencode_session(
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
 
     if trajectory is not None:
-        append_opencode_turns(trajectory, session_ids, message_rows, part_rows, model_ref=model_ref)
+        append_opencode_turns(
+            trajectory, session_ids, message_rows, part_rows, model_ref=model_ref, normalized_call_ids=normalized_ids
+        )
 
     return AgentObservationBundle(
         schema_version="2.0",

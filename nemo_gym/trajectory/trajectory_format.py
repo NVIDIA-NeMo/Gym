@@ -6,12 +6,21 @@
 from copy import deepcopy
 from typing import Any
 
-from nemo_gym.core.failure_kinds import validate_failure_kind
+from nemo_gym.core.failure_kinds import is_namespaced, is_registered
 
 
 _TOOL_V2_FIELDS = {
-    "agent_instance", "span_id", "native_tool_call_id", "parent_span_id", "model_call_id", "failure_id", "timings",
-    "producer_id", "model_call_ref", "source_message_id", "source_model_ref",
+    "agent_instance",
+    "span_id",
+    "native_tool_call_id",
+    "parent_span_id",
+    "model_call_id",
+    "failure_id",
+    "timings",
+    "producer_id",
+    "model_call_ref",
+    "source_message_id",
+    "source_model_ref",
 }
 _TOOL_FLAT_FIELDS = {"started_at", "completed_at", "duration_ms", "timing_source"}
 
@@ -27,7 +36,10 @@ def project_observation_v1(record: dict[str, Any]) -> dict[str, Any]:
             timing = timings[0]
             record.update({key: timing.get(key) for key in ("started_at", "completed_at", "duration_ms")})
             record["timing_source"] = {
-                "executor": "executor", "lifecycle": "harness", "transcript": "artifact", "event_receipt": "harness"
+                "executor": "executor",
+                "lifecycle": "harness",
+                "transcript": "artifact",
+                "event_receipt": "harness",
             }[timing["boundary"]]
         for key in _TOOL_V2_FIELDS:
             record.pop(key, None)
@@ -59,6 +71,8 @@ def project_trajectory_v1(trajectory: dict[str, Any]) -> dict[str, Any]:
         result["rollout_id"] = result.pop("capture_key")
     result.pop("failure_events", None)
     result["tool_calls"] = [project_observation_v1(record) for record in result.get("tool_calls", [])]
+    for turn in result.get("turns", []):
+        turn.pop("agent_instance", None)
     for invocation in result.get("invocations", []):
         invocation.pop("agent_instance", None)
     for call in result.get("model_calls", []):
@@ -90,9 +104,10 @@ def validate_failure_events(events: dict[str, dict[str, Any]]) -> None:
             raise ValueError("invalid failure event identity or fields")
         if event.get("boundary") not in boundaries:
             raise ValueError("invalid failure boundary")
-        validate_failure_kind(event.get("failure_kind"))
         if not isinstance(event.get("failure_kind"), str) or not isinstance(event.get("failure_reason"), str):
             raise ValueError("failure kind and reason are required")
+        if not (is_registered(event["failure_kind"]) or is_namespaced(event["failure_kind"])):
+            raise ValueError("unregistered failure kind")
         if event.get("cause_id") is not None and event["cause_id"] not in events:
             raise ValueError("failure cause must resolve in failure_events")
         if (status := event.get("http_status")) is not None and (type(status) is not int or not 100 <= status <= 599):
@@ -110,3 +125,17 @@ def validate_failure_events(events: dict[str, dict[str, Any]]) -> None:
                 raise ValueError("failure cause references must not form a cycle")
             visited.add(cause)
             cause = events[cause].get("cause_id")
+
+
+def reject_v2_fields(records: object) -> None:
+    """Do not silently discard meaningful v2 evidence mislabeled as a v1 wire record."""
+    if not isinstance(records, list):
+        return
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        fields = _TOOL_V2_FIELDS - {"model_call_id", "source_message_id", "source_model_ref"}
+        if record.get("kind") == "tool_call" or "tool_call_id" in record:
+            fields = _TOOL_V2_FIELDS
+        if any(record.get(key) not in (None, [], {}) for key in fields):
+            raise ValueError("v2 observation fields require schema_version 2.0")

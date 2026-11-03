@@ -1841,6 +1841,41 @@ class TestRolloutCollection:
         assert maybe_rollout_id_from_run_body(returned_row) == "caller-owned-capture-id"
         assert result == {"reward": 1.0}
 
+    async def test_run_examples_enrichment_matches_shared_projection(self, monkeypatch):
+        from copy import deepcopy
+
+        from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+        source_row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            ROLLOUT_ID_KEY_NAME: "capture",
+            "task_id": "task",
+            "responses_create_params": {"input": "solve"},
+        }
+        raw = {
+            "reward": 1.0,
+            "ng_agent_observations": {
+                "source": "test",
+                "records": [{"kind": "agent_invocation", "invocation_id": "root"}],
+            },
+        }
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, deepcopy(raw))))
+        _, result = await next(
+            RolloutCollectionHelper().run_examples(
+                [source_row],
+                enrich_results=True,
+                trajectory_schema_version="2.0",
+            )
+        )
+        expected = deepcopy(raw)
+        await enrich_run_result(
+            source_row, expected, capture_dirs=[], observability_enabled=False, trajectory_schema_version="2.0"
+        )
+        assert result["ng_trajectory"] == expected["ng_trajectory"]
+        assert result["reward"] == 1.0
+
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -28,6 +28,7 @@ from nemo_gym.trajectory.trajectory_format import (
     canonical_tool_record,
     project_bundle_v1,
     project_trajectory_v1,
+    reject_v2_fields,
     validate_failure_events,
 )
 
@@ -102,6 +103,7 @@ class TrajectoryModelCall(ObservationModel):
 
 class TrajectoryTurn(ObservationModel):
     invocation_id: str
+    agent_instance: Optional[str] = Field(default=None, min_length=1)
     activation_id: Optional[int] = Field(
         default=None,
         ge=1,
@@ -352,6 +354,13 @@ class AgentObservationBundle(ObservationModel):
     )
     gaps: list[ObservationGap] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def decode_version(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("schema_version", "1.0") == "1.0":
+            reject_v2_fields(value.get("records", []))
+        return value
+
     @model_serializer(mode="wrap")
     def serialize_version(self, handler: SerializerFunctionWrapHandler):
         result = handler(self)
@@ -367,14 +376,14 @@ class AgentObservationBundle(ObservationModel):
     def validate_identity(self) -> "AgentObservationBundle":
         """Require unique invocation IDs and reject cycles in the observed parent graph."""
         invocation_records = [record for record in self.records if isinstance(record, AgentInvocation)]
-        invocations = {record.invocation_id: record for record in invocation_records}
+        invocations = {(record.agent_instance, record.invocation_id): record for record in invocation_records}
         if len(invocation_records) != len(invocations):
             raise ValueError("invocation_id must be unique within an observation bundle")
 
         # Missing parents are valid when an opaque producer can observe only part of the invocation tree.
-        checked: set[str] = set()
+        checked: set[tuple[str | None, str]] = set()
         for invocation_id in invocations:
-            chain: set[str] = set()
+            chain: set[tuple[str | None, str]] = set()
             current = invocation_id
             while current in invocations and current not in checked:
                 if current in chain:
@@ -383,7 +392,7 @@ class AgentObservationBundle(ObservationModel):
                 parent = invocations[current].parent_invocation_id
                 if parent is None:
                     break
-                current = parent
+                current = (invocations[current].agent_instance, parent)
             checked.update(chain)
         return self
 
@@ -408,7 +417,15 @@ class TrajectoryRecord(ObservationModel):
     @model_validator(mode="before")
     @classmethod
     def decode_identity(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "capture_key" not in value:
+        if not isinstance(value, dict):
+            return value
+        if value.get("schema_version", "1.0") == "1.0":
+            reject_v2_fields(
+                [*value.get("tool_calls", []), *value.get("invocations", []), *value.get("model_calls", [])]
+            )
+            if value.get("failure_events"):
+                raise ValueError("failure_events requires trajectory schema 2.0")
+        if "capture_key" not in value:
             return value
         if value.get("schema_version") != "2.0":
             raise ValueError("capture_key requires trajectory schema 2.0")
@@ -424,12 +441,17 @@ class TrajectoryRecord(ObservationModel):
         if self.schema_version == "1.0":
             return project_trajectory_v1(result)
         result["capture_key"] = result.pop("rollout_id")
-        result["tool_calls"] = [canonical_tool_record(tool, include_join_evidence=False) for tool in result["tool_calls"]]
+        result["tool_calls"] = [
+            canonical_tool_record(tool, include_join_evidence=False) for tool in result["tool_calls"]
+        ]
         return result
 
     @model_validator(mode="after")
     def validate_identity(self) -> "TrajectoryRecord":
-        invocation_ids = [(getattr(invocation, "agent_instance", None), invocation.invocation_id) for invocation in [*self.invocations, *self.verifier_invocations]]
+        invocation_ids = [
+            (getattr(invocation, "agent_instance", None), invocation.invocation_id)
+            for invocation in [*self.invocations, *self.verifier_invocations]
+        ]
         if len(invocation_ids) != len(set(invocation_ids)):
             raise ValueError("invocation_id must be unique within a trajectory")
         model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]
@@ -441,20 +463,60 @@ class TrajectoryRecord(ObservationModel):
                 raise ValueError("v2 tool attempts require unique span identities")
             validate_failure_events(self.failure_events)
             calls = {call.model_call_id: call for call in self.model_calls if call.model_call_id}
+            owners: dict[str, set[str | None]] = defaultdict(set)
+            for invocation in self.invocations:
+                owners[invocation.invocation_id].add(invocation.agent_instance)
+                for reference in invocation.model_calls:
+                    call = calls.get(reference.model_call_id)
+                    if (
+                        call is not None
+                        and invocation.agent_instance is not None
+                        and call.agent_instance is not None
+                        and call.agent_instance != invocation.agent_instance
+                    ):
+                        raise ValueError("model call and owning invocation have different agent instances")
+            for item in [*self.tool_calls, *self.turns]:
+                known = owners.get(item.invocation_id, set())
+                if (
+                    item.agent_instance is not None
+                    and known
+                    and None not in known
+                    and item.agent_instance not in known
+                ):
+                    raise ValueError("record and owning invocation have different agent instances")
             for tool in self.tool_calls:
+                if tool.parent_span_id is not None and (tool.agent_instance, tool.parent_span_id) not in identities:
+                    raise ValueError("parent_span_id must resolve to an attempt of the same agent instance")
                 if tool.failure_id is not None and tool.failure_id not in self.failure_events:
                     raise ValueError("tool failure_id must resolve in failure_events")
                 if tool.model_call_id is not None:
                     call = calls.get(tool.model_call_id)
                     if call is None:
                         raise ValueError("tool model_call_id must resolve to one captured call")
-                    if tool.agent_instance is not None and call.agent_instance is not None and tool.agent_instance != call.agent_instance:
+                    if call.response is not None:
+                        import json
+
+                        from nemo_gym.trajectory.model_call_record import _tool_calls_and_reasoning
+
+                        response = json.loads(call.response) if isinstance(call.response, str) else call.response
+                        requested, _ = (
+                            _tool_calls_and_reasoning(response) if isinstance(response, dict) else ([], None)
+                        )
+                        if (tool.native_tool_call_id or tool.tool_call_id) not in {
+                            item.get("call_id") for item in requested
+                        }:
+                            raise ValueError("requesting model response does not contain this tool request")
+                    if (
+                        tool.agent_instance is not None
+                        and call.agent_instance is not None
+                        and tool.agent_instance != call.agent_instance
+                    ):
                         raise ValueError("tool and requesting model call have different agent instances")
-        keys: set[tuple[str, int]] = set()
+        keys: set[tuple[str | None, str, int]] = set()
         for turn in self.turns:
             if turn.task_id != self.task_id or turn.rollout_id != self.rollout_id:
                 raise ValueError("turn identity must match the trajectory")
-            key = (turn.invocation_id, turn.turn_no)
+            key = (turn.agent_instance, turn.invocation_id, turn.turn_no)
             if key in keys:
                 raise ValueError("turn number must be unique within an invocation")
             keys.add(key)

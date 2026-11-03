@@ -371,12 +371,12 @@ class TestParseOpencodeSession:
             == "[Old tool result content cleared]"
         )
         tools = {tool.tool_call_id: tool for tool in _tool_calls(bundle)}
-        assert {tool_id: tool.duration_ms for tool_id, tool in tools.items()} == {
+        assert {tool_id: tool.timings[0].duration_ms for tool_id, tool in tools.items()} == {
             "task-1": 2000,
             "bash-1": 400,
         }
-        assert tools["task-1"].started_at == 1785813051.824
-        assert tools["task-1"].completed_at == 1785813053.824
+        assert tools["task-1"].timings[0].started_at == 1785813051.824
+        assert tools["task-1"].timings[0].completed_at == 1785813053.824
         compaction = _compactions(bundle)[0]
         assert compaction.trigger == "overflow"
         assert compaction.summary == "condensed context"
@@ -445,8 +445,8 @@ class TestParseOpencodeSession:
         assert ("tool_timing_unavailable", "p0") in [(gap.code, gap.detail) for gap in bundle.gaps]
 
     @pytest.mark.parametrize("call_id", ["absent", None, ""], ids=["absent", "null", "empty"])
-    def test_a_tool_part_without_a_call_id_leaves_tool_timing_unknown(self, tmp_path, call_id) -> None:
-        """The tool ran but has no observation to time, so the tool history read is not complete."""
+    def test_a_tool_part_without_a_call_id_preserves_persisted_attempt(self, tmp_path, call_id) -> None:
+        """A missing request ID does not erase the persisted attempt and its timing."""
         part = {
             "type": "tool",
             "tool": "bash",
@@ -458,10 +458,11 @@ class TestParseOpencodeSession:
 
         bundle = _parse_opencode_session(db, "fallback")
 
-        assert _tool_calls(bundle) == []
-        gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
-        assert ("tool_call_identity_unavailable", "p0") in gaps
-        assert ("tool_timing_unavailable", "p0") in gaps
+        (observed,) = _tool_calls(bundle)
+        assert observed.native_tool_call_id is None
+        assert observed.span_id
+        assert observed.timings[0].duration_ms == 10000
+        assert any(gap.code == "tool_call_identity_unavailable" for gap in bundle.gaps)
 
     def test_an_unreadable_part_leaves_tool_timing_unknown(self, tmp_path) -> None:
         """The part may have been a tool call, so the tool history read is not complete."""
@@ -508,9 +509,11 @@ class TestParseOpencodeSession:
 
         bundle = _parse_opencode_session(db, "fallback")
 
-        assert all(tool.started_at is None and tool.completed_at is None for tool in _tool_calls(bundle))
+        assert all(
+            tool.timings[0].started_at == 2 and tool.timings[0].completed_at is None for tool in _tool_calls(bundle)
+        )
         assert {gap.code for gap in bundle.gaps} >= {
-            "tool_timing_unavailable",
+            "tool_clock_discontinuity",
             "subagent_parent_unavailable",
             "subagent_spawn_ambiguous",
         }

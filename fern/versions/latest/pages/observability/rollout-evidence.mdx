@@ -40,6 +40,34 @@ Follow [Model-Call Capture](/main/model-server/model-call-capture) for a runnabl
 Agent-side evidence depends on the harness and execution path. See the
 [harness conformance results](/main/observability/harness-conformance#results) for measured harness checks.
 
+## Tool Timing v2
+
+Set `trajectory_schema_version: "2.0"` alongside the collection settings above to retain
+attempt-level tool timing. The default remains `"1.0"` for existing readers. Direct callers can use
+`RolloutCollectionHelper.run_examples(..., enrich_results=True, trajectory_schema_version="2.0")`
+or await `nemo_gym.rollouts.enrich_run_result(row, result, capture_dirs=[...],
+observability_enabled=True, trajectory_schema_version="2.0")` after a run. Both paths use the
+collector's capture merge and normalization. Raw `run_examples` behavior stays unchanged.
+
+V2 names the capture namespace `capture_key`. Each tool execution has a stable `span_id`, its
+native request ID, optional agent instance and requesting model-call ID, and `timings` with
+explicit boundary, producer, clock domain, endpoints and duration method. OpenCode reads its
+persisted tool parts as lifecycle measurements. Repeated native IDs remain separate attempts;
+a started but unfinished tool stays `incomplete`, including when its enclosing harness times out.
+
+`TrajectoryRecord.model_validate(...)` accepts v1 and v2 and rejects unknown versions. Use
+`nemo_gym.trajectory.project_trajectory_v1(...)` explicitly for a legacy reader. The projection
+loses attempt, instance, parent, failure and detailed timing provenance. It projects one measured
+boundary into legacy flat fields; multiple boundaries require an explicit consumer choice and
+produce no flat interval. Legacy measurements with unknown boundaries remain diagnostic evidence
+when upgraded, rather than becoming executor measurements.
+
+Missing agent identity, clock provenance, completion, failure details or exact requesting-call
+links produce scoped gaps. Tool IDs alone never select a model call. Payload omission happens
+after joins and leaves a verification gap. Durations from different clock domains can be summed
+as work, but their endpoints cannot establish overlap. The wall-time reader selects lifecycle
+measurements by default and leaves incompatible-clock unions unknown.
+
 ## Which Artifact to Read
 
 | Artifact | Produced by | Use |

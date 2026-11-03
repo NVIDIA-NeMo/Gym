@@ -156,8 +156,9 @@ def test_sandbox_message_membership_numbering_and_synthetic_exclusion(tmp_path, 
         ("child", 1, 1),
         ("root", 2, 2),
     ]
-    assert trajectory.turns[0].answer[0]["id"] == "m1"
-    assert [p["text"] for p in trajectory.turns[0].answer[0]["content"]] == ["one", "two"]
+    assert trajectory.turns[0].source_message_id == "m1"
+    assert [message["content"][0]["text"] for message in trajectory.turns[0].answer] == ["one", "two"]
+    assert all("id" not in message["content"][0] for message in trajectory.turns[0].answer)
     assert not trajectory.gaps
     assert len([record for record in observations.records if isinstance(record, AgentInvocation)]) == 2
 
@@ -376,3 +377,67 @@ def test_native_gap_diagnostics_are_bounded_and_content_free(tmp_path):
     assert len(diagnostic["parts"]) == 128
     assert diagnostic["truncated"] is True
     assert "secret" not in gap.detail
+
+
+async def test_v2_tool_artifacts_keep_partial_intervals_and_exact_request_joins(tmp_path):
+    from nemo_gym.rollouts import enrich_run_result
+    from nemo_gym.trajectory import ToolCallObservation
+
+    def part(status, times, exit_code=None):
+        return {
+            "type": "tool",
+            "tool": "bash",
+            "callID": "reused",
+            "state": {
+                "status": status,
+                "time": times,
+                "input": {"command": "true"},
+                "output": "ok" if status == "completed" else None,
+                "metadata": {"exit": exit_code} if exit_code is not None else {},
+            },
+        }
+
+    db = _session_db(
+        tmp_path,
+        [
+            _policy(part("completed", {"start": 1000, "end": 2000}, 7)),
+            _policy(part("running", {"start": 3000})),
+        ],
+    )
+    trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0")
+    bundle = _parse_opencode_session(db, "0-0", trajectory)
+    tools = [r for r in bundle.records if isinstance(r, ToolCallObservation)]
+    assert len({r.span_id for r in tools}) == 2
+    assert len({r.tool_call_id for r in tools}) == 2
+    assert tools[0].native_tool_call_id == tools[1].native_tool_call_id == "reused"
+    assert tools[0].status == "failed"
+    assert tools[0].timings[0].duration_ms == 1000
+    assert tools[1].status == "incomplete"
+    assert tools[1].timings[0].started_at == 3
+    assert tools[1].timings[0].completed_at is None
+    assert tools[1].timings[0].duration_ms is None
+    assert all(t.timings[0].boundary == "lifecycle" for t in tools)
+    calls = [
+        {
+            "model_call_id": f"model-{index}",
+            "client_session_id": "root",
+            "client_assistant_message_id": f"m{index}",
+            "response": {
+                "output": [{"type": "function_call", "call_id": "reused", "name": "bash", "arguments": "{}"}]
+            },
+        }
+        for index in range(2)
+    ]
+    result = {
+        "ng_agent_observations": bundle.model_dump(mode="json"),
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+        "ng_model_call_capture": {"calls": calls},
+    }
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    await enrich_run_result(row, result, capture_dirs=[], observability_enabled=True, trajectory_schema_version="2.0")
+    saved = result["ng_trajectory"]
+    assert [t["model_call_id"] for t in saved["tool_calls"]] == ["model-0", "model-1"]
+    assert [t["status"] for t in saved["tool_calls"]] == ["failed", "incomplete"]
+    assert saved["turns"][0]["answer"][0]["call_id"] == saved["tool_calls"][0]["tool_call_id"]
+    again = _parse_opencode_session(db, "0-0")
+    assert [r.span_id for r in again.records if isinstance(r, ToolCallObservation)] == [r.span_id for r in tools]

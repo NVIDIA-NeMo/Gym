@@ -486,7 +486,7 @@ async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, 
         241,
     )
     tools = {record.tool_call_id: record for record in records if record.kind == "tool_call"}
-    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("cancelled", "invocation_cancelled")
+    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("incomplete", None)
     assert tools["tool-1"].status != "cancelled"
     invocation = next(record for record in records if record.kind == "agent_invocation")
     assert {"type": "function_call_output", "call_id": "running-shell", "output": "started"}.items() <= next(

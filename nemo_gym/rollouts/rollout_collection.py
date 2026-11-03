@@ -37,7 +37,7 @@ from difflib import get_close_matches
 from itertools import repeat
 from math import isfinite
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 from uuid import uuid4
 
 import aiohttp
@@ -102,6 +102,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
 )
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.models.model_call_capture import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import BatchStatusTracker
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
@@ -159,9 +160,8 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.trajectory.tool_timing import normalize_tool_calls
-from nemo_gym.trajectory.trajectory_format import project_bundle_v1, project_trajectory_v1
+from nemo_gym.trajectory.trajectory_format import project_bundle_v1, project_trajectory_v1, validate_failure_events
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -756,7 +756,10 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row.get(TASK_INDEX_KEY_NAME, maybe_rollout_id_from_run_body(row) or "unknown")),
     )
-    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row.get(TASK_INDEX_KEY_NAME, task_id)}-{row.get(ROLLOUT_INDEX_KEY_NAME, 0)}"
+    rollout_id = (
+        maybe_rollout_id_from_run_body(row)
+        or f"{row.get(TASK_INDEX_KEY_NAME, task_id)}-{row.get(ROLLOUT_INDEX_KEY_NAME, 0)}"
+    )
     return task_id, rollout_id
 
 
@@ -859,7 +862,9 @@ def _turns_from_model_calls(
     return turns
 
 
-def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
+def _build_trajectory_record(
+    row: dict[str, Any], result: dict[str, Any], *, schema_version: Literal["1.0", "2.0"] | None = None
+) -> TrajectoryRecord:
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
@@ -904,20 +909,33 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             observations = AgentObservationBundle.model_validate(raw_observations)
             gaps.extend(observations.gaps)
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
-            producer_invocation_ids = {record.invocation_id for record in invocations}
+            producer_invocation_ids = {(record.agent_instance, record.invocation_id) for record in invocations}
             invocations.extend(
-                record for record in observed_invocations if record.invocation_id not in producer_invocation_ids
+                record
+                for record in observed_invocations
+                if (record.agent_instance, record.invocation_id) not in producer_invocation_ids
             )
             observed_tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
             # Canonical tools merge by execution-attempt identity after capture is available.
             # Keep the v1 single-call update behavior only for records that have no attempt identity.
             for observed in observed_tools:
-                existing = next((tool for tool in tools if tool.span_id is None and observed.span_id is None
-                                 and tool.invocation_id == observed.invocation_id
-                                 and tool.tool_call_id == observed.tool_call_id), None)
+                existing = next(
+                    (
+                        tool
+                        for tool in tools
+                        if tool.span_id is None
+                        and observed.span_id is None
+                        and tool.invocation_id == observed.invocation_id
+                        and tool.tool_call_id == observed.tool_call_id
+                    ),
+                    None,
+                )
                 if existing is not None:
-                    tools.remove(existing)
-                tools.append(TrajectoryToolCall.model_validate(observed.model_dump(mode="json")))
+                    merged_tool = existing.model_dump(mode="json")
+                    merged_tool.update(observed.model_dump(mode="json", exclude_unset=True))
+                    tools[tools.index(existing)] = TrajectoryToolCall.model_validate(merged_tool)
+                else:
+                    tools.append(TrajectoryToolCall.model_validate(observed.model_dump(mode="json")))
             observations_read = True
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
@@ -1044,18 +1062,34 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     failure_events = result.get("failure_events", result.get("_ng_failure_events", {}))
     if not isinstance(failure_events, dict):
         failure_events = {}
+    try:
+        validate_failure_events(failure_events)
+    except (ValueError, TypeError, KeyError):
+        gaps.append(ObservationGap(code="failure_events_invalid"))
+        failure_events = {}
     tools, tool_gaps = normalize_tool_calls(
-        tools, capture_key=rollout_id,
-        producer_id=raw_observations.get("source", "trajectory") if isinstance(raw_observations, dict) else "trajectory",
-        model_calls=model_calls, invocations=invocations, failure_events=failure_events,
+        tools,
+        capture_key=rollout_id,
+        producer_id=raw_observations.get("source", "trajectory")
+        if isinstance(raw_observations, dict)
+        else "trajectory",
+        model_calls=model_calls,
+        invocations=invocations,
+        failure_events=failure_events,
     )
     gaps.extend(tool_gaps)
-    version = "2.0" if (
-        isinstance(raw_observations, dict) and raw_observations.get("schema_version") == "2.0"
-        or isinstance(raw_trajectory, dict) and raw_trajectory.get("schema_version") == "2.0"
-    ) else "1.0"
+    version = (
+        "2.0"
+        if (
+            isinstance(raw_observations, dict)
+            and raw_observations.get("schema_version") == "2.0"
+            or isinstance(raw_trajectory, dict)
+            and raw_trajectory.get("schema_version") == "2.0"
+        )
+        else "1.0"
+    )
     return TrajectoryRecord(
-        schema_version=version,
+        schema_version=schema_version or version,
         failure_events=failure_events,
         task_id=task_id,
         rollout_id=rollout_id,
@@ -1064,7 +1098,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
-        gaps=list({(gap.code, gap.agent_instance, gap.invocation_id, gap.span_id, gap.detail): gap for gap in gaps}.values()),
+        gaps=list(
+            {(gap.code, gap.agent_instance, gap.invocation_id, gap.span_id, gap.detail): gap for gap in gaps}.values()
+        ),
     )
 
 
@@ -1085,9 +1121,13 @@ def _record_policy_model_server(result: dict[str, Any], global_config: Any, agen
         result[NG_POLICY_MODEL_SERVER_KEY] = name
 
 
-def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
+def _attach_trajectory_record(
+    row: dict[str, Any], result: dict[str, Any], *, schema_version: Literal["1.0", "2.0"] | None = None
+) -> None:
     try:
-        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result).model_dump(mode="json")
+        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result, schema_version=schema_version).model_dump(
+            mode="json"
+        )
     except Exception as exc:
         result.pop(NG_TRAJECTORY_KEY, None)
         logger.warning("Could not project standardized trajectory evidence.", exc_info=True)
@@ -1257,9 +1297,14 @@ def _attach_ng_perf(
 
 
 async def enrich_run_result(
-    row: dict[str, Any], result: dict[str, Any], *, capture_dirs: list[Path],
-    observability_enabled: bool, include_payloads: bool = True,
-    rollout_latency_ms: float | None = None, delete_capture: bool = False,
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    capture_dirs: list[Path],
+    observability_enabled: bool,
+    include_payloads: bool = True,
+    rollout_latency_ms: float | None = None,
+    delete_capture: bool = False,
     trajectory_schema_version: Literal["1.0", "2.0"] = "1.0",
 ) -> dict[str, Any]:
     """Enrich one result through the same capture/trajectory path as rollout collection.
@@ -1272,27 +1317,39 @@ async def enrich_run_result(
             result[key] = row[key]
     capture_key = maybe_rollout_id_from_run_body(result)
     if capture_dirs and (
-        not result.get(NG_NO_PERSIST_KEY) or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+        not result.get(NG_NO_PERSIST_KEY)
+        or NG_AGENT_OBSERVATIONS_KEY in result
+        or NG_VERIFIER_INVOCATIONS_KEY in result
     ):
         if capture_key is not None:
             await await_model_call_capture_quiescence(capture_key, capture_dirs)
         # Resolve joins while payloads exist. Omission is an output policy, not a weaker join.
         merge_model_call_capture_into_record(result, capture_dirs, include_payloads=True)
-    if any(key in result for key in ("ng_model_call_capture", NG_AGENT_OBSERVATIONS_KEY,
-                                     NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY)):
-        _attach_trajectory_record(row, result)
+    if any(
+        key in result
+        for key in ("ng_model_call_capture", NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY)
+    ):
+        _attach_trajectory_record(row, result, schema_version=trajectory_schema_version)
         raw = result.get(NG_TRAJECTORY_KEY)
         if isinstance(raw, dict):
             if trajectory_schema_version == "1.0":
                 result[NG_TRAJECTORY_KEY] = project_trajectory_v1(raw)
-            elif raw.get("schema_version") != "2.0":
-                result[NG_TRAJECTORY_KEY] = TrajectoryRecord.model_validate(raw).model_copy(
-                    update={"schema_version": "2.0"}
-                ).model_dump(mode="json")
             if not include_payloads:
                 for call in result[NG_TRAJECTORY_KEY].get("model_calls", []):
                     call["request"] = None
                     call["response"] = None
+                if trajectory_schema_version == "2.0":
+                    gaps = result[NG_TRAJECTORY_KEY].setdefault("gaps", [])
+                    for tool in result[NG_TRAJECTORY_KEY].get("tool_calls", []):
+                        gap = {
+                            "code": "tool_request_payload_unavailable",
+                            "invocation_id": tool["invocation_id"],
+                            "agent_instance": tool.get("agent_instance"),
+                            "span_id": tool["span_id"],
+                            "detail": None,
+                        }
+                        if tool.get("model_call_id") is not None and gap not in gaps:
+                            gaps.append(gap)
         if trajectory_schema_version == "1.0" and isinstance(result.get(NG_AGENT_OBSERVATIONS_KEY), dict):
             result[NG_AGENT_OBSERVATIONS_KEY] = project_bundle_v1(result[NG_AGENT_OBSERVATIONS_KEY])
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
@@ -3007,8 +3064,11 @@ class _RowResultIterator:
     direct caller can stop collecting and cancel the rollouts still in flight.
     """
 
-    def __init__(self, completions: Iterator[Future]):
+    def __init__(
+        self, completions: Iterator[Future], *, enrich: Callable[[_CompletedRollout], Awaitable[None]] | None = None
+    ):
         self._completions = completions
+        self._enrich = enrich
         self._closed = False
 
     def __iter__(self):
@@ -3019,9 +3079,10 @@ class _RowResultIterator:
             raise StopIteration
         return self._without_metadata(next(self._completions))
 
-    @staticmethod
-    async def _without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
+    async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
         completed = await future
+        if self._enrich is not None:
+            await self._enrich(completed)
         return completed.row, completed.result
 
     async def aclose(self) -> None:
@@ -3075,6 +3136,8 @@ class _RowResultIterator:
                 outcome.exception()
             else:
                 result = task.result()
+                if self._enrich is not None:
+                    await self._enrich(result)
                 outcome.set_result((result.row, result.result))
             outcomes.append(outcome)
         return outcomes
@@ -4140,9 +4203,15 @@ class RolloutCollectionHelper(BaseModel):
                 _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
 
                 await enrich_run_result(
-                    row, result, capture_dirs=capture_dirs, observability_enabled=observability_enabled,
+                    row,
+                    result,
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
                     include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
                     rollout_latency_ms=rollout_latency_ms,
+                    trajectory_schema_version=ModelCallCaptureConfig.model_validate(
+                        global_config
+                    ).trajectory_schema_version,
                 )
 
                 # Freeze and rebuild tokens only for participating agents.
@@ -5258,6 +5327,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
+        enrich_results: bool = False,
+        include_model_call_payloads: bool = True,
+        delete_model_call_capture: bool = False,
+        trajectory_schema_version: Literal["1.0", "2.0"] | None = None,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5317,10 +5390,33 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
         failure row with ``_ng_failure_*`` fields.
 
+        ``enrich_results=True`` opts into the same capture merge, trajectory and performance
+        projection as the collector. ``trajectory_schema_version="2.0"`` retains attempt timing
+        provenance; the default v1 projection supports readers that have not migrated.
+        Payload omission happens after exact joins. With enrichment disabled, these options
+        do not change the raw result contract.
+
         ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
         """
+
+        enrich = None
+        if enrich_results:
+            config = self.setup_server_client(head_server_config).global_config_dict
+            capture_config = ModelCallCaptureConfig.model_validate(config)
+
+            async def enrich(completed: _CompletedRollout) -> None:
+                await enrich_run_result(
+                    completed.row,
+                    completed.result,
+                    capture_dirs=model_call_capture_dirs_from_config(config),
+                    observability_enabled=capture_config.observability_enabled,
+                    include_payloads=include_model_call_payloads,
+                    delete_capture=delete_model_call_capture,
+                    rollout_latency_ms=completed.rollout_latency_ms,
+                    trajectory_schema_version=trajectory_schema_version or capture_config.trajectory_schema_version,
+                )
 
         return _RowResultIterator(
             self._run_examples_with_metadata(
@@ -5334,7 +5430,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
                 **({"retry_requests": False} if not retry_requests else {}),
-            )
+            ),
+            enrich=enrich,
         )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
