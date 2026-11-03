@@ -28,16 +28,21 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Restore the release's <db>_template databases with its own scripts, on a server that listens on the socket only.
-# The scripts log failed imports to /tmp/error.log and go on, so the build prints that log and fails when no database
-# was restored.
+# The scripts connect to the database named after their user, root, which the base image's entrypoint would create.
+# They print failed imports and go on, so the build fails when they print an error or a dump folder did not become a
+# database.
 RUN set -eu; \
     install -d -o postgres -g postgres -m 0700 "$PGDATA"; \
     gosu postgres initdb --username=root --auth=trust --encoding=UTF8; \
     gosu postgres pg_ctl start --wait --log=/tmp/restore.log --options="-c listen_addresses="; \
-    for script in /docker-entrypoint-initdb.d/*.sh; do gosu postgres bash "$script"; done; \
+    gosu postgres createdb root; \
+    for script in /docker-entrypoint-initdb.d/*.sh; do \
+        gosu postgres bash "$script" > /tmp/restore-output.log 2>&1 || { cat /tmp/restore-output.log; exit 1; }; \
+        if grep -E "^Error" /tmp/restore-output.log; then exit 1; fi; \
+    done; \
     restored="$(gosu postgres psql --dbname=postgres --tuples-only --no-align \
         --command="SELECT count(*) FROM pg_database WHERE datname LIKE '%\_template' AND datname <> 'sql_test_template'")"; \
     gosu postgres pg_ctl stop --wait --mode=fast; \
-    if [ -s /tmp/error.log ]; then cat /tmp/error.log; fi; \
-    echo "Restored ${restored} databases"; \
-    test "${restored}" -gt 0
+    dumps="$(find /docker-entrypoint-initdb.d/postgre_table_dumps -mindepth 1 -maxdepth 1 -type d -name '*_template' | wc -l)"; \
+    echo "Restored ${restored} of ${dumps} databases"; \
+    test "${restored}" -eq "${dumps}"
