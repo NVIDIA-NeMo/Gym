@@ -17,7 +17,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
@@ -26,6 +25,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult, read_text, stage_media, upload_text

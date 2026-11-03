@@ -10,7 +10,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     AgentSessionState,
@@ -18,6 +17,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
