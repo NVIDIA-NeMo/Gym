@@ -741,7 +741,7 @@ def test_health_only_accepts_already_selected_rows(prepared_run, newer):
 
 
 async def test_ordinary_reverification_reads_fresh_manifest_without_changing_source(prepared_run, monkeypatch):
-    import nemo_gym.rollout_reverification as reverify
+    import nemo_gym.eval.rollout_reverification as reverify
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -857,7 +857,7 @@ async def test_aggregate_output_alias_remains_readable_with_health_enabled(tmp_p
 
 @pytest.fixture
 def fake_reverification(monkeypatch):
-    import nemo_gym.rollout_reverification as reverify
+    import nemo_gym.eval.rollout_reverification as reverify
 
     monkeypatch.setattr(reverify, "get_exporters", list)
     monkeypatch.setattr(reverify, "_guard_reverify_mode", AsyncMock(return_value=None))
@@ -927,7 +927,7 @@ def test_alias_readers_refuse_ambiguous_or_established_history(prepared_run, com
         raw_outcomes_are_selected(alias)
     with pytest.raises(ConfigError, match="beside the rollout alias"):
         collection._expand_input_glob(str(alias))
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.eval.rollout_reverification import _prepare_output_fpaths
 
     for resume, append in ((True, False), (False, True)):
         with pytest.raises(ConfigError, match="beside the rollout alias|Manifest-backed"):
@@ -1602,7 +1602,7 @@ async def test_legacy_reply_cleanup_preserves_declared_failure_diagnostics(runne
 
 @pytest.mark.parametrize("destination_kind", ["alias", "alias_failures", "alias_materialized_inputs"])
 def test_reverify_fresh_overwrite_refuses_competing_legacy_alias_companions(tmp_path, destination_kind):
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.eval.rollout_reverification import _prepare_output_fpaths
 
     target = tmp_path / "target.jsonl"
     alias = tmp_path / "alias.jsonl"

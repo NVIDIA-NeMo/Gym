@@ -79,6 +79,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
 from nemo_gym.metrics.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.models.token_capture.config import TokenCaptureConfig
 from nemo_gym.models.token_capture.consumer import clear_token_captures_for_rollouts
@@ -93,7 +94,6 @@ from nemo_gym.models.token_capture.delivery import (
 from nemo_gym.models.token_capture.protocols import LineageResolution, TokenCaptureSnapshot
 from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.models.token_capture.store import TokenCaptureStore
-from nemo_gym.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
 from nemo_gym.rollouts.batch_status import observe_materialized_rows
 from nemo_gym.rollouts.health.types import RunHealthLimits
 from nemo_gym.rollouts.rollout_collection import (
@@ -13349,7 +13349,7 @@ class TestSidecarReadersSkipOmittedRows:
         assert (accounting["expected"], accounting["missing"]) == (3, 2)
 
     def test_rollout_compare_leaves_them_out(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_compare.rows import load_rollouts
+        from nemo_gym.eval.rollout_compare.rows import load_rollouts
 
         assert [row[TASK_INDEX_KEY_NAME] for row in load_rollouts(self._output(tmp_path))] == [0]
 
@@ -13428,7 +13428,7 @@ class TestOmittedRowsAndTheLatestAttempt:
         assert (accounting["expected"], accounting["missing"]) == (3, 1)
 
     def test_rollout_compare(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_compare.rows import load_rollouts
+        from nemo_gym.eval.rollout_compare.rows import load_rollouts
 
         assert [row[TASK_INDEX_KEY_NAME] for row in load_rollouts(self._output(tmp_path))] == [1, 2]
 
@@ -13737,7 +13737,7 @@ class TestUnroutedRunFailure:
     ) -> None:
         """Task 1 failed in the provider, then its resumed /run is cut off with routing off. The kept
         evidence must not replace the provider failure: with provider_unavailable counted the rewards stay [1, 0], not [1]."""
-        from nemo_gym.rollout_compare.rows import load_rollouts
+        from nemo_gym.eval.rollout_compare.rows import load_rollouts
         from nemo_gym.rollouts.rollout_health import _rollout_accounting
 
         failure = ClientPayloadError("Response payload is not completed")
@@ -13910,7 +13910,7 @@ class TestUnroutedRunErrorRowsAndTheLatestAttempt:
         assert (accounting["expected"], accounting["missing"]) == (4, 2)
 
     def test_rollout_compare(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_compare.rows import load_rollouts
+        from nemo_gym.eval.rollout_compare.rows import load_rollouts
 
         assert [row[TASK_INDEX_KEY_NAME] for row in load_rollouts(self._output(tmp_path))] == [0, 3]
 
