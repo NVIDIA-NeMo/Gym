@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.cli import eval as eval_cli
-from nemo_gym.rollout_reverification import (
+from nemo_gym.eval.rollout_reverification import (
     RolloutReverificationConfig,
     RolloutReverificationHelper,
     due_judge_failures,

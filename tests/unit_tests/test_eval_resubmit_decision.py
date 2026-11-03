@@ -2898,7 +2898,7 @@ def _journal_judge_jobs(job: Path, entries: list[dict]) -> None:
 
 
 def test_inspect_reports_the_judge_only_jobs_of_the_run_and_their_outcomes(tmp_path, fake_executor) -> None:
-    from nemo_gym.rollout_reverification import write_settle_receipt
+    from nemo_gym.eval.rollout_reverification import write_settle_receipt
 
     job = _judge_job_dir(tmp_path)
     fake_executor.job_dir = job

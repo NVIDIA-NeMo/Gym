@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import nemo_gym.rollout_reverification as reverify
+import nemo_gym.eval.rollout_reverification as reverify
 from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.rollouts.test_rollout_store import prepared_run, snapshot  # noqa: F401
