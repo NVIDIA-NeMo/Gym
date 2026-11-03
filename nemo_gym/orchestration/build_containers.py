@@ -614,6 +614,7 @@ class BuildContainerHelper(BaseModel):
             await self._run_warmup()
 
     async def _run_warmup(self) -> None:
+        # TODO @bxyu-nvidia: Eventually this sbatch_external_vllm will migrate to Gym-native orchestration and we can just import the relevant thing
         launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
         if not launcher.is_file():
             raise FileNotFoundError(f"Warmup launcher not found: {launcher}. Run from the Gym checkout.")
