@@ -6,7 +6,7 @@
 import base64
 import binascii
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from jsonschema import Draft202012Validator
 
@@ -14,6 +14,7 @@ from nemo_gym.trajectory.trajectory_record import NG_AGENT_OBSERVATIONS_KEY
 
 from .checks import SchemaCheck, SemanticCheck
 from .results import Results, gate_passes
+from .tool_timing import ToolTimingScope, check_tool_timing
 
 
 NAMES = {
@@ -83,6 +84,7 @@ class EvidenceScope:
     verifier: bool = True
     steps: bool = True
     require_sandbox: bool = False
+    tool_timing: ToolTimingScope | None = None
 
 
 def required_object(**properties: dict) -> dict:
@@ -1293,4 +1295,9 @@ def inspect_record(record: dict | None, *, source: str = "record", scope: Eviden
     inspector.ownership()
     inspector.evaluation()
     inspector.gaps()
-    return inspector.result(source)
+    if scope.tool_timing is not None:
+        check_tool_timing(inspector.tools, scope.tool_timing, inspector.results, available=inspector.available)
+    result = inspector.result(source)
+    if scope.tool_timing is not None:
+        result["tool_timing_scope"] = asdict(scope.tool_timing)
+    return result

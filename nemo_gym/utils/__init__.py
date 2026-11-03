@@ -33,11 +33,16 @@ if TYPE_CHECKING:
         is_nemo_gym_fastapi_entrypoint,
         is_nemo_gym_fastapi_worker,
     )
+    from nemo_gym.utils.tool_recording import ClockContext, ToolCallHandle, ToolCallRecorder, tool_recording_files
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "ClockContext": "tool_recording",
+    "ToolCallHandle": "tool_recording",
+    "ToolCallRecorder": "tool_recording",
+    "tool_recording_files": "tool_recording",
     "IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME": "server_process",
     "IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME": "server_process",
     "aggregation_sources_path_for": "path_utils",

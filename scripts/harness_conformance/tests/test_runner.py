@@ -782,7 +782,8 @@ def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch
     inspected = []
     monkeypatch.setattr(runner, "run_process", lambda *args, **kwargs: {"returncode": 0, "timed_out": False})
 
-    def fail_inspection(scenario, directory, execution):
+    def fail_inspection(scenario, directory, execution, *, tool_timing=None):
+        assert tool_timing is None
         inspected.append(scenario.name)
         raise error("truncated rollout")
 
