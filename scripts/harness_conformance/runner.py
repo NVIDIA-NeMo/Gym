@@ -9,6 +9,7 @@ import json
 import math
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from scripts.check_suites.process import run_process as run_worker
@@ -20,6 +21,7 @@ from nemo_gym.rollouts.harness_capabilities import (
     EvidenceScope,
     PriorityTier,
     Results,
+    ToolTimingScope,
     digest_file,
     gate_passes,
     inspect_behavior,
@@ -32,6 +34,7 @@ from nemo_gym.rollouts.harness_capabilities import (
 )
 
 from .episode import HARNESSES, _settings
+from .registry import P0_TOOL_TIMING_HARNESSES, tool_timing_inventory
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
 
 
@@ -58,7 +61,9 @@ def run_process(command: list[str], *, directory: Path, timeout: float) -> dict:
     return run_worker(command, cwd=ROOT, env=env, log_path=directory / "episode.log", timeout=timeout)
 
 
-def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dict:
+def inspect_episode(
+    scenario: Scenario, directory: Path, execution: dict, *, tool_timing: ToolTimingScope | None = None
+) -> dict:
     """Inspect artifacts, behavior and health independently of process exit status."""
     witness_path = directory / "witness.json"
     witness = json.loads(witness_path.read_text()) if witness_path.exists() else None
@@ -81,7 +86,12 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     else:
         delivery = "missing"
 
-    scope = EvidenceScope(tools=scenario.tool_steps > 0, steps=scenario.steps, verifier=not scenario.terminal_error)
+    scope = EvidenceScope(
+        tools=scenario.tool_steps > 0,
+        steps=scenario.steps,
+        verifier=not scenario.terminal_error,
+        tool_timing=tool_timing if scenario.tool_steps > 0 else None,
+    )
     artifact = inspect_record(record, scope=scope)
     checks = artifact["checks"] + inspect_behavior(
         witness,
@@ -117,6 +127,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     p0_passed = gate_passes(checks)
     passed = p0_passed and (scenario.tier == "P0" or gate_passes(checks, tier=scenario.tier))
     return {
+        "tool_timing_scope": asdict(scope.tool_timing) if scope.tool_timing else None,
         "scenario": scenario.name,
         "tier": scenario.tier,
         "exercised": record is not None,
@@ -172,17 +183,23 @@ def run_suite(
     output: Path,
     timeout: float,
     gate_tier: PriorityTier = "P0",
+    tool_timing_scopes: dict[str, ToolTimingScope] | None = None,
 ) -> tuple[dict, int]:
     """Run each requested harness/scenario in a fresh process and publish the completed report."""
     if not harnesses or not scenarios:
         raise ValueError("at least one harness and one scenario are required")
     if not any(s.tier <= gate_tier for s in scenarios):
         raise ValueError("no selected scenarios are covered by --gate-tier; use --gate-tier P1 for compaction")
+    tool_timing_scopes = tool_timing_scopes or {}
+    if set(tool_timing_scopes) - set(harnesses):
+        raise ValueError("timing scopes must refer to selected runnable harnesses")
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     manifest = suite_manifest(scenarios)
     manifest.update(
         harnesses=harnesses,
+        tool_timing_targets=tool_timing_inventory(),
+        tool_timing_scopes={name: asdict(scope) for name, scope in tool_timing_scopes.items()},
         timeout=timeout,
         python=sys.version,
         runner_sources={p.name: digest_file(p) for p in sorted(Path(__file__).parent.glob("*.py"))},
@@ -228,7 +245,9 @@ def run_suite(
             execution = run_process(command, directory=directory, timeout=timeout + 30)
             execution_error |= scenario.tier <= gate_tier and (execution["returncode"] != 0 or execution["timed_out"])
             try:
-                result = inspect_episode(scenario, directory, execution)
+                scope = tool_timing_scopes.get(harness)
+                # Only a harness with declared timing expectations has its tool timing inspected.
+                result = inspect_episode(scenario, directory, execution, **({"tool_timing": scope} if scope else {}))
             except (ConfigError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
                 execution_error |= scenario.tier <= gate_tier
                 result = {
@@ -273,6 +292,8 @@ def run_suite(
         "verdict": "fulfilled" if passed else "not_fulfilled",
         "suite_sha256": digest_file(output / "suite.json"),
         "harnesses": rows,
+        "tool_timing_targets": tool_timing_inventory(),
+        "tool_timing_scopes": {name: asdict(scope) for name, scope in tool_timing_scopes.items()},
         "limits": [
             "local harness runtime and controlled Chat/Responses/Messages model only; no remote sandbox qualification",
             "existing general checks stay P0; compaction scenarios and their new checks are P1",
@@ -286,6 +307,14 @@ def run_suite(
     temporary.write_text(_json(summary))
     os.replace(temporary, output / "conformance_summary.json")
     return summary, 2 if execution_error else 0 if passed else 1
+
+
+def load_tool_timing_scopes(path: Path) -> dict[str, ToolTimingScope]:
+    """Load explicit expectations; runtime artifacts retain the independently observed version."""
+    values = json.loads(path.read_text())
+    if not isinstance(values, dict) or set(values) - set(P0_TOOL_TIMING_HARNESSES):
+        raise ValueError("timing scopes must map registered timing targets to scope declarations")
+    return {name: ToolTimingScope(**scope) for name, scope in values.items()}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -308,7 +337,16 @@ def main(argv: list[str] | None = None) -> int:
         help="fail for scenarios through this priority (default: P0)",
     )
     parser.add_argument("--list-scenarios", action="store_true")
+    parser.add_argument("--list-timing-targets", action="store_true")
+    parser.add_argument(
+        "--tool-timing-scopes",
+        type=Path,
+        help="JSON object mapping selected harness names to ToolTimingScope declarations",
+    )
     args = parser.parse_args(argv)
+    if args.list_timing_targets:
+        print(_json(tool_timing_inventory()), end="")
+        return 0
     if args.list_scenarios:
         print(_json(suite_manifest(SCENARIOS)), end="")
         return 0
@@ -319,12 +357,14 @@ def main(argv: list[str] | None = None) -> int:
     harnesses = list(dict.fromkeys(args.harness or HARNESSES))
     scenarios = tuple(s for s in SCENARIOS if not args.scenario or s.name in args.scenario)
     try:
+        scopes = load_tool_timing_scopes(args.tool_timing_scopes) if args.tool_timing_scopes else {}
         _, code = run_suite(
             harnesses=harnesses,
             scenarios=scenarios,
             output=args.output,
             timeout=args.timeout,
             gate_tier=args.gate_tier,
+            tool_timing_scopes=scopes,
         )
     except (ConfigError, OSError, ValueError, TypeError, KeyError) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)

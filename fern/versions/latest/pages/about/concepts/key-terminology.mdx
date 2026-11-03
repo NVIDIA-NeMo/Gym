@@ -106,6 +106,7 @@ Other features use some of these words in their own senses and keep them:
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
+| **Tool call recorder** | `ToolCallRecorder`: records each tool attempt's start and finish, from a harness hook, to a JSONL file that `read_tool_events` replays into tool call observations with their timing. See [Rollout evidence](/main/observability/rollout-evidence#recording-tool-attempts-in-a-harness). |
 
 ### Evaluation
 
