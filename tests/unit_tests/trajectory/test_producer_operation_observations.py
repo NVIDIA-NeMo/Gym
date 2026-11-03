@@ -85,7 +85,7 @@ def test_runtime_and_cost_observations_reject_coercion_and_nonfinite_values():
     import pytest
     from pydantic import ValidationError
 
-    from nemo_gym.failure_transport import ModelOperationObservation
+    from nemo_gym.core.failure_transport import ModelOperationObservation
     from nemo_gym.trajectory.trajectory_record import AgentInvocation
 
     with pytest.raises(ValidationError):
@@ -103,7 +103,7 @@ def test_trial_coverage_from_actual_cpu_collector_metadata_fails_closed_when_evi
 
     from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
 
-    fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
+    fixture = json.loads((Path(__file__).parents[1] / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     collected = CollectedEvidence.model_validate(deepcopy(fixture))
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert trial_health(decision, collected)[0] is True
@@ -144,7 +144,7 @@ def test_trial_coverage_requires_whole_row_report_and_reports_the_turn():
 
     from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
 
-    fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
+    fixture = json.loads((Path(__file__).parents[1] / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     baseline = CollectedEvidence.model_validate(fixture)
     decision = decide_from_collected(baseline, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert trial_health(decision, baseline)[0] is True
@@ -182,7 +182,7 @@ def test_recovered_observations_remain_unknown_and_keep_both_counters():
 
     from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
 
-    fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-trial-operations.json").read_text())
+    fixture = json.loads((Path(__file__).parents[1] / "fixtures/cpu-mcqa-trial-operations.json").read_text())
     collected = CollectedEvidence.model_validate(fixture)
     counters = {"recovered_attempt_errors": 2, "recovered_operations": 1}
     collected.quality["observed_upstream_recovery"] = counters.copy()
@@ -199,7 +199,7 @@ def test_historical_mcqa_without_grading_observation_stays_unknown():
 
     from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
 
-    fixtures = Path(__file__).parent / "fixtures"
+    fixtures = Path(__file__).parents[1] / "fixtures"
     historical = CollectedEvidence.model_validate_json((fixtures / "cpu-mcqa-trial-operations.json").read_text())
     decision = decide_from_collected(historical, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert decision.action.value == "noop"

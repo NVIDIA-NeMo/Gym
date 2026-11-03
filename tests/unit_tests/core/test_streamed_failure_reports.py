@@ -11,10 +11,10 @@ from fastapi import Body
 from fastapi.testclient import TestClient
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.failure_transport import FailureHeader, observe_failure
+from nemo_gym.core.episode_types import FailureBoundary
+from nemo_gym.core.failure_transport import FailureHeader, observe_failure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
-from nemo_gym.server_runtime.episode_types import FailureBoundary
-from nemo_gym.typed_exceptions import NgFailureEvent
 from tests.unit_tests.models.test_chat_completions_streaming import _EchoChatModel
 from tests.unit_tests.models.test_responses_api_model_streaming import _EchoModel
 
@@ -136,7 +136,7 @@ async def test_the_codex_relay_observes_the_report_a_keepalive_stream_ends_with(
     """Producer bytes from the real model server, relayed by the real Codex proxy into the serving request's log."""
     from aiohttp import ClientSession, web
 
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core.failure_transport import RequestFailureLog
     from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
     produced = _client(_LateResponses, fail=fail, stream_keepalive_s=_KEEPALIVE_S).post(
@@ -178,7 +178,7 @@ async def test_the_codex_relay_observes_the_report_a_keepalive_stream_ends_with(
 
 
 def test_the_reader_keeps_malformed_and_omitted_reports_unaccepted() -> None:
-    from nemo_gym.failure_transport import StreamFailureReportReader
+    from nemo_gym.core.failure_transport import StreamFailureReportReader
 
     field = FailureHeader.STREAM_FIELD
     for line, omitted in (
@@ -196,7 +196,7 @@ def test_the_reader_keeps_malformed_and_omitted_reports_unaccepted() -> None:
 def test_a_large_event_is_omitted_only_when_it_carries_a_report(chunk_size: int | None) -> None:
     """An event over the line bound is skipped; only one that carries the report field loses evidence. The lines
     after it are still framed and read."""
-    from nemo_gym.failure_transport import StreamFailureReportReader
+    from nemo_gym.core.failure_transport import StreamFailureReportReader
 
     field = FailureHeader.STREAM_FIELD
     large = "x" * (StreamFailureReportReader._MAX_LINE_BYTES + 10)
@@ -236,7 +236,7 @@ def test_a_large_event_is_omitted_only_when_it_carries_a_report(chunk_size: int 
 
 
 def test_invalid_terminal_report_locations_are_omitted() -> None:
-    from nemo_gym.failure_transport import RequestFailureLog, StreamFailureReportReader
+    from nemo_gym.core.failure_transport import RequestFailureLog, StreamFailureReportReader
 
     field = FailureHeader.STREAM_FIELD
     assert FailureHeader.decode_stream_event({field: None}).omitted
@@ -270,7 +270,7 @@ def test_a_buffered_responses_stream_selects_its_failure_in_the_reply_header(fai
 
 
 def _report_with_compact_size(size: int):
-    from nemo_gym.typed_exceptions import failure_report_for
+    from nemo_gym.core.typed_exceptions import failure_report_for
 
     def report(padding: int):
         cause = _model_event("c" * 1800, "c1")
@@ -294,7 +294,7 @@ def _report_with_compact_size(size: int):
 
 
 def test_a_stream_report_within_the_compact_budget_is_decoded_intact() -> None:
-    from nemo_gym.failure_transport import StreamFailureReportReader
+    from nemo_gym.core.failure_transport import StreamFailureReportReader
 
     field = FailureHeader.STREAM_FIELD
     fits = _report_with_compact_size(FailureHeader.MAX_BYTES)

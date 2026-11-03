@@ -24,9 +24,10 @@ from nemo_gym.core.episode import (
     verifier_invocation_context,
     verifier_model_requests,
 )
+from nemo_gym.core.episode_types import FailureBoundary
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
-from nemo_gym.failure_transport import FailureHeader, observe_failure
-from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.core.failure_transport import FailureHeader, observe_failure
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     GradingOperationObservation,
@@ -36,7 +37,6 @@ from nemo_gym.trajectory.trajectory_record import (
     VerifierInvocation,
     grading_result_binding,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.verification.judge import JudgeGrading, _judge_grading
 
 

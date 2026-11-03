@@ -27,10 +27,13 @@ import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
+    ACCOUNTING_UNKNOWN_PREFIX,
     CHAIN_END_JOURNAL_NAME,
     DRIVER_FAILURE_NAME,
     EXPORT_RECEIPT_MISSING,
     EXPORT_RECEIPT_MISSING_REASON,
+    FOLLOW_UP_SUBMISSION_REFUSED,
+    FRESH_RESTART_MARKER_NAME,
     GUARDED_DRIVER_FAILURE_KINDS,
     INCOMPLETE_MARKER_NAME,
     NO_ELIGIBLE_RETRY,
@@ -140,6 +143,8 @@ _FAKE_SBATCH = """#!/bin/bash
 echo "$* sentinel=${GYM_FOLLOWUP_SENTINEL:-}" >> "$FAKE_LOG_DIR/sbatch_calls"
 echo "${GYM_RESUBMIT:-}|${GYM_RESUBMIT_KEEP_BUDGET:-}" >> "$FAKE_LOG_DIR/sbatch_env"
 if [[ -n "${FAKE_SBATCH_FAILS:-}" ]]; then echo "sbatch: error: Socket timed out"; exit 1; fi
+# The scheduler's refusal, as at a QOS submit limit: nothing is queued, and sbatch says why on stderr.
+if [[ -n "${FAKE_SBATCH_REFUSES:-}" ]]; then printf '%s\n' "$FAKE_SBATCH_REFUSES" >&2; exit 1; fi
 # Every queued job is 999 unless a test gives the sentinel its own id, to tell the two apart.
 _id=999
 [[ -z "${GYM_FOLLOWUP_SENTINEL:-}" || -z "${FAKE_SENTINEL_ID:-}" ]] || _id=$FAKE_SENTINEL_ID
@@ -451,6 +456,99 @@ def test_each_resumed_segment_still_queues_its_own_follow_up(tmp_path):
         "--dependency=afternotok:999",
         "--dependency=afterany:999",
     ]
+
+
+# sbatch's reply when a QOS caps the jobs a user may have submitted.
+_QOS_SUBMIT_LIMIT_REPLY = (
+    "sbatch: error: QOSMaxSubmitJobPerUserLimit\n"
+    "sbatch: error: Batch job submission failed: Job violates accounting/QOS policy "
+    "(job submit limit, user's size and/or time limits)"
+)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_follow_up_the_scheduler_refuses_is_a_typed_stop_not_unknown_accounting(tmp_path):
+    refused = _run_prologue(tmp_path, ResumeConfig(), None, extra_env={"FAKE_SBATCH_REFUSES": _QOS_SUBMIT_LIMIT_REPLY})
+
+    # This allocation still does its work; nothing was queued, so no sentinel either.
+    assert refused.returncode == 0 and "REACHED_WORK" in refused.stdout, refused.stdout + refused.stderr
+    assert len(_sbatch_calls(tmp_path)) == 1
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert marker == (
+        f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit "
+        "sbatch: error: Batch job submission failed: Job violates accounting/QOS policy "
+        "(job submit limit, user's size and/or time limits)\n"
+    )
+    assert "QOSMaxSubmitJobPerUserLimit" in refused.stdout and "gym eval resubmit --recover" in refused.stdout
+    # Its claim named no job: none is left behind for a later reader to take as an unobserved follow-up.
+    assert not list(tmp_path.glob(".gym_followup_queued.*"))
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "reply,refused",
+    [
+        (_QOS_SUBMIT_LIMIT_REPLY, True),
+        (
+            "sbatch: error: Batch job submission failed: Invalid account or account/partition combination specified",
+            True,
+        ),
+        ("sbatch: error: Batch job submission failed: Requested node configuration is not available", True),
+        ("sbatch: error: Batch job submission failed: Job dependency problem", True),
+        # The request or its reply may have been lost: the job may exist, so the accounting stays unknown.
+        ("sbatch: error: Batch job submission failed: Socket timed out on send/recv operation", False),
+        ("sbatch: error: Batch job submission failed: Transport endpoint is not connected", False),
+        ("sbatch: error: Batch job submission failed: Broken pipe", False),
+        ("sbatch: error: Batch job submission failed: Unspecified error", False),
+        ("sbatch: error: Batch job submission failed: Unable to contact slurm controller (connect failure)", False),
+    ],
+)
+def test_only_a_definite_refusal_of_the_follow_up_is_a_typed_stop(tmp_path, reply, refused):
+    _run_prologue(tmp_path, ResumeConfig(), None, extra_env={"FAKE_SBATCH_REFUSES": reply})
+
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert marker.startswith(FOLLOW_UP_SUBMISSION_REFUSED if refused else ACCOUNTING_UNKNOWN_PREFIX), marker
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_recovery_resubmits_a_run_whose_follow_up_the_scheduler_refused(tmp_path):
+    from nemo_gym.orchestration.recovery import RecoveryAction, decide_from_collected
+    from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir
+
+    # The segment's prologue took its follow-up claim, and the scheduler refused the submission.
+    job = write_job_dir(tmp_path, n=2, results=[ident(0, reward=1.0)], failures=[])
+    _run_prologue(job, ResumeConfig(), None, extra_env={"FAKE_SBATCH_REFUSES": _QOS_SUBMIT_LIMIT_REPLY})
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    # The accounting is known: the chain stopped on a refusal, not on an unobserved submission.
+    assert collected.infra_retries_state != "unknown" and collected.walltime_state != "unknown"
+    assert decision.action == RecoveryAction.RESUBMIT, decision.reason
+    assert f"the chain recorded: {FOLLOW_UP_SUBMISSION_REFUSED}" in decision.reason
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_follow_up_submission_without_a_definite_reply_stays_unknown_and_logs_the_reply(tmp_path):
+    failed = _run_prologue(tmp_path, ResumeConfig(), None, sbatch_loses_reply=True)
+
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == (
+        f"{ACCOUNTING_UNKNOWN_PREFIX} Follow-up submission may have succeeded without an observed reply.\n"
+    )
+    assert "sbatch exited 1: sbatch: error: Socket timed out on send/recv operation" in failed.stdout
+
+
+def test_inspection_names_a_chain_stopped_on_a_refused_follow_up(tmp_path):
+    from nemo_gym.orchestration.recovery import decide_from_collected
+    from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir
+
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
+    line = f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit"
+    (job / INCOMPLETE_MARKER_NAME).write_text(line + "\n")
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.chain_continuation_note == line
+    assert f"the chain recorded: {line}" in decision.reason
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -1667,9 +1765,18 @@ def test_a_segment_that_completes_the_run_without_its_export_receipt_writes_the_
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-def test_a_segment_that_completes_the_run_keeps_a_deliberate_stop(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "stop",
+    [
+        "Accumulated walltime reached the cap; continue with gym eval resubmit --recover.",
+        # As a segment left it when its follow-up submission got no definite reply and the run then completed.
+        f"{ACCOUNTING_UNKNOWN_PREFIX} Follow-up submission may have succeeded without an observed reply.",
+        f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit",
+    ],
+    ids=["walltime-cap", "accounting-unknown", "follow-up-refused"],
+)
+def test_a_segment_that_completes_the_run_supersedes_an_earlier_stop(tmp_path, monkeypatch, stop):
     _segment_finishing_the_run(tmp_path, monkeypatch)
-    stop = "Accumulated walltime reached the cap; continue with gym eval resubmit --recover."
     result = _run_prologue(
         tmp_path,
         ResumeConfig(),
@@ -1679,11 +1786,12 @@ def test_a_segment_that_completes_the_run_keeps_a_deliberate_stop(tmp_path, monk
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == stop + "\n"
-    assert "Run complete" not in result.stdout
+    # A complete run leaves no incomplete-chain marker; the job log and the journal say what it superseded.
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+    assert "Run complete" in result.stdout and f"The chain's earlier stop no longer applies: {stop}" in result.stdout
     assert _scancel_calls(tmp_path) == ["998", "999"]
     [entry] = _chain_end_entries(tmp_path)
-    assert entry["ended"] == "run_complete_stop_kept"
+    assert entry["ended"] == "run_complete_stop_superseded"
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -1715,3 +1823,58 @@ def test_a_segment_without_a_recorded_sentinel_cancels_only_its_follow_up(tmp_pa
     assert _scancel_calls(tmp_path) == ["999"]
     [entry] = _chain_end_entries(tmp_path)
     assert entry["cancelled"] == {"follow_up": {"job_id": "999", "result": "cancelled"}}
+
+
+def _server_start_failed_before_any_rollout(tmp_path, prev_job_id: str = "100") -> None:
+    # The previous segment's driver: its policy server could not bind its port, and nothing was saved.
+    (tmp_path / f"{DRIVER_FAILURE_NAME}.{prev_job_id}").write_text("server_start_failed\n")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_server_that_failed_to_start_before_any_rollout_restarts_the_run_fresh_once(tmp_path):
+    _server_start_failed_before_any_rollout(tmp_path)
+
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "FAILED")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "restarting the run fresh as an infra retry" in result.stdout and "REACHED_WORK" in result.stdout
+    assert "no eligible retries" not in result.stdout
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
+    assert (tmp_path / f"{FRESH_RESTART_MARKER_NAME}.200").exists()
+    assert _sbatch_calls(tmp_path), "the follow-up is queued as for any infra retry"
+    incomplete = tmp_path / INCOMPLETE_MARKER_NAME
+    assert not incomplete.exists() or "no eligible retries" not in incomplete.read_text()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("exhausted", ["restarted_once", "budget_spent"])
+def test_a_server_start_failure_after_the_fresh_restart_stops_with_its_kind_and_a_fresh_resubmit(tmp_path, exhausted):
+    _server_start_failed_before_any_rollout(tmp_path)
+    if exhausted == "restarted_once":
+        (tmp_path / f"{FRESH_RESTART_MARKER_NAME}.100").write_text("")
+        resume = ResumeConfig(max_retries=2)
+    else:
+        resume = ResumeConfig(max_retries=0)
+
+    result = _run_prologue(tmp_path, resume, "FAILED")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    stop = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert "server_start_failed on job 100 before any rollout was saved; fresh restart exhausted" in stop
+    assert "resubmit fresh:" in stop and "--recover" not in stop
+    assert "REACHED_WORK" not in result.stdout and not _sbatch_calls(tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_server_start_failure_with_saved_rollouts_keeps_the_saved_evidence_path(tmp_path):
+    _server_start_failed_before_any_rollout(tmp_path)
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    (tmp_path / "artifacts" / "rollouts_manifest.json").write_text("{}")
+
+    result = _run_prologue(
+        tmp_path, ResumeConfig(max_retries=2), "FAILED", admission_command="echo __GYM_CONTINUATION:stop"
+    )
+
+    assert "restarting the run fresh" not in result.stdout
+    assert not (tmp_path / f"{FRESH_RESTART_MARKER_NAME}.200").exists()
+    assert result.returncode == 1 and "no eligible retries" in result.stdout

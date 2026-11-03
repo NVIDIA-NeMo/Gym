@@ -61,19 +61,20 @@ from nemo_gym.client import (
 )
 from nemo_gym.config import SKILLS_REF_KEY_NAME, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.core import (
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NgFailureEvent,
     accumulate_response_usage,
+    observe_failure,
 )
-from nemo_gym.failure_transport import observe_failure
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, FailureBoundary
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"

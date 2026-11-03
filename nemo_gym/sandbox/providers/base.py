@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from nemo_gym.core.episode_types import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
-from nemo_gym.exception_inspection import error_to_http_status
-from nemo_gym.server_runtime.episode_types import FailureBoundary, SandboxFailureDetails
-from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.utils.exception_inspection import error_to_http_status
 
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list

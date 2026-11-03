@@ -27,6 +27,7 @@ from omegaconf import OmegaConf
 import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeFailure
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_records import (
@@ -38,7 +39,6 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.server_runtime.episode_types import EpisodeFailure
 from tests.unit_tests.rollouts.test_rollout_collection import (
     FakeResponse,
     failing_row,
@@ -2130,10 +2130,10 @@ async def test_typed_episode_outcomes_settle_stop_or_retry_through_collection_an
     from httpx import ASGITransport, AsyncClient
     from pydantic import BaseModel
 
+    from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
     from nemo_gym.core.responses_api_types import NeMoGymResponse
     from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
     from nemo_gym.server_runtime.base_resources_server import AggregateMetricsRequest
-    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
     from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnResponse
     from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 

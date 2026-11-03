@@ -93,6 +93,12 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import (
+    EpisodeFailure,
+    FailureBoundary,
+    FailureReport,
+    is_materialized_task_row,
+)
 from nemo_gym.core.failure_kinds import (
     CANCELLED,
     COLLECTION_DISPATCH_FAILED,
@@ -104,8 +110,9 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
@@ -158,12 +165,6 @@ from nemo_gym.rollouts.rollout_recovery import (
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_runtime.episode_types import (
-    EpisodeFailure,
-    FailureBoundary,
-    FailureReport,
-    is_materialized_task_row,
-)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -185,7 +186,6 @@ from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     failure_observations,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,

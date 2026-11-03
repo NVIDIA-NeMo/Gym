@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
-from nemo_gym.failure_transport import FailureHeader
+from nemo_gym.core.episode_types import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.failure_transport import FailureHeader
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.rollouts.rollout_collection import (
     NG_FAILURE_COUNTS_AS_ZERO_KEY,
     NG_TERMINAL_KEY,
@@ -15,8 +17,6 @@ from nemo_gym.rollouts.rollout_collection import (
 )
 from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
 from nemo_gym.sandbox.failure_details import sandbox_failure_event
-from nemo_gym.server_runtime.episode_types import FailureBoundary, SandboxFailureDetails
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
 from tests.unit_tests.test_sandbox_failure_details import POD, SANDBOX, _ended
 
