@@ -29,26 +29,38 @@ from collections.abc import Mapping
 from pathlib import Path
 from time import time
 from typing import Any, Callable, ClassVar, Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    OUTPUT_LOG_FILE,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxCommand,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    shell_assignments,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -62,15 +74,22 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxExecResult,
+    SandboxSpec,
+    create_provider,
+    read_text,
+    resolve_provider_config,
+    upload_text,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
     ObservationGap,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
     OpenClawSessionTree,
@@ -392,10 +411,9 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
-    # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
+    # Bootstrap with POSIX sh; the runtime installer and harness runner require Bash.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "OpenClaw sandbox execution requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -410,10 +428,74 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
-    check_paths = shlex.join(
-        ["python3", "-I", "-c", _SANDBOX_PATH_CHECK, workdir, str(Path(directory).parent), runtime]
-    )
+    check_paths = f"(set -- {shlex.join([workdir, str(Path(directory).parent), runtime])}{_SANDBOX_PATH_CHECK})"
     return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}"
+
+
+# One ``openclaw mcp probe`` per MCP grant: CLI startup, connection and tool listing.
+_MCP_PROBE_TIMEOUT_SECONDS = 120
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
+_PROBE_LIMIT = re.compile(r"probe exceeded [0-9.]+ s")
+# Bootstrap failures before OpenClaw starts, as the runner or interpreter reports them in output.log.
+_BOOTSTRAP = (
+    ("FileNotFoundError", "executable not found"),
+    ("No such file or directory", "executable not found"),
+    ("PermissionError", "permission denied"),
+    ("Permission denied", "permission denied"),
+)
+
+
+def _url_origin(url: str | None) -> str | None:
+    """scheme://host[:port] of a configured server URL, without path, query or userinfo."""
+    try:
+        parts = urlsplit(url or "")
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return None
+    return f"{parts.scheme}://{parts.hostname}{port}" if parts.scheme and parts.hostname else None
+
+
+def _mcp_probe_problem(name: str, result: SandboxExecResult, *, url: str | None = None) -> str | None:
+    """Why ``openclaw mcp probe <name> --json`` did not prove a connection, or None if it did.
+
+    The answer goes into a 502 or a gap, so it holds only classifications: the error kind, an HTTP status, a
+    bootstrap class and the configured server's origin. Probe output itself is untrusted (it can echo server bodies
+    or credentials) and stays in the probe's own files.
+    """
+    output = (result.stdout or "") + (result.stderr or "")
+    origin = _url_origin(url)
+    where = f" ({origin})" if origin else ""
+    status = _HTTP_STATUS.search(output)
+    if result.error_type == "timeout":
+        limit = _PROBE_LIMIT.fullmatch((result.stderr or "").strip())
+        return f"timeout: {limit.group(0)}" if limit else "timeout"
+    if result.return_code != 0 or result.error_type is not None:
+        kind = result.error_type or f"exit {result.return_code}"
+        detail = next((label for marker, label in _BOOTSTRAP if marker in output), None)
+        if status:
+            detail = f"HTTP {status.group(1)}{where}"
+        return f"{kind}: {detail}" if detail else kind
+    start = (result.stdout or "").find("{")
+    try:
+        report, _ = json.JSONDecoder().raw_decode((result.stdout or "")[start:]) if start >= 0 else (None, 0)
+    except ValueError:
+        report = None
+    if not isinstance(report, dict) or not isinstance(report.get("servers"), dict):
+        return "unreadable probe output"
+    diagnostics = [
+        str(item.get("message"))
+        for item in report.get("diagnostics") or []
+        if isinstance(item, dict) and item.get("serverName") == name
+    ]
+    if diagnostics:
+        status = _HTTP_STATUS.search(" ".join(diagnostics))
+        return f"{f'HTTP {status.group(1)}' if status else 'connection failed'}{where}"
+    if name not in report["servers"]:
+        return "not connected"
+    return None
 
 
 class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
@@ -441,7 +523,8 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Per-request timeout of a sandbox session's MCP tool grants (OpenClaw's mcp.servers.<name>.timeout).
+    mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -464,6 +547,23 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 
 class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read pinned assistant errors or the CLI's typed context-overflow envelope."""
+        context_overflow = native_result.get("kind") == "context_overflow"
+        message = str(native_result.get("message" if context_overflow else "errorMessage") or "")
+        match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+        if context_overflow:
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if native_result.get("stopReason") in {"error", "aborted"}:
+            if message in {"Connection error.", "terminated"} or re.fullmatch(
+                r"LLM idle timeout \(\d+(?:\.\d+)?s\): no response from model", message
+            ):
+                return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if native_result.get("stopReason") == "error":
+            if match:
+                return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
+        return AgentOutcome(failure_kind="unknown")
 
     config: OpenClawAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
@@ -494,9 +594,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or workdir in ("/", "/tmp"):
             raise HTTPException(422, "OpenClaw workdir must be absolute and separate from /tmp runtime storage")
-        if any(access.required for access in self.effective_tool_accesses(body)):
+        unsupported = [
+            access.name
+            for access in self.effective_tool_accesses(body)
+            if access.required and not isinstance(access, MCPToolAccess)
+        ]
+        if unsupported:
             raise HTTPException(
-                422, "OpenClaw sandbox execution supports its own sandbox tools, not required HTTP/MCP tools"
+                422,
+                "OpenClaw in the task sandbox supports only MCP tool grants; required grants it cannot use: "
+                + ", ".join(sorted(unsupported)),
             )
         if self.config.model_server is None:
             raise HTTPException(422, "OpenClaw sandbox execution requires a sandbox-reachable Gym model_server")
@@ -578,7 +685,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
                     f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -664,6 +771,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
         session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
+        session_id = state.session.session_dir.rsplit("/", 1)[-1]
+        # Capture rejected attempts too: they have no responseId in the transcript.
+        session_config["models"]["providers"]["nemo"]["headers"] = {"x-session-id": session_id}
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
         session_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
@@ -688,6 +798,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "plugins": {"enabled": False},
             }
         )
+        mcp_servers, required_grants = self._granted_mcp_servers(state.request)
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
             f"{state.runtime}/node/bin/node",
@@ -698,7 +809,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "--agent",
             "main",
             "--session-id",
-            state.session.session_dir.rsplit("/", 1)[-1],
+            session_id,
             "--thinking",
             self.config.thinking,
             "--model",
@@ -711,7 +822,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ]
         payload = {
             "config": session_config,
-            "directory": state.session.session_dir,
             "command": command,
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
             "cwd": state.session.workdir,
@@ -725,6 +835,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "OPENCLAW_NO_RESPAWN": "1",
             },
         }
+        mcp_gaps = []
+        if mcp_servers:
+            mcp_gaps = await self._probe_mcp_grants(
+                state, payload, mcp_servers, required_grants, timeout=min(timeout, _MCP_PROBE_TIMEOUT_SECONDS)
+            )
+            if mcp_servers:
+                session_config["mcp"] = {"servers": mcp_servers}
+                # The model sees each grant's tools as <grant>__<tool>; the allow list must name them.
+                session_config["tools"]["allow"].append("bundle-mcp")
         try:
             async with self.sem:
                 await state.execute(payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds)
@@ -732,17 +851,167 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # Cancellation/cleanup failure still leaves useful transcript evidence
             # for the subsequent close. Never convert uncertain cleanup to success.
             try:
-                await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
+                await self._collect_sandbox_response(
+                    state, body, prompt=prompt, system=system, capture_correlated=True
+                )
+                state.observations.gaps.extend(mcp_gaps)
             except Exception:
                 LOG.exception("Could not salvage interrupted OpenClaw observations")
             raise
-        response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
-        if response.error is not None:
-            # Preserve the transcript in session observations, but let the environment
-            # classify runtime/provider failures before it invokes the verifier.
+        response = await self._collect_sandbox_response(
+            state, body, prompt=prompt, system=system, capture_correlated=True
+        )
+        # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
+        # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
+        stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
+        lost = sorted(name for name in mcp_servers if f'failed to start server "{name}"' in stderr)
+        mcp_gaps += [
+            ObservationGap(code="mcp_server_skipped", detail=f"{name}: did not connect in the agent run")
+            for name in lost
+            if name not in required_grants
+        ]
+        if state.observations is not None:
+            state.observations.gaps.extend(mcp_gaps)
+        if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
+            # Runtime and cleanup failures must not become gradable model outcomes.
             raise HTTPException(502, response.error.message)
+        if lost_required := [name for name in lost if name in required_grants]:
+            raise HTTPException(
+                502, "Required Gym MCP tools did not connect in the agent run: " + ", ".join(lost_required)
+            )
         response.metadata = {**(response.metadata or {}), AGENT_TIMEOUT_METADATA_KEY: str(timeout)}
         return response
+
+    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], set[str]]:
+        """OpenClaw ``mcp.servers`` entries for a session's MCP tool grants, and the required grant names."""
+        servers = {}
+        required = set()
+        for access in self.effective_tool_accesses(request):
+            if not isinstance(access, MCPToolAccess):
+                continue
+            entry: dict[str, Any] = {"url": str(access.connection.url), "transport": "streamable-http"}
+            if access.connection.headers:
+                entry["headers"] = dict(access.connection.headers)
+            if self.config.mcp_tool_timeout_seconds is not None:
+                entry["timeout"] = self.config.mcp_tool_timeout_seconds
+            servers[access.name] = entry
+            if access.required:
+                required.add(access.name)
+        return servers, required
+
+    async def _probe_mcp_grants(
+        self,
+        state: OpenClawSandboxSession,
+        payload: dict[str, Any],
+        servers: dict[str, Any],
+        required: set[str],
+        *,
+        timeout: float,
+    ) -> list[ObservationGap]:
+        """Connect to each grant with ``openclaw mcp probe <name> --json`` before the agent runs.
+
+        OpenClaw leaves a server that fails to connect out of the tool list and keeps running. A required grant that
+        does not connect fails the activation before any model call; an optional one is removed from ``servers`` and
+        reported as a gap. ``probe --json`` exits 0 when the connection fails (2026.6.11 prints the catalog without
+        the check ``doctor --probe`` makes), so a grant counts as connected only when the JSON lists it under
+        ``servers`` with no diagnostic for it.
+        """
+        await state.upload_json(
+            "home/.openclaw/openclaw.json", {"mcp": {"servers": servers}, "plugins": {"enabled": False}}
+        )
+        gaps = []
+        missing = []
+        for index, name in enumerate(list(servers)):
+            result = await self._run_mcp_probe(state, payload, name, index=index, timeout=timeout)
+            problem = _mcp_probe_problem(name, result, url=servers[name].get("url"))
+            if problem is None:
+                continue
+            detail = f"{name}: {problem}"
+            if name in required:
+                missing.append(detail)
+            else:
+                del servers[name]
+                gaps.append(ObservationGap(code="mcp_server_skipped", detail=detail))
+        if missing:
+            # The activation ends before the agent runs; close reports these instead of only the interruption.
+            state.observations = AgentObservationBundle(
+                source=OPENCLAW_OBSERVATION_SOURCE, gaps=[ObservationGap(code="agent_activation_interrupted"), *gaps]
+            )
+            raise HTTPException(502, "Required Gym MCP tools could not be initialized: " + "; ".join(missing))
+        return gaps
+
+    async def _run_mcp_probe(
+        self, state: OpenClawSandboxSession, payload: dict[str, Any], name: str, *, index: int, timeout: float
+    ) -> SandboxExecResult:
+        """Run one ``openclaw mcp probe`` under its own supervisor and receipt, beside the agent run's.
+
+        A provider timeout may stop only the local client (Docker does), so the supervisor bounds the probe inside
+        the sandbox and stops it on timeout, cancellation and close. The probe's result counts only once its
+        termination is confirmed; until then ``state.probe`` keeps it for close to stop.
+        """
+        probe = SandboxSession(
+            sandbox=state.session.sandbox,
+            session_dir=f"{state.session.session_dir}/mcp-probe-{index}",
+            workdir=state.session.workdir,
+            harness="OpenClaw MCP probe",
+        )
+        params = {
+            "cwd": state.session.workdir,
+            "command": [*payload["command"][:2], "mcp", "probe", name, "--json"],
+            "env": payload["env"],
+            "stdin": "/dev/null",
+            "stdout": f"{probe.session_dir}/stdout.log",
+            "stderr": f"{probe.session_dir}/stderr.log",
+        }
+
+        async def stage() -> SandboxCommand:
+            # Create the directory as the session user: a provider's upload may create missing parents as root,
+            # and the supervisor, running as the session user, must write its claim and receipt there.
+            made = await probe.sandbox.exec(f"mkdir -p -- {shlex.quote(probe.session_dir)}", cwd="/", timeout_s=30)
+            if made.return_code != 0 or made.error_type:
+                raise RuntimeError(f"Cannot create {probe.session_dir}: {made.stderr or made.stdout}")
+            await upload_text(probe.sandbox, path=f"{probe.session_dir}/params.sh", text=shell_assignments(params))
+            runner = f"{state.session.session_dir}/{HARNESS_RUNNER_FILE}"
+            return SandboxCommand(argv=["bash", runner, f"{probe.session_dir}/params.sh"])
+
+        async def collect() -> dict[str, str]:
+            output = {}
+            # output.log holds supervisor and runner errors from before OpenClaw starts.
+            for file in ("stdout.log", "stderr.log", OUTPUT_LOG_FILE):
+                try:
+                    output[file] = await read_text(probe.sandbox, path=f"{probe.session_dir}/{file}")
+                except Exception:
+                    LOG.warning("OpenClaw MCP probe %s unavailable for %s", file, name, exc_info=True)
+            return output
+
+        state.probe = probe
+        error: Exception | None = None
+        try:
+            output = await probe.execute(
+                stage_activation=stage,
+                collect=collect,
+                timeout=timeout,
+                close_timeout=self.config.session_close_timeout_seconds,
+            )
+        except Exception as exc:  # A timeout or runner failure; termination is checked below either way.
+            output, error = probe.artifacts or {}, exc
+        if not probe.cleanup_confirmed:
+            raise RuntimeError(f"OpenClaw MCP probe for {name} did not confirm termination") from error
+        state.probe = None
+        receipt = probe.cleanup or {}
+        if receipt.get("timed_out") or isinstance(error, TimeoutError):
+            return SandboxExecResult(
+                stdout=None, stderr=f"probe exceeded {timeout:g} s", return_code=-1, error_type="timeout"
+            )
+        if error is not None:
+            return SandboxExecResult(stdout=None, stderr=str(error), return_code=-1, error_type="sandbox")
+        return_code = receipt.get("return_code")
+        return SandboxExecResult(
+            stdout=output.get("stdout.log"),
+            stderr=output.get("stderr.log") or output.get(OUTPUT_LOG_FILE),
+            return_code=return_code if type(return_code) is int else -1,
+            error_type=None,
+        )
 
     async def _collect_sandbox_response(
         self,
@@ -751,6 +1020,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        capture_correlated: bool = False,
     ) -> NeMoGymResponse:
         gaps = []
         artifacts = state.session.artifacts or {}
@@ -863,6 +1133,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
+        envelope_error = meta.get("error") if isinstance(meta, dict) else None
+        context_error = (
+            envelope_error
+            if isinstance(envelope_error, dict) and envelope_error.get("kind") == "context_overflow"
+            else None
+        )
+        terminal_result = context_error if context_error is not None else last
+        if context_error is not None:
+            error = error or str(context_error.get("message") or "OpenClaw context overflow")
         if last.get("stopReason") == "error" or (
             last.get("stopReason") == "aborted" and not (result and result["timed_out"])
         ):
@@ -906,10 +1185,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 openclaw_session_conversation(events, input_items=input_items, fallback_output=output),
                 events,
                 transcript_available=bool(events),
+                prefer_openclaw_session_id=False,
+                capture_correlated=capture_correlated,
                 model_ref=self.config.model_server,
             )
-            # Sandbox sessions enable only local file/process tools, so there is
-            # exactly one invocation; child sessions cannot be spawned.
+            # Sandbox sessions disable child agents, so there is exactly one invocation.
             state.observations.gaps = [
                 gap for gap in state.observations.gaps if gap.code != "subagent_hierarchy_unavailable"
             ]
@@ -921,6 +1201,33 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
+        if (
+            result
+            and (
+                result["return_code"] == 0
+                or (
+                    result["return_code"] == 1
+                    and artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
+                )
+            )
+            and not result["timed_out"]
+            and not result["error"]
+            and (
+                context_error is not None
+                or last.get("stopReason") == "error"
+                or (
+                    last.get("stopReason") == "aborted"
+                    and self.classify_outcome(last).failure_kind == MODEL_TRANSPORT_ERROR
+                )
+            )
+        ):
+            # 2026.6.11 can surface model errors by throwing FailoverError and
+            # exiting 1. Require its terminal diagnostic as well as the assistant
+            # error; an unrelated worker exit must still raise. The environment
+            # owns verify/retry/fail policy for the preserved model response.
+            # An idle watchdog abort is a model failure; the supervisor's whole-run
+            # deadline and unrelated aborts must not be classified as transport errors.
+            return self.report_outcome(response, terminal_result)
         return response
 
     def model_post_init(self, __context: Any) -> None:

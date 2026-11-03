@@ -22,9 +22,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 
 
 # Import the adapter before Tau2 so it can set TAU2_DATA_DIR before Tau2
@@ -188,7 +189,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=malformed),
         ) as create_chat_completion:
             with pytest.raises(Tau2MalformedToolCallError, match="1 consecutive attempts"):
@@ -203,7 +204,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=malformed),
         ) as create_chat_completion:
             with pytest.raises(Tau2MalformedToolCallError, match="1 consecutive attempts"):
@@ -221,7 +222,7 @@ class TestApp:
         )
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(side_effect=[malformed, valid]),
         ) as create_chat_completion:
             response = await client.create_chat_completion(model="model", messages=[])
@@ -235,7 +236,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=response),
         ) as create_chat_completion:
             with pytest.raises(Tau2MalformedToolCallError, match="must decode to an object"):
@@ -251,7 +252,7 @@ class TestApp:
         client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=expected),
         ) as create_chat_completion:
             response = await client.create_chat_completion(model="model", messages=[])
@@ -557,7 +558,7 @@ class TestApp:
         token = _POLICY_CALL_USAGES.set(usages)
         try:
             with patch(
-                "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+                "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
                 AsyncMock(side_effect=[malformed, valid, user_turn]),
             ):
                 await client.create_chat_completion(model=TAU2_AGENT_MODEL, messages=[])
@@ -595,7 +596,7 @@ class TestApp:
 
         with (
             patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
-            patch("nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
+            patch("nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
         ):
             response = TestClient(app).post("/run", json=self._example_run_request().model_dump(mode="json"))
         assert response.status_code == 200
@@ -643,7 +644,8 @@ class TestApp:
         token = _POLICY_CALL_USAGES.set(usages)
         try:
             with patch(
-                "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion", AsyncMock(return_value=partial)
+                "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
+                AsyncMock(return_value=partial),
             ):
                 response = await client.create_chat_completion(model=TAU2_AGENT_MODEL, messages=[])
         finally:
@@ -717,7 +719,7 @@ class TestApp:
         test_case = self
         with (
             patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
-            patch("nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
+            patch("nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion", create_chat_completion),
         ):
             results = await asyncio.gather(
                 server.run(self._example_run_request()), server.run(self._example_run_request())
