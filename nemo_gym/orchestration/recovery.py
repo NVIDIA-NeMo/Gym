@@ -5257,6 +5257,17 @@ def _incomplete_answer(row: Mapping[str, Any]) -> bool:
 CUTOFF_REASONS = frozenset({"length", "max_output_tokens", "max_tokens"})
 
 
+def _answer_cut_off(response: Mapping[str, Any]) -> bool:
+    """Whether the saved answer itself says it was cut off: its ``incomplete_details.reason`` is ``max_output_tokens``
+    or ``max_tokens``, or its output tokens reached its ``max_output_tokens``."""
+    details = response.get("incomplete_details")
+    if isinstance(details, dict) and details.get("reason") in CUTOFF_REASONS - {"length"}:
+        return True
+    usage, cap = response.get("usage"), response.get("max_output_tokens")
+    tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+    return type(cap) is int and cap > 0 and type(tokens) is int and tokens >= cap
+
+
 def _cut_off(row: Mapping[str, Any]) -> bool:
     """Whether the saved answer carries an actual cutoff signal, not just an incomplete status.
 
@@ -5266,12 +5277,7 @@ def _cut_off(row: Mapping[str, Any]) -> bool:
     response = row.get("response")
     if not isinstance(response, dict):
         return False
-    details = response.get("incomplete_details")
-    if isinstance(details, dict) and details.get("reason") in CUTOFF_REASONS - {"length"}:
-        return True
-    usage, cap = response.get("usage"), response.get("max_output_tokens")
-    tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
-    if type(cap) is int and cap > 0 and type(tokens) is int and tokens >= cap:
+    if _answer_cut_off(response):
         return True
     observed = row.get("ng_trial_observations")
     calls = observed.get("model_calls") if isinstance(observed, dict) else None
@@ -5387,9 +5393,10 @@ def _observed_incomplete_answer(row: Mapping[str, Any]) -> bool:
     joined. Its answer must still be observed: the row recorded no failure, its one agent
     invocation ended completed or incomplete (an agent marks a cut-off answer incomplete) without an error, its last
     model call is exactly one captured call that answered in one completed operation, and that call's response is
-    the saved answer, or, for an agent that saves its own answer envelope (its own response id), that call itself
-    finished on a cutoff (``CUTOFF_REASONS``): the cut-off answer is observed on the model's own last reply. A verifier
-    that ran must have completed: a verifier error is never read as the model's fault.
+    the saved answer, or, for an agent that saves its own answer envelope (its own response id), the envelope says it
+    was cut off (``_answer_cut_off``) and that call itself finished on a cutoff (``CUTOFF_REASONS``): two independent
+    signals that the model's own last reply was cut. A verifier that ran must have completed: a verifier error is never
+    read as the model's fault.
     """
     observed = row.get("ng_trial_observations")
     if (
@@ -5459,7 +5466,8 @@ def _observed_incomplete_answer(row: Mapping[str, Any]) -> bool:
         and isinstance(meta.get("response_id"), str)
         and bool(meta["response_id"])
         and (
-            meta["response_id"] == (row.get("response") or {}).get("id") or meta.get("finish_reason") in CUTOFF_REASONS
+            meta["response_id"] == (row.get("response") or {}).get("id")
+            or (meta.get("finish_reason") in CUTOFF_REASONS and _answer_cut_off(row.get("response") or {}))
         )
     )
 
