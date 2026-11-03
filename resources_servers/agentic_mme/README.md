@@ -155,9 +155,13 @@ before calling the provider (`AGENTIC_MME_SEARCH_CACHE=<dir>`):
     config_paths="benchmarks/agentic_mme/config.yaml,benchmarks/agentic_mme/retrieval_tavily_serpapi_lens.yaml,benchmarks/agentic_mme/retrieval_cache.yaml"
     ng_prepare_benchmark "+config_paths=[$config_paths]"   # then run with the same config_paths
 
-- google_search: exact normalised query, else fuzzy match (`token_sort_ratio >=
-  cache_fuzzy_threshold`, default 0.8) over FTS5 candidates from
-  `<dir>/index/master.db`, rejected when the two queries contain different numbers.
+- google_search: exact normalised query. Fuzzy matching is off by default
+  (`cache_fuzzy_threshold: 0`), because a near match can be a different question
+  ('capital of australia' vs 'capital of austria'). With a threshold set, a query
+  that misses exactly may match an earlier one (`token_sort_ratio >= threshold` over
+  FTS5 candidates from `<dir>/index/master.db`, rejected when the two queries contain
+  different numbers); the output then carries `"matched_query"`, so the model sees
+  which question the results answer.
 - google_lens_search: SHA-256 of the image pixels; fetch_webpage: normalised URL.
 - Misses go to the provider and are written back (`cache_write: false` to only read);
   new query norms also go to `<dir>/index/search_norms_<host>_<pid>.txt`, and are

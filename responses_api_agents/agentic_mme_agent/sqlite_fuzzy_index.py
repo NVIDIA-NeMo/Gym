@@ -27,7 +27,7 @@ steps (leg 6562317).
 Two-stage retrieval. SQLite generates candidates through an inverted index;
 rapidfuzz still does the scoring:
 
-    1. FTS5 MATCH over master.db  -> <= candidate_limit candidates, bm25-ranked
+    1. FTS5 MATCH over master.db  -> <= CANDIDATE_LIMIT candidates, bm25-ranked
     2. norms cached by THIS process since startup -> all of them (small)
     3. rapidfuzz token_sort_ratio over the union; best >= threshold wins
 
@@ -41,8 +41,8 @@ Two properties are load-bearing on Lustre:
 - The master is opened `mode=ro&immutable=1`, so SQLite skips locking entirely
   and never creates `-wal`/`-shm` files. Those cannot cross nodes: the
   cross-node POC (32 tasks x 4 nodes) had shared-write SQLite crash 7/32 workers
-  with a 34 s write p99, versus 0 crashes for flat files. See SEARCH_CACHE.md in
-  the archived bc_frankie_bash_tool_flat_file repo. NEVER open this read-write.
+  with a 34 s write p99, versus 0 crashes for flat files. NEVER open this
+  read-write.
 - `sqlite3` releases the GIL around query execution, so unlike the Python-list
   scan these lookups genuinely run in parallel across the harness thread pool.
 
@@ -57,21 +57,17 @@ import os
 import sqlite3
 import threading
 
-
-try:
-    from rapidfuzz import fuzz as _rf_fuzz
-    from rapidfuzz import process as _rf_process
-except ImportError:  # fuzzy matching becomes unavailable; exact lookups unaffected
-    _rf_fuzz = _rf_process = None
+from rapidfuzz import fuzz as _rf_fuzz
+from rapidfuzz import process as _rf_process
 
 
 INDEX_DIR = "index"
 MASTER_DB = "master.db"
 
-# Trigram FTS5 rejects terms shorter than 3 characters.
-_MIN_TERM = {"trigram": 3, "unicode61": 2}
+# Shortest query token used as an FTS5 term (unicode61 indexes whole words).
+MIN_TERM_LENGTH = 2
 
-# Both defaults are measured, not guessed. bench/parity_recall.py over the live
+# Both settings are measured, not guessed. bench/parity_recall.py over the live
 # 1,892,440-norm index, 1000 perturbed real queries, threshold 0.8:
 #
 #   tokenizer  limit   recall    p50       p90       speedup
@@ -90,8 +86,8 @@ _MIN_TERM = {"trigram": 3, "unicode61": 2}
 # ranks them on those two terms alone, so the true match can sit deep in the
 # list. 3000 is where recall reached 100%; rescoring 3000 candidates in rapidfuzz
 # is still microseconds.
-DEFAULT_TOKENIZER = "unicode61"
-DEFAULT_CANDIDATE_LIMIT = 3000
+TOKENIZER = "unicode61"
+CANDIDATE_LIMIT = 3000
 
 
 def master_db_path(cache_root):
@@ -103,7 +99,7 @@ def token_sorted(norm):
     return " ".join(sorted(norm.split()))
 
 
-def build_master_db(path, norms, tokenizer=DEFAULT_TOKENIZER):
+def build_master_db(path, norms):
     """Build the FTS5 master from `norms`. Returns the deduped row count.
 
     Writes to a temp file and atomically renames, so readers never observe a
@@ -126,7 +122,7 @@ def build_master_db(path, norms, tokenizer=DEFAULT_TOKENIZER):
     try:
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA synchronous=OFF")
-        conn.execute(f"CREATE VIRTUAL TABLE norms USING fts5(norm, tokenize='{tokenizer}')")
+        conn.execute(f"CREATE VIRTUAL TABLE norms USING fts5(norm, tokenize='{TOKENIZER}')")
         conn.executemany("INSERT INTO norms(norm) VALUES (?)", ((n,) for n in ordered))
         conn.commit()
     finally:
@@ -154,14 +150,9 @@ class SqliteFuzzyIndex:
     of the cross-node locking concerns that keep the master read-only.
     """
 
-    def __init__(self, root, threshold, candidate_limit=DEFAULT_CANDIDATE_LIMIT, tokenizer=DEFAULT_TOKENIZER):
-        if _rf_process is None:
-            raise ImportError("fuzzy matching requested but rapidfuzz is not installed")
+    def __init__(self, root, threshold):
         self.root = str(root)
         self.threshold = threshold
-        self.candidate_limit = candidate_limit
-        self.tokenizer = tokenizer
-        self.last_candidate_count = 0
 
         self._db_path = master_db_path(self.root)
         self._tl = threading.local()
@@ -172,9 +163,9 @@ class SqliteFuzzyIndex:
         # a single shared connection keeps every thread reading the same rows
         # (thread-local connections cannot see each other's in-memory data).
         self._lock = threading.Lock()
-        self._local_set = set()  # dedup, and the source of local_count
+        self._local_set = set()  # dedup
         self._local_db = sqlite3.connect(":memory:", check_same_thread=False)
-        self._local_db.execute(f"CREATE VIRTUAL TABLE norms USING fts5(norm, tokenize='{self.tokenizer}')")
+        self._local_db.execute(f"CREATE VIRTUAL TABLE norms USING fts5(norm, tokenize='{TOKENIZER}')")
 
     # ---- master ----------------------------------------------------------
     def _conn(self):
@@ -199,8 +190,7 @@ class SqliteFuzzyIndex:
         ones, short ones ("the", "of") have posting lists spanning most of the
         corpus and discriminate nothing.
         """
-        min_len = _MIN_TERM.get(self.tokenizer, 3)
-        return sorted({t for t in norm.split() if len(t) >= min_len}, key=len, reverse=True)
+        return sorted({t for t in norm.split() if len(t) >= MIN_TERM_LENGTH}, key=len, reverse=True)
 
     @staticmethod
     def _stages(terms):
@@ -235,7 +225,7 @@ class SqliteFuzzyIndex:
         for expr in self._stages(self._terms(norm)):
             try:
                 rows = conn.execute(
-                    "SELECT norm FROM norms WHERE norms MATCH ? ORDER BY rank LIMIT ?", (expr, self.candidate_limit)
+                    "SELECT norm FROM norms WHERE norms MATCH ? ORDER BY rank LIMIT ?", (expr, CANDIDATE_LIMIT)
                 ).fetchall()
             except sqlite3.Error:
                 return []  # malformed expression or corrupt page -> treat as no candidates
@@ -264,33 +254,13 @@ class SqliteFuzzyIndex:
             self._local_db.execute("INSERT INTO norms(norm) VALUES (?)", (norm,))
             return True
 
-    def add_many(self, norms):
-        for norm in norms:
-            self.add(norm)
-
-    @property
-    def local_count(self):
-        return len(self._local_set)
-
-    @property
-    def master_count(self):
-        """Rows in the FTS5 master, or 0 if there is no usable master."""
-        conn = self._conn()
-        if conn is None:
-            return 0
-        try:
-            return conn.execute("SELECT count(*) FROM norms").fetchone()[0]
-        except sqlite3.Error:
-            return 0
-
     # ---- lookup ----------------------------------------------------------
     def lookup(self, norm):
         """Best token_sort_ratio match >= threshold over master + local, or None."""
-        # Both tiers are indexed, so each returns at most candidate_limit rows —
+        # Both tiers are indexed, so each returns at most CANDIDATE_LIMIT rows —
         # the rescore set is bounded no matter how long the run goes.
         originals = self._master_candidates(norm) + self._local_candidates(norm)
         sorted_forms = [token_sorted(c) for c in originals]
-        self.last_candidate_count = len(originals)
         if not originals:
             return None
 

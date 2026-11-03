@@ -95,9 +95,10 @@ class RetrievalConfig(BaseModel):
     exa_api_key: SecretStr = SecretStr("")
     imgbb_api_key: SecretStr = SecretStr("")
     jina_api_key: SecretStr = SecretStr("")
-    # Local retrieval cache (see search_cache.py); "" disables it. Fuzzy threshold 0 = exact only.
+    # Local retrieval cache (see search_cache.py); "" disables it. Fuzzy threshold 0 = exact only (the
+    # default): a fuzzy hit answers a different query, shown to the model as matched_query.
     cache_root: str = ""
-    cache_fuzzy_threshold: float = Field(default=0.8, ge=0, le=1)
+    cache_fuzzy_threshold: float = Field(default=0.0, ge=0, le=1)
     cache_write: bool = True
     # Consent to send task images to a third party for Google Lens (required in any case).
     allow_image_upload: bool = False
@@ -298,7 +299,7 @@ class Retrieval:
             else None
         )
         if cache is not None:
-            hit, kind = await asyncio.to_thread(self._cache_lookup, cache, args, workspace)
+            hit, kind, matched_query = await asyncio.to_thread(self._cache_lookup, cache, args, workspace)
             if hit is not None:
                 if isinstance(args, FetchArgs):
                     out = {
@@ -311,6 +312,9 @@ class Retrieval:
                 else:
                     out = {"ok": True, "tool": name, "context": "", "raw": hit}
                 out["cache"] = kind
+                if matched_query is not None:
+                    # Fuzzy hit: these are results for another query; the model must see which one.
+                    out["matched_query"] = matched_query
                 return self._decontaminate(out)
         out = await self._live(name, args, workspace)
         if cache is not None:
@@ -363,14 +367,14 @@ class Retrieval:
         return out
 
     @staticmethod
-    def _cache_lookup(cache, args, workspace: ImageWorkspace) -> tuple[Any, str]:
+    def _cache_lookup(cache, args, workspace: ImageWorkspace) -> tuple[Any, str, str | None]:
         if isinstance(args, SearchArgs):
             return cache.get_search(args.query)
         if isinstance(args, LensArgs):
             hit = cache.get_lens(workspace.get(args.image_index))
         else:
             hit = cache.get_browse(args.url)
-        return hit, "exact" if hit is not None else "miss"
+        return hit, "exact" if hit is not None else "miss", None
 
     def _cache_store(self, cache, args, workspace: ImageWorkspace, out: dict[str, Any]) -> None:
         if isinstance(args, FetchArgs):

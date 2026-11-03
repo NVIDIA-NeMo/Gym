@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 
 import pytest
 from PIL import Image
@@ -26,7 +27,38 @@ def test_exact_fuzzy_and_number_guard(tmp_path) -> None:
     assert cache.get_search("eiffel tower height in meters 2010")[1] == "exact"
     assert cache.get_search("height in meters of the Eiffel Tower 2010")[1] == "fuzzy"
     # same words, different year: not the same question
-    assert cache.get_search("Eiffel Tower height in meters 2020") == (None, "miss")
+    assert cache.get_search("Eiffel Tower height in meters 2020") == (None, "miss", None)
+
+
+def test_fuzzy_matching_is_off_by_default(tmp_path) -> None:
+    _seed(tmp_path, "capital of austria", {"organic": [{"title": "Vienna"}]})
+    build_master_db(master_db_path(str(tmp_path)), ["capital of austria"])
+    assert SearchCache(str(tmp_path)).get_search("capital of australia") == (None, "miss", None)
+    assert RetrievalConfig().cache_fuzzy_threshold == 0
+    # Opting in, the same near miss becomes a hit for the other question.
+    assert SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("capital of australia")[1:] == (
+        "fuzzy",
+        "capital of austria",
+    )
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_hit_shows_the_model_which_query_it_answers(tmp_path, monkeypatch) -> None:
+    shared_cache.cache_clear()
+    _seed(tmp_path, "capital of austria", {"organic": [{"title": "Vienna", "link": "https://v.example"}]})
+    build_master_db(master_db_path(str(tmp_path)), ["capital of austria"])
+
+    async def no_network(*args, **kwargs):
+        raise AssertionError("a cache hit must not call the provider")
+
+    monkeypatch.setattr(retrieval, "http_payload", no_network)
+    workspace = ImageWorkspace()
+    workspace.add(Image.new("RGB", (4, 4), "red"))
+    config = RetrievalConfig(mode="live", serper_api_key="s", cache_root=str(tmp_path), cache_fuzzy_threshold=0.8)
+    out = await Retrieval(config).call("google_search", {"query": "capital of australia"}, workspace)
+    assert out["cache"] == "fuzzy" and out["matched_query"] == "capital of austria"
+    exact = await Retrieval(config).call("google_search", {"query": "Capital of Austria"}, workspace)
+    assert exact["cache"] == "exact" and "matched_query" not in exact
 
 
 @pytest.mark.asyncio
@@ -80,6 +112,38 @@ def test_rebuild_index_makes_new_entries_fuzzy_matchable(tmp_path) -> None:
     assert SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("in Paris tallest building 2024")[1] == "fuzzy"
 
 
+def test_this_process_entries_are_fuzzy_matchable_before_any_rebuild(tmp_path) -> None:
+    # No master.db yet: the in-memory local tier alone must serve a near match, and the new norm
+    # must reach this process's shard for the next rebuild.
+    cache = SearchCache(str(tmp_path), fuzzy_threshold=0.8)
+    cache.put_search(
+        "tallest building in Paris 2024", {"organic": [{"title": "Tour Montparnasse"}]}, "exa", "us", "en"
+    )
+    assert not os.path.exists(master_db_path(str(tmp_path)))
+    results, kind, matched = cache.get_search("in Paris tallest building 2024")
+    assert kind == "fuzzy" and matched == "tallest building in Paris 2024"
+    assert results["organic"][0]["title"] == "Tour Montparnasse"
+    shards = list((tmp_path / "index").glob("search_norms_*.txt"))
+    assert [s.read_text().splitlines() for s in shards] == [["tallest building in paris 2024"]]
+    # A second put of the same norm is not written to the shard again.
+    cache.put_search("Tallest building in Paris 2024", {"organic": []}, "exa", "us", "en")
+    assert shards[0].read_text().splitlines() == ["tallest building in paris 2024"]
+
+
+def test_rebuild_index_reads_norms_from_shards(tmp_path) -> None:
+    from responses_api_agents.agentic_mme_agent.search_cache import rebuild_index
+    from responses_api_agents.agentic_mme_agent.sqlite_fuzzy_index import SqliteFuzzyIndex
+
+    _seed(tmp_path, "who painted the sistine chapel ceiling", {"organic": []})
+    # A norm another process recorded in its shard, with no entry file of its own here.
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "search_norms_node7_123.txt").write_text("who designed the louvre pyramid\n\n")
+    assert rebuild_index(str(tmp_path)) == 2
+    index = SqliteFuzzyIndex(str(tmp_path), threshold=0.8)
+    assert index.lookup("the louvre pyramid who designed") == "who designed the louvre pyramid"
+    assert index.lookup("sistine chapel ceiling who painted the") == "who painted the sistine chapel ceiling"
+
+
 def test_entries_are_shared_readable_under_a_strict_umask(tmp_path) -> None:
     import os
     import stat
@@ -103,6 +167,6 @@ def test_unwritable_cache_never_fails_the_caller(tmp_path) -> None:
     os.chmod(tmp_path / "search", 0o500)
     try:
         _seed(tmp_path, "read only cache", {"organic": []})  # must not raise
-        assert SearchCache(str(tmp_path), fuzzy_threshold=0).get_search("read only cache") == (None, "miss")
+        assert SearchCache(str(tmp_path), fuzzy_threshold=0).get_search("read only cache") == (None, "miss", None)
     finally:
         os.chmod(tmp_path / "search", 0o700)

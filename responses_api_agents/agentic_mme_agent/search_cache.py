@@ -79,7 +79,7 @@ def _numbers(norm: str) -> set[str]:
 
 
 class SearchCache:
-    def __init__(self, root: str, fuzzy_threshold: float = 0.8, write: bool = True) -> None:
+    def __init__(self, root: str, fuzzy_threshold: float = 0.0, write: bool = True) -> None:
         self.root = root
         self.write = write
         # With no master.db yet the index still matches this process's own new entries (local tier).
@@ -117,20 +117,23 @@ class SearchCache:
                 os.remove(tmp)
 
     # ---- search -------------------------------------------------------------------------------
-    def get_search(self, query: str) -> tuple[dict[str, Any] | None, str]:
-        """(Serper-shaped results, "exact" | "fuzzy" | "miss")."""
+    def get_search(self, query: str) -> tuple[dict[str, Any] | None, str, str | None]:
+        """(Serper-shaped results, "exact" | "fuzzy" | "miss", the cached query a fuzzy hit answers).
+
+        A fuzzy hit answers a different, similar query; callers must show that query to the model.
+        """
         norm = normalize_query(query)
         entry = self._read("search", norm)
         if entry and isinstance(entry.get("results"), dict):
-            return entry["results"], "exact"
+            return entry["results"], "exact", None
         if self.fuzzy is not None and norm:
             match = self.fuzzy.lookup(norm)
             # A near-identical query about another year / quantity is a different question.
             if match and _numbers(match) == _numbers(norm):
                 entry = self._read("search", match)
                 if entry and isinstance(entry.get("results"), dict):
-                    return entry["results"], "fuzzy"
-        return None, "miss"
+                    return entry["results"], "fuzzy", entry.get("query") or match
+        return None, "miss", None
 
     def put_search(self, query: str, results: dict[str, Any], provider: str, gl: str, hl: str) -> None:
         norm = normalize_query(query)
