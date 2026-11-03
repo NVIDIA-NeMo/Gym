@@ -7183,6 +7183,30 @@ def test_an_untrained_callers_call_keeps_its_own_sampling_and_is_flagged(tmp_pat
     assert sent["_headers"] == {"x-ng-sampling": "null"}
 
 
+async def test_a_null_calls_header_reaches_the_wire(monkeypatch):
+    """vllm_model hands x-ng-sampling: null to the client (see above); the client must put it on the HTTP request.
+
+    NeMo RL's vLLM skips its train/val check only on that header, so losing it fails every judge call there.
+    """
+
+    class Sent(Exception):
+        pass
+
+    captured: dict[str, Any] = {}
+
+    async def fake_request(**kwargs: Any) -> None:
+        captured.update(kwargs)
+        raise Sent
+
+    monkeypatch.setattr("nemo_gym.client.openai_client.request", fake_request)
+    client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://engine/v1", default_headers={"x-default": "1"})
+    with raises(Sent):
+        await client.create_chat_completion(_headers={"x-ng-sampling": "null"}, model="m", messages=[])
+    assert captured["headers"]["x-ng-sampling"] == "null"
+    assert captured["headers"]["x-default"] == "1"
+    assert captured["headers"]["Authorization"] == "Bearer abc"
+
+
 def test_a_pinned_server_refuses_a_training_frameworks_values(tmp_path):
     server = _sampling_model_server(tmp_path, required=False, sampling_overrides={"temperature": 1.0})
     provider = _sampling_provider()
@@ -7195,14 +7219,32 @@ def test_a_pinned_server_refuses_a_training_frameworks_values(tmp_path):
         f"/ng-sampling/{segment}/v1/responses", json={"input": "task"}
     )
 
-    assert response.status_code == 500
-    assert "sampling_overrides" in response.text
+    # A configuration conflict, not a transient failure: 409 ends the rollout instead of retrying it.
+    assert response.status_code == 409
+    assert "sampling_overrides ['temperature']" in response.text
     provider.create_chat_completion.assert_not_awaited()
 
 
 def test_a_trained_agents_server_cannot_also_pin_sampling(tmp_path):
-    with raises(ValueError, match="cannot set sampling_overrides"):
-        _sampling_model_server(tmp_path, sampling_overrides={"temperature": 1.0})
+    with raises(ValueError, match=r"cannot set sampling_overrides \['temperature'\]"):
+        _sampling_model_server(tmp_path, sampling_overrides={"temperature": 1.0, "logprobs": True})
+
+
+def test_a_trained_agents_server_may_pin_what_the_engine_reports(tmp_path):
+    """Score centering pins logprobs and top_logprobs on the policy's server; they do not change sampling."""
+    server = _sampling_model_server(tmp_path, sampling_overrides={"logprobs": True, "top_logprobs": 16})
+    provider = _sampling_provider()
+    server._clients = [provider]
+    segment = encode_model_sampling(ModelCallSampling(temperature=0.6, top_p=0.95))
+
+    response = TestClient(server.setup_webserver()).post(
+        f"/ng-rollout/trained-a1/ng-sampling/{segment}/v1/responses", json={"input": "task"}
+    )
+
+    assert response.status_code == 200, response.text
+    sent = provider.create_chat_completion.await_args.kwargs
+    assert (sent["temperature"], sent["top_p"]) == (0.6, 0.95)
+    assert (sent["logprobs"], sent["top_logprobs"]) == (True, 16)
 
 
 class TestEndpointFile:
