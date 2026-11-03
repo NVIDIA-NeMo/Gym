@@ -1,0 +1,55 @@
+# Drop-in replacement for the equivalence_llm_judge reward: the same datasets and agent, graded by Nemotron Decide
+# instead of a generative LLM judge. The row's expected_answer is shown to the model as state.reference.
+#   reward_mode: pass        -> binary reward like the LLM judge's [[A=B]] verdict
+#   reward_mode: probability -> dense p(equivalent) reward
+equivalence_decide_judge:
+  resources_servers:
+    decide_judge:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Short-answer equivalence graded by Nemotron Decide (replaces the LLM judge)
+      value: Same task as equivalence_llm_judge at decision-model cost and latency
+      decide:
+        base_url: ${oc.env:DECIDE_BASE_URL,http://localhost:8770}
+        api: ${oc.env:DECIDE_API,systemone}
+        model: nemotron-decide
+        api_key_env: DECIDE_API_KEY
+      reward_mode: ${oc.env:DECIDE_REWARD_MODE,pass}
+      pass_threshold: 0.5
+      reference_fields: [expected_answer, question]
+      include_tool_calls: false
+      allow_row_checklist: false
+      checklist:
+        - name: equivalent
+          question: >-
+            Is the final answer in the response equivalent in meaning to the reference expected_answer (the same
+            entity, value or option, ignoring formatting, capitalization and the \boxed{} wrapper)?
+          weight: 1.0
+          required: true
+        - name: boxed
+          question: Does the response put its final answer inside \boxed{}?
+          weight: 0.0
+equivalence_decide_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: equivalence_decide_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        license: "TBD"
+        jsonl_fpath: resources_servers/equivalence_llm_judge/data/example.jsonl
+
+equivalence_decide_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: equivalence_decide_judge_simple_agent
