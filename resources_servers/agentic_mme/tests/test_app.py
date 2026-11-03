@@ -111,9 +111,7 @@ def completion(content: str):
             "created": 0,
             "model": "judge",
             "object": "chat.completion",
-            "choices": [
-                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}
-            ],
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
         }
     )
 

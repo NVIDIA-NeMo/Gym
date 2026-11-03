@@ -166,7 +166,9 @@ class AgenticMMEServer(SimpleResourcesServer):
         if self._judge_slots is None:
             self._judge_slots = asyncio.Semaphore(self.config.judge_max_concurrency)
         prompt = JUDGE_USER.format(
-            question=question, expected=expected, extracted=extracted or "(nothing)",
+            question=question,
+            expected=expected,
+            extracted=extracted or "(nothing)",
             text=text[-self.config.judge_max_text_chars :],
         )
         params = {

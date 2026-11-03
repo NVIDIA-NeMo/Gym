@@ -80,7 +80,9 @@ def convert(task: dict, root: Path) -> dict:
         content.append({"type": "input_text", "text": f"Image {index}."})
         content.append({"type": "input_image", "detail": "auto", "image_url": image_data_url(root / image)})
     content.append({"type": "input_text", "text": task["input"]["prompt"]})
-    answer_checks = [c["answer_check"] for c in task["process_evaluation"].get("checkpoints", []) if "answer_check" in c]
+    answer_checks = [
+        c["answer_check"] for c in task["process_evaluation"].get("checkpoints", []) if "answer_check" in c
+    ]
     match_type = MATCH_TYPES.get((answer_checks[-1].get("match_type") if answer_checks else None) or "", "contains")
     return {
         "responses_create_params": {
