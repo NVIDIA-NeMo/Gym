@@ -35,8 +35,8 @@ from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.agent_utils.sandbox_observation import lifecycle_observation
-from nemo_gym.agent_utils.verify_call import is_verify_transport_error
+from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+from nemo_gym.agents.utils.verify_call import is_verify_transport_error
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId, current_verifier_invocation_id

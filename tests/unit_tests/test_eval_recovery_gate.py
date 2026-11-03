@@ -352,7 +352,7 @@ def test_terminal_and_exhausted_verification_failures_keep_their_state() -> None
 
 
 def test_an_explicit_fail_policy_still_stops_a_failed_verification_as_settled() -> None:
-    from nemo_gym.agent_outcome import OutcomeAction
+    from nemo_gym.agents.agent_outcome import OutcomeAction
     from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
 
     policy = RecoveryOutcomePolicyConfig(by_failure_kind={"collection_dispatch_failed": OutcomeAction.FAIL})

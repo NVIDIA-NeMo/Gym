@@ -23,7 +23,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import OutcomeAction
+from nemo_gym.agents.agent_outcome import OutcomeAction
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor

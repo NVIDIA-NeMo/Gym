@@ -360,7 +360,7 @@ beside a declared verifier image, `image`, `build` and `pull_policy: build` too;
 beside `services`, `name`, `version` and `x-` fields (`networks`, `volumes`, `configs`, `secrets`, `include`, ...).
 Harbor stacks the whole file on its verifier project (`_docker_compose_paths` in docker.py at v0.22.0), so every such
 key shapes Harbor's verifier container, while this server starts the verifier from `task.toml`'s environment and the
-verifier image and reads the file's `services` alone (`nemo_gym/tasks/harbor/verifier_env.py`); grading it without
+verifier image and reads the file's `services` alone (`nemo_gym/data/tasks/harbor/verifier_env.py`); grading it without
 the key would differ from Harbor without a word. Among the hub datasets, arc-crm-6's six separate-verifier tasks are
 refused this way (their file sets `network_mode`, `pids_limit`, `security_opt` and `cap_drop` on `main`);
 cadir-ci-benchmark's two ship the `main`-only shape this rule honours, but they are refused at load before the file
@@ -375,7 +375,7 @@ declared images lack the helper its Dockerfiles copy in). The record names the t
 
 The image is named the way Harbor names it, `hb__<hash>`, where the hash is Harbor's 32-character content
 hash of the `environment/` folder, its environment id (vendored from Harbor v0.22.0 in
-`nemo_gym/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
+`nemo_gym/data/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
 Gym. Builds are configured by a top-level `builds:` block in the merged configuration (`env.yaml`, a
 `--config` file, or `++builds.<setting>=<value>` on the command line; explicit settings apply over the
 defaults below):
@@ -478,7 +478,7 @@ builds a task with (service `main`, `build.context` the task's `environment/` fo
 when the task ships one, and runs
 `docker compose --project-directory <environment/> -f <harbor file> [-f <task file>] -f <images file> build`, as
 `DockerEnvironment.start()` does (`harbor/environments/docker/docker.py` at v0.22.0, cited by permalink in
-`nemo_gym/tasks/harbor/image_build.py`), with one generated override of Gym's own passed last, the way Harbor
+`nemo_gym/data/tasks/harbor/image_build.py`), with one generated override of Gym's own passed last, the way Harbor
 passes its own generated overrides after the task's file: `docker-compose-images.yaml`, the `image` of every
 service built (`hb__<hash>` for `main`, `hb__<hash>-<service>` per sidecar), so Gym's names win over a sidecar's
 own `image:` without a `docker tag` step. One compose build builds every service with a `build:` section, as
@@ -732,7 +732,7 @@ can be empty if optional log collection fails.
 
 Every run through this server (`gym dataset validate` and `gym eval run <task target>`) also leaves one
 per-run summary beside its rollouts, `<rollouts stem>_run_summary.json` (`rollouts_run_summary.json` by
-default; `nemo_gym.tasks.harbor.run_summary`), so a results folder explains itself: the command, target,
+default; `nemo_gym.data.tasks.harbor.run_summary`), so a results folder explains itself: the command, target,
 taskset and agent; the dataset's folder, source and digests; the `task_source` the run config declares for the
 taskset (`harbor_<taskset>_agent`, known before dispatch) and, as a cross-check, the one the result rows carry
 (`rows_task_source`, `null` without rows or when they disagree); the files of the run under `files` (rollouts,
@@ -1069,7 +1069,7 @@ num_repeats = 3
 A task folder may carry `task_data.json`, a JSON object of the task's own field values; the loader writes them into the
 row's `task_input.task_data` beside `_ng_digest` and `_ng_dataset_digest`, and the file enters the task digest. A dataset
 that ships `task_data.py` beside `dataset.toml`, a module exporting one Pydantic model `TaskData`, types those fields
-(`nemo_gym.tasks.harbor.task_data`). Prepare imports it once per dataset and checks every task folder's
+(`nemo_gym.data.tasks.harbor.task_data`). Prepare imports it once per dataset and checks every task folder's
 `task_data.json` against it before any image is recorded or built (and the loaded tasks again before a row is
 written), refusing the dataset, naming the task, when a task's fields do not satisfy the model or carry a key it does
 not declare (unknown keys fail whatever the model's `extra` setting: the model is validated with extras forbidden, so
@@ -1090,7 +1090,7 @@ report. A dataset without the module is checked for the reserved keys only, as b
 ## Authoring Gym datasets
 
 Three authoring shapes sit on top of Harbor's task folder, all rendered to plain files before any server reads them
-(`nemo_gym.tasks.harbor.parameterized`, `python_verifier`, `publish`):
+(`nemo_gym.data.tasks.harbor.parameterized`, `python_verifier`, `publish`):
 
 - **Parameterized tasks.** A template folder is a task folder with `tasks.jsonl` beside its `task.toml`, one row per
   task (`{"task_id": "...", "task_data": {...}}`, or the fields flat beside `task_id`). Prepare renders it into
@@ -1157,7 +1157,7 @@ Three authoring shapes sit on top of Harbor's task folder, all rendered to plain
 - **`solution/answer.md`.** A task verified by its answer rather than by a script ships the reference answer as
   `solution/answer.md` (or `answer.template.md` in a template). The oracle writes the file's text to `answer.md` in
   the working directory, as the task user, with the command the published `solve.sh` runs under Harbor's oracle
-  (`printf '%s' <answer> > answer.md`, `nemo_gym.tasks.harbor.publish.answer_write_command`), and submits the same
+  (`printf '%s' <answer> > answer.md`, `nemo_gym.data.tasks.harbor.publish.answer_write_command`), and submits the same
   text as its response. The oracle reads the file as bytes (`base64 /solution/answer.md` over the sandbox exec, decoded
   on the host), not as the exec's raw stdout: a provider may rebuild stdout from per-line messages (OpenSandbox's
   foreground exec, its default when `operations.background_exec` is unset, drops a trailing newline, doubles blank
@@ -1434,7 +1434,7 @@ harbor_environment_server:
 ```
 
 **Files.** Each file is merged onto the task's Compose document, in order, the way Compose merges `-f` files
-(`nemo_gym/tasks/harbor/compose_overlay.py`): mappings key by key; sequences appended, the keyed ones (`ports` by
+(`nemo_gym/data/tasks/harbor/compose_overlay.py`): mappings key by key; sequences appended, the keyed ones (`ports` by
 host, published port, target and protocol; `volumes` by target; `expose`, `cap_add`, `env_file`, ... by value)
 unique on their key with the later entry winning; `environment`, `labels`, `extra_hosts` and `sysctls` as mappings
 whatever their written form; `depends_on` and a service's `networks` as mappings; `command`, `entrypoint` and

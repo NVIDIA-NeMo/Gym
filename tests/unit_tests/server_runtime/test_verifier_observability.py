@@ -12,11 +12,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.failure_transport import RequestFailureLog
+from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.server_runtime.base_resources_server import (
@@ -664,7 +664,7 @@ def test_the_resources_route_names_its_server_in_the_grading_record():
 
 @pytest.mark.asyncio
 async def test_a_judge_request_through_nemo_gym_async_openai_saves_no_grading_record(monkeypatch):
-    from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+    from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
 
     sent = AsyncMock()
     monkeypatch.setattr(NeMoGymAsyncOpenAI, "_request_with_retry", sent)
