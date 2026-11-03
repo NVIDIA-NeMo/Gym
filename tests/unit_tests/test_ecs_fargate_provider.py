@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,

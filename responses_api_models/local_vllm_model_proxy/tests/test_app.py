@@ -15,7 +15,7 @@
 from unittest.mock import MagicMock
 
 import responses_api_models.local_vllm_model_proxy.app
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_models.local_vllm_model_proxy.app import (
     LocalVLLMModelProxyServer,
     LocalVLLMModelProxyServerConfig,

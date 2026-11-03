@@ -22,19 +22,18 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
-from nemo_gym.judge import judge_failsafe
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.server_runtime import ReverifyMode
+from nemo_gym.verification import exercise_verifier_fixture, judge_failsafe
 from resources_servers.equivalence_llm_judge.app import (
     VERIFIER_FIXTURE,
     LLMJudgeResourcesServer,
@@ -894,7 +893,7 @@ async def test_domain_aggregation_runs_off_event_loop():
     import threading
     from unittest.mock import patch
 
-    from nemo_gym.config_types import AggregateMetrics
+    from nemo_gym.config import AggregateMetrics
 
     config = LLMJudgeResourcesServerConfig(
         host="127.0.0.1",

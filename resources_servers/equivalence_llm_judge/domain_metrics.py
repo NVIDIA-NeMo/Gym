@@ -6,7 +6,7 @@ import math
 from typing import Any
 from urllib.parse import quote
 
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 
 
 def _modality(row: dict[str, Any]) -> str | None:

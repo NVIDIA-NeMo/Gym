@@ -28,8 +28,24 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym import failure_kinds
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BenchmarkDatasetConfig,
+    DatasetConfig,
+    get_global_config_dict,  # same import as resources_servers/swebench_pro/app.py
+)
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, failure_kinds
+from nemo_gym.data import normalize_task_fields
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.sandbox import (
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionResponse,
@@ -39,14 +55,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BenchmarkDatasetConfig, DatasetConfig
-from nemo_gym.global_config import get_global_config_dict  # same import as resources_servers/swebench_pro/app.py
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader.execution import (
     CLEANUP_STATUSES,
     FAILED_CATEGORIES,
@@ -71,7 +79,7 @@ _RESOLVED = frozenset({"deleted", "not_created"})
 # Candidate-code extraction: first ```python fence, else first bare ``` fence, else the whole response text.
 _PYTHON_FENCE = re.compile(r"```python[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 _BARE_FENCE = re.compile(r"```[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
-# Framework-owned row keys that are never task data: the routing keys nemo_gym/task_materialization.py strips
+# Framework-owned row keys that are never task data: the routing keys nemo_gym/data/task_materialization.py strips
 # (agent_ref, task_source, skills_ref) and the keys rollout collection and reverify attach to a row. Every _ng_* key
 # is dropped too.
 _FRAMEWORK_ROW_KEYS = frozenset(
@@ -519,6 +527,13 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             task = _task(body)
         except Exception:
             return self._response(body, None, "task_invalid", terminal=True)
+        if (
+            body.response.get("status") == "incomplete"
+            and (body.response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
+            and not body.response.get("error")
+        ):
+            # Exhausting the generation budget is a final model outcome, not a transient failure.
+            return self._response(body, task, "response_truncated", scored=True)
         source = _source(body.response)
         if source is None:
             if _needs_regeneration(body.response):

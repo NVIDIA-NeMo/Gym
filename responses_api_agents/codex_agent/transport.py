@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 from aiohttp import web
 
-from nemo_gym.server_utils import request
+from nemo_gym.client import request
 
 
 @asynccontextmanager

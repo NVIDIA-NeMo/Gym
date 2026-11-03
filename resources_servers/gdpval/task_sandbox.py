@@ -21,9 +21,8 @@ from typing import Any, Mapping, Optional
 
 from fastapi import HTTPException
 
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import AsyncSandbox, SandboxConfig, resolve_provider_config
 from resources_servers.gdpval import persisted_layout
 
 

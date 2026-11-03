@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics
 
 
@@ -46,8 +46,8 @@ def test_hle_preparation_preserves_domain_labels(monkeypatch, tmp_path, include_
     import sys
 
     import benchmarks.hle.prepare as prepare
-    import nemo_gym.global_config as global_config
-    import nemo_gym.prompt as prompt
+    import nemo_gym.config.global_config as global_config
+    import nemo_gym.data.prompt as prompt
 
     data = {
         "image": "image-data" if include_vision else "",
