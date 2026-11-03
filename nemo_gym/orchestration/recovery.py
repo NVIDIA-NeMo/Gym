@@ -3537,7 +3537,10 @@ def gate_task_summary(
         if states.get(state):
             errors.append(f"{states[state]} {label}: {decision.identities[state.value][:5]}")
     if score is None or not math.isfinite(score):
-        errors.append("score unavailable: no requested metric was read")
+        errors.append(
+            "score unavailable: no requested metric was read (pass --score-key, and --score-agent or "
+            "--score-environment for a Gym aggregate)"
+        )
     if decision.duplicate_results:
         errors.append(f"duplicate result rows: {decision.duplicate_results[:5]}")
     if decision.action == RecoveryAction.STOP:

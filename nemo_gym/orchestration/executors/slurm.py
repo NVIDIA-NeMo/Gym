@@ -1087,7 +1087,15 @@ def _remote_managed_evidence(
     try:
         command = f"python -c {shlex.quote(_remote_managed_reader_script())} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
         entrypoint = render_driver_entrypoint(
-            repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True, private_uv=True
+            repo=install.repo,
+            ref=install.ref,
+            prepare_cmd=None,
+            command=command,
+            cleanup=True,
+            private_uv=True,
+            # The reader asks the tracking server for the exported run's status (`query_mlflow_status`), as the
+            # login-host export does; without the client that read fails and delivery stays unverified.
+            extras=("mlflow",),
         )
         # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
         # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
