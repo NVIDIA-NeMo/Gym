@@ -1056,3 +1056,101 @@ class TestReviewFindingPins:
                     "nemo_gym.server_runtime.base_resources_server", fromlist=["AggregateMetricsRequest"]
                 ).AggregateMetricsRequest(verify_responses=[])
             )
+
+
+class TestDeadlineEvidence:
+    """Each limit RemoteAgent enforces leaves typed deadline evidence the timeout reader counts, naming the limit, its
+    enforcer and the active operation, with the error that ended it; ordinary failures leave none."""
+
+    @staticmethod
+    def _observed(monkeypatch):
+        observed = []
+        monkeypatch.setattr(remote_agent_app, "observe_failure", observed.append)
+        return observed
+
+    @staticmethod
+    def _deadline(result, observed, *, limit, kind, operation, stage, configured_s):
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        [timeout] = result["timeouts"]
+        assert (timeout["limit"], timeout["enforcer"], timeout["evidence"]) == (limit, "remote_agent", "internal")
+        assert timeout["configured_s"] == configured_s and timeout["elapsed_s"] >= 0
+        timed_out = classify_timeout(result)
+        assert (timed_out.evidence, timed_out.limit, timed_out.enforcer) == ("typed", limit, "remote_agent")
+        [failure] = observed
+        assert failure.event_id == timeout["event_id"] and failure.failure_kind == kind
+        assert (failure.operation, failure.stage) == (operation, stage)
+        assert failure.__cause__ is not None  # the error that ended the step is kept
+        # Recorded, not routed differently: the row is the same retryable sentinel as before.
+        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS and NG_TERMINAL_KEY not in result
+
+    async def test_a_remote_request_past_its_deadline_names_the_request_limit(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=asyncio.TimeoutError()))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        self._deadline(
+            result,
+            observed,
+            limit="remote_responses_timeout_secs",
+            kind="remote_agent:request_deadline",
+            operation="remote_agent.agent",
+            stage="agent",
+            configured_s=1800.0,
+        )
+
+    async def test_a_run_past_its_deadline_while_waiting_on_the_model_names_that_wait(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+
+        async def slow_request(*args, **kwargs):
+            await asyncio.sleep(30)
+
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=slow_request), run_timeout_secs=0.05)
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "during agent" in result["error"]
+        self._deadline(
+            result,
+            observed,
+            limit="run_timeout_secs",
+            kind="remote_agent:run_deadline",
+            operation="remote_agent.agent",
+            stage="agent",
+            configured_s=0.05,
+        )
+
+    async def test_a_run_past_its_deadline_during_verification_names_the_verification(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        agent, _, server_client = make_wired_agent(
+            monkeypatch, scripted_service(_MINIMAL_TRAJECTORY), run_timeout_secs=0.2
+        )
+        wired = server_client.post.side_effect
+
+        async def slow_verify(server_name, url_path, **kwargs):
+            if url_path == "/verify":
+                await asyncio.sleep(30)
+            return await wired(server_name, url_path, **kwargs)
+
+        server_client.post.side_effect = slow_verify
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "during verify" in result["error"]
+        self._deadline(
+            result,
+            observed,
+            limit="run_timeout_secs",
+            kind="remote_agent:run_deadline",
+            operation="remote_agent.verify",
+            stage="verification",
+            configured_s=0.2,
+        )
+
+    async def test_a_healthy_run_and_an_http_error_carry_no_deadline(self, monkeypatch) -> None:
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        observed = self._observed(monkeypatch)
+        agent, _, _ = make_wired_agent(monkeypatch, scripted_service(_MINIMAL_TRAJECTORY))
+        healthy = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "timeouts" not in healthy and classify_timeout(healthy) is None
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(return_value=FakeRemoteResponse(500, b"kaboom")))
+        failed = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert failed[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
+        assert "timeouts" not in failed and classify_timeout(failed) is None
+        assert observed == []
