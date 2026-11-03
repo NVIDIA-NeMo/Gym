@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Run the sandbox runner as a process against a stand-in for the OpenHands SDK."""
+
+import json
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from responses_api_agents.openhands_agent.sandbox import RUNNER_SOURCE
+
+
+# Records what the runner built and lets each test choose how the conversation ends.
+STUB = """
+import json, os, time
+
+__version__ = "1.59.0"
+LOG = os.environ["STUB_LOG"]
+
+def note(**entry):
+    with open(LOG, "a") as handle:
+        handle.write(json.dumps(entry) + "\\n")
+
+class Event:
+    def __init__(self, kind, **fields):
+        self.fields = {"kind": kind, **fields}
+    def model_dump_json(self):
+        return json.dumps(self.fields)
+
+class LLM:
+    def __init__(self, **settings):
+        self.settings = settings
+        note(llm=settings)
+    def model_copy(self, update):
+        return LLM(**{**self.settings, **update})
+
+class AgentContext:
+    def __init__(self, **fields):
+        note(context=fields)
+
+class Agent:
+    def __init__(self, **fields):
+        note(agent={"tools": [tool.spec for tool in fields["tools"]], "condenser": fields["condenser"] is not None})
+
+class Tool:
+    def __init__(self, name, params=None):
+        self.spec = {"name": name, "params": params or {}}
+
+class _Status:
+    value = "running"
+
+class _State:
+    execution_status = _Status()
+
+class _Stats:
+    def model_dump(self, mode):
+        return {"usage_to_metrics": {}}
+
+class Conversation:
+    def __init__(self, agent, workspace, persistence_dir, callbacks, max_iteration_per_run, visualizer, delete_on_close):
+        note(conversation={"workspace": workspace, "persistence_dir": persistence_dir, "max": max_iteration_per_run})
+        self.callbacks = callbacks
+        self.state = _State()
+        self.conversation_stats = _Stats()
+    def send_message(self, text):
+        for callback in self.callbacks:
+            callback(Event("MessageEvent", source="user", text=text))
+    def run(self):
+        mode = os.environ["STUB_MODE"]
+        for callback in self.callbacks:
+            callback(Event("ActionEvent", tool_call_id="c1", llm_response_id="r1"))
+        if mode == "finish":
+            _State.execution_status.value = "finished"
+        elif mode == "error":
+            try:
+                error = RuntimeError("upstream said no")
+                error.status_code = 503
+                raise error
+            except RuntimeError as cause:
+                raise ValueError("conversation failed") from cause
+        else:
+            note(running=True)
+            while True:
+                time.sleep(0.05)
+    def close(self):
+        note(closed=True)
+"""
+
+
+@pytest.fixture
+def stub(tmp_path: Path) -> Path:
+    root = tmp_path / "stub"
+    modules = {
+        "openhands/__init__.py": "",
+        "openhands/sdk/__init__.py": STUB,
+        "openhands/tools/__init__.py": "",
+        "openhands/tools/file_editor.py": "class FileEditorTool:\n    name = 'file_editor'\n",
+        "openhands/tools/task_tracker.py": "class TaskTrackerTool:\n    name = 'task_tracker'\n",
+        "openhands/tools/terminal.py": "class TerminalTool:\n    name = 'terminal'\n",
+        "openhands/tools/preset/__init__.py": "",
+        "openhands/tools/preset/default.py": "def get_default_condenser(llm):\n    return llm\n",
+    }
+    for name, source in modules.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(source)
+    return root
+
+
+def start(tmp_path: Path, stub: Path, mode: str) -> tuple[subprocess.Popen, Path]:
+    session = tmp_path / "session"
+    (session / "state").mkdir(parents=True)
+    (tmp_path / "work").mkdir()
+    runner_input = {
+        "workdir": str(tmp_path / "work"),
+        "prompt": "Build it",
+        "system_message_suffix": "Extra",
+        "llm": {"model": "openai/m", "base_url": "http://model/ng-rollout/r/v1"},
+        "condenser": True,
+        "max_iterations": 7,
+        "state_dir": str(session / "state"),
+        "events_path": str(session / "events.jsonl"),
+        "result_path": str(session / "result.json"),
+    }
+    (session / "input.json").write_text(json.dumps(runner_input))
+    env = {"PYTHONPATH": str(stub), "STUB_MODE": mode, "STUB_LOG": str(tmp_path / "stub.log"), "PATH": "/usr/bin:/bin"}
+    process = subprocess.Popen([sys.executable, str(RUNNER_SOURCE), str(session / "input.json")], env=env)
+    return process, session
+
+
+def notes(tmp_path: Path) -> list[dict]:
+    return [json.loads(line) for line in (tmp_path / "stub.log").read_text().splitlines()]
+
+
+def events(session: Path) -> list[dict]:
+    return [json.loads(line) for line in (session / "events.jsonl").read_text().splitlines()]
+
+
+def test_finished_run_records_events_result_and_the_harness_configuration(tmp_path, stub):
+    process, session = start(tmp_path, stub, "finish")
+    assert process.wait(timeout=60) == 0
+    result = json.loads((session / "result.json").read_text())
+    assert (result["status"], result["execution_status"], result["openhands_version"]) == (
+        "returned",
+        "finished",
+        "1.59.0",
+    )
+    recorded = events(session)
+    assert [event["kind"] for _, event in recorded] == ["MessageEvent", "ActionEvent"]
+    assert all(isinstance(seen_at, float) for seen_at, _ in recorded)
+    log = notes(tmp_path)
+    terminal = next(entry["agent"]["tools"][0] for entry in log if "agent" in entry)
+    # The subprocess terminal keeps tool shells in the supervised process tree; history stays in the session.
+    assert terminal == {
+        "name": "terminal",
+        "params": {"terminal_type": "subprocess", "env": {"HISTFILE": str(session / "state/bash_history")}},
+    }
+    condenser_llm = [entry["llm"] for entry in log if "llm" in entry][1]
+    assert condenser_llm["base_url"] == "http://model/ng-rollout/r/v1" and condenser_llm["usage_id"] == "condenser"
+    assert {"closed": True} in log
+
+
+def test_error_records_the_exception_chain_with_its_status(tmp_path, stub):
+    process, session = start(tmp_path, stub, "error")
+    assert process.wait(timeout=60) == 1
+    result = json.loads((session / "result.json").read_text())
+    assert result["status"] == "error"
+    assert [(entry["type"], entry["status_code"]) for entry in result["error"]] == [
+        ("ValueError", None),
+        ("RuntimeError", 503),
+    ]
+
+
+def test_sigterm_keeps_partial_events_and_closes_the_terminal(tmp_path, stub):
+    process, session = start(tmp_path, stub, "hang")
+    deadline = time.monotonic() + 60
+    while not (tmp_path / "stub.log").exists() or {"running": True} not in notes(tmp_path):
+        assert time.monotonic() < deadline and process.poll() is None
+        time.sleep(0.05)
+    process.send_signal(signal.SIGTERM)
+    assert process.wait(timeout=60) == 128 + signal.SIGTERM
+    result = json.loads((session / "result.json").read_text())
+    assert result["status"] == "terminated"
+    assert [event["kind"] for _, event in events(session)] == ["MessageEvent", "ActionEvent"]
+    assert {"closed": True} in notes(tmp_path)
