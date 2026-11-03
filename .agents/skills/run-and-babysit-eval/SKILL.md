@@ -1,5 +1,5 @@
 ---
-name: gym-eval
+name: run-and-babysit-eval
 description: >
   Take a NeMo Gym evaluation from a ready config to a trusted result: submit it, let the resumable
   Slurm chain continue through walltime limits, preemption and node loss, inspect and recover the
@@ -7,7 +7,7 @@ description: >
   gates, and decide when to stop a chain or start a fresh run. Use when a working Gym config
   (benchmark, model, compute) exists and the run has to finish with a result you can rely on. Not
   for building a benchmark or harness (use add-benchmark or add-harness) or for setting up a
-  model's serving config (use gym-add-model-config). Triggered by: "run the eval", "submit this
+  model's serving config (use add-model-eval-config). Triggered by: "run the eval", "submit this
   benchmark", "the job timed out", "the chain stopped", "resume the run", "recover the run",
   "is the run done", "inspect the run", "gate the score", "restart the evaluation".
 ---
@@ -338,7 +338,7 @@ again, not the evaluation. For the evaluation itself, only `num_repeats` and the
 (`--concurrency`) may change from the command line or a benchmark's `run`; a smoke run also sets `limit`
 (step 1). Never change the benchmark, the judge, or its token budgets and timeouts, which are the
 evaluation's identity. The model section is yours
-([gym-add-model-config](../gym-add-model-config/SKILL.md)). A slow deployment produces timeouts and
+([add-model-eval-config](../add-model-eval-config/SKILL.md)). A slow deployment produces timeouts and
 truncated answers that count as model failures: a policy-model response timeout is the model's unless
 the call sets `--policy-timeout-counts-as-model false` (for a self-hosted evaluation that owns its
 serving; it moves the timeout to the evaluation side and changes nothing else). Keep the default whenever
