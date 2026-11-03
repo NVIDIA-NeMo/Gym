@@ -200,21 +200,20 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.models.token_capture import (
-    TokenCaptureConfig,
-    TokenCaptureStore,
+from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
-    installed_token_source,
     mask_incomplete_when_attributed_from_config,
     token_capture_dirs_from_config,
 )
-from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
+from nemo_gym.models.token_capture.protocols import installed_token_source
+from nemo_gym.models.token_capture.store import TokenCaptureStore
 from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 
 

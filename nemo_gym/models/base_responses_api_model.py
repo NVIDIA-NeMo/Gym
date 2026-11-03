@@ -79,12 +79,6 @@ from nemo_gym.models.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.models.token_capture import (
-    capture_tokens,
-    current_capture_context,
-    register_call_intent,
-    resolve_parent,
-)
 from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
@@ -93,6 +87,12 @@ from nemo_gym.models.token_capture.protocols import (
     LineageResolver,
 )
 from nemo_gym.models.token_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
+from nemo_gym.models.token_capture.sink import (
+    capture_tokens,
+    current_capture_context,
+    register_call_intent,
+    resolve_parent,
+)
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
