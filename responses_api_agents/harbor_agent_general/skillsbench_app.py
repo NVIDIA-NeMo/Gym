@@ -7,9 +7,8 @@ from pathlib import Path
 
 from harbor.models.job.config import JobConfig
 
-from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborAgentConfig, HarborRunRequest
 
 

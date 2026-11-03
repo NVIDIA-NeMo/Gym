@@ -11,8 +11,8 @@ from shlex import quote
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand
-from nemo_gym.agent_utils.supervisor_client import (
+from nemo_gym.agents.utils.sandbox_session import SandboxCommand
+from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,
     RUNNER_INTERPRETER,

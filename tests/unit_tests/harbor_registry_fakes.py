@@ -6,8 +6,8 @@
 ``conftest.py`` installs it (``fake_registry``, and ``no_real_registry`` for every ``test_harbor*`` module), and
 test_harbor_tasks.py and test_harbor_task_data.py read its ``resolved`` and ``missing`` state."""
 
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.registry import ImageConfigError
+from nemo_gym.data.tasks.harbor.dockerfile import RECORD_VERSION
+from nemo_gym.data.tasks.harbor.registry import ImageConfigError
 
 
 IMAGE_PATH = "/usr/local/bin:/usr/bin:/bin"

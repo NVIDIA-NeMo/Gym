@@ -42,7 +42,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from fastapi import FastAPI
 
 from nemo_gym.core.episode import _ROLLOUT_ID, current_rollout_id
-from nemo_gym.server_utils import install_request_context_isolation
+from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
 from tests.unit_tests.telemetry.conftest import requires_lens
 from tests.unit_tests.telemetry.test_propagation import (
     traces,  # noqa: F401  (fixture: real Lens providers, in-memory exporter)

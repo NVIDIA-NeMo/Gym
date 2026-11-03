@@ -30,12 +30,12 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from nemo_gym.server_runtime import ReverifyMode
-from nemo_gym.telemetry.resources_operations import ResourcesOperation
+from nemo_gym.telemetry import ResourcesOperation
 from nemo_gym.verification import JudgeError
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
@@ -1318,10 +1318,10 @@ async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
+    from nemo_gym.agents import agent_tools
     from nemo_gym.config import ResourcesServerRef
     from nemo_gym.core import NeMoGymResponse
     from nemo_gym.metrics import compute_pass_majority_metrics
-    from nemo_gym.sandbox import agent_tools
     from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer, LibraryJudgeMathVerifyRequest
 
     original = NeMoGymResponse.model_validate(

@@ -47,7 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
@@ -57,6 +57,7 @@ from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     ModelServerRef,
+    get_first_server_config_dict,
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
@@ -70,7 +71,6 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.server_utils import get_first_server_config_dict
 from nemo_gym.telemetry import Profiler
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
