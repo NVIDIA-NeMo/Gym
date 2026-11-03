@@ -291,6 +291,7 @@ def evaluate_record(
         transcript_completion_tokens=transcript_completion,
         capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in calls),
         capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
+        scored=type(record.get("reward")) in (int, float) and not record.get("mask_sample"),
         timing=read_rollout_timing(record),
     )
 
@@ -530,7 +531,7 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
     owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
     """
     # Lazy: rollout_collection imports this module.
-    from nemo_gym.rollouts.rollout_collection import is_omitted_rollout_row, is_unstarted_rollout_row
+    from nemo_gym.rollouts.rollout_collection import is_non_superseding_rollout_row, is_omitted_rollout_row
 
     failed: dict[tuple[Any, ...], dict[str, Any]] = {}
     any_sidecar = False
@@ -539,8 +540,9 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
         if failures_path_for(path).is_file():
             any_sidecar = True
             for row in _jsonl_rows(failures_path_for(path)):
-                # Main's rule: a row the dispatch budget never started is no attempt and selects nothing.
-                if is_unstarted_rollout_row(row):
+                # Main's rule: a row the dispatch budget never started is no attempt and selects nothing; nor does
+                # the evidence of a failed /run with routing off.
+                if is_non_superseding_rollout_row(row):
                     continue
                 failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
         if not materialized_path_for(path).is_file():
@@ -587,6 +589,7 @@ def _rollout_accounting(
     limits_source: LimitsSource | Mapping[str, LimitsSource],
     duplicated: int,
     run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
+    scored: set[tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
     """Project managed runs from selected history; preserve raw accounting for legacy runs.
 
@@ -596,12 +599,15 @@ def _rollout_accounting(
     in-memory coverage so this path never reloads large rollout records on SIGTERM.
     In a legacy sidecar, a ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
     rollout's latest execution and leaves it missing, and a row never started is skipped.
+    ``scored`` holds the ``landed`` keys whose records are all scored. It is ``None`` when the records were not
+    read, which leaves a legacy input's ``scored`` count unknown.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
     from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
     from nemo_gym.rollouts.rollout_collection import is_terminal_failure
 
-    expected = missing = not_started = omitted = final = not_final = 0
+    expected = missing = not_started = omitted = final = not_final = completed = 0
+    scored_count: int | None = 0
     by_class: Counter[str] = Counter()
     inventory_known = True
     any_sidecar = False
@@ -611,6 +617,9 @@ def _rollout_accounting(
             coverage = RolloutStore.read(path).coverage()
         if coverage is not None:
             expected += coverage["expected"]
+            completed += coverage["successful"]
+            if scored_count is not None:
+                scored_count += coverage["measured"]
             missing += coverage["missing"]
             not_started += coverage["not_started"]
             omitted += coverage["intentionally_omitted"]
@@ -624,6 +633,13 @@ def _rollout_accounting(
         landed_here = _landed_in(landed, source_index)
         legacy = _read_failures(landed_here, [path])
         any_sidecar = any_sidecar or legacy.any_sidecar
+        # Without an inventory every landed record counts; with one, only the rollouts it owes.
+        owed_here = landed_here if legacy.owed is None else landed_here & legacy.owed
+        completed += len(owed_here)
+        if scored is None:
+            scored_count = None
+        elif scored_count is not None:
+            scored_count += len(owed_here & _landed_in(scored, source_index))
         if legacy.owed is None:
             inventory_known = False
         else:
@@ -639,12 +655,19 @@ def _rollout_accounting(
         if expected == 0:
             reasons.append("no rollouts expected")
         else:
+            # Failures judge nothing until a limit is set, but a run without a single result vouches for nothing.
+            if not completed:
+                reasons.append(f"none of {expected} rollouts completed")
             if missing or not_started:
                 reasons.append(f"missing {missing + not_started} of {expected}")
             if duplicated:
                 reasons.append(f"{duplicated} records share a rollout identity")
     return {
+        "state": "observed" if inventory_known else "unavailable",
+        **({} if inventory_known else {"state_reason": "no inventory of the expected rollouts"}),
         "expected": expected if inventory_known else None,
+        "completed": completed,
+        "scored": scored_count,
         "failed": {
             "total": final + not_final,
             "final": final,
@@ -910,7 +933,8 @@ def run_health_checks(
     _mark_duplicate_identities(digests, lines, ignored)
     summary = _reduce(digests, ignored)
     artifacts = summary["run"]["artifacts"]
-    landed = {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)}
+    keys = [(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)]
+    landed = set(keys)
     artifacts.update(
         _rollout_accounting(
             landed,
@@ -919,6 +943,7 @@ def run_health_checks(
             limits_source=limits_source,
             duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
             run_coverage=run_coverage,
+            scored=landed - {key for key, digest in zip(keys, digests) if not digest.scored},
         )
     )
     # Every rollout's final record: its saved row, or the last failed attempt of one that never landed.
@@ -949,6 +974,31 @@ def run_health_checks(
     )
 
 
+def write_disabled_summary(rollout_paths: Sequence[Path], output_dir: Path) -> Path | None:
+    """Write the quality summary of a run with ``disable_health_check`` set, so a disabled check is recorded as
+    ``state: disabled`` rather than by an absent summary. It counts and judges nothing: the counts and ``healthy``
+    are null.
+
+    A report written at the end of a run must not stop it, so a write error is logged and returns ``None``.
+    """
+    artifacts = {
+        "state": "disabled",
+        "state_reason": "disable_health_check is set",
+        **dict.fromkeys(("expected", "completed", "scored", "failed", "missing", "healthy")),
+        "unhealthy_reasons": [],
+        "not_evaluated": sorted(spec.id for spec in CHECK_REGISTRY),
+    }
+    run = {"artifacts": artifacts, QUALITY_SUMMARY_SOURCES_KEY: _report_sources(rollout_paths, output_dir)}
+    summary_path = output_dir / QUALITY_SUMMARY_FILENAME
+    try:
+        summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
+        (output_dir / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        logger.exception("Writing the disabled quality summary failed.")
+        return None
+    return summary_path
+
+
 def write_provisional_summary(
     rollout_path: Path,
     landed: set[tuple[Any, Any]],
@@ -977,6 +1027,8 @@ def write_provisional_summary(
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
     _judge_run(artifacts, run_findings, run_coverage)
     artifacts["partial"] = True
+    artifacts["state"] = "unavailable"
+    artifacts["state_reason"] = "the run stopped before its rollouts were read"
     # Only run_excessive_failures runs here; every other check needs the rollouts and is not evaluated.
     artifacts["not_evaluated"] = sorted(spec.id for spec in CHECK_REGISTRY if spec.id != _RUN_FAILURES_CHECK)
     if artifacts["healthy"]:
@@ -1103,9 +1155,18 @@ def format_health_report(result: HealthCheckResult) -> str:
     checked = sum(verdicts.values())
     ignored = result.summary["run"].get("ignored_checks", [])
     ignored_note = f" (ignored: {', '.join(ignored)})" if ignored else ""
+    responses = result.summary["run"].get("stats", {}).get("responses")
+    response_note = ""
+    if responses is not None:
+        response_note = (
+            f"Model responses: {responses['faulted']}/{responses['selected']} faulted; "
+            f"{responses['unknown']} rollout scopes unobserved; "
+            f"{responses['duplicated']} duplicate call IDs\n"
+        )
     return (
-        f"Rollout health: {checked} checked, {verdicts['healthy']} healthy, "
-        f"{verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"Rollout checks: {checked} checked, {verdicts['healthy']} passed, "
+        f"{verdicts['unhealthy']} flagged, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"{response_note}"
         f"Quality summary: {result.summary_path}"
     )
 
@@ -1176,14 +1237,19 @@ def _health_check_collected_rollouts(
     coverage: dict | None = None,
     terminated: bool = False,
     model_call_capture_dirs: Sequence[Path] = (),
+    disabled: bool = False,
 ) -> None:
     """Write the quality summary for whatever a run collected; a run that never started collection has none.
 
     After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
     minutes on a large run. So a stopped run with ``landed_keys`` gets the provisional summary: the run
-    accounting only, without reading the rollouts.
+    accounting only, without reading the rollouts. With ``disabled``, the summary only records that
+    (:func:`write_disabled_summary`). A check that cannot run writes nothing, so saved evidence stays as it is.
     """
     if not output_fpath.exists():
+        return
+    if disabled:
+        write_disabled_summary([output_fpath], output_fpath.parent)
         return
     from nemo_gym.rollouts.health.timeouts import export_run_health_timeouts
 

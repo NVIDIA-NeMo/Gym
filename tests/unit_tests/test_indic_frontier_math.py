@@ -110,8 +110,8 @@ def test_native_config_routes_to_frontiermath_without_global_sampling_defaults()
     assert agent.datasets[0].jsonl_fpath == "benchmarks/indic/frontier_math/data/indic_frontiermath_raw.jsonl"
     assert not config.get("responses_create_params")
     policy = config.policy_model.responses_api_models.vllm_model
-    assert policy.chat_template_kwargs is None
-    assert policy.sampling_overrides is None
+    assert policy.get("chat_template_kwargs") is None
+    assert policy.get("sampling_overrides") is None
 
 
 @pytest.fixture
