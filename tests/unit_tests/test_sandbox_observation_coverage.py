@@ -24,8 +24,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
-from nemo_gym.sandbox import SandboxSpec
 from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.providers.base import SandboxSpec
 from tests.unit_tests.test_evaluation_health import _run
 from tests.unit_tests.test_grading_artifacts import _observed, _ungraded
 
