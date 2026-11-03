@@ -90,6 +90,9 @@ class JobBenchVerifyResponse(BaseVerifyResponse):
 
 
 class JobBenchResourcesServer(SimpleResourcesServer):
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: JobBenchConfig
 
     def model_post_init(self, context: Any, /) -> None:

@@ -769,6 +769,8 @@ async def test_sandbox_ending_mid_episode_masks_the_rollout_instead_of_failing_r
     assert result.evaluation_completed is False
     assert result.failure_kind == "provider_oom_killed"
     assert "SANDBOX::ENDED" in result.failure_reason
+    # Where and on which sandbox it ended; the kind and the mask are unchanged.
+    assert result.failure_reason.startswith("[sandbox phase=agent sandbox=box-1 reason=SandboxApiException] ")
     assert result.task_id == "task-1"
 
 
@@ -878,3 +880,72 @@ def test_gym_tar_ships_the_data_package_but_not_the_agents_datasets(monkeypatch:
     assert "nemo_gym/data/__init__.py" in names
     assert any(name.startswith("responses_api_agents/anyswe_agent/") for name in names)
     assert not any(name.startswith("responses_api_agents/anyswe_agent/data") for name in names)
+
+
+def _ended_sdk_error(reason: str, container_line: str):
+    """Shaped like the OpenSandbox SDK's SandboxApiException for a sandbox the provider ended (HTTP 410)."""
+    message = (
+        f"Sandbox box-1 has ended ({reason}): 1/1 observed pods failed; primary reason=ContainerFailed; "
+        f"sample pod=box-1-0; sample detail=Pod box-1-0 {container_line}"
+    )
+    cls = type("SandboxApiException", (Exception,), {"__module__": "opensandbox.exceptions.sandbox"})
+    error = cls(f"Get command status failed: HTTP 410: {message}")
+    error.status_code = 410
+    error.error = SimpleNamespace(code="SANDBOX::ENDED", message=message)
+    return error
+
+
+@pytest.mark.parametrize(
+    "reason, container_line, kind, cause",
+    [
+        ("OOMKilled", "container sandbox exited with code 137 (OOMKilled)", "provider_oom_killed", "oom"),
+        # A helper container's memory kill is not the agent's own: infrastructure, whatever the reason says.
+        ("OOMKilled", "container execd exited with code 137 (OOMKilled)", "provider_unavailable", "oom"),
+        ("OOMKilled", "init container setup exited with code 137 (OOMKilled)", "provider_unavailable", "oom"),
+        # An exit status 137 in a report whose provider reason is not a memory kill is not one: the typed reason
+        # decides, the old text markers no longer override it.
+        ("Error", "container execd exited with code 137 (Error)", "provider_unavailable", "unknown"),
+        (
+            "Evicted",
+            "entered Failed phase (Evicted): Pod ephemeral local storage usage exceeds the total limit",
+            "provider_unavailable",
+            "storage",
+        ),
+    ],
+)
+async def test_the_typed_provider_reason_decides_the_kind_and_is_observed(reason, container_line, kind, cause):
+    from responses_api_agents.harness_agent import app as agent_app
+
+    error = _ended_sdk_error(reason, container_line)
+    assert sandbox_infra_failure_kind(error) == kind
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={})])
+    agent._provider.connect = AsyncMock(side_effect=TimeoutError())
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"), task_id="task-1"
+    )
+
+    async def responses(_, __, ___):
+        raise error
+
+    observed = []
+    with (
+        patch.object(HarnessAgent, "responses", new=responses),
+        patch.object(agent_app, "observe_failure", new=observed.append),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(return_value={"sandbox_handle": "box-1"}),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.mask_sample is True and result.failure_kind == kind
+    [ended] = observed
+    assert ended.boundary == "sandbox" and ended.failure_kind == kind
+    assert (ended.stage, ended.details.sandbox_id) == ("agent", "box-1")
+    assert ended.details.provider_status_reason == reason
+
+
+def test_old_text_markers_still_decide_without_a_typed_report():
+    # A provider message from before the typed report (no "has ended (...)" status): the marker text still counts.
+    assert sandbox_infra_failure_kind(_sdk_exception("container exited with code 137")) == "provider_oom_killed"

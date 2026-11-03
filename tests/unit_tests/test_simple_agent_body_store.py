@@ -33,10 +33,14 @@ from tests.unit_tests.test_agent_environment_collection_failures import MODEL_RE
 
 class _ProviderModel(_EchoModel):
     provider_url: str = ""
+    request_timeout_seconds: float = 30
 
     async def responses(self, body=Body()):
         client = model_client.NeMoGymAsyncOpenAI(
-            api_key="test", base_url=self.provider_url, max_http_attempts=2, request_timeout_seconds=0.04
+            api_key="test",
+            base_url=self.provider_url,
+            max_http_attempts=2,
+            request_timeout_seconds=self.request_timeout_seconds,
         )
         return NeMoGymResponse.model_validate(await client.create_response(input=[]))
 
@@ -94,6 +98,7 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
                 config=BaseResponsesAPIModelConfig(host="127.0.0.1", port=0, entrypoint="", name="model"),
                 server_client=client(),
                 provider_url=str(upstream.make_url("/v1")),
+                request_timeout_seconds=0.04 if mode == "timeout" else 30,
             )
             await start(model, "model", "responses_api_models", "scripted")
             resource_app = FastAPI()
