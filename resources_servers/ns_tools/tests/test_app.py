@@ -14,6 +14,7 @@
 # limitations under the License.
 import subprocess
 from contextlib import asynccontextmanager
+from typing import Any, Awaitable, Callable, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,12 +24,18 @@ from app import (
     NSToolsVerifyRequest,
 )
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from nemo_skills.mcp.tool_manager import ToolManager
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ResourcesServerRef
-from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_runtime import SimpleResourcesServer
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    SimpleResourcesServer,
+)
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
 class TestApp:
@@ -451,3 +458,202 @@ class TestSidecarTeardownWiredToLifespan:
 
         proc.terminate.assert_called_once()
         assert server._python_tool_process is None
+
+
+class FakePythonToolManager:
+    """Stands in for the NeMo Skills ToolManager: like DirectPythonTool, one python session per request_id."""
+
+    def __init__(self) -> None:
+        self.python_sessions: Dict[str, list] = {}
+        self.cleaned_up: list = []
+        self.cleanup_error: Optional[Exception] = None
+        # Runs inside execute_tool while the sandbox runs the code, before the call records its python session.
+        self.during_execute: Optional[Callable[[str], Awaitable[None]]] = None
+
+    async def execute_tool(self, raw_name: str, args: Dict[str, Any], extra_args: Dict[str, Any]) -> str:
+        request_id = extra_args["request_id"]
+        if self.during_execute is not None:
+            await self.during_execute(request_id)
+        # Like DirectPythonTool, map the request to its python session once the sandbox call returns.
+        self.python_sessions.setdefault(request_id, []).append(args["code"])
+        return "4"
+
+    async def cleanup_request(self, request_id: str) -> None:
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+        self.cleaned_up.append(request_id)
+        self.python_sessions.pop(request_id, None)
+
+    async def shutdown(self) -> None:
+        pass
+
+
+def _session_server(tool_manager: FakePythonToolManager) -> tuple[NSToolsResourcesServer, FastAPI]:
+    config = NSToolsConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="ns_tools",
+        verifiers={"math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge")},
+        nemo_skills_tools=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+    )
+    server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def install_tools(self: NSToolsResourcesServer) -> None:
+        self.tool_manager = tool_manager
+        self._tool_name_map["stateful_python_code_exec"] = "stateful_python_code_exec"
+
+    # Registers the catch-all tool route as the configured tools do, so the checks below also cover its routing.
+    with patch.object(NSToolsResourcesServer, "_initialize_nemo_skills_tools", install_tools):
+        app = server.setup_webserver()
+    return server, app
+
+
+EPISODE_ID = EpisodeId(rollout_id="rollout", attempt=0)
+
+
+def _seed(resources_session_id: str) -> Dict[str, Any]:
+    return ResourcesSeedSessionRequest(
+        resources_session_id=resources_session_id,
+        episode_id=EPISODE_ID,
+        task_id=TaskId(taskset="ns_tools", task_id="0"),
+        task_data={"question": "What is 2 + 2?", "expected_answer": "4"},
+    ).model_dump(mode="json")
+
+
+def _close(resources_session_id: str, episode_id: EpisodeId = EPISODE_ID) -> Dict[str, Any]:
+    return ResourcesCloseSessionRequest(resources_session_id=resources_session_id, episode_id=episode_id).model_dump(
+        mode="json"
+    )
+
+
+VERIFY_BODY = {
+    "responses_create_params": {"input": [{"role": "user", "content": "What is 2 + 2?"}]},
+    "response": {
+        "id": "resp_test",
+        "created_at": 0.0,
+        "model": "dummy",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+    "question": "What is 2 + 2?",
+    "expected_answer": "4",
+}
+
+
+class TestResourcesSessions:
+    def test_session_contract(self) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+
+        check_resources_session_contract(
+            app,
+            ResourcesSeedSessionRequest.model_validate(_seed("contract-session")),
+            keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server._session_episodes,
+            verify_body=VERIFY_BODY,
+        )
+        # The verify of the closed session was masked without reaching the delegated verifier.
+        server.server_client.post.assert_not_called()
+
+    def test_close_without_verify_releases_python_session(self) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+        client = TestClient(app)
+
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        tool_call = client.post("/stateful_python_code_exec", json={"code": "print(2 + 2)"})
+        assert tool_call.status_code == 200 and tool_call.text == "4"
+        assert "rs-1" in tool_manager.python_sessions
+        assert len(server._timing_by_session["rs-1"]) == 1
+
+        # An Environment Server whose seed reply was lost closes without the cookie.
+        client.cookies.clear()
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+
+        assert "rs-1" not in tool_manager.python_sessions
+        assert "rs-1" not in server._timing_by_session
+        assert "rs-1" not in server._session_episodes
+
+    def test_failed_cleanup_leaves_session_open_for_a_retry(self) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "x = 1"}).status_code == 200
+
+        tool_manager.cleanup_error = RuntimeError("sandbox unreachable")
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 500
+        assert server._fence.closed_episode("rs-1") is None
+        assert "rs-1" in tool_manager.python_sessions
+
+        tool_manager.cleanup_error = None
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+        assert "rs-1" not in tool_manager.python_sessions
+        assert server._fence.closed_episode("rs-1") == EPISODE_ID
+
+    def test_tool_call_after_close_is_a_lost_session(self) -> None:
+        tool_manager = FakePythonToolManager()
+        _, app = _session_server(tool_manager)
+        client = TestClient(app)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+
+        response = client.post("/stateful_python_code_exec", json={"code": "print(1)"})
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == "session_lost"
+        # The refused call opened no python session that nothing would release.
+        assert tool_manager.python_sessions == {}
+
+    def test_tool_call_racing_close_releases_its_python_session(self) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+        client = TestClient(app)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+
+        async def close_mid_call(request_id: str) -> None:
+            tool_manager.during_execute = None
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close(request_id)))
+
+        tool_manager.during_execute = close_mid_call
+        response = client.post("/stateful_python_code_exec", json={"code": "print(1)"})
+
+        assert response.status_code == 404
+        # The close released the session before the call recorded it; the call released it after.
+        assert tool_manager.cleaned_up == ["rs-1", "rs-1"]
+        assert tool_manager.python_sessions == {}
+        assert "rs-1" not in server._timing_by_session
+
+    def test_verify_then_close_releases_once_more_harmlessly(self) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+        client = TestClient(app)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(2 + 2)"}).status_code == 200
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+
+        verified = client.post("/verify", json=VERIFY_BODY)
+        assert verified.status_code == 200
+        assert verified.json()["reward"] == 1.0 and verified.json()["num_tool_calls"] == 1
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+
+        assert tool_manager.cleaned_up == ["rs-1", "rs-1"]
+        assert tool_manager.python_sessions == {}
+
+    def test_legacy_seed_keeps_working(self) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+        client = TestClient(app)
+
+        # An Agent's /run seeds with the row itself.
+        seeded = client.post("/seed_session", json=VERIFY_BODY | {"verifier_type": "math_with_judge"})
+        assert seeded.status_code == 200 and seeded.json() == {}
+        assert server._session_episodes == {}
+        assert client.post("/stateful_python_code_exec", json={"code": "print(1)"}).status_code == 200
+        assert len(tool_manager.python_sessions) == 1

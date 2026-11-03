@@ -28,7 +28,6 @@ import logging
 import subprocess
 import sys
 import time
-import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -37,16 +36,27 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.mcp.utils import locate
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ResourcesServerRef
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 
 
@@ -132,6 +142,13 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
+    # The episode and task each Environment Server seed bound to its resources_session_id.
+    _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = {}
+    _fence: ResourcesSessionFence = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -312,11 +329,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             logger.error(f"Unknown tool requested: {tool_name}")
             return PlainTextResponse(json.dumps({"error": f"Unknown tool: {tool_name}"}))
 
-        # Get session ID for stateful execution
-        session_id = request.session.get(SESSION_ID_KEY)
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            logger.warning(f"No session ID found, using fallback: {session_id}")
+        # The session middleware always sets the session ID, which keys the stateful python session.
+        session_id = request.session[SESSION_ID_KEY]
+        if self._fence.closed_episode(session_id) is not None:
+            raise ResourcesSessionLostError(f"ns_tools session {session_id} is closed")
 
         if session_id not in self._timing_by_session:
             self._timing_by_session[session_id] = []
@@ -357,6 +373,11 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             logger.exception(f"Error executing tool {tool_name}: {e}")
             result = {"error": str(e)}
 
+        if self._fence.closed_episode(session_id) is not None:
+            # The session closed while this call ran, so release the python session the call may have opened.
+            await self.tool_manager.cleanup_request(session_id)
+            raise ResourcesSessionLostError(f"ns_tools session {session_id} closed during the tool call")
+
         elapsed = time.perf_counter() - start_time
         self._timing_by_session[session_id].append(
             {
@@ -378,6 +399,57 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         if isinstance(result, str):
             return PlainTextResponse(result)
         return PlainTextResponse(json.dumps(result))
+
+    # --------------------------------------------------------
+    # Sessions
+    # --------------------------------------------------------
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Bind an Environment Server's resources session to the request's cookie.
+
+        The python session itself starts lazily on the first tool call. An Agent's ``/run`` seeds with its legacy
+        body, which keeps no state here; verify releases that rollout's python session.
+        """
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            return BaseSeedSessionResponse()
+
+        resources_session_id = body.resources_session_id
+        async with self._fence.locked(resources_session_id):
+            self._fence.raise_if_closed(resources_session_id)
+            identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
+            if identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+        # Tool calls and verify find the python session by the cookie, so it must name this resources session.
+        request.session[SESSION_ID_KEY] = resources_session_id
+        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Release the session's python session and tool timings, even when verify never ran.
+
+        Releases by ``resources_session_id``, since a close whose seed reply was lost carries no cookie. A cleanup
+        failure propagates, so the session is not recorded as closed and the caller can retry.
+        """
+        resources_session_id = body.resources_session_id
+        async with self._fence.locked(resources_session_id):
+            closed_episode = self._fence.closed_episode(resources_session_id)
+            if closed_episode is not None:
+                if closed_episode != body.episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+                return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
+            identity = self._session_episodes.get(resources_session_id)
+            if identity is not None and identity[0] != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            # Verify has already released a verified episode's python session; cleaning up again is a no-op.
+            if self.tool_manager is not None:
+                await self.tool_manager.cleanup_request(resources_session_id)
+            self._timing_by_session.pop(resources_session_id, None)
+            self._session_episodes.pop(resources_session_id, None)
+            self._fence.mark_closed(resources_session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     # --------------------------------------------------------
     # Verification
@@ -413,6 +485,11 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         Detailed per-call and summary logging is controlled by verbose_tool_logging.
         """
         session_id = request.session.get(SESSION_ID_KEY) if request else None
+        if session_id is not None and self._fence.closed_episode(session_id) is not None:
+            # Close released the session's tool timings, so its metrics would read as a rollout without tool calls.
+            return NSToolsVerifyResponse(
+                **(body.model_dump() | lost_session_verification(f"ns_tools session {session_id} is closed"))
+            )
         try:
             metrics = self._aggregate_timing_metrics(session_id)
             if self.config.verbose_tool_logging:
