@@ -104,24 +104,40 @@ JUDGE_UNPARSEABLE = "judge_unparseable"
 VERIFIER_ERROR = "verifier_error"
 
 # --- provider: sandboxes, browsers, containers ----------------------------------------- #
-# Creation observations stay separate from retry choices, including Pending fail-fast.
+# The kind describes provider evidence; the event's boundary identifies its caller-facing API.
+# The create/reconnect readiness deadline expired without a confirmed Pending observation.
 PROVIDER_CREATE_TIMEOUT = "provider_create_timeout"
+# An attempt-owned sandbox was observed Pending when its create deadline expired.
 PROVIDER_CREATE_PENDING = "provider_create_pending"
+# A configured readiness probe failed, or the SDK reported the sandbox unhealthy.
 PROVIDER_NOT_READY = "provider_not_ready"
+# Sandbox setup or a required runtime check failed.
 PROVIDER_SETUP_FAILED = "provider_setup_failed"
 # An SDK internal error without a recognized transport cause.
 PROVIDER_INTERNAL_ERROR = "provider_internal_error"
 # PTY refusal, availability and protocol evidence do not assert whole-sandbox death.
+# The PTY session is missing, detached, closed or has lost its connection.
 PROVIDER_PTY_UNAVAILABLE = "provider_pty_unavailable"
+# Attachment was refused because another client holds the PTY session.
 PROVIDER_PTY_BUSY = "provider_pty_busy"
+# An SDK response or PTY frame violates the required protocol structure.
 PROVIDER_PROTOCOL_ERROR = "provider_protocol_error"
+# A provider request failed without a more specific classification.
 PROVIDER_REQUEST_FAILED = "provider_request_failed"
+# A provider request or file transfer timed out; remote completion is unknown.
 PROVIDER_IO_TIMEOUT = "provider_io_timeout"
+# Gym observed its own command-session deadline expire; cleanup is handled separately.
 PROVIDER_COMMAND_TIMEOUT = "provider_command_timeout"
+# Command outcome fields are absent/contradictory, or the PTY ended before command completion.
 PROVIDER_COMMAND_OUTCOME_UNKNOWN = "provider_command_outcome_unknown"
+# The budget for obtaining an already-submitted command's status expired.
 PROVIDER_STATUS_UNAVAILABLE = "provider_status_unavailable"
+# A transport failure or unavailable-backend HTTP response.
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
+# Authoritative current-workload OOM evidence. OpenSandbox requires an explicit terminal
+# OOMKilled lifecycle reason or current user-container inspect evidence, retaining its source.
+# Exit 137, message text, historical container state and sidecar OOMs are insufficient.
 PROVIDER_OOM_KILLED = "provider_oom_killed"
 # The provider answered HTTP 401 or 403: the sandbox credentials were refused.
 PROVIDER_CREDENTIALS_REJECTED = "provider_credentials_rejected"
