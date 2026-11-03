@@ -3740,6 +3740,20 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
     )
 
 
+def _cut_judge_reply(call: Mapping[str, Any]) -> bool:
+    """Whether a captured judge reply was cut short: an incomplete Responses reply, or a chat completion that stopped
+    on its output cap or a content filter."""
+    meta = call.get("response_metadata") if isinstance(call, Mapping) else None
+    return isinstance(meta, Mapping) and (
+        (meta.get("dialect") == "responses" and meta.get("response_status") == "incomplete")
+        or (
+            meta.get("dialect") == "chat"
+            and meta.get("response_status") is None
+            and meta.get("finish_reason") in ("length", "content_filter")
+        )
+    )
+
+
 def _observed_trial_operations(
     decision: RecoveryDecision,
     collected: CollectedEvidence | None,
@@ -3916,7 +3930,11 @@ def _observed_trial_operations(
                     for key, event in events.items()
                     if isinstance(event, dict) and event.get("operation_id") == op_id
                 }
-                if len(owned) != attempts - int(final):
+                # A failed HTTP attempt or a transport failure (no HTTP status) before the final attempt is its own
+                # recorded event of this operation, as for a policy request.
+                if len(owned) != attempts - int(final) + transport or transport != sum(
+                    event.get("http_status") is None for event in owned.values()
+                ):
                     return False
                 ids = set()
                 for key, event in owned.items():
@@ -3933,8 +3951,10 @@ def _observed_trial_operations(
                         or event.get("operation") != "model_request"
                         or event.get("failure_kind") != "model_request_error"
                         or event.get("cause_id") is not None
-                        or type(event.get("http_status")) is not int
-                        or not 400 <= event["http_status"] <= 599
+                        or not (
+                            event.get("http_status") is None
+                            or (type(event["http_status"]) is int and 400 <= event["http_status"] <= 599)
+                        )
                     ):
                         return False
                     ids.add(eid)
@@ -4289,15 +4309,26 @@ def _observed_trial_operations(
                 grading_ids.add(grade["operation_id"])
             if verifier is not None:
                 populations[3].add(verifier["invocation_id"])
+            # A completed grade that rests on a judge reply cut by its output cap or a content filter has no valid
+            # verdict behind it: where the caller counts those, it is an observed grading without a valid verdict.
+            cut_reply = (
+                grade is not None
+                and judge_calls is not None
+                and grade["outcome"] == "completed"
+                and grading_failures is not None
+                and any(_cut_judge_reply(call) for call in judge_calls)
+            )
             if (
                 grade is not None
                 and judge_calls is not None
                 and not all(
-                    completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed")
+                    completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed" and not cut_reply)
                     for call in judge_calls
                 )
             ):
                 return False
+            if cut_reply:
+                invalid_grades.append(_identity(row))
             if (
                 grade is not None
                 and judge_calls is not None
