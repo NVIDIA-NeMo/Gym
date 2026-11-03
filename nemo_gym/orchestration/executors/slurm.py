@@ -498,6 +498,16 @@ READER_QUEUE_WAIT_ENV = "NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S"
 _READER_QUEUE_WAIT_DEFAULT_S = 600
 # How often a queued reader counts the reader steps again.
 _READER_QUEUE_POLL_S = 10
+# A reader step srun refused outright (nothing was queued) is submitted again after this many seconds, doubling up
+# to _READER_SRUN_RETRY_MAX_S, for as long as the queue wait allows.
+_READER_SRUN_RETRY_S = 15
+_READER_SRUN_RETRY_MAX_S = 60
+# srun's words for a submission the scheduler refused without queueing it: a per-user submit or size limit, or no
+# node free for an immediate start.
+_SRUN_REFUSAL = (
+    "Job violates accounting/QOS policy|Requested nodes are busy|"
+    "Immediate execution impossible|Resources temporarily unavailable"
+)
 # With a reader step, whether a reader that cannot run in its step may read on the login host instead: "forbid" (the
 # default) or "allow". Forbidden, such a read is unavailable: nothing is read on the login host or decided from it.
 READER_LOGIN_FALLBACK_ENV = "NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK"
@@ -582,6 +592,11 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
     When the user's reader steps are at ``step.max_readers``, the reader queues: it counts them again every
     ``_READER_QUEUE_POLL_S`` seconds for up to ``step.queue_wait_s``, saying on stderr how many it is queued behind
     (a progress line), and runs in its step once one ends. Only a cap still reached after that wait keeps it out.
+
+    A step srun refused outright (``_SRUN_REFUSAL``: a submit or QOS limit, or no node free to start it) was never
+    queued, so the reader submits it again after ``_READER_SRUN_RETRY_S`` seconds, doubling up to
+    ``_READER_SRUN_RETRY_MAX_S``, with a progress line each time, for as long as ``step.queue_wait_s`` allows. Any
+    other srun failure, or a refusal past that wait, falls through to the cancellation below as before.
     """
     name = shlex.quote(f"gym-reader-{token}")
     inside = shlex.quote(f'echo "{_READER_HOST_PREFIX}cpu:$SLURM_JOB_ID"; exec 3<&0 </dev/null; {script}')
@@ -623,8 +638,25 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         "    done",
         "fi",
         "if [[ -z $_gym_fallback ]]; then",
-        *(f"    {line}" for line in run_step),
-        f'    _gym_host=$(grep -m 1 "^{_READER_HOST_PREFIX}cpu:" "$_gym_step_out")',
+        "    _gym_retry_s=0",
+        f"    _gym_backoff={_READER_SRUN_RETRY_S}",
+        "    while :; do",
+        *(f"        {line}" for line in run_step),
+        f'        _gym_host=$(grep -m 1 "^{_READER_HOST_PREFIX}cpu:" "$_gym_step_out")',
+        "        [[ -z $_gym_host ]] || break",
+        '        _gym_srun_said=$(tail -n 1 "$_gym_err" | cut -c 1-300)',
+        f'        printf "%s\\n" "$_gym_srun_said" | grep -qE {shlex.quote(_SRUN_REFUSAL)} || break',
+        f"        (( _gym_retry_s + _gym_backoff <= {step.queue_wait_s} )) || break",
+        # Refused at submission, so nothing was queued; the cancel only covers a race with a late start.
+        f'        scancel --name {name} --user "$USER" 2>/dev/null',
+        f'        echo "{READER_PROGRESS_PREFIX} the reader step was refused ($_gym_srun_said); retrying in '
+        f'$_gym_backoff s, waited $_gym_retry_s s of {step.queue_wait_s} s" >&2',
+        '        sleep "$_gym_backoff"',
+        "        _gym_retry_s=$(( _gym_retry_s + _gym_backoff ))",
+        f"        _gym_backoff=$(( _gym_backoff * 2 > {_READER_SRUN_RETRY_MAX_S} ? {_READER_SRUN_RETRY_MAX_S} : "
+        "_gym_backoff * 2 ))",
+        '        : >"$_gym_step_out"',
+        "    done",
         "    if [[ -n $_gym_host ]]; then",
         f"        _gym_host=${{_gym_host#{_READER_HOST_PREFIX}}}",
         "    else",
@@ -641,6 +673,7 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         "            _gym_waited=$(( _gym_waited + 2 ))",
         "        done",
         f'        _gym_fallback="the reader step did not start within {step.wait_s} s and was cancelled"',
+        '        (( _gym_retry_s == 0 )) || _gym_fallback="$_gym_fallback after $_gym_retry_s s of resubmissions"',
         '        [[ -z $_gym_srun_said ]] || _gym_fallback="$_gym_fallback ($_gym_srun_said)"',
         # A step that may still start must not race a second reader on the login host: stop instead.
         "        if (( ! _gym_gone )); then",

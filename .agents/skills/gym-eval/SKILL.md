@@ -169,7 +169,9 @@ reason on stderr (`gym: the reader did not run: ...`). A reader at the per-user 
 (`NEMO_GYM_REMOTE_READER_MAX`, default 8) queues first, printing `gym-reader progress: queued behind N
 reader steps`, and runs once one ends; it waits up to `NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S` (default 600,
 0 does not wait). When the reason still says that reader steps are already running or pending, raise the
-limit or the wait and run the same command again. Other reasons (the step did not
+limit or the wait and run the same command again. A step srun refuses for a submit or QOS limit, or
+because no node is free to start it, is submitted again with a back-off inside the same wait
+(`gym-reader progress: the reader step was refused (...); retrying in N s`). Other reasons (the step did not
 start within its wait) have their own remedy.
 
 The output is one JSON line, the recovery outcome, and nothing is written; the exit code is 0 only
