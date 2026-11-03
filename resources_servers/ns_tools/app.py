@@ -141,11 +141,14 @@ class NSToolsToolManager(ToolManager):
             # Use the sandbox's resolved address and session routing header, and retain both maps on failure.
             sandbox = tool._sandbox
             session_id = str(session_id)
+            # Bounded like Skills' own delete: an unreachable sandbox must fail the close, which the caller retries,
+            # rather than hold the session's fence forever.
             response = await http_request(
                 "DELETE",
                 f"http://{sandbox.host}:{sandbox.port}/sessions/{session_id}",
                 headers={"X-Session-ID": session_id},
                 timeout=ClientTimeout(total=10),
+                _max_num_tries=3,
             )
             async with response:
                 if response.status not in (200, 404):
@@ -474,11 +477,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             logger.exception(f"Error executing tool {tool_name}: {e}")
             result = {"error": str(e)}
 
-        if self._fence.closed_episode(session_id) is not None:
-            # The session closed while this call ran, so release the python session the call may have opened.
-            await self.tool_manager.cleanup_request(session_id)
-            raise ResourcesSessionLostError(f"ns_tools session {session_id} closed during the tool call")
-
         elapsed = time.perf_counter() - start_time
         self._timing_by_session[session_id].append(
             {
@@ -632,7 +630,13 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             )
         finally:
             if self.tool_manager is not None and session_id:
-                await self.tool_manager.cleanup_request(session_id)
+                # Under the fence, so a tool call still running for this session records its python session first.
+                async with self._fence.locked(session_id):
+                    try:
+                        await self.tool_manager.cleanup_request(session_id)
+                    except Exception:
+                        # The score stands; the python session stays owned, so /close_session retries the release.
+                        logger.exception("Could not release the python session of ns_tools session %s", session_id)
 
     # --------------------------------------------------------
     # Cleanup

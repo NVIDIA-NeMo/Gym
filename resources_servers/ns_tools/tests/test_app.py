@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiohttp import ClientResponseError, web
+from aiohttp import ClientOSError, ClientResponseError, web
 from anyio import CancelScope, get_cancelled_exc_class
 from app import (
     NSToolsConfig,
@@ -44,7 +44,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     SimpleResourcesServer,
 )
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 
 
 class TestApp:
@@ -606,21 +606,25 @@ class TestResourcesSessions:
                     raise
 
         call = asyncio.create_task(run_tool())
+        close = None
         try:
             await asyncio.wait_for(received.wait(), timeout=5)
             scopes[0].cancel()
-            await asyncio.sleep(0)
-            assert not call.done()
+            # A close that races the cancelled call must not DELETE before the POST creates the python session.
+            close = asyncio.create_task(
+                server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            )
+            await asyncio.sleep(0.05)
+            assert not call.done() and not close.done()
             finish.set()
             await asyncio.wait_for(call, timeout=5)
+            await asyncio.wait_for(close, timeout=5)
             assert cancellations == [True]
-            assert tool.requests_to_sessions["rs-1"] in sessions
-            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             assert sessions == set()
             assert "rs-1" not in tool.requests_to_sessions
         finally:
             finish.set()
-            await asyncio.gather(call, return_exceptions=True)
+            await asyncio.gather(call, *([close] if close else []), return_exceptions=True)
             await tool._sandbox.close()
             await http_client.close()
             await runner.cleanup()
@@ -687,6 +691,52 @@ class TestResourcesSessions:
             await tool._sandbox.close()
             await http_client.close()
             await runner.cleanup()
+
+    async def test_delete_to_an_unreachable_sandbox_gives_up(
+        self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Nothing listens on the port, so every DELETE is refused.
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+        http_client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        tool_manager = NSToolsToolManager(
+            module_specs=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+            context={"sandbox": {"host": "127.0.0.1", "port": str(unused_tcp_port)}},
+        )
+        tool = tool_manager._tools["DirectPythonTool"]
+        tool.requests_to_sessions["rs-1"] = "python-session"
+        server, _ = _session_server(tool_manager)
+        try:
+            with pytest.raises(ClientOSError):
+                await asyncio.wait_for(
+                    server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1"))),
+                    timeout=10,
+                )
+            assert tool.requests_to_sessions["rs-1"] == "python-session"
+            assert server._fence.closed_episode("rs-1") is None
+        finally:
+            await tool._sandbox.close()
+            await http_client.close()
+
+    def test_failed_cleanup_at_verify_keeps_the_score(self) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "x = 1"}).status_code == 200
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        tool_manager.cleanup_error = RuntimeError("sandbox unreachable")
+
+        verified = client.post("/verify", json=VERIFY_BODY)
+
+        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
+        # The python session stays owned, so the close retries the release and reports its failure.
+        assert "rs-1" in tool_manager.python_sessions
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 500
+        tool_manager.cleanup_error = None
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+        assert tool_manager.python_sessions == {}
 
     def test_session_contract(self) -> None:
         tool_manager = FakePythonToolManager()
