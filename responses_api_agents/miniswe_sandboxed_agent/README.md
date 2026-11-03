@@ -109,8 +109,9 @@ Removing the custom wrapper has these limits:
 
 - Gym’s native Bash execution wrapper records observed start/end timestamps and
   monotonic durations for supported tool executions. Older or incomplete native
-  records can still lack those facts; Gym preserves `tool_timing_unavailable`
-  gaps rather than estimating missing timings.
+  records can still lack those facts; Gym records the observation-gap code
+  `tool_timing_unavailable` (not a failure kind) rather than estimating missing
+  timings.
 - A correlated native `Submitted` exit records the submit command as completed,
   with its observed start/end timestamps and duration. It carries no final
   tool-output body. Older or partial artifacts without that exit evidence remain
