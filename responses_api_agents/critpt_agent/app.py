@@ -23,7 +23,7 @@ import yaml
 from fastapi import HTTPException, Request, Response
 from pydantic import ConfigDict
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,

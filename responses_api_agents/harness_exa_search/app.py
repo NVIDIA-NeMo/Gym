@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import Body, Request
 from pydantic import ConfigDict, Field, SecretStr
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming

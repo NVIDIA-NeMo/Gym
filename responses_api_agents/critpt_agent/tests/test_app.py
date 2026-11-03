@@ -28,7 +28,7 @@ from environment_servers.single_agent_turn_legacy.app import (
     SingleAgentTurnLegacyEnvironmentServer,
     SingleAgentTurnLegacyEnvironmentServerConfig,
 )
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedRejectedError, AgentSeedSessionRequest
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedRejectedError, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
