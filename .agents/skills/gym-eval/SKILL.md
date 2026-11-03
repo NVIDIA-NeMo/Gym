@@ -505,8 +505,8 @@ correct or report yourself, until the matching policy lands in Gym.
 - **A sandbox killed for memory.** A kill during the agent's own command is the model's outcome, not
   a fault to rerun. Where the stack retries it (harness-agent rows, kind `provider_oom_killed`, the
   provider text in `failure_reason`) or scores it 0 (Terminal-Bench 4.0: read `sandbox_resource_limit`,
-  resource `memory`, with the provider text in `detail`), count it as the model's. A process killed
-  inside a live sandbox (exit 137) is a scored 0 marked interrupted. SWE-family and SkillsBench keep
+  resource `memory`, with the provider text in `detail`), count it as the model's. In Terminal-Bench 4.0,
+  a process killed inside a live sandbox (exit 137) is a scored 0 marked interrupted. SWE-family and SkillsBench keep
   nothing typed about it.
 - **A sandbox that ended for its own limit.** Terminal-Bench 4.0 scores 0 only when the provider text
   names the sandbox's own memory or storage limit; read `sandbox_resource_limit` before you accept
