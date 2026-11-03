@@ -1,0 +1,21 @@
+# BrowseComp through the single_agent_turn_legacy Environment Server instead of the legacy_agent relay.
+# The servers and dataset are config.yaml's. The Environment Server seeds the harness session and the agent session,
+# grants the agent direct HTTP access to the harness tools, runs the agent turn, closes the agent, verifies, and
+# closes the harness session, so a crash repeats only the current step.
+config_paths:
+- benchmarks/browsecomp/config.yaml
+
+browsecomp_benchmark_environment_server:
+  environment_servers:
+    _delete_key: legacy_agent
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: browsecomp_benchmark_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: browsecomp_benchmark_agent
+      # The agent's search, browse and bash_command calls reach its harness session through this grant.
+      resources_tool_transports:
+      - direct_http

@@ -18,20 +18,29 @@ import json
 import re
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
+from uuid import uuid4
 
 import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
+from nemo_gym.client import request as http_request
 from nemo_gym.config import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -41,6 +50,7 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -50,7 +60,13 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    DirectHTTPToolAccess,
+    MCPToolAccess,
+)
 from responses_api_models.vllm_model.app import VLLMConverter
 
 
@@ -228,6 +244,19 @@ def _is_infrastructure_failure(exc: BaseException) -> bool:
     return isinstance(exc, (aiohttp.ClientConnectionError, TimeoutError))
 
 
+@dataclass
+class BrowsecompAgentSessionState(AgentSessionState):
+    """An Environment Server episode: its grant to the resources server and the cookie jar its tool calls carry."""
+
+    tool_access: DirectHTTPToolAccess
+    resources_cookies: dict[str, str]
+
+
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    """Flatten a plain dict or an aiohttp cookie jar of morsels into name-to-value pairs."""
+    return {str(name): str(getattr(value, "value", value)) for name, value in (cookies or {}).items()}
+
+
 class BrowsecompAgent(SimpleResponsesAPIAgent):
     config: BrowsecompAgentConfig
     _policy_model_openai_client: Optional[NeMoGymAsyncOpenAI] = None
@@ -287,17 +316,115 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         # RE-RAISE unchanged so run()'s containment behaves exactly as before.
         # Grep the next run for [browsecomp][responses_exc].
         try:
-            return await self._responses_impl(request, response, body)
+            agent_session_id = self._agent_session_id_from_request(request)
+            if agent_session_id is None:
+                return await self._responses_impl(request, response, body)
+            state = self._require_agent_session(agent_session_id)
+            if not isinstance(state, BrowsecompAgentSessionState):
+                raise TypeError("Expected BrowseComp agent session state")
+            return await self._session_responses(request, response, body, state)
         except Exception as e:
             print(f"[browsecomp][responses_exc] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
             traceback.print_exc()
             raise
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> BrowsecompAgentSessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("BrowseComp agent does not support sandbox access")
+        accesses = self.effective_tool_accesses(body)
+        unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
+        if unsupported:
+            raise AgentSeedRejectedError(
+                f"BrowseComp agent does not support required MCP tool access: {', '.join(unsupported)}"
+            )
+        direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
+        if len(direct_accesses) != 1:
+            raise AgentSeedRejectedError(
+                "BrowseComp agent needs exactly one direct HTTP tool access to its resources server, got "
+                f"{len(direct_accesses)}; set resources_tool_transports: [direct_http] on the Environment Server"
+            )
+        [tool_access] = direct_accesses
+        return BrowsecompAgentSessionState(
+            request=body, tool_access=tool_access, resources_cookies=dict(tool_access.cookies)
+        )
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, BrowsecompAgentSessionState):
+            raise TypeError("Expected BrowseComp agent session state")
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, resources_cookies=state.resources_cookies
+        )
+
+    async def _session_responses(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        state: BrowsecompAgentSessionState,
+    ) -> NeMoGymResponse:
+        """Run an Environment Server's one activation, with the empty-answer retries run() makes around it.
+
+        Like run(), a retry keeps the session's resources state; it does not seed again. A model call that fails with
+        an HTTP error returns a failed response that names its status, for the Environment Server's outcome policy.
+        """
+        attempts = max(1, self.config.max_run_retries)
+        for attempt in range(attempts):
+            attempt_body = body
+            if self.config.snap_dir:
+                # The keys run() sets: the rollout's capture key is unique across tasks, repeats and attempts.
+                metadata = dict(body.metadata or {})
+                metadata.update(task_index=state.request.episode_id.capture_key, attempt=str(attempt))
+                attempt_body = body.model_copy(update={"metadata": metadata})
+            try:
+                model_response = await self._responses_impl(request, response, attempt_body, session=state)
+            except aiohttp.ClientResponseError as error:
+                return self._model_request_failure(body, error)
+            answer = re.sub(r"<think>.*?</think>", "", self._last_message_text(model_response), flags=re.DOTALL)
+            if answer.strip() or getattr(model_response, "timed_out", False) or attempt == attempts - 1:
+                return model_response
+            print(
+                f"[browsecomp][retry][{state.request.episode_id.capture_key}] attempt={attempt + 1}/{attempts} "
+                f"reason=empty_output_after_think_strip",
+                flush=True,
+            )
+
+    def _model_request_failure(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, error: aiohttp.ClientResponseError
+    ) -> NeMoGymResponse:
+        """A failed response for a model call that answered with an HTTP error.
+
+        run() scored a 4xx 0 and set a 5xx aside as an infrastructure failure. The Environment Server's default
+        outcome policy verifies 400, 413 and 422, retries 408, 425, 429 and 5xx, and fails the episode on the rest.
+        The output is empty, as run() scored no partial answer.
+        """
+        content = getattr(error, "response_content", b"")
+        detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=time.time(),
+            model=body.model or self.config.model_server.name,
+            object="response",
+            output=[],
+            status="failed",
+            error={"code": "server_error", "message": f"Model HTTP {error.status}: {detail or error.message}"},
+            tools=body.tools,
+            tool_choice=body.tool_choice,
+            parallel_tool_calls=body.parallel_tool_calls,
+            metadata={
+                **(body.metadata or {}),
+                AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                    failure_kind=MODEL_REQUEST_ERROR, status_code=error.status
+                ).model_dump_json(),
+            },
+        )
 
     async def _responses_impl(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        session: Optional[BrowsecompAgentSessionState] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
@@ -311,7 +438,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
-        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+        # update the cookies on every resources server response
+        resources_server_cookies = request.cookies if session is None else dict(session.resources_cookies)
 
         reset_threshold = self._reset_threshold(self.config)
         loop_started = time.monotonic()
@@ -606,12 +734,23 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 else:
 
                     async def _tool_call():
-                        response = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path=f"/{output_function_call.name}",
-                            json=tool_args,
-                            cookies=resources_server_cookies,
-                        )
+                        if session is None:
+                            response = await self.server_client.post(
+                                server_name=self.config.resources_server.name,
+                                url_path=f"/{output_function_call.name}",
+                                json=tool_args,
+                                cookies=resources_server_cookies,
+                            )
+                        else:
+                            # An Environment Server episode reaches its resources session only through the grant.
+                            response = await http_request(
+                                method="POST",
+                                url=f"{str(session.tool_access.base_url).rstrip('/')}/{output_function_call.name}",
+                                json=tool_args,
+                                cookies=resources_server_cookies,
+                                headers=dict(session.tool_access.headers),
+                                _internal=True,
+                            )
                         return response, (await response.content.read()).decode()
 
                     try:
@@ -621,7 +760,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         timed_out = True
                         break
                     # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
-                    resources_server_cookies = api_response.cookies
+                    if session is None:
+                        resources_server_cookies = api_response.cookies
+                    else:
+                        resources_server_cookies = resources_server_cookies | _cookie_values(api_response.cookies)
                     # reference-harness parity: the resources server wraps every tool result in a one-field
                     # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
                     # model then sees a single escaped line instead of raw multi-line text. This was
@@ -796,7 +938,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
 
         # Propogate any extra cookies necessary for downstream verification
-        for k, v in (*resources_server_cookies.items(), *(model_server_cookies or {}).items()):
+        if session is None:
+            downstream_cookies = (*resources_server_cookies.items(), *(model_server_cookies or {}).items())
+        else:
+            # The Environment Server takes the resources cookies from the session's close, not from this reply.
+            session.resources_cookies = resources_server_cookies
+            downstream_cookies = (model_server_cookies or {}).items()
+        for k, v in downstream_cookies:
             response.set_cookie(k, v)
 
         if model_response is None:

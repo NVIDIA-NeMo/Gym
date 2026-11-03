@@ -35,3 +35,25 @@ ng_e2e_collect_rollouts \
     ++policy_api_key=??? \
     ++policy_model_name=???
 ```
+
+## Run through the Environment Server
+
+`config_single_agent_turn.yaml` runs the same benchmark through the `single_agent_turn_legacy` Environment Server instead of the `legacy_agent` relay. A crash then repeats only the current step (seed, agent turn, agent close, verify, close) rather than the whole episode. Use it in place of `config.yaml` in step 3:
+
+```bash
+config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+benchmarks/browsecomp/config_single_agent_turn.yaml"
+```
+
+Correct answers are judged the same way on both paths. Errors are handled differently, so the counts can differ:
+
+| Case | `config.yaml` (`/run`) | `config_single_agent_turn.yaml` |
+| --- | --- | --- |
+| Rollout reaches `rollout_timeout_s` | Reward 0 without a judge call, `timed_out: 1` | The same |
+| Model call returns 400, 413 or 422 | Reward 0, with `agent_error` | Verified with an empty answer, which scores 0 |
+| Model call returns 5xx after the client's retries, or a connection drops or times out | Set aside unscored (`kill_shaped`) for resume | A non-terminal failure row (`_ng_failure_*`), unscored, which `gym eval run --resume` retries |
+| Model call returns 408, 425 or 429 after the client's retries | Reward 0, with `agent_error` | A non-terminal failure row, which a resume retries |
+| Model call returns any other 4xx | Reward 0, with `agent_error` | A terminal failure row, not scored and not retried |
+| Any other error in the agent turn | Reward 0, with `agent_error` | A non-terminal failure row, which a resume retries |
+
+So an error that `config.yaml` scored 0 now leaves the scored set instead of counting as a wrong answer. Check the failure rows and the coverage file alongside the accuracy.

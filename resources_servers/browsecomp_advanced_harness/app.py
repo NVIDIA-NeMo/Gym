@@ -286,6 +286,8 @@ class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
     # reward in <split>_metrics.json (nested metrics.* records are not recursed).
     num_provider_429s: int = 0
     num_provider_other_retries: int = 0
+    # 1 when the agent stopped at its rollout_timeout_s, so the mean is the share of samples it stopped.
+    timed_out: int = 0
 
 
 # Task-local accumulator for provider retry counts. The client retry loops
@@ -1560,9 +1562,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
+        # browsecomp_agent marks a rollout it stopped at rollout_timeout_s.
+        timed_out = bool(getattr(body.response, "timed_out", False))
 
         judge_error = None
-        if self.config.use_judge:
+        if timed_out:
+            # Wrong by construction: the agent's /run scores it 0 without a verify, and an Environment Server's
+            # verify does the same without calling the judge.
+            judge_evaluation = JudgeEvaluation(
+                reasoning="The rollout reached its time limit.", extracted_final_answer="", reward=0.0
+            )
+        elif self.config.use_judge:
             judge_evaluation, judge_error = await self._verify_answer_with_judge(
                 question, ground_truth, last_assistant_response
             )
@@ -1586,6 +1596,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             metrics=session_metrics,
             num_provider_429s=num_provider_429s,
             num_provider_other_retries=num_provider_other_retries,
+            timed_out=int(timed_out),
         )
 
         # The verify response carries the session's metrics, and an agent's /run sends no close, so release here.
