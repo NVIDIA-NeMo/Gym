@@ -36,7 +36,7 @@ from scicode_integration.runner import build_test_program, preflight_grading_int
 from setup_grading_env import ensure_grading_env
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

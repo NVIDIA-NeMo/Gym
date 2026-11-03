@@ -45,7 +45,7 @@ class Agent:
 ```
 
 <Note>
-The pseudocode shows an agent that runs the whole episode itself through its `/run` endpoint. Most agents, including Remote Agent, still run this way: rollout collection reaches them through a `legacy_agent` Environment Server that relays `/run` unchanged. Agents that implement agent sessions, such as SimpleAgent and the [sandboxed harnesses](/main/agent-server/integrate-existing-agents#sandboxed-harnesses), can instead run under an [Environment Server](/main/about/architecture#environment-server) that drives agent sessions, such as `single_agent_turn`. It calls `seed_session` and `verify` on the Resources server and drives the agent through session endpoints, so the agent does not decide when to verify.
+The pseudocode shows an agent that runs the whole episode itself through its `/run` endpoint. Most agents, including Remote Agent, still run this way: rollout collection reaches them through a `legacy_agent` Environment Server that relays `/run` unchanged. Agents that implement agent sessions, such as SimpleAgent and the [sandboxed harnesses](/main/agent-server/integrate-existing-agents#sandboxed-harnesses), can instead run under an [Environment Server](/main/about/architecture#environment-server) that drives agent sessions, such as `single_agent_turn`. Most shipped SimpleAgent configurations do, through its flat-row adapter `single_agent_turn_legacy`. Such a server calls `seed_session` and `verify` on the Resources server and drives the agent through session endpoints, so the agent does not decide when to verify.
 </Note>
 
 ## Choose a Path

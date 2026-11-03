@@ -65,8 +65,10 @@ ns_tools_simple_agent:
 
 ns_tools_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: ns_tools_simple_agent
+      resources_tool_transports:
+      - direct_http

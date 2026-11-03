@@ -23,11 +23,12 @@ import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from pytest import MonkeyPatch
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
-import nemo_gym.global_config as gc
+import nemo_gym.config.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -292,14 +293,64 @@ class TestEvalExportFlags:
             ],
         )
 
-        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert target == "nemo_gym.cli.eval:export_run"
         assert set(overrides) == {
-            "+format=atif",
+            "+exporter=atif",
             "+rollouts_jsonl_fpath='rollouts.jsonl'",
             "+output_dirpath='atif'",
             "+session_id='evaluation-42'",
             "+agent_version='2.3.1'",
         }
+
+
+class TestEvalExportExporterArgument:
+    def test_defaults_to_atif_and_passes_overrides_through_unchanged(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "+rollouts_jsonl_fpath=r.jsonl", "+meta.k=v", "++a=1", "hydra.run.dir=/tmp/log", "~b"],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_run"
+        assert overrides == [
+            "+exporter=atif",
+            "+rollouts_jsonl_fpath=r.jsonl",
+            "+meta.k=v",
+            "++a=1",
+            "hydra.run.dir=/tmp/log",
+            "~b",
+        ]
+
+    def test_a_captured_override_follows_the_translated_flags_for_the_default_exporter(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "++session_id=override", "--session-id", "original", "--rollouts", "r.jsonl"],
+        )
+
+        assert overrides.index("+session_id='original'") < overrides.index("++session_id=override")
+        assert overrides[0] == "+exporter=atif"
+
+    def test_positional_exporter_is_passed_as_an_override(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "atif", "+rollouts_jsonl_fpath=r.jsonl"])
+
+        assert overrides == ["+exporter=atif", "+rollouts_jsonl_fpath=r.jsonl"]
+
+    def test_deprecated_format_flag_still_selects_the_exporter(
+        self, monkeypatch: MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "--format", "atif"])
+
+        assert overrides == ["+exporter=atif"]
+        assert "`--format` is deprecated" in caplog.text
+
+    def test_unknown_exporter_is_rejected_with_the_choices(
+        self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["eval", "export", "nope", "+rollouts_jsonl_fpath=r.jsonl"])
+
+        assert "unknown exporter 'nope'; choose from: atif" in capsys.readouterr().err
 
 
 class TestEnvTestResourceServerFlag:
@@ -568,7 +619,7 @@ class TestFriendlyValidationError:
         from pydantic import ValidationError
 
         from nemo_gym.cli.main import _handle_pydantic_validation_error
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (so it passes the scoping check) with one missing and one invalid field.
         class _Model(BaseNeMoGymCLIConfig):
@@ -592,7 +643,7 @@ class TestFriendlyValidationError:
         assert "invalid configuration: count" in recorder.message
 
     def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
         class _Config(BaseNeMoGymCLIConfig):
@@ -730,7 +781,7 @@ class TestFriendlyValidationError:
     def test_dataset_config_mistake_is_a_clean_error_not_a_traceback(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, request, argv: list[str], expected: str
     ) -> None:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data.prompt import load_prompt_config
 
         # The loader caches by the path string, and these relative names would otherwise outlive this tmp_path.
         load_prompt_config.cache_clear()
@@ -859,10 +910,9 @@ class TestDatasetValidateFlags:
         # The file name is not a Hydra expression: unquoted, `(` is a parse error and `,` is ambiguous. It is
         # also not JSON: Hydra keeps `\uXXXX` and a doubled backslash literally, so the override must parse
         # back to the exact name the user typed, Unicode and backslashes included.
-        from nemo_gym.tasks.harbor import cli as harbor_cli
 
         captured: list = []
-        monkeypatch.setattr(harbor_cli, "validate_target", lambda args, overrides: captured.append(overrides))
+        monkeypatch.setattr(cli_eval, "validate_target", lambda args, overrides: captured.append(overrides))
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", "tasks", "--output", name])
         main()
         assert len(captured) == 1 and len(captured[0]) == 1
@@ -1627,22 +1677,22 @@ class TestDidYouMean:
     """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
 
     def test_helper_suggests_close_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
 
     def test_helper_silent_when_nothing_close(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
     def test_helper_does_not_suggest_exact_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["list", "eval", "env"]) == ""
 
     def test_helper_suggests_next_close_match_after_excluding_exact(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
 
@@ -1974,10 +2024,8 @@ def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, delet
 
 
 def test_eval_run_keeps_home_relative_target(monkeypatch):
-    import nemo_gym.tasks.harbor.cli as harbor_cli
-
     captured = []
-    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append(args.target))
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append(args.target))
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes_agent"])
     cli_main.main()
     assert captured == ["~/tasks"]
@@ -1989,8 +2037,6 @@ def test_eval_run_keeps_home_relative_target(monkeypatch):
 def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch, target):
     import pwd
     from types import SimpleNamespace
-
-    import nemo_gym.tasks.harbor.cli as harbor_cli
 
     home = tmp_path / "home"
     (home / "tasks").mkdir(parents=True)
@@ -2004,7 +2050,7 @@ def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch
         lambda name: SimpleNamespace(pw_dir=str(home)) if name == "harbor_test_user" else real_getpwnam(name),
     )
     captured = []
-    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes_agent", "+limit=3"])
     cli_main.main()
     assert captured == [(target, ["+agent_name=hermes_agent", "+limit=3"])]

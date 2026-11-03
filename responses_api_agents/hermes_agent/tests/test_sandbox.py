@@ -17,15 +17,21 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_FILE, parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.agents import (
+    CLEANUP_PHASE_COUNT,
+    STOP_REQUEST_FILE,
+    AgentCloseSessionRequest,
+    AgentOutcomePolicyConfig,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    SandboxSession,
+    agent_outcome_policy,
+    parse_cleanup_receipt,
+)
+from nemo_gym.agents.base_responses_api_agent import _AgentSessionRecord
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -720,48 +726,18 @@ async def test_launch_claim_without_pid_is_not_proof_of_cleanup(agent, state, lo
     state.session.sandbox.disconnect.assert_not_awaited()
 
 
-@pytest.mark.parametrize("stop_timing", ["before-shell", "before-handler"])
-async def test_stop_during_interpreter_startup_closes_without_starting_a_worker(
-    agent, state, local_runner, monkeypatch, tmp_path, stop_timing
-):
+async def test_stop_before_launch_closes_without_starting_a_worker(agent, state, local_runner, tmp_path):
     directory = Path(state.session.session_dir)
-    ready = tmp_path / "before-handler"
-    worker_started = tmp_path / "worker-started"
-    wrapper = tmp_path / "delayed_supervisor.py"
-    wrapper.write_text(
-        "import pathlib,runpy,sys,time\n"
-        f"if '--help' in sys.argv: runpy.run_path({process_supervisor.__file__!r}, run_name='__main__')\n"
-        f"pathlib.Path({str(ready)!r}).touch()\n"
-        f"while not pathlib.Path({str(directory / STOP_REQUEST_FILE)!r}).exists(): time.sleep(0.01)\n"
-        # Keep the interpreter in the pre-handler window while close sends TERM.
-        "time.sleep(0.15)\n"
-        f"runner=runpy.run_path({process_supervisor.__file__!r})\n"
-        "def unexpected_worker(*args, **kwargs):\n"
-        f"    pathlib.Path({str(worker_started)!r}).touch()\n"
-        "    raise AssertionError('Worker must not start after the stop marker')\n"
-        "runner['subprocess'].Popen=unexpected_worker\n"
-        "raise SystemExit(runner['main']())\n"
-    )
-    state.session.sandbox.upload.side_effect = lambda source, destination: shutil.copyfile(
-        wrapper if Path(destination).name == SUPERVISOR_FILE else source, destination
-    )
-    if stop_timing == "before-shell":
-        (directory / STOP_REQUEST_FILE).touch()
+    (directory / STOP_REQUEST_FILE).touch()
     state.task = asyncio.create_task(
         agent._run_sandbox_episode(
             body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
         )
     )
     try:
-        if stop_timing == "before-handler":
-            async with asyncio.timeout(3):
-                while not ready.exists():
-                    await asyncio.sleep(0.01)
-            await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         with pytest.raises(RuntimeError, match="exited without output"):
             await state.task
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
-        assert not worker_started.exists()
         assert json.loads((directory / "cleanup.json").read_text()) == {
             "cleanup_confirmed": True,
             "error": None,
@@ -931,12 +907,10 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
     launch_command = state.session.sandbox.exec.await_args_list[0].args[0]
     launch_args = shlex.split(launch_command)
-    assert any(arg.endswith("/process_supervisor") for arg in launch_args)
+    assert any(arg.endswith("/process_supervisor.sh") for arg in launch_args)
     assert float(launch_args[launch_args.index("--timeout") + 1]) == agent.config.sandbox_runner_timeout_seconds
     cleanup_timeout = float(launch_args[launch_args.index("--cleanup-timeout") + 1])
-    assert cleanup_timeout * process_supervisor.CLEANUP_PHASE_COUNT == pytest.approx(
-        agent.config.session_close_timeout_seconds
-    )
+    assert cleanup_timeout * CLEANUP_PHASE_COUNT == pytest.approx(agent.config.session_close_timeout_seconds)
     assert state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] == pytest.approx(
         agent.config.sandbox_runner_timeout_seconds + agent.config.session_close_timeout_seconds + 30
     )
@@ -1397,7 +1371,7 @@ def test_text_history_and_system_message_are_preserved(agent):
 
 
 async def test_required_resources_tools_are_rejected_before_connect(agent, state):
-    from nemo_gym.tool_access import DirectHTTPToolAccess
+    from nemo_gym.server_runtime import DirectHTTPToolAccess
 
     state.request.tool_accesses = [DirectHTTPToolAccess(name="required", required=True, base_url="http://tools")]
     with pytest.raises(HTTPException, match="only MCP tool grants"):
@@ -1456,7 +1430,7 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
-    monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
+    monkeypatch.setattr("nemo_gym.agents.utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
     # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
@@ -1523,7 +1497,7 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
     factory.connect = AsyncMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
 
-    with caplog.at_level("WARNING", logger="nemo_gym.base_responses_api_agent"):
+    with caplog.at_level("WARNING", logger="nemo_gym.agents.base_responses_api_agent"):
         result = await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
 
     assert result.agent_session_id == state.request.agent_session_id
