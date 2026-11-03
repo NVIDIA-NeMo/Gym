@@ -14,6 +14,11 @@ import json
 import os
 import shutil
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from pydantic import ValidationError
+
+from nemo_gym.server_runtime import BaseRunRequest
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
@@ -33,21 +38,38 @@ def prepare(source_jsonl: str | None = None, limit: int | None = None) -> Path:
         raise FileNotFoundError(f"AgentArena turns file not found: {source_path}")
 
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
-    if limit is None:
-        shutil.copyfile(source_path, OUTPUT_FPATH)
-    else:
-        with source_path.open(encoding="utf-8") as src, OUTPUT_FPATH.open("w", encoding="utf-8") as out:
-            for i, line in enumerate(src):
-                if i >= limit:
-                    break
-                out.write(line)
-
-    with OUTPUT_FPATH.open(encoding="utf-8") as f:
-        rows = [json.loads(line) for line in f if line.strip()]
-    if not rows or any("responses_create_params" not in row for row in rows):
-        raise ValueError(f"{source_path} has no rows or rows without responses_create_params")
+    # Publish only what validated: a prepare that left a broken file behind would be taken for a
+    # prepared benchmark, since the cache check only looks for the path.
+    with TemporaryDirectory(dir=OUTPUT_FPATH.parent) as staging_dir:
+        staged = Path(staging_dir) / OUTPUT_FPATH.name
+        if limit is None:
+            shutil.copyfile(source_path, staged)
+        else:
+            with source_path.open(encoding="utf-8") as src, staged.open("w", encoding="utf-8") as out:
+                for i, line in enumerate(src):
+                    if i >= limit:
+                        break
+                    out.write(line)
+        rows = _validate(staged, source_path)
+        staged.replace(OUTPUT_FPATH)
     print(f"Wrote {len(rows)} AgentArena turns to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
+
+
+def _validate(staged: Path, source_path: Path) -> list[dict]:
+    """Every physical line of the copy is a request the environment can run."""
+    # Not `if line.strip()`: the copy keeps the source's bytes, and collation reads each of its
+    # lines, so a blank line it skipped here would stop the run instead of the preparation.
+    with staged.open(encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f]
+    if not rows:
+        raise ValueError(f"{source_path} has no rows")
+    for number, row in enumerate(rows, 1):
+        try:
+            BaseRunRequest.model_validate(row)
+        except ValidationError as exc:
+            raise ValueError(f"{source_path}:{number}: {exc}") from exc
+    return rows
 
 
 if __name__ == "__main__":
