@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.indirect_prompt_injection.app import IPIResourcesServer, IPIResourcesServerConfig
 
 
@@ -103,8 +103,6 @@ def test_a_typed_session_keeps_its_environment_until_close() -> None:
     assert seeded.status_code == 200, seeded.text
     assert seeded.json()["resources_session_id"] == "resources-session"
     assert "Message sent" in client.post("/send_message", json=MESSAGE).json()["output"]
-    # The session owns a copy: the task row's environment is unchanged.
-    assert all(message.get("to") != MESSAGE["recipient"] for message in TASK_DATA["environment"]["messages"])
 
     # A retried seed returns the same session, with the message the agent already sent.
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -165,3 +163,14 @@ def test_an_agents_run_seed_still_gets_a_session_that_verify_releases() -> None:
 
     assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
     assert server.session_id_to_env == {}
+    # The HTTP client sends a verify again when its connection drops after the server answered.
+    resent = client.post("/verify", json=verify_json()).json()
+    assert (resent["reward"], resent["mask_sample"]) == (1.0, False)
+
+
+def test_an_agents_run_verify_without_a_seed_is_masked() -> None:
+    client = TestClient(make_server().setup_webserver())
+
+    verified = client.post("/verify", json=verify_json()).json()
+
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)

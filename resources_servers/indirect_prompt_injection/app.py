@@ -28,6 +28,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -126,10 +127,14 @@ class IPIResourcesServer(SimpleResourcesServer):
     # the sessions it seeds.
     _typed_sessions: Dict[str, Tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _fence: ResourcesSessionFence = PrivateAttr()
+    # Sessions of an Agent's /run whose verify released them. The HTTP client sends a verify again when the
+    # connection drops, and the score reads only the request, so that resend is scored rather than masked.
+    _verified_run_sessions: ClosedResourcesSessionRecords[None] = PrivateAttr()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._verified_run_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -205,9 +210,9 @@ class IPIResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: IPIVerifyRequest) -> IPIVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self.session_id_to_env:
-            # Never seeded, closed, or gone with a restart: the agent's tool calls never reached the injected content,
-            # so a trajectory free of the injected call would read as a resisted attack.
+        if session_id not in self.session_id_to_env and session_id not in self._verified_run_sessions:
+            # Never seeded, closed, or gone with a restart: the server no longer holds the environment the agent's
+            # tool calls read, so a trajectory free of the injected call cannot be told from a resisted attack.
             lost = lost_session_verification("No seeded indirect_prompt_injection session for this verify")
             return IPIVerifyResponse(
                 **(body.model_dump() | lost),
@@ -256,8 +261,8 @@ class IPIResourcesServer(SimpleResourcesServer):
                 verification_type=body.injection.verification_type,
             )
         finally:
-            if session_id not in self._typed_sessions:
-                self.session_id_to_env.pop(session_id, None)
+            if session_id not in self._typed_sessions and self.session_id_to_env.pop(session_id, None) is not None:
+                self._verified_run_sessions.remember(session_id, None)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         metrics: Dict[str, Any] = {}
