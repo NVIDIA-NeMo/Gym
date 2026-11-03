@@ -107,7 +107,6 @@ def post_model(model_server):
     """Send ordinary HTTP requests through the sandbox-local transport."""
     with HistoryTransport(model_server.url, timeout=5) as url, requests.Session() as session:
         session.trust_env = False
-        session.headers["Connection"] = "close"
 
         def post(*, endpoint="chat/completions", **kwargs):
             return session.post(f"{url}/{endpoint}", timeout=5, **kwargs)

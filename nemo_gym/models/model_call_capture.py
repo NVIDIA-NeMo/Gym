@@ -46,7 +46,6 @@ from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
 )
-from nemo_gym.server_runtime.request_handling.session_routing import RolloutRouter, install_rollout_routing
 from nemo_gym.models.history_delta import HistoryBuffer, HistoryTransportProtocol
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
@@ -69,6 +68,7 @@ from nemo_gym.models.token_capture.protocols import (
 from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.server_runtime.request_handling.session_routing import RolloutRouter, install_rollout_routing
 
 
 logger = logging.getLogger(__name__)
