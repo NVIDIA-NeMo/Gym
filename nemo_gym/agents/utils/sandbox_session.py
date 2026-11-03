@@ -21,10 +21,12 @@ from nemo_gym.agents.utils.supervisor_client import (
     CONTINUE_REQUEST_FILE,
     DEFAULT_PAUSE_TIMEOUT,
     EXPIRE_REQUEST_FILE,
+    LAUNCH_CLAIM_FILE,
     OUTPUT_LOG_FILE,
     PAUSE_REQUEST_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
+    SUPERVISOR_PID_FILE,
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
     PauseAcknowledgement,
@@ -57,6 +59,8 @@ HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
 # Consecutive failed polls for an adopted launch's receipt before the wait gives up.
 _RECEIPT_POLL_FAILURES = 5
+# Each receipt poll is one command of at most this many seconds; a longer one could outlive a provider's stream limit.
+_RECEIPT_POLL_WINDOW_S = 50.0
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -410,9 +414,44 @@ class SandboxSession[Artifacts]:
                 pause_mode=self.pause_mode,
             )
             self.launch_started = True
-            return asyncio.create_task(self.sandbox.exec(command_line, cwd=self.workdir, timeout_s=provider_timeout))
+            return asyncio.create_task(self._exec_launch(command_line, provider_timeout=provider_timeout))
 
         return await self._run_launch(launch, close_timeout=close_timeout)
+
+    async def _exec_launch(self, command_line: str, *, provider_timeout: float) -> SandboxExecResult:
+        """Run the supervised launch; if its connection is lost after the supervisor started, wait for its receipt.
+
+        The supervisor runs on in the sandbox whatever happens to the command that started it, and writes the cleanup
+        receipt on every exit path it controls, so the receipt answers for the launch as ``adopt`` does after a
+        restore. A launch whose supervisor never started still fails at once: no receipt would ever come.
+        """
+        launched_at = monotonic()
+        try:
+            return await self.sandbox.exec(command_line, cwd=self.workdir, timeout_s=provider_timeout)
+        except Exception as error:
+            # A provider-confirmed OOM kill took the whole sandbox: nothing is left there to ask or to wait for.
+            oom_killed = (
+                isinstance(error, NgFailureEvent)
+                and error.boundary == "sandbox"
+                and error.failure_kind == PROVIDER_OOM_KILLED
+            )
+            if oom_killed or not await self._supervisor_started():
+                raise
+            LOG.warning("%s launch connection lost (%s); waiting for its cleanup receipt", self.harness, error)
+            return await self._wait_for_receipt(
+                deadline=launched_at + provider_timeout, window_s=_RECEIPT_POLL_WINDOW_S
+            )
+
+    async def _supervisor_started(self) -> bool:
+        """Whether the launch's supervisor claimed the launch; False when the sandbox cannot say."""
+        claim = quote(f"{self.session_dir}/{LAUNCH_CLAIM_FILE}")
+        pid = quote(f"{self.session_dir}/{SUPERVISOR_PID_FILE}")
+        try:
+            probe = await self.sandbox.exec(f"[ -e {pid} ] || [ -e {claim} ]", cwd=self.workdir, timeout_s=30)
+        except Exception:
+            LOG.warning("%s could not check whether its supervisor started", self.harness, exc_info=True)
+            return False
+        return probe.return_code == 0 and not probe.error_type
 
     async def adopt(
         self,
@@ -422,7 +461,7 @@ class SandboxSession[Artifacts]:
         timeout: float,
         close_timeout: float,
         pause_allowance_s: float = 0.0,
-        poll_window_s: float = 50.0,
+        poll_window_s: float = _RECEIPT_POLL_WINDOW_S,
     ) -> Artifacts:
         """Take over a launch that ran on through a restore, as ``execute`` would have finished it.
 
@@ -465,12 +504,16 @@ class SandboxSession[Artifacts]:
         receipt = quote(f"{self.session_dir}/{CLEANUP_RECEIPT_FILE}")
         failures = 0
         while (window := min(window_s, deadline - monotonic())) > 0:
-            result = await self.sandbox.exec(
-                f"for _ in $(seq 1 {max(1, int(window))}); do "
-                f"[ -f {receipt} ] && {{ cat {receipt}; exit 0; }}; sleep 1; done; exit 3",
-                cwd=self.workdir,
-                timeout_s=window + 10,
-            )
+            try:
+                result = await self.sandbox.exec(
+                    f"for _ in $(seq 1 {max(1, int(window))}); do "
+                    f"[ -f {receipt} ] && {{ cat {receipt}; exit 0; }}; sleep 1; done; exit 3",
+                    cwd=self.workdir,
+                    timeout_s=window + 10,
+                )
+            except Exception as error:
+                # A poll whose command raised (a dropped connection) is one failed poll, not the end of the wait.
+                result = SandboxExecResult(stdout=None, stderr=repr(error), return_code=-1, error_type="poll_failed")
             if result.return_code == 0 and not result.error_type:
                 try:
                     code = json.loads(result.stdout or "{}").get("return_code")
