@@ -115,10 +115,11 @@ otel:
 ```
 
 `driver.gym_install.ref` is the Gym the job installs and scores the run with: a full commit of
-public Gym that has your benchmark. Recovery (`gym eval resubmit --recover`) needs a commit at or
-after the one that ships this skill. The CLI you submit with may be newer than the pinned commit;
-the job still installs the pinned one. Site `#SBATCH` directives (a QoS, a node to avoid) go in
-`compute.cluster.extra_args`, without leading dashes: `{qos: <qos>, exclude: <node>}`.
+public Gym that has your benchmark, never a branch. Recovery (`gym eval resubmit --recover`) reads
+the run with that commit. The CLI you submit with may be newer than the pinned commit; the job
+still installs the pinned one. Install the CLI as gym-eval (step 1) describes. Site `#SBATCH`
+directives (a QoS, a node to avoid) go in `compute.cluster.extra_args`, without leading dashes:
+`{qos: <qos>, exclude: <node>}`.
 
 | What | Where |
 | --- | --- |
@@ -135,6 +136,13 @@ the job still installs the pinned one. Site `#SBATCH` directives (a QoS, a node 
 
 `extra_args` is passed to `vllm serve` verbatim: check each flag against the vLLM version in the
 image. Gym does not validate them.
+
+Each instance uses `tensor_parallel_size × pipeline_parallel_size` GPUs, and all instances together
+must fit the node pool (`nodes × gpus_per_node`). More instances raise throughput for many
+rollouts; they do not change the outputs. A model with no reasoning output runs without
+`--reasoning-parser` and sets `uses_reasoning_parser: false` on the client (section 3). Weight
+quantization (`--quantization`, a quantized checkpoint), `--dtype` and `--kv-cache-dtype` change
+the outputs and the score: they are part of the model config, not a memory setting (section 7).
 
 Two readiness limits: the job waits `health_check.timeout_seconds` for the policy service, and
 the driver then waits `server_spinup_timeout_seconds` (under the benchmark's `run`, 600 s by
@@ -164,13 +172,32 @@ these values win over the benchmark's and the model type's own. The same keys wo
 line: `+policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=false`.
 
 - Set `uses_reasoning_parser` on the client to match the server: true when vLLM runs a reasoning
-  parser for this model.
+  parser for this model. The shipped `vllm_model` config sets it to true, so a model served without
+  `--reasoning-parser` needs `false` here.
+- A benchmark whose own config already declares the policy model fails validation with "at most 1
+  item" when another model type is composed beside it: set `driver.policy_model_type: ""` for it.
 - Some benchmark configs set `chat_template_kwargs` (or `extra_body`) themselves. That is a
   benchmark setting: leave it as the benchmark sets it, because an override would replace it. The
   shipped `vllm_model` configs leave these keys unset, so a benchmark's value survives
   `--model-type vllm_model`, which merges after the benchmark config.
 - A request's own `chat_template_kwargs` is used only with `forward_request_chat_template_kwargs:
   true` (see the vLLM model server page).
+
+What the client sends, and what it leaves to the server:
+
+- Gym's agents speak the Responses API; `vllm_model` turns each call into a chat-completions
+  request (`is_responses_native: false` by default) and the tool calls back into Responses items,
+  so the served template and tool-call parser decide whether tools work.
+- Sampling (`temperature`, `top_p`, the output budget `max_output_tokens`) comes from the
+  benchmark and its data. Any value they leave unset falls to the server: the model's
+  `generation_config.json` with `--generation-config auto`, vLLM's defaults otherwise. A product
+  deployment's sampling defaults are not evaluation settings. Leave the client's
+  `sampling_overrides` unset for evaluation: it replaces the benchmark's sampling on every request.
+- When the output budget alone exceeds `--max-model-len`, the client lowers it to fit the window
+  (`refit_output_budget_to_window`, on by default) and records it in the model call's capture. A
+  window that is too short therefore shows up as truncated answers, not as an error.
+- System prompts come from the benchmark. A template that rejects the `developer` role needs
+  `replace_developer_role_with_system: true` on the client; check the template before setting it.
 
 ## 4. Validate without GPUs
 
@@ -195,7 +222,8 @@ beside a nested block at the same path) fails the job on the cluster, after the 
 
 ## 5. Smoke it
 
-Submit the model with one benchmark and a small task count before a full evaluation:
+Submit the model with one benchmark and a small task count before a full evaluation
+(`gym eval submit --config submit.yaml`; it prints the run's `GYM_JOB_ID`):
 
 ```yaml
 driver:
@@ -219,8 +247,9 @@ messages alone (equal means the template dropped the tools). In the inspection's
 `gate_task.evaluation_health.model.kinds` and
 `gate_task.failures.response_failures.by_cause` (`truncated`, `empty`, `malformed`) are the model's
 own faults: they count in the score, never fail health, and point at the deployment (output
-budget, `--max-model-len`, parsers). `UNVERIFIED` with `trial_counts.unobserved_reason` naming the
-benchmark's server is about that server's grading record, not about your deployment: report it and
+budget, `--max-model-len`, parsers). Answers that never stop and run to the output budget point
+at an end-of-turn token that the template and the model's generation config disagree on.
+`UNVERIFIED` with `trial_counts.unobserved_reason` naming the benchmark's server is about that server's grading record, not about your deployment: report it and
 change nothing for it.
 
 ## 6. Read the resolved config
@@ -234,7 +263,8 @@ file may have changed since, and overrides mean nothing without it.
 | Keep identical between the models you compare | May change with the deployment |
 | --- | --- |
 | The benchmark config: data, split, prompts, task limits. | Tensor, pipeline, data and expert parallelism; `number_of_instances`. |
-| Sampling settings the benchmark sets, and `num_repeats`. | `--max-num-seqs`, GPU memory settings, client concurrency. |
+| Sampling settings the benchmark sets, and `num_repeats`. | `--max-num-seqs`, `--gpu-memory-utilization`, client concurrency. |
+| Weight quantization, `--dtype` and `--kv-cache-dtype` (or record each difference as part of the model). | |
 | The judge model and the grading config. | Ports, container image, node layout. |
 | The benchmark's token budgets and timeouts. | `--max-model-len`, as long as it holds the benchmark's longest prompt plus its output budget. |
 | A reasoning switch the benchmark sets, and the Gym commit that scores the run. | |

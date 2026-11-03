@@ -7,7 +7,13 @@ import pytest
 
 from nemo_gym.core.failure_transport import FailureHeader
 from nemo_gym.core.typed_exceptions import failure_report_for
-from nemo_gym.sandbox.failure_details import ended_sandbox, provider_report, sandbox_failure_event
+from nemo_gym.sandbox.failure_details import (
+    ended_sandbox,
+    provider_report,
+    sandbox_failure_event,
+    sandbox_transport_failure_event,
+)
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
 
 
 SANDBOX = "00000000-0000-4000-8000-000000000001"
@@ -178,3 +184,31 @@ def test_a_longest_reported_event_fits_one_header() -> None:
 def test_the_provider_report_is_the_sdks_own_text() -> None:
     error = _ended("OOMKilled", "x")
     assert provider_report(error) == error.error.message
+
+
+@pytest.mark.parametrize(
+    "error, kind",
+    [
+        (TimeoutError("Timed out during OpenSandbox write_file(/tmp/x) after 300s"), "transport_timeout"),
+        (SandboxBackendUnreachableError("connection refused"), "provider_unavailable"),
+    ],
+)
+def test_a_call_the_sandbox_never_answered_is_a_transport_failure_event(error, kind) -> None:
+    event = sandbox_transport_failure_event(
+        error, stage="seed", provider="opensandbox", sandbox_id="box-1", operation="agent.sandbox_upload_ripgrep"
+    )
+
+    assert event is not None
+    assert (event.boundary, event.failure_kind, event.stage) == ("sandbox", kind, "seed")
+    assert event.operation == "agent.sandbox_upload_ripgrep" and event.__cause__ is error
+    assert (event.details.sandbox_id, event.details.provider) == ("box-1", "opensandbox")
+    # Nothing is claimed about why the sandbox did not answer.
+    assert event.details.provider_status_reason is None and event.details.exit_code is None
+    assert "/tmp/x" not in event.failure_reason
+    report = failure_report_for(event)
+    assert len(FailureHeader.encode(report)[FailureHeader.NAME]) < FailureHeader.MAX_BYTES
+
+
+@pytest.mark.parametrize("error", [RuntimeError("boom"), ValueError("x"), ConnectionError("reset")])
+def test_any_other_error_is_not_a_transport_failure_event(error) -> None:
+    assert sandbox_transport_failure_event(error, stage="agent") is None

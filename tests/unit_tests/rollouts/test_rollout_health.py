@@ -289,6 +289,11 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
         (_record(8, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=500)]),
         (_record(8, 1, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=408)]),
     ]
+    failed_tool = _record(9, 0)
+    failed_tool["ng_trajectory"]["tool_calls"] = [
+        {"invocation_id": "root", "tool_call_id": "t1", "output": "ripgrep execution failed: x"}
+    ]
+    rows.append((failed_tool, [_call()]))
     rows.append(deepcopy(rows[0]))
     rollout_path = _write_fixture(tmp_path, rows)
 
@@ -1294,6 +1299,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
         "trajectory_capture_mismatch",
         "rollout_token_count_mismatch",
         "model_call_runaway_generation",
+        "rollout_tool_call_failed",
     }
 
     # A malformed line must not be grouped with a valid rollout whose numeric
@@ -3974,3 +3980,85 @@ def test_run_provenance_records_whether_mlflow_tracking_is_required(tmp_path: Pa
     (tmp_path / "rollouts_resolved_config.yaml").write_text(line + "route_failures_to_sidecar: true\n")
     summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
     assert summary["run"]["provenance"]["mlflow"]["tracking_required"] is required
+
+
+def _tool_call(index: int, output) -> dict:
+    return {"invocation_id": "root", "tool_call_id": f"t{index}", "tool_name": "grep", "output": output}
+
+
+def _tool_call_failed_findings(tmp_path: Path, tool_calls: list[dict], **record_updates) -> tuple[dict, list]:
+    record = _record(0, 0)
+    record["ng_trajectory"]["tool_calls"] = tool_calls
+    record.update(record_updates)
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1).rollouts
+    return record, [finding for finding in digest.findings if finding.check == "rollout_tool_call_failed"]
+
+
+def test_tool_outputs_that_report_the_harness_tool_could_not_run_are_one_counted_finding(tmp_path: Path) -> None:
+    failed = [_tool_call(i, "ripgrep execution failed: spawn rg ENOENT") for i in range(129)]
+    ok = [_tool_call(1000, "3 matches"), _tool_call(1001, None), _tool_call(1002, "the ripgrep execution failed")]
+
+    record, findings = _tool_call_failed_findings(tmp_path, [*failed, *ok], reward=0.0)
+
+    [finding] = findings
+    assert finding.detail["count"] == 129
+    assert list(finding.subject.values()) == [0, 0]
+    # The finding labels the rollout; the reward the record carries is not read or changed.
+    assert record["reward"] == 0.0
+
+
+def test_a_trajectory_without_failed_tool_outputs_has_no_tool_call_failed_finding(tmp_path: Path) -> None:
+    _, findings = _tool_call_failed_findings(tmp_path, [_tool_call(1, "3 matches"), _tool_call(2, "")])
+    assert findings == []
+    _, findings = _tool_call_failed_findings(tmp_path, [])
+    assert findings == []
+
+
+def test_a_tool_failure_marker_is_read_from_text_output_shapes(tmp_path: Path) -> None:
+    _, findings = _tool_call_failed_findings(
+        tmp_path,
+        [
+            _tool_call(1, "  Ripgrep execution failed: exit 2"),
+            _tool_call(2, {"output": "ripgrep execution failed: killed"}),
+            _tool_call(3, {"unrelated": "ripgrep execution failed"}),
+        ],
+    )
+    assert [finding.detail["count"] for finding in findings] == [2]
+
+
+def test_tool_call_failed_leaves_the_verdict_to_the_finding_only(tmp_path: Path) -> None:
+    record = _record(0, 0)
+    record["ng_trajectory"]["tool_calls"] = [_tool_call(1, "ripgrep execution failed: x")]
+    result = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1)
+    [digest] = result.rollouts
+    assert [finding.check for finding in digest.findings] == ["rollout_tool_call_failed"]
+    assert digest.verdict == "unhealthy"
+
+
+def _missing_turns_finding(tmp_path: Path, **record_updates):
+    record = _record(0, 0, include_turn=False)
+    record.update(record_updates)
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [])]), workers=1).rollouts
+    [finding] = [item for item in digest.findings if item.check == "rollout_missing_agent_turns"]
+    return finding
+
+
+def test_missing_agent_turns_names_the_resource_limit_that_ended_the_sandbox(tmp_path: Path) -> None:
+    limit = {"resource": "storage", "detail": "Pod entered Failed phase (Evicted)"}
+
+    finding = _missing_turns_finding(tmp_path, sandbox_resource_limit=limit)
+
+    # Still reported: the detail only says why the absence was expected.
+    assert finding.detail == {
+        "reason": "no agent turn with model activity",
+        "expected_absence": "sandbox_resource_limit:storage",
+    }
+
+
+@pytest.mark.parametrize("limit", [None, {}, {"detail": "no resource"}, {"resource": ""}, "storage"])
+def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(tmp_path: Path, limit) -> None:
+    updates = {} if limit is None else {"sandbox_resource_limit": limit}
+
+    finding = _missing_turns_finding(tmp_path, **updates)
+
+    assert finding.detail == {"reason": "no agent turn with model activity"}

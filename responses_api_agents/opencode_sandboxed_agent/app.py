@@ -22,14 +22,14 @@ import sqlite3
 import sys
 import tempfile
 from asyncio import Semaphore
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import cache
 from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
+from typing import Any, ClassVar, Dict, Iterator, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -47,7 +47,7 @@ from nemo_gym.agents import (
     verify_agent_response,
 )
 from nemo_gym.client import SESSION_ID_KEY, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict, maybe_get_global_config_dict
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
@@ -76,7 +76,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.sandbox.failure_details import sandbox_failure_event
+from nemo_gym.sandbox.failure_details import sandbox_failure_event, sandbox_transport_failure_event
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -115,6 +115,13 @@ DEPRECATION_WARNING = (
     "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
     "the HLE search presets (tool_servers) and vibench_agent. "
     "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
+)
+
+
+RIPGREP_WARNING = (
+    "opencode_sandboxed_agent: the agent sandbox has no network access (network_access, or enforce_agent_no_network "
+    "on the resources server) and local_ripgrep_binary_path is not set. OpenCode cannot download ripgrep there, so "
+    "its grep and glob calls fail. Set local_ripgrep_binary_path to a host-local rg executable."
 )
 
 
@@ -648,10 +655,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         _warn_deprecated_once()
+        if (
+            self.config.local_ripgrep_binary_path is None
+            and self._agent_network_restricted()
+            and not is_nemo_gym_fastapi_worker()
+        ):
+            LOGGER.warning(RIPGREP_WARNING)
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
+
+    def _agent_network_restricted(self) -> bool:
+        """Whether the agent's sandbox is denied network access: by this agent's ``network_access``, or by its
+        resources server's ``enforce_agent_no_network``. Reads only a config the process already holds."""
+        if self.config.network_access != "inherit":
+            return True
+        global_config = maybe_get_global_config_dict()
+        block = global_config.get(self.config.resources_server.name) if global_config is not None else None
+        implementations = block.get("resources_servers") if hasattr(block, "get") else None
+        return any(
+            hasattr(implementation, "get") and implementation.get("enforce_agent_no_network") is True
+            for implementation in (implementations.values() if hasattr(implementations, "values") else ())
+        )
 
     async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
@@ -717,6 +743,37 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.tool_servers:
             plugins.append("required-mcp.js")
         return plugins
+
+    @staticmethod
+    def _observe_sandbox_failure(error: BaseException, sandbox: AsyncSandbox, *, stage: str, operation: str) -> None:
+        """Observe the sandbox failure ``error`` reports beside the failure the caller raises; the caller's reply, its
+        kind and the retry decision stay its own.
+
+        A provider-ended sandbox is observed as the typed event ``sandbox_failure_event`` builds. Only when it builds
+        none, a ``TimeoutError`` or ``SandboxBackendUnreachableError`` is observed as ``sandbox_transport_failure_event``
+        builds it, so one error never yields two events.
+        """
+        handle = getattr(sandbox, "_handle", None)
+        provider = getattr(handle, "provider_name", None)
+        sandbox_id = getattr(handle, "sandbox_id", None)
+        facts: dict[str, Any] = {
+            "provider": provider if isinstance(provider, str) else None,
+            "sandbox_id": sandbox_id if isinstance(sandbox_id, str) else None,
+            "operation": operation,
+            "stage": stage,
+        }
+        event = sandbox_failure_event(error, **facts) or sandbox_transport_failure_event(error, **facts)
+        if event is not None:
+            observe_failure(event)
+
+    @contextmanager
+    def _observing_sandbox_failure(self, sandbox: AsyncSandbox, *, stage: str, operation: str) -> Iterator[None]:
+        """Observe the sandbox failure an error raised in the block reports, then let the error propagate unchanged."""
+        try:
+            yield
+        except Exception as error:
+            self._observe_sandbox_failure(error, sandbox, stage=stage, operation=operation)
+            raise
 
     @staticmethod
     def _agent_sandbox_facts(sandbox: AsyncSandbox, **facts: Any) -> str:
@@ -969,7 +1026,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         effective_config = await self._create_opencode_config(request, image_input=bool(attachments))
         for name in self._runtime_plugins():
-            await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
+            with self._observing_sandbox_failure(sandbox, stage="seed", operation="agent.sandbox_upload_plugin"):
+                await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
         for name in ("temperature", "top_p"):
             value = getattr(body, name, None)
@@ -977,7 +1035,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 build_agent[name] = value
         if self._model_call_capture_enabled():
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
-            await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
+            with self._observing_sandbox_failure(
+                sandbox, stage="seed", operation="agent.sandbox_upload_observability_patch"
+            ):
+                await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
         if attachments:
             # Decoded on the host only for the upload; the bytes never reach the launch command or a log.
@@ -988,7 +1049,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     # Uploads keep the host mode and may land root-owned: world-readable so the
                     # sandbox user can open the file.
                     local_path.chmod(0o644)
-                    await sandbox.upload(local_path, attachment.remote_path)
+                    with self._observing_sandbox_failure(
+                        sandbox, stage="seed", operation="agent.sandbox_upload_attachment"
+                    ):
+                        await sandbox.upload(local_path, attachment.remote_path)
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -1034,7 +1098,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
         if ripgrep_remote_path is not None:
-            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
+            with self._observing_sandbox_failure(sandbox, stage="seed", operation="agent.sandbox_upload_ripgrep"):
+                await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
         try:
@@ -1046,20 +1111,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # A provider exception does not establish how the command ended: report it at the agent boundary, with
             # the sandbox facts known here, rather than grade a substituted partial run. A provider-ended sandbox is
             # observed beside it as a typed sandbox failure.
-            handle = getattr(sandbox, "_handle", None)
-            ended = sandbox_failure_event(
-                error,
-                provider=getattr(handle, "provider_name", None)
-                if isinstance(getattr(handle, "provider_name", None), str)
-                else None,
-                sandbox_id=getattr(handle, "sandbox_id", None)
-                if isinstance(getattr(handle, "sandbox_id", None), str)
-                else None,
-                operation="agent.sandbox_exec",
-                stage="agent",
-            )
-            if ended is not None:
-                observe_failure(ended)
+            self._observe_sandbox_failure(error, sandbox, stage="agent", operation="agent.sandbox_exec")
             raise NgFailureEvent(
                 boundary="agent",
                 failure_kind=AGENT_ROUTE_FAILED,
