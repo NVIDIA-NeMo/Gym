@@ -1,0 +1,73 @@
+---
+title: "Job Records"
+description: "The manifest, resolved config, and local index that gym eval submit leaves behind."
+position: 5
+---
+
+`gym eval submit` describes what to submit; the job record describes what **was** submitted. It exists so a run can be found again, by a person, a collection script, or a future status command, without re-reading the original config.
+
+The record format is deliberately executor-neutral. Nothing in it is named after Slurm, and the `executor` field says how to interpret the executor-shaped parts.
+
+## Where records are written
+
+| Location | File | Notes |
+| --- | --- | --- |
+| Run directory on the cluster | `gym-job.json` | The durable copy. |
+| Run directory on the cluster | `resolved-config.yaml` | The config exactly as submitted: interpolations resolved, overrides applied. |
+| Your machine | `$XDG_CACHE_HOME/nemo-gym/jobs/<gym_job_id>.json`, or `~/.cache/nemo-gym/jobs/<gym_job_id>.json` when `XDG_CACHE_HOME` is unset | A copy of the manifest, so you can list your own submissions. |
+
+The resolved config is the right thing to archive or diff: the config file may have changed since, and the overrides mean nothing without the file they were applied to. It is also what `--resolve-only` prints.
+
+### Secrets
+
+In `resolved-config.yaml`, `host:VAR` values are written back as `host:VAR`, never as the value, so the file is safe to share with another account. The resolved values live only in the owner-only `job.sh`. The collector's ingest token is not written to the job directory at all.
+
+### Write order and failures
+
+The local index is written first, because it cannot fail the submit: a failure to write it is reported on stderr and ignored. The resolved config and manifest are then written to the run directory. By that point the jobs are already queued, so if either write fails the command raises an error that names every queued job (`<benchmark>=<slurm job id>`). Record those IDs by hand before collecting results.
+
+## Manifest fields
+
+`gym-job.json` is a `SubmissionRecord`:
+
+| Field | Description |
+| --- | --- |
+| `gym_job_id` | The submission's primary key and the run directory's name, `gym-job-<YYYYMMDDTHHMMSSZ>-<6 hex>`. |
+| `gym_version` | Version of the Gym that submitted. |
+| `gym_commit` | Commit of that Gym when it can be determined: from the install metadata of a git install, otherwise from the source checkout's `HEAD`. A `-dirty` suffix means uncommitted changes, so the commit alone does not reproduce it. `null` when unknown. |
+| `submitted_at` | UTC time, ISO 8601 with a trailing `Z`. |
+| `run_dir` | Absolute path of the run directory. |
+| `cluster` | The name of the `compute` entry. |
+| `executor` | Which executor produced the record; `slurm` today. A plain string, so adding an executor does not change the schema. Branch on it before interpreting `job_id`. |
+| `hostname` | The host submitted through. `null` means the submission ran directly on the machine with the scheduler's client, not that the host is unknown. |
+| `submitted_by` | Local username that submitted. |
+| `benchmarks` | A list of per-benchmark entries; see below. |
+| `executor_metadata` | Free-form string map for whatever an executor needs to find the run again. Empty for Slurm. Read it only after checking `executor`. |
+| `schema_version` | Integer, currently `1`. |
+
+Each entry in `benchmarks`:
+
+| Field | Description |
+| --- | --- |
+| `benchmark` | The benchmark's name. |
+| `job_dir` | The benchmark's directory inside the run directory. |
+| `job_id` | The Slurm job ID. `null` exactly when the executor failed to queue this benchmark. |
+| `error` | Why it failed, when `job_id` is `null`. |
+
+A submission with at least one entry whose `job_id` is `null` makes the command exit 1, but the record is still written for the benchmarks that were queued.
+
+## `--json`
+
+`gym eval submit --json` prints the manifest, and only the manifest, so the output parses as JSON:
+
+```bash
+gym eval submit -c submit.yaml --json | jq -r '.benchmarks[] | "\(.benchmark) \(.job_id)"'
+```
+
+With `--resolve-only`, `--json` prints the resolved config instead. `--dry-run` produces no record, so there is nothing to print as JSON.
+
+## Compatibility
+
+A record outlives the Gym that wrote it, so `schema_version` is read in one direction: a reader accepts any record at or below its own version and refuses only one that is newer. Upgrading Gym therefore never orphans records already on disk. To keep that safe, within one schema version a field may only be added with a default, or removed; its meaning never changes. A change in meaning requires a version bump and an explicit migration.
+
+If you load records yourself, use `SubmissionRecord.load(payload)` from `nemo_gym.orchestration.jobs`. It raises a clear error for a missing `schema_version` or one written by a newer Gym.

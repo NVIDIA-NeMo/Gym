@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -25,8 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
-from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
+from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.utils.text import did_you_mean
 
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,19 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
+def _hydra_quote(value: str) -> str:
+    """Single-quote `value` as a literal for Hydra's override grammar, so it parses back to the same string.
+
+    `json.dumps` is not that encoder: Hydra keeps `\\uXXXX`, `\\t` and a doubled backslash literally, so a Unicode
+    or backslash-containing filename would reach the command under another name. Hydra un-escapes a backslash
+    only when its run ends at a quote character, so only those runs (and the quote itself) are escaped here.
+    Everything else, Unicode included, is passed through unchanged.
+    """
+    escaped = re.sub(r"(\\*)(')", lambda m: m.group(1) * 2 + "\\'", value)
+    escaped = re.sub(r"(\\+)$", lambda m: m.group(1) * 2, escaped)
+    return f"'{escaped}'"
+
+
 def _value_flag(
     name: str,
     hydra_key: str,
@@ -88,12 +103,15 @@ def _value_flag(
     choices: tuple[str, ...] | None = None,
     quote: bool = False,
 ) -> Flag:
-    """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
+    """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset).
+
+    `quote=True` passes VALUE as a literal string (see `_hydra_quote`), for filenames and free text.
+    """
     dest = name.replace("-", "_")
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
-            [f"+{hydra_key}={json.dumps(getattr(args, dest)) if quote else getattr(args, dest)}"]
+            [f"+{hydra_key}={_hydra_quote(getattr(args, dest)) if quote else getattr(args, dest)}"]
             if getattr(args, dest) is not None
             else []
         ),
@@ -114,6 +132,19 @@ def _split_comma_separated(value: str) -> list[str]:
     if not all(values):
         raise argparse.ArgumentTypeError("check IDs must be a comma-separated list without empty entries")
     return values
+
+
+def _limit_fraction_or_none(value: str) -> float | None:
+    """A run-health limit: a fraction in [0, 1], or ``none`` (any case) for no limit."""
+    if value.strip().lower() == "none":
+        return None
+    try:
+        fraction = float(value)
+    except ValueError:
+        fraction = float("nan")
+    if not 0 <= fraction <= 1:
+        raise argparse.ArgumentTypeError(f"expected a fraction in [0, 1] or none, got {value!r}")
+    return fraction
 
 
 def _csv_list_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
@@ -236,7 +267,7 @@ SEARCH_TERMS = Flag(
             help="Text matched (substring or fuzzy) against a component's name, description, and key metadata.",
         ),
     ),
-    translate_to_hydra=lambda args: [f"+query={json.dumps(args.query)}"] if getattr(args, "query", None) else [],
+    translate_to_hydra=lambda args: [f"+query={_hydra_quote(args.query)}"] if getattr(args, "query", None) else [],
 )
 
 
@@ -396,19 +427,6 @@ def _asset_config_path(flag: str, value: str) -> str:
         )
     if matches:
         return str(matches[0])
-
-    if flag == "environment" and value in LEGACY_ENVIRONMENT_ALIASES:
-        canonical = LEGACY_ENVIRONMENT_ALIASES[value]
-        resolved = _asset_config_path(flag, canonical)
-        logger.warning(f"`--environment {value}` is deprecated; use `--environment {canonical}`.")
-        return resolved
-
-    if canonical_path := legacy_config_path_alias(path):
-        for root in roots:
-            candidate = root / canonical_path
-            if candidate.exists():
-                logger.warning(f"Config path `{path}` is deprecated; use `{canonical_path}`.")
-                return str(candidate.resolve())
 
     # No match: build a "did you mean?" hint and the roots searched
     if flag == "benchmark":
@@ -578,7 +596,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from pydantic import ValidationError
     from rich.markup import escape
 
-    from nemo_gym.config_types import ConfigError
+    from nemo_gym.config.config_types import ConfigError
     from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
@@ -600,6 +618,28 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
+    # Malformed driver/benchmarks shapes are left for SubmitConfig validation to report.
+    driver = resolved.get("driver")
+    available = driver.get("benchmarks") if isinstance(driver, dict) else None
+    if (
+        args.select is not None
+        and isinstance(available, dict)
+        and available
+        and all(isinstance(name, str) for name in available)
+    ):
+        selected = [name.strip() for name in args.select.split(",") if name.strip()]
+        if not selected:
+            raise ConfigError(
+                f"--select was given no benchmark names. Available: {', '.join(available)}. "
+                "Omit --select to submit all of them."
+            )
+        unknown = [name for name in selected if name not in available]
+        if unknown:
+            raise ConfigError(
+                f"--select named {', '.join(unknown)}, which {'is' if len(unknown) == 1 else 'are'} not under "
+                f"driver.benchmarks in '{config_path}'. Available: {', '.join(available)}."
+            )
+        resolved["driver"]["benchmarks"] = {name: available[name] for name in selected}
     # SubmitConfig is an orchestration model: report schema errors against its YAML file
     # rather than using the generic CLI handler's +key=<value> hint.
     try:
@@ -639,8 +679,12 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
                 # written instead of being swallowed or raising MarkupError.
                 rich.print(f"[red]failed[/red] {benchmark.benchmark}: {escape(benchmark.error or '')}")
             else:
+                executor_label = {"slurm": "Slurm job", "kubernetes": "Kubernetes Job"}.get(
+                    record.executor, f"{record.executor} job"
+                )
                 rich.print(
-                    f"[green]submitted[/green] {benchmark.benchmark} → Slurm job [bold]{benchmark.job_id}[/bold]"
+                    f"[green]submitted[/green] {benchmark.benchmark} → {executor_label} "
+                    f"[bold]{benchmark.job_id}[/bold]"
                 )
 
     if record.failed:
@@ -649,16 +693,59 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error("resubmit does not accept Hydra overrides")
+    from nemo_gym.orchestration.submit import resubmit
+
+    try:
+        print(resubmit(args.gym_job_id, args.benchmark).job_id)
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
         # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
-        from nemo_gym.tasks.harbor.cli import run_target
+        from nemo_gym.cli.eval import run_target
 
         run_target(args, overrides)
         return
+    if getattr(args, "only_tasks", None) or getattr(args, "exclude_tasks", None):
+        # Register-only flags: without a TARGET nothing consumes them, and a silently ignored selection
+        # would run every task.
+        args._parser.error(
+            "--only-tasks and --exclude-tasks apply to a task TARGET; pass a Harbor task folder or harbor: reference"
+        )
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
+
+
+# `gym eval export <exporter>`: which exporter handles the run. Register-only: `_eval_export` consumes it.
+EXPORTER = Flag(
+    register=lambda p: p.add_argument(
+        "exporter",
+        nargs="?",
+        metavar="EXPORTER",
+        help=f"Exporter to run: {', '.join(RUN_EXPORTERS)} (default: {DEFAULT_RUN_EXPORTER}). "
+        "Exporter settings are `+key=value` overrides, e.g. `+rollouts_jsonl_fpath=results/rollouts.jsonl`.",
+    ),
+)
+
+
+def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
+    exporter = args.exporter
+    if args.format is not None:
+        logger.warning("`--format` is deprecated; pass the exporter name instead: `gym eval export <exporter>`.")
+        if exporter and exporter != args.format:
+            args._parser.error(f"conflicting exporter: {exporter!r} and --format {args.format!r}")
+        exporter = exporter or args.format
+    exporter = exporter or DEFAULT_RUN_EXPORTER
+    if exporter not in RUN_EXPORTERS:
+        args._parser.error(f"unknown exporter {exporter!r}; choose from: {', '.join(RUN_EXPORTERS)}")
+    dispatch("nemo_gym.cli.eval:export_run", [f"+exporter={exporter}", *overrides])
 
 
 # `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
@@ -669,7 +756,8 @@ TASK_TARGET = Flag(
         nargs="?",
         metavar="TARGET",
         help=(
-            "Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]` hub reference. "
+            "Harbor task folder, folder of task folders, `harbor:<dataset>[@<version>]` hub reference, or the "
+            "name of a committed entry under environments/harbor/ (e.g. terminal_bench_4) after `gym dataset pull`. "
             "Existing folders (including expanded ~user paths) and explicit ./, ../, /, or ~/ paths "
             "take precedence over Hydra overrides. Prefix an ambiguous relative path with ./; "
             "otherwise key=value and ~key are configuration overrides."
@@ -686,6 +774,22 @@ SANDBOX = Flag(
     ),
 )
 
+EXCLUDE_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--exclude-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs to leave out of a task TARGET (e.g. `fp8-*,jax-speedrun-gpu`).",
+    ),
+)
+
+ONLY_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--only-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs; only matching tasks of a task TARGET run.",
+    ),
+)
+
 
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     expected_overrides = ["+verbose=true"] if args.verbose else []
@@ -694,16 +798,30 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides != expected_overrides:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.health.types import RunHealthLimits
 
+    # A limit flag that is not given is absent from args, so the limit stays unset and keeps the run's persisted
+    # value; `none` sets it to None, which removes it.
+    given_limits = {
+        field: getattr(args, flag)
+        for field, flag in (
+            ("max_not_final_failure_fraction", "health_max_not_final_failure_fraction"),
+            ("max_final_failure_fraction", "health_max_final_failure_fraction"),
+        )
+        if hasattr(args, flag)
+    }
     try:
         health_check_rollouts(
             args.run_dir,
             rollout_file=args.rollout_file,
             workers=args.workers,
             ignored_checks=args.ignore_checks or (),
+            limits=RunHealthLimits(**given_limits),
             json_output=args.json,
+            model_call_capture_dir=args.model_call_capture_dir,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, ConfigError) as exc:
         args._parser.error(str(exc))
 
 
@@ -723,6 +841,11 @@ def _env_init(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("select a resources server or a manifest-backed workload, not both")
     if scaffold_options and not scaffold_selected:
         args._parser.error("--profile, --reuse-verifier, and reward options require --environment or --benchmark")
+    print(
+        "`gym env init` is deprecated for new datasets: use `gym dataset init <name>` for a Harbor-shaped dataset. "
+        "It remains for custom resources servers until tasksets can ship their own tools; it will then be removed.",
+        file=sys.stderr,
+    )
     target = "nemo_gym.cli.env:init_environment" if scaffold_selected else "nemo_gym.cli.env:init_resources_server"
     dispatch(target, overrides)
 
@@ -768,6 +891,67 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
         "gitlab": "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
     }
     dispatch(targets[args.storage], overrides)
+
+
+def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.data.tasks.harbor.scaffold import init_dataset
+
+    try:
+        folder = init_dataset(Path(args.root), args.name, image=args.image, parameterized=args.parameterized)
+    except (FileExistsError, ValueError) as exc:
+        args._parser.error(str(exc))
+    print(f"Wrote {folder}")
+    # Copy-paste commands: a root with a space in it was accepted above, so the path is shell-quoted here.
+    quoted = shlex.quote(str(folder))
+    print(f"Next: gym dataset validate {quoted}  # the reference solution must score 1")
+    print(f"      gym eval run {quoted} --agent <harness> --model-type openai_model --model <model> --model-url <url>")
+
+
+def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.cli.eval import validate_target
+
+    validate_target(args, overrides)
+
+
+def _dataset_pull(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dataset pull TARGET`: fetch a Harbor dataset into environments/harbor/ without preparing or running it."""
+    from nemo_gym.data.tasks.harbor.prepare import pull_target
+
+    pull_target(args, overrides)
+
+
+def _dataset_publish(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dataset publish --harbor TARGET --output DIR`: plain Harbor task folders, checked by Harbor's own loader."""
+    from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+    from nemo_gym.data.tasks.harbor.publish import publish_harbor
+
+    if not args.harbor:
+        args._parser.error("`gym dataset publish` writes Harbor task folders: pass --harbor")
+    try:
+        report = publish_harbor(Path(args.target), Path(args.output))
+    except (HarborTaskError, OSError) as exc:
+        args._parser.error(str(exc))
+    print(report.text())
+    if not report.ok:
+        sys.exit(1)
+
+
+def _dev_compare(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dev compare OLD NEW`: the paths and quoted options reach the command verbatim (as `gym eval run` passes
+    its TARGET) rather than through Hydra's override grammar, which mangles non-ASCII and backslashes. The root
+    `gym --json` toggle switches stdout to the JSON summary; `--json PATH` after the subcommand writes it to a file."""
+    from nemo_gym.cli.dev import dev_compare
+
+    # The remaining tokens (e.g. `+tail=3`, `+verbose=true`) are Hydra overrides, handed over as dispatch() does.
+    sys.argv = [sys.argv[0], *overrides]
+    dev_compare(
+        json_stdout=getattr(args, "json", False),
+        old_rollouts=args.old_rollouts,
+        new_rollouts=args.new_rollouts,
+        key=args.key,
+        logs_root=args.logs_root,
+        json_output=args.json_output,
+    )
 
 
 # One-line help for each command group, shown in `gym --help`.
@@ -897,6 +1081,108 @@ COMMANDS = {
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
             SEARCH_DIR,
+        ),
+    ),
+    "dataset init": Command(
+        target=_dataset_init,
+        summary="Scaffold a Harbor-shaped dataset: dataset.toml and one task, ready to validate and run.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "name", metavar="NAME", help="Dataset name, `org/name`; a bare name becomes `local/<name>`."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--root",
+                    default=".",
+                    metavar="DIR",
+                    help="Where to create the folder (default: current directory).",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--image", default="python:3.12-slim", metavar="IMAGE", help="The task's prebuilt image."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--parameterized",
+                    action="store_true",
+                    help="Scaffold a template folder (task.toml, instruction.template.md, tasks.jsonl, task_data.py, "
+                    "a Python verifier, solution/answer.template.md) that prepare renders into one task per row.",
+                )
+            ),
+        ),
+    ),
+    "dataset publish": Command(
+        target=_dataset_publish,
+        summary="Write a Gym-authored dataset as plain Harbor task folders and run Harbor's format check.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="A dataset folder, a task folder, or a parameterized template folder (tasks.jsonl beside task.toml).",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--harbor",
+                    action="store_true",
+                    help="Publish in Harbor's task format: rows expanded, Python verifiers wrapped in tests/test.sh, "
+                    "answer.md wrapped in solution/solve.sh.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--output",
+                    required=True,
+                    metavar="DIR",
+                    help="Where to write the task folders (new or empty). Harbor's format check runs over them when "
+                    "the `harbor` package is importable.",
+                )
+            ),
+        ),
+    ),
+    "dataset pull": Command(
+        target=_dataset_pull,
+        summary="Fetch a Harbor dataset into environments/harbor/ and report its folder, task count and digest.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="`harbor:<org>/<name>[@<tag> | @sha256:<digest>]` (package store), "
+                    "`harbor:<dataset>[@<version>]` (registry), or the name of a committed entry under "
+                    "environments/harbor/ whose dataset.toml declares `[gym] source` (e.g. terminal_bench_4). "
+                    "A reference an entry declares lands in that entry's folder.",
+                )
+            ),
+        ),
+    ),
+    "dataset validate": Command(
+        target=_dataset_validate,
+        summary="Run each Harbor task's reference solution through the verifier and report the rewards.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="Harbor task folder, folder of task folders, `harbor:<dataset>[@<version>]`, or the name "
+                    "of a committed entry under environments/harbor/ (e.g. terminal_bench_4) after `gym dataset pull`.",
+                )
+            ),
+            SANDBOX,
+            CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
+            _value_flag("limit", "limit", "Maximum number of tasks to validate."),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
+            # Quoted: a file name with parentheses or commas is not a Hydra expression.
+            _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",), quote=True),
         ),
     ),
     "dataset collate": Command(
@@ -1086,6 +1372,8 @@ COMMANDS = {
             AGENT_TYPE,
             ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
@@ -1116,6 +1404,16 @@ COMMANDS = {
                 "health_check_ignored_checks",
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
+            _value_flag(
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
+            ),
         ),
     ),
     "eval aggregate": Command(
@@ -1128,6 +1426,7 @@ COMMANDS = {
                 "input_glob",
                 "Glob (or comma-separated globs) matching the rollout shards to aggregate.",
                 aliases=("-i",),
+                quote=True,
             ),
             _value_flag(
                 "output",
@@ -1142,6 +1441,16 @@ COMMANDS = {
                 "health_check_ignored_checks",
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
+            _value_flag(
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
+            ),
         ),
     ),
     "eval health-check": Command(
@@ -1155,10 +1464,24 @@ COMMANDS = {
                     dest="rollout_file",
                     type=Path,
                     metavar="PATH",
-                    help="Rollout JSONL path; relative paths resolve under RUN_DIR (default: rollouts.jsonl).",
+                    help=(
+                        "Rollout JSONL path, checked alone; relative paths resolve under RUN_DIR (default: "
+                        "rollouts.jsonl, or the shards `gym eval aggregate` merged into it)."
+                    ),
                 )
             ),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--model-call-capture-dir",
+                    type=Path,
+                    metavar="DIR",
+                    help=(
+                        "The run's model_call_capture_dir. With it, the captured calls of rollouts that failed "
+                        "without a row (an episode deadline, say) count in run.stats.timeouts' time split."
+                    ),
+                )
+            ),
             Flag(
                 register=lambda p: p.add_argument(
                     "--ignore-checks",
@@ -1168,14 +1491,45 @@ COMMANDS = {
                     help="Comma-separated check IDs to exclude from verdict derivation.",
                 )
             ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-not-final-failure-fraction",
+                    type=_limit_fraction_or_none,
+                    default=argparse.SUPPRESS,
+                    metavar="FRACTION|none",
+                    help=(
+                        "Override the run's persisted limit for not final (retryable) failures, as a share of expected "
+                        "rollouts; none removes the limit. Overrides only this limit; a limit whose flag is not given "
+                        "keeps its persisted value."
+                    ),
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-final-failure-fraction",
+                    type=_limit_fraction_or_none,
+                    default=argparse.SUPPRESS,
+                    metavar="FRACTION|none",
+                    help=(
+                        "Override the run's persisted limit for final (not retried) failures, as a share of "
+                        "expected rollouts; none removes the limit. Overrides only this limit; a limit whose flag is "
+                        "not given keeps its persisted value."
+                    ),
+                )
+            ),
             JSON,
         ),
     ),
     "eval export": Command(
-        target="nemo_gym.cli.eval:export_rollouts_as_atif",
-        summary="Export supported Gym trajectories as ATIF.",
+        target=_eval_export,
+        summary="Export a finished run with an exporter (default: atif).",
         flags=(
-            _value_flag("format", "format", "Output trajectory format.", choices=("atif",)),
+            EXPORTER,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--format", choices=tuple(RUN_EXPORTERS), help="Deprecated: pass the exporter name instead."
+                )
+            ),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Gym rollouts JSONL to export.", quote=True),
             _value_flag("output-dir", "output_dirpath", "New directory for exported trajectories.", quote=True),
             _value_flag("session-id", "session_id", "Stable identifier for the source evaluation run.", quote=True),
@@ -1261,6 +1615,14 @@ COMMANDS = {
             ),
             Flag(
                 register=lambda p: p.add_argument(
+                    "--select",
+                    metavar="NAME[,NAME...]",
+                    help="Submit only the named entries under driver.benchmarks (comma-separated). "
+                    "Default: submit all of them.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
                 ),
             ),
@@ -1279,6 +1641,18 @@ COMMANDS = {
                     help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
+        ),
+    ),
+    "eval resubmit": Command(
+        target=_eval_resubmit,
+        summary="Queue one benchmark of a submitted run again, in place.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="GYM_JOB_ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "eval compare": Command(
@@ -1310,6 +1684,12 @@ COMMANDS = {
                 metavar="PATH[,PATH...]",
             ),
             _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
+                "Baseline/candidate intervals remain the recorded 95%% intervals.",
+            ),
             _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
             _comma_list_flag(
                 "candidate-agents",
@@ -1333,6 +1713,49 @@ COMMANDS = {
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
+    # Temporary migration aid: the parity gate before an old resources server is deleted for its Harbor path.
+    # Register-only flags (no Hydra translation) are consumed by `_dev_compare`, like `gym eval run`'s TARGET.
+    "dev compare": Command(
+        target=_dev_compare,
+        summary="Compare two rollout JSONL files task by task and show the losing verifier output for every flip.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "old_rollouts", metavar="OLD_ROLLOUTS", help="Rollouts JSONL from the old (reference) side."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "new_rollouts", metavar="NEW_ROLLOUTS", help="Rollouts JSONL from the new (candidate) side."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--key",
+                    metavar="FIELD",
+                    help="Dotted field holding the task id on both sides (default: detected, e.g. _ng_task_id or "
+                    "task_name).",
+                ),
+            ),
+            _value_flag("tail", "tail", "Lines of the losing side's verifier output to print per flip (default 15)."),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--logs-root",
+                    dest="logs_root",
+                    metavar="DIR",
+                    help="Directory against which a relative verifier_logs_dir is resolved (e.g. "
+                    "environment_servers/harbor).",
+                ),
+            ),
+            # `--json PATH` after the subcommand writes a file. The root `gym --json` toggle (before the subcommand)
+            # is still honoured: it prints the same summary on stdout instead of the report.
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json", dest="json_output", metavar="PATH", help="Also write a machine-readable summary here."
+                ),
+            ),
+        ),
+    ),
 }
 
 
@@ -1403,7 +1826,7 @@ def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> N
     # ckeck if the error is coming from a BaseNeMoGymCLIConfig subclass
     # pydantic sets ValidationError.title to the validated
     # model's name, so we match it against the CLI config classes.
-    from nemo_gym.config_types import BaseNeMoGymCLIConfig
+    from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
     config_names = {BaseNeMoGymCLIConfig.__name__}
     stack = [BaseNeMoGymCLIConfig]
@@ -1532,6 +1955,12 @@ def main() -> None:
         if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
             overrides = [args.target, *overrides]
             args.target = None
+
+        # Likewise for eval export's optional EXPORTER slot: restore the captured override ahead of the raw
+        # overrides but after the translated flags, so a flag and a raw override of one key keep their order.
+        if command.target is _eval_export and args.exporter and _is_positional_hydra_override(args.exporter):
+            overrides = [args.exporter, *overrides]
+            args.exporter = None
 
         # --config and the asset selectors all emit +config_paths; coalesce them into one token.
         overrides = _merge_config_paths(translated + overrides)

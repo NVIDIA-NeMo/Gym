@@ -14,15 +14,24 @@
 # limitations under the License.
 
 import base64
+import contextlib
+import os
 import re
 import shlex
+import signal
+import socket
 import subprocess
+import time
+import warnings
 from pathlib import Path
 
 import pytest
+from hydra.core.override_parser.overrides_parser import OverridesParser
+from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
+    RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
     render_gym_cmd,
 )
@@ -219,6 +228,22 @@ def test_build_vllm_command_multi_instance():
     assert "--data-parallel-size 4" in cmd
 
 
+def test_multi_node_dp_worker_drops_the_traces_endpoint_the_head_keeps():
+    """Request spans come from the head's API server; a headless worker has no collector on its node."""
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        extra_args="--otlp-traces-endpoint http://localhost:4318/v1/traces --max-model-len 8192",
+    )
+    cmd = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+    head, worker = cmd.split("else", 1)
+    assert "--otlp-traces-endpoint http://localhost:4318/v1/traces" in head
+    assert "--otlp-traces-endpoint" not in worker
+    assert "--max-model-len 8192" in worker
+
+
 def test_build_vllm_command_single_instance_omits_dp_flag(vllm_service):
     cmd = _build_vllm_command(vllm_service)
     assert "--data-parallel-size" not in cmd
@@ -315,6 +340,97 @@ def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_serv
     cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
     assert "export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=" in cmd
     assert cmd.index("export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=") < cmd.index("ray symmetric-run")
+
+
+def test_build_vllm_ray_command_worker_waits_for_head_port(vllm_service):
+    # Worker nodes poll RAY_HEAD_NODE_IP before calling ray symmetric-run or ray start.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "/dev/tcp/${RAY_HEAD_NODE_IP%:*}/${RAY_HEAD_NODE_IP##*:}" in cmd
+    assert "${SLURM_NODEID:-0}" in cmd
+    # Wait must precede the symmetric-run --help probe, covering both Ray branches.
+    assert cmd.index("/dev/tcp/${RAY_HEAD_NODE_IP%:*}/${RAY_HEAD_NODE_IP##*:}") < cmd.index(
+        "if ray symmetric-run --help"
+    )
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _ray_bootstrap(cmd: str, tmp_path: Path, *, node_id: int, port: int, wait_s: int, help_rc: int = 0):
+    """Rendered bootstrap with a short head wait and a fake `ray` that records its calls."""
+    default = f"RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT={RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S}\n"
+    assert cmd.count(default) == 1
+    script = (
+        'ray() { echo "$*" >> "$RAY_CALLS"; [ "$2" != --help ] || return "$RAY_HELP_RC"; }\nexport -f ray\n'
+        + cmd.replace(default, f"RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT={wait_s}\n")
+    )
+    env = {
+        **os.environ,
+        "SLURM_NODEID": str(node_id),
+        "RAY_HEAD_NODE_IP": f"127.0.0.1:{port}",
+        "RAY_CALLS": str(tmp_path / "ray_calls"),
+        "RAY_HELP_RC": str(help_rc),
+    }
+    return ["bash", "-c", script], env
+
+
+@pytest.mark.parametrize(
+    "help_rc, join_call",
+    [(0, "symmetric-run --address 127.0.0.1:{port} --min-nodes 2"), (1, "start --address=127.0.0.1:{port}")],
+    ids=["symmetric-run", "older-ray-fallback"],
+)
+def test_build_vllm_ray_command_worker_waits_for_late_head(vllm_service, tmp_path, help_rc, join_call):
+    # A Ray 2.59 symmetric-run worker gives up on a head that is ~40s late; the worker
+    # must not start Ray until the head's GCS port accepts connections.
+    port = _free_port()
+    argv, env = _ray_bootstrap(
+        _build_vllm_ray_command(vllm_service, total_nodes=2),
+        tmp_path,
+        node_id=1,
+        port=port,
+        wait_s=30,
+        help_rc=help_rc,
+    )
+    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(2)
+        assert proc.poll() is None, proc.communicate()
+        assert not (tmp_path / "ray_calls").exists()
+        with socket.create_server(("127.0.0.1", port)):
+            _, stderr = proc.communicate(timeout=10)
+    finally:
+        proc.kill()
+
+    assert proc.returncode == 0, stderr
+    assert (tmp_path / "ray_calls").read_text().splitlines()[-1].startswith(join_call.format(port=port))
+
+
+def test_build_vllm_ray_command_worker_fails_when_head_never_comes_up(vllm_service, tmp_path):
+    argv, env = _ray_bootstrap(
+        _build_vllm_ray_command(vllm_service, total_nodes=2), tmp_path, node_id=1, port=_free_port(), wait_s=2
+    )
+    result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=15)
+
+    assert result.returncode == 1
+    assert "Waiting up to 2s for the Ray head" in result.stdout
+    assert "timed out waiting for the Ray head" in result.stderr
+    assert not (tmp_path / "ray_calls").exists()
+
+
+def test_build_vllm_ray_command_head_does_not_wait_for_itself(vllm_service, tmp_path):
+    # Head's port is closed until Ray starts; a head that waited would time out here.
+    port = _free_port()
+    argv, env = _ray_bootstrap(
+        _build_vllm_ray_command(vllm_service, total_nodes=2), tmp_path, node_id=0, port=port, wait_s=30
+    )
+    result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "ray_calls").read_text().splitlines()
+    assert calls[-1].startswith(f"symmetric-run --address 127.0.0.1:{port} --min-nodes 2")
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +549,14 @@ def test_build_vllm_ray_serve_command_multi_node_raises_queue_length_response_de
     cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
     assert "export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=" in cmd
     assert cmd.index("export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=") < cmd.index("ray symmetric-run")
+
+
+def test_build_vllm_ray_serve_command_multi_node_spreads_requests_over_all_replicas(vllm_service):
+    # The head node's proxy would otherwise keep every request on its local replica, which never
+    # fills, so it must be switched off before `ray start`/`ray symmetric-run` starts the proxy.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0" in cmd
+    assert cmd.index("export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0") < cmd.index("ray symmetric-run")
 
 
 def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
@@ -608,11 +732,21 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "checkout main" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
-    assert "uv pip install -e ." in out
+    assert 'uv pip install -e ".[ray]"' in out
     assert "--system" not in out
     assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
+
+
+def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
+    # The uv installer does not write $HOME/.local/bin/env when that directory is
+    # already on PATH, so sourcing it would abort the `set -e` preamble.
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert ".local/bin/env" not in out
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in out
+    assert out.index("astral.sh/uv/install.sh") < out.index('export PATH="$HOME/.local/bin:$PATH"')
+    assert out.index('export PATH="$HOME/.local/bin:$PATH"') < out.index("uv venv --seed .venv")
 
 
 def test_render_driver_entrypoint_installs_git_if_missing():
@@ -817,7 +951,8 @@ def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_d
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "Auto-resume chain" not in script
-    assert "resume_from_cache" not in script
+    # Only a resubmit (see test_eval_resubmit.py) turns resume on for a run that is not resumable.
+    assert "\n    +resume_from_cache=True" not in script
 
 
 def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
@@ -1140,7 +1275,7 @@ def test_render_service_command_no_pre_command_by_default():
     out = _render_service_command("svc", "img:latest", "vllm serve model")
     assert "bash -c" not in out
     assert (
-        "srun --overlap --no-container-mount-home --container-image=img:latest "
+        "srun --overlap --no-container-mount-home --container-image=img:latest --kill-on-bad-exit=1 --wait=1 "
         "--output=logs/svc-$SLURM_JOB_ID.log vllm serve model &" in out
     )
 
@@ -2243,9 +2378,8 @@ def test_kv_settings_are_not_accepted_on_a_tier(tmp_path, field):
         _pd_config(tmp_path, services=services)
 
 
-@pytest.mark.parametrize("field", ["nixl_side_channel_port", "server_per_node"])
-def test_tier_only_settings_are_not_accepted_on_a_plain_vllm_service(tmp_path, field):
-    services = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", field: 1}}
+def test_tier_only_settings_are_not_accepted_on_a_plain_vllm_service(tmp_path):
+    services = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "nixl_side_channel_port": 1}}
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         _pd_config(tmp_path, services=services)
 
@@ -2496,6 +2630,62 @@ _RAY_WITH_PROBE = {
 }
 
 
+_TRACED_OTEL = {"endpoint": "https://otlp.example.com", "service_name": "svc", "vllm_traces": True}
+
+
+def _traced_script(tmp_path, services, pools, policy="policy"):
+    config = SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "driver": {"container": "gym:latest", "policy_model": policy, "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": _TRACED_OTEL,
+        }
+    )
+    return build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+
+
+_TRACES_FLAG = "--otlp-traces-endpoint http://localhost:4318/v1/traces"
+_UNPINNED_JUDGE = {"type": "vllm", "container": "img", "model": "/j", "port": 9000}
+
+
+def test_vllm_traces_follow_the_collector_to_a_later_pool_and_skip_the_unpinned_api_on_node_0(tmp_path):
+    # Policy pinned to the second pool: driver and collector sit on node 1. The unpinned judge spans
+    # the allocation and answers on node 0, where this job has no collector.
+    script = _traced_script(
+        tmp_path, {"policy": _vllm(8000, "aux", tensor_parallel_size=4), "judge": _UNPINNED_JUDGE}, _TWO_POOLS
+    )
+    assert _TRACES_FLAG in _step(script, "policy")
+    assert _TRACES_FLAG not in _step(script, "judge")
+    assert "Waiting for judge at http://localhost:9000" in script
+
+
+def test_vllm_traces_reach_the_unpinned_api_when_the_collector_is_on_node_0(tmp_path):
+    script = _traced_script(
+        tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "judge": _UNPINNED_JUDGE}, _TWO_POOLS
+    )
+    assert _TRACES_FLAG in _step(script, "policy")
+    assert _TRACES_FLAG in _step(script, "judge")
+
+
+def test_vllm_traces_skip_a_tier_with_one_server_per_node(tmp_path):
+    # One API per pool node: a localhost endpoint would reach the collector from one node only.
+    script = _traced_script(tmp_path, _per_node_services(), _PD_POOLS)
+    assert _TRACES_FLAG not in _step(script, "policy-prefill")
+    assert _TRACES_FLAG not in _step(script, "policy-decode")
+
+
+def test_vllm_traces_skip_multi_node_ray_serve_but_trace_single_node_ray_serve(tmp_path):
+    two_nodes = {"gpu": {"partition": "batch", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 1}}
+    one_node = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 2}}
+    serve = {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "use_ray_serve": True}
+    assert _TRACES_FLAG not in _step(
+        _traced_script(tmp_path, {"policy": {**serve, "number_of_instances": 2}}, two_nodes), "policy"
+    )
+    assert _TRACES_FLAG in _step(_traced_script(tmp_path, {"policy": serve}, one_node), "policy")
+
+
 def test_a_pinned_service_on_a_later_pool_is_probed_where_it_runs(tmp_path):
     # The probe runs on node 0; the aux pool's service answers on node 1.
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu"), "scorer": _vllm(8001, "aux")})
@@ -2544,3 +2734,256 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+@pytest.fixture
+def pool_size():
+    return 4
+
+
+@pytest.fixture
+def per_node_config(tmp_path, pool_size):
+    def build(**overrides):
+        service = {
+            "type": "vllm",
+            "container": "img",
+            "model": "/ckpt",
+            "served_model_name": "hy4",
+            "node_pool": "gpu",
+            "tensor_parallel_size": 4,
+            "server_per_node": True,
+            **overrides,
+        }
+        pool = {"partition": "batch", "nodes": pool_size, "ntasks_per_node": 1, "gpus_per_node": 4}
+        return SubmitConfig.model_validate(
+            {
+                "services": {"policy": service},
+                "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": {"gpu": pool}}},
+                "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+                "job": {"output_path": str(tmp_path / "jobs")},
+            }
+        )
+
+    return build
+
+
+@pytest.fixture
+def render_per_node_script(tmp_path):
+    def render(config):
+        return build_sbatch_script(
+            config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+        )
+
+    return render
+
+
+@pytest.fixture
+def per_node_script(per_node_config, render_per_node_script):
+    return render_per_node_script(per_node_config())
+
+
+def test_a_per_node_vllm_service_starts_one_single_node_server_on_every_pool_node(per_node_script, pool_size):
+    step = _step(per_node_script, "policy")
+    assert f'--nodelist="${{GYM_POOL_GPU_NODES}}" --nodes={pool_size} --ntasks={pool_size}' in step
+    assert "vllm serve /ckpt --port 8000 --tensor-parallel-size 4" in step
+    assert "ray" not in step and "--headless" not in step
+
+
+def test_without_server_per_node_the_pool_stays_one_engine_behind_one_url(per_node_config, render_per_node_script):
+    with pytest.warns(UserWarning, match=r"leaving \d+ GPU"):
+        config = per_node_config(server_per_node=False)
+    script = render_per_node_script(config)
+    assert "ray symmetric-run" in _step(script, "policy")
+    assert "GYM_POOL_GPU_NODE_" not in script and "policy-node" not in script
+    assert "+policy_base_url=http://localhost:8000/v1" in script
+
+
+def test_a_per_node_service_is_not_reported_as_leaving_gpus_idle(per_node_config):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        per_node_config()
+
+
+def test_every_node_of_a_per_node_service_is_probed_where_it_runs(per_node_script, pool_size):
+    assert "Waiting for policy at http://localhost:8000" in per_node_script
+    for node in range(1, pool_size):
+        assert f"Waiting for policy-node{node} at http://${{gym_nodes[{node}]}}:8000" in per_node_script
+    assert "policy-node0" not in per_node_script
+
+
+def test_a_per_node_service_exports_every_pool_node_to_the_driver(per_node_script, pool_size):
+    for node in range(pool_size):
+        assert f'export GYM_POOL_GPU_NODE_{node}="${{gym_nodes[{node}]}}"' in per_node_script
+
+
+def test_a_per_node_service_names_the_variable_and_url_of_each_node(per_node_config, pool_size):
+    config = per_node_config()
+    service = config.services["policy"]
+    assert service.node_host_var(2) == "GYM_POOL_GPU_NODE_2"
+    assert service.node_urls(2) == [
+        "http://${oc.env:GYM_POOL_GPU_NODE_0}:8000/v1",
+        "http://${oc.env:GYM_POOL_GPU_NODE_1}:8000/v1",
+    ]
+    assert config.driver.benchmarks["b"].run["policy_base_url"] == service.node_urls(pool_size)
+
+
+def test_the_driver_resolves_the_policy_url_list_to_the_pool_hosts(per_node_script, pool_size, monkeypatch):
+    token = re.search(r"'(\+policy_base_url=[^']*)'", per_node_script).group(1)
+    for node in range(pool_size):
+        monkeypatch.setenv(f"GYM_POOL_GPU_NODE_{node}", f"host{node}")
+    override = OverridesParser.create().parse_overrides([token])[0]
+    config = OmegaConf.create({"policy_base_url": override.value(), "model": {"base_url": "${policy_base_url}"}})
+    assert OmegaConf.to_container(config, resolve=True)["model"]["base_url"] == [
+        f"http://host{node}:8000/v1" for node in range(pool_size)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"node_pool": None}, "has no node_pool"),
+        ({"number_of_instances": 4}, "number_of_instances must be 1"),
+        ({"use_ray_serve": True}, "drop use_ray_serve"),
+    ],
+    ids=["no_pool", "several_instances", "ray_serve"],
+)
+def test_a_per_node_service_refuses_a_setting_that_leaves_one_server_per_node_undefined(
+    per_node_config, overrides, message
+):
+    with pytest.raises(ValueError, match=message):
+        per_node_config(**overrides)
+
+
+def test_a_prefill_decode_tier_still_cannot_set_server_per_node(tmp_path):
+    services = _pd_services()
+    services["policy"]["prefill"]["server_per_node"] = True
+    with pytest.raises(ValueError, match="Set it on the vllm_pd service itself"):
+        _pd_config(tmp_path, services=services)
+
+
+def _run_job_script(
+    tmp_path, *, service: str, driver: str, name: str = "vllm_model", prelude: str = ""
+) -> subprocess.CompletedProcess:
+    """Run a rendered job.sh with a fake `srun` on PATH: the `name` service step runs `service`, the driver `driver`.
+
+    `prelude` is bash put after the shebang line, for a test that needs to hook the script's own commands.
+    """
+    config = SubmitConfig.model_validate(
+        {
+            "services": {name: {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "acct"}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path)},
+            "otel": {"enabled": False},
+        }
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["cluster"], tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fakes = {"srun": f'case "$*" in *logs/driver-*) {driver} ;; *) {service} ;; esac', "curl": "exit 0"}
+    for binary, body in fakes.items():
+        (bin_dir / binary).write_text(f"#!/bin/bash\n{body}\n")
+        (bin_dir / binary).chmod(0o755)
+    shebang, _, rest = script.partition("\n")
+    (tmp_path / "job.sh").write_text(f"{shebang}\n{prelude}{rest}")
+    # A file, not a pipe: a service still running when the script exits would hold a pipe open.
+    with (tmp_path / "job.out").open("w") as out:
+        process = subprocess.Popen(
+            ["bash", "job.sh"],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            cwd=tmp_path,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "SLURM_JOB_ID": "1"},
+            start_new_session=True,
+        )
+        try:
+            returncode = process.wait(timeout=60)
+        finally:
+            # Slurm stops the steps a job leaves running; here the fake steps are killed with the job's group.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    return subprocess.CompletedProcess(["job.sh"], returncode, (tmp_path / "job.out").read_text())
+
+
+def test_a_service_that_exits_mid_run_ends_the_job_and_names_the_service(tmp_path):
+    # The service passes its health check and dies 1 s in; the driver alone would run for 10 minutes.
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+    )
+
+    assert result.returncode == 1
+    assert "service vllm_model exited (status 3) while the driver was running" in result.stdout
+    assert "driver got TERM" in result.stdout
+
+
+def test_the_driver_exit_code_stands_when_the_driver_finishes_first(tmp_path):
+    result = _run_job_script(tmp_path, service="exec sleep 600", driver="exit 7")
+
+    assert result.returncode == 7
+    assert "exited" not in result.stdout
+
+
+# Puts the reviewer's race window in one place: the watch loop has just seen the driver alive, and both the driver
+# and the service end before it checks the service. On that first service check, the wrapper releases both fake
+# steps, waits until both have exited, then lets `kill` answer: the service is dead.
+_DRIVER_AND_SERVICE_END_TOGETHER = """\
+kill() {
+    if [[ "${FUNCNAME[1]}" == _gym_run_driver && "$1" == -0 && "$2" != "$_gym_driver_pid" && ! -e go ]]; then
+        : > go
+        while builtin kill -0 "$_gym_driver_pid" 2>/dev/null || builtin kill -0 "$2" 2>/dev/null; do :; done
+    fi
+    builtin kill "$@"
+}
+"""
+
+
+def test_a_driver_that_ends_as_its_service_ends_keeps_its_own_status(tmp_path):
+    wait_for_go = "until [ -e go ]; do sleep 0.1; done"
+    result = _run_job_script(
+        tmp_path,
+        service=f"{wait_for_go}; exit 3",
+        driver=f"{wait_for_go}; exit 0",
+        prelude=_DRIVER_AND_SERVICE_END_TOGETHER,
+    )
+
+    assert (tmp_path / "go").exists()
+    assert result.returncode == 0
+    assert "while the driver was running" not in result.stdout
+
+
+def test_ray_workers_are_watched_and_the_collector_is_not(tmp_path):
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    watch = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
+    assert "OTEL_COLLECTOR_PID=$!" in script
+    assert re.findall(r"_gym_service_exited (\S+) ", watch) == ["policy", "ray", "ray_gpu_workers"]
+
+
+def test_a_service_named_driver_is_watched_apart_from_the_driver(tmp_path):
+    # Its launcher PID is DRIVER_PID; the driver's own PID must not overwrite it. The fake srun tells the two apart by the
+    # case-sensitive log name: logs/DRIVER-... is the service, logs/driver-... the driver.
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+        name="DRIVER",
+    )
+
+    assert result.returncode == 1
+    assert "service DRIVER exited (status 3) while the driver was running" in result.stdout
+    assert "driver got TERM" in result.stdout
+
+
+def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged(tmp_path):
+    # A multi-task service (a vllm_pd tier, a Ray worker pool) must not outlive one of its tasks, whatever the cluster's
+    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps keep Slurm's defaults.
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    driver_steps = [line for line in steps if "logs/driver-" in line]
+    collector_steps = [line for line in steps if "logs/otel_collector-" in line]
+    service_steps = [line for line in steps if line not in driver_steps and line not in collector_steps]
+
+    assert service_steps and driver_steps
+    assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
+    assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps + collector_steps)

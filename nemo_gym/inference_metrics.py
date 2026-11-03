@@ -27,8 +27,8 @@ from prometheus_client.openmetrics.parser import text_string_to_metric_families 
 from prometheus_client.parser import text_string_to_metric_families
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
-from nemo_gym.exporters import export_metrics, get_exporters
-from nemo_gym.server_utils import request
+from nemo_gym.artifacts.exporters import export_metrics, get_exporters
+from nemo_gym.client.http_client import request
 
 
 logger = logging.getLogger(__name__)

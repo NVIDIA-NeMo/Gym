@@ -43,7 +43,7 @@ def test_mixed_probe_results_fail_p0_with_per_harness_explanation(tmp_path, monk
     for harness, code in (("pi", 0), ("codex", 1), ("hermes", 2)):
         write_probe_result(tmp_path, harness, code)
     check = checks.p0_check(["pi", "codex", "hermes", "opencode"], artifacts=tmp_path, sha="tested-sha")
-    assert check["name"] == "Harness conformance P0"
+    assert check["name"] == "Harness conformance (non-blocking)"
     assert check["head_sha"] == "tested-sha"
     assert check["conclusion"] == "failure"
     assert check["output"]["title"] == "1 passed, 1 failed, 2 unavailable"
@@ -136,7 +136,7 @@ def test_publisher_downloads_current_attempt_and_posts_check(
     assert posted[0]["external_id"] == "harness-conformance-p0-123-2"
     if not listing_failure:
         assert "https://github.com/example/Gym/actions/runs/123/artifacts/456" in posted[0]["output"]["summary"]
-    assert "Harness conformance P0" in (tmp_path / "summary.md").read_text()
+    assert "Harness conformance (non-blocking)" in (tmp_path / "summary.md").read_text()
 
 
 def test_actionable_summary_counts_scenarios_and_includes_rerun(tmp_path, monkeypatch):

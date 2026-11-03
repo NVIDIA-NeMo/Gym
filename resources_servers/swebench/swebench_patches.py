@@ -328,7 +328,9 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
     return eval_sh
 
 
-async def patch_swebench_multilingual_sandbox(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
+async def patch_swebench_multilingual_sandbox(
+    repo: str, instance_id: str, sandbox: AsyncSandbox, *, overwrite_maven_settings: bool = True
+) -> None:
     if MAP_REPO_TO_EXT.get(repo) == "java":
         base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
         settings_xml_path = base_path / "settings.xml"
@@ -347,7 +349,8 @@ find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.grad
 fi""")
 
         # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
+        if overwrite_maven_settings:
+            await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
         await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")

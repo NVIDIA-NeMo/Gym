@@ -23,24 +23,23 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.atif_reverification import AtifProjectionError
-from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import (
+from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    rollout_run_key,
 )
+from nemo_gym.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
     JUDGE_FAILED_FAILURE_CLASS,
-    JUDGE_INVALID_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
     CacheKeysByStatus,
     InputRolloutPair,
     OutputPaths,
@@ -59,7 +58,6 @@ from nemo_gym.rollout_reverification import (
     _is_judge_failure,
     _load_cache_keys_by_status,
     _load_reverified_results,
-    _normalize_invalid_judge_result,
     _parse_output_line_key,
     _prepare_atif_payloads,
     _prepare_output_fpaths,
@@ -74,6 +72,9 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.server_runtime.base_resources_server import ReverifyMode
+from nemo_gym.trajectory.atif_reverification import AtifProjectionError
+from nemo_gym.utils.path_utils import aggregation_sources_path_for
 
 
 _TOOL_TRAJECTORY_SHA256 = (
@@ -796,6 +797,23 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
+        """A flat materialized row names no Environment Server; the re-verified row keeps the one the run stamped."""
+        pair = InputRolloutPair(
+            input={"task": "q1", AGENT_REF_KEY_NAME: {"name": "agent_a"}},
+            rollout={
+                "response": {"output": "x"},
+                "_ng_environment_server": "env_a",
+                "_ng_result_type": "legacy_agent",
+                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert (result["_ng_environment_server"], result["_ng_result_type"]) == ("env_a", "legacy_agent")
+        assert NG_FAILURE_CLASS_KEY not in result
+
     def test_merges_input_row_with_response(self) -> None:
         pair = InputRolloutPair(
             input={"task": "q1", "verifier_metadata": {"answer": 42}},
@@ -911,7 +929,7 @@ class TestBuildVerifyPayload:
                 "deliverables_dir": "/artifacts/task-1/repeat_0",
                 "reference_ids": ["ref-b"],
                 "reward": 0.0,
-                NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS,
+                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
             },
         )
 
@@ -931,7 +949,11 @@ class TestBuildVerifyPayload:
 class TestIsJudgeFailure:
     def test_true_only_for_judge_failed_class(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}) is True
-        assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS}) is True
+
+    def test_preserved_producer_judge_class_is_recoverable(self) -> None:
+        row = {NG_FAILURE_CLASS_KEY: "judge_timeout", "_ng_failure_legacy_class": "judge_failed"}
+        assert _is_judge_failure(row)
+        assert _recovery_rollout_predicate()({**row, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
 
     def test_false_for_other_failure_classes(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
@@ -942,15 +964,6 @@ class TestIsJudgeFailure:
     def test_legacy_judge_failed_boolean_is_not_honored(self) -> None:
         """v2 marks judge failures only via _ng_failure_class; the older boolean is ignored."""
         assert _is_judge_failure({"_ng_failure_judge_failed": True}) is False
-
-    def test_invalid_judge_result_is_retryable_unless_verifier_marks_it_permanent(self) -> None:
-        retryable = _normalize_invalid_judge_result({"invalid_judge_response": True})
-        assert retryable[NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
-        assert NG_TERMINAL_KEY not in retryable
-
-        permanent = _normalize_invalid_judge_result({"invalid_judge_response": True, "invalid_judge_retryable": False})
-        assert permanent[NG_FAILURE_CLASS_KEY] == "permanent"
-        assert permanent[NG_TERMINAL_KEY] is True
 
 
 class TestRecoveryRolloutPredicate:
@@ -999,6 +1012,22 @@ class TestSeedOutputWithSuccesses:
         assert keys == {(0, 0), (1, 0), (2, 0)}
         seeded = [orjson.loads(line) for line in out.read_bytes().splitlines() if line.strip()]
         assert seeded == rows
+
+    @pytest.mark.parametrize("seeds", [True, False], ids=["seeds a row", "seeds nothing"])
+    def test_drops_the_shard_list_only_when_it_seeds(self, tmp_path: Path, seeds: bool) -> None:
+        """Seeded rows are not the merged ones an aggregation listed shards for; with none seeded, they still are."""
+        out = tmp_path / "output.jsonl"
+        out.write_bytes(orjson.dumps({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n")
+        src = tmp_path / "successes.jsonl"
+        tasks = (0, 1) if seeds else (0,)
+        src.write_bytes(
+            b"".join(orjson.dumps({TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: 0}) + b"\n" for t in tasks)
+        )
+        aggregation_sources_path_for(out).write_text("{}")
+
+        _seed_output_with_successes(src, out)
+
+        assert aggregation_sources_path_for(out).exists() is not seeds
 
     def test_empty_source_creates_empty_output_and_returns_empty_set(self, tmp_path: Path) -> None:
         src = tmp_path / "successes.jsonl"
@@ -1131,7 +1160,6 @@ class TestLoadCacheKeysByStatus:
                     NG_FAILURE_CLASS_KEY: "timeout_exceeded",
                     NG_TERMINAL_KEY: True,
                 },
-                # Unstamped skip: terminal only under the opt-in contract.
                 {TASK_INDEX_KEY_NAME: 6, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "skipped"},
             ],
         )
@@ -1348,7 +1376,7 @@ class TestPrepareAtifPayloads:
         return OutputPaths(output=tmp_path / "out.jsonl", failures=tmp_path / "out_failures.jsonl")
 
     def _write_inputs_and_manifest(self, tmp_path: Path) -> tuple[Path, Path]:
-        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
+        fixture = Path(__file__).parent / "trajectory" / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
         trajectory = tmp_path / "trajectory.json"
         trajectory.write_bytes(fixture.read_bytes())
         materialized = tmp_path / "materialized.jsonl"
@@ -1504,6 +1532,21 @@ class TestRunVerificationPayloads:
         for fut in futures:
             results.append(await fut)
         return results
+
+    async def test_identity_stamps_stay_on_the_row_and_out_of_the_verify_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        row = self._make_row("agent_a") | {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        mock_client.post = AsyncMock(return_value=MagicMock())
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(returned, _)] = await self._collect(_run_verification_payloads([row]))
+
+        sent = mock_client.post.await_args.kwargs["json"]
+        assert "_ng_environment_server" not in sent and "_ng_result_type" not in sent
+        assert returned["_ng_environment_server"] == "env_a"
 
     async def test_returns_row_and_response_json_for_each_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [self._make_row("agent_a", i) for i in range(3)]
@@ -1762,6 +1805,23 @@ class TestPrepareOutputFpaths:
             "", str(tmp_path / "out.jsonl"), resume_from_cache=False, overwrite=False, append=False
         )
         assert not paths.output.exists()
+
+    @pytest.mark.parametrize("mode", ["overwrite", "append", "resume_from_cache"])
+    def test_drops_the_shard_list_only_with_the_output_it_deletes(self, tmp_path: Path, mode: str) -> None:
+        """A run that appends drops it when it starts writing, so one that stops before then keeps it."""
+        out = tmp_path / "out.jsonl"
+        out.write_text("merged rows\n")
+        aggregation_sources_path_for(out).write_text("{}")
+
+        _prepare_output_fpaths(
+            "",
+            str(out),
+            resume_from_cache=mode == "resume_from_cache",
+            overwrite=mode == "overwrite",
+            append=mode == "append",
+        )
+
+        assert aggregation_sources_path_for(out).exists() is (mode != "overwrite")
 
     def test_keeps_existing_files_when_resuming_regardless_of_overwrite(self, tmp_path: Path) -> None:
         out = tmp_path / "out.jsonl"
@@ -2230,7 +2290,7 @@ class TestRolloutReverificationRunFromConfig:
     ) -> None:
         """Exercise public ATIF mode while an unrelated configured verifier is unsupported."""
 
-        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
+        fixture = Path(__file__).parent / "trajectory" / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
         materialized = tmp_path / "inputs.jsonl"
         materialized.write_bytes(
             orjson.dumps(
@@ -2825,36 +2885,6 @@ class TestRunFromConfigResumeFromCache:
 
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched) == expected_dispatch
 
-    async def test_invalid_judge_result_is_scored_by_default(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        pairs = [InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}})]
-        self._patch(monkeypatch, pairs, [], result={"reward": 0.0, "invalid_judge_response": True})
-
-        returned = await RolloutReverificationHelper().run_from_config(
-            self._make_config(tmp_path, resume_from_cache=False)
-        )
-
-        assert [(r[TASK_INDEX_KEY_NAME], r["reward"]) for r in returned] == [(0, 0.0)]
-        assert NG_FAILURE_CLASS_KEY not in returned[0]
-        assert self._read_jsonl(tmp_path / "output_failures.jsonl") == []
-
-    async def test_invalid_judge_result_goes_to_the_sidecar_when_opted_in(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        pairs = [InputRolloutPair(input=self._row("agent_a", 0), rollout={"response": {}})]
-        self._patch(monkeypatch, pairs, [], result={"reward": 0.0, "invalid_judge_response": True})
-
-        returned = await RolloutReverificationHelper().run_from_config(
-            self._make_config(tmp_path, resume_from_cache=False, retry_invalid_judge_responses=True)
-        )
-
-        assert returned == []
-        failures = self._read_jsonl(tmp_path / "output_failures.jsonl")
-        assert [(r[TASK_INDEX_KEY_NAME], r[NG_FAILURE_CLASS_KEY]) for r in failures] == [
-            (0, JUDGE_INVALID_FAILURE_CLASS)
-        ]
-
     async def test_overwrite_without_resume_deletes_prior_output_and_reruns_everything(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -2968,6 +2998,191 @@ class TestRunFromConfigResumeFromCache:
         assert all(r[AGENT_REF_KEY_NAME] == {"name": "agent_a"} for r in agg_rows)
 
 
+class TestResumeOfOutputCachedWithoutIdentityStamps:
+    """A resume of output written before reverification kept collection's identity stamps groups as a fresh run.
+
+    Real input, rollout and output files; the input join, cache drop, output loading and _call_aggregate_metrics
+    grouping run for real. Only the /verify dispatch, the reverify-mode guard, exporters and the resources server
+    behind /aggregate_metrics are stubbed. Each test reads the partition aggregation sends.
+    """
+
+    _STAMP = {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+
+    def _key(self, task: int) -> dict:
+        return {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0}
+
+    def _write(self, path: Path, rows: list[dict]) -> None:
+        path.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+
+    def _fixture(self, tmp_path: Path, *, source_stamp: dict, cached_tasks: list[int], drop_source: int | None = None):
+        agent = {AGENT_REF_KEY_NAME: {"name": "agent_a"}}
+        self._write(tmp_path / "inputs.jsonl", [self._key(t) | agent | {"question": f"q{t}"} for t in range(4)])
+        self._write(
+            tmp_path / "rollouts.jsonl",
+            [
+                self._key(t) | agent | source_stamp | {"response": {"output": f"answer {t}"}, "reward": 0.0}
+                for t in range(4)
+                if t != drop_source
+            ],
+        )
+        # As a reverification before the identity fix wrote them: agent_ref and keys, no identity stamps.
+        cached = [self._key(t) | agent | {"reward": 1.0} for t in cached_tasks]
+        if cached:
+            self._write(tmp_path / "output.jsonl", cached)
+        return cached
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, dispatched: list, posted: list) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
+
+        def fake_run(payloads, semaphore=None):
+            dispatched.extend(p[TASK_INDEX_KEY_NAME] for p in payloads)
+
+            async def fut(p: dict) -> tuple[dict, dict]:
+                return p, {"reward": 0.5}
+
+            return [fut(p) for p in payloads]
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", fake_run)
+        client = MagicMock(global_config_dict={})
+
+        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+            posted.append(sorted(r[TASK_INDEX_KEY_NAME] for r in json.verify_responses))
+            return MagicMock()
+
+        client.post = capture_post
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: {"agent_a": "rs_a"}
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(return_value={"agent_metrics": {}, "key_metrics": {}, "group_level_metrics": []}),
+        )
+
+    def _config(self, tmp_path: Path, *, resume: bool, **overrides: bool) -> RolloutReverificationConfig:
+        return RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+            rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=resume,
+            **overrides,
+        )
+
+    async def test_cached_rows_take_their_source_stamps_and_group_with_the_new_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cached = self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[0, 1])
+        on_disk = (tmp_path / "output.jsonl").read_bytes()
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=True))
+
+        assert dispatched == [2, 3]
+        assert posted == [[0, 1, 2, 3]]  # one group of four, as a fresh reverification
+        assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in returned} == {("env_a", "legacy_agent")}
+        # The cached rows keep their verdicts, and the file keeps its bytes: only the new rows were appended.
+        assert [r["reward"] for r in returned] == [1.0, 1.0, 0.5, 0.5]
+        assert (tmp_path / "output.jsonl").read_bytes().startswith(on_disk)
+        assert [orjson.loads(line) for line in on_disk.splitlines()] == cached
+
+    async def test_append_recovers_cached_identity_from_the_failures_sidecar(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cached = self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[0, 1])
+        cached[1]["verdict"] = "cached-correct"
+        self._write(tmp_path / "output.jsonl", cached)
+        producing = [orjson.loads(line) for line in (tmp_path / "rollouts.jsonl").read_bytes().splitlines()]
+        self._write(tmp_path / "rollouts.jsonl", producing[:1])
+        self._write(
+            tmp_path / "rollouts_failures.jsonl",
+            [row | {NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS} for row in producing[1:]],
+        )
+        source_bytes = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
+        on_disk = (tmp_path / "output.jsonl").read_bytes()
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._config(tmp_path, resume=True, judge_failed_only=True, append=True)
+        )
+
+        assert dispatched == [2, 3]
+        assert posted == [[0, 1, 2, 3]]
+        assert returned[:2] == [row | self._STAMP for row in cached]
+        assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in returned} == {("env_a", "legacy_agent")}
+        assert [r["reward"] for r in returned] == [1.0, 1.0, 0.5, 0.5]
+        assert (tmp_path / "output.jsonl").read_bytes().startswith(on_disk)
+        assert [orjson.loads(line) for line in on_disk.splitlines()] == cached
+        assert {name: (tmp_path / name).read_bytes() for name in source_bytes} == source_bytes
+
+    async def test_a_fresh_reverification_groups_the_same_way(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[])
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=False))
+
+        assert dispatched == [0, 1, 2, 3] and posted == [[0, 1, 2, 3]]
+        assert {r["_ng_environment_server"] for r in returned} == {"env_a"}
+
+    async def test_no_stamp_is_invented_when_the_source_has_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Rollouts collected before collection stamped Environment Servers group by agent, cached or new."""
+        self._fixture(tmp_path, source_stamp={}, cached_tasks=[0, 1])
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=True))
+
+        assert posted == [[0, 1, 2, 3]]
+        assert not any("_ng_environment_server" in r or "_ng_result_type" in r for r in returned)
+
+    async def test_a_cached_row_without_a_source_rollout_stops_before_export_and_aggregation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No identity is guessed and no split group is aggregated: the run stops with the remedy, and the output
+        keeps every row with its verdict."""
+        cached = self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[0, 1], drop_source=0)
+        on_disk = (tmp_path / "output.jsonl").read_bytes()
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+        upload, metrics = MagicMock(), MagicMock()
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", lambda: [MagicMock()])
+        monkeypatch.setattr("nemo_gym.rollout_reverification.export_rollouts", upload)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.export_metrics", metrics)
+
+        with pytest.raises(ConfigError, match=r"1 cached row\(s\).*\(0, 0\).*resume_from_cache=false"):
+            await RolloutReverificationHelper().run_from_config(
+                self._config(tmp_path, resume=True, upload_rollouts=True)
+            )
+
+        assert posted == [] and not upload.called and not metrics.called
+        assert dispatched == [2, 3]
+        rows = [orjson.loads(line) for line in (tmp_path / "output.jsonl").read_bytes().splitlines()]
+        assert (tmp_path / "output.jsonl").read_bytes().startswith(on_disk) and rows[:2] == cached
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2, 3]
+
+    async def test_cached_rows_without_any_stamp_still_aggregate_when_a_source_rollout_is_gone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An unstamped run stays one group by agent even if a source rollout is gone: nothing to split."""
+        self._fixture(tmp_path, source_stamp={}, cached_tasks=[0, 1], drop_source=0)
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=True))
+
+        assert posted == [[0, 1, 2, 3]]
+        assert not any("_ng_environment_server" in r for r in returned)
+
+
 class TestRunFromConfigJudgeFailedOnly:
     """Smoke test: the whole `gym eval reverify --judge-failed-only` recovery path end to end.
 
@@ -3072,6 +3287,27 @@ class TestRunFromConfigJudgeFailedOnly:
             return []
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
+    async def test_recovered_and_carried_rows_group_under_the_environment_server_of_the_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Aggregation groups by the Environment Server stamp, so a recovered row must keep it as a carried one does."""
+        stamp = {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0) | stamp],
+            failures=[self._failure(1) | stamp, self._failure(2) | stamp],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        rows = self._read_jsonl(tmp_path / "recovered.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2]
+        assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in rows} == {("env_a", "legacy_agent")}
+        assert {rollout_run_key(r) for r in rows} == {"env_a"}
+
     async def test_recovers_only_judge_failed_rows_and_merges_with_successes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3106,100 +3342,69 @@ class TestRunFromConfigJudgeFailedOnly:
         assert (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "unsafe_recovered.jsonl").exists()
 
-    async def test_migrates_legacy_invalid_main_row_before_seeding(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        legacy_invalid = self._success(0, reward=0.0)
-        legacy_invalid["invalid_judge_response"] = True
-        self._setup_fixture(
-            tmp_path,
-            materialized=[self._mat(0)],
-            successes=[legacy_invalid],
-            failures=[],
-        )
-        dispatched: list = []
-        self._patch(monkeypatch, dispatched, recovered_reward=0.8)
-
-        returned = await RolloutReverificationHelper().run_from_config(
-            self._make_config(tmp_path, retry_invalid_judge_responses=True)
-        )
-
-        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [0]
-        assert [row["reward"] for row in returned] == [0.8]
-        assert self._read_jsonl(tmp_path / "rollouts.jsonl") == []
-        migrated = self._read_jsonl(tmp_path / "rollouts_failures.jsonl")
-        assert migrated[0][NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
-
-    async def test_invalid_main_row_is_seeded_not_migrated_by_default(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        scored_invalid = self._success(0, reward=0.0)
-        scored_invalid["invalid_judge_response"] = True
-        self._setup_fixture(
-            tmp_path,
-            materialized=[self._mat(0), self._mat(1)],
-            successes=[scored_invalid],
-            failures=[self._failure(1)],
-        )
-        rollouts_before = (tmp_path / "rollouts.jsonl").read_bytes()
-        dispatched: list = []
-        self._patch(monkeypatch, dispatched, recovered_reward=0.8)
-
-        returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
-
-        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [1]
-        assert [(row[TASK_INDEX_KEY_NAME], row["reward"]) for row in returned] == [(0, 0.0), (1, 0.8)]
-        assert (tmp_path / "rollouts.jsonl").read_bytes() == rollouts_before
-        assert [row[TASK_INDEX_KEY_NAME] for row in self._read_jsonl(tmp_path / "rollouts_failures.jsonl")] == [1]
-
     @pytest.mark.parametrize(
-        ("stage_row_in", "retry_invalid_judge_responses"),
-        [("sidecar", False), ("sidecar", True), ("rollouts", True)],
+        "omitted",
+        [
+            pytest.param({NG_FAILURE_CLASS_KEY: "kill_shaped"}, id="killed"),
+            pytest.param({NG_FAILURE_CLASS_KEY: "cancelled", NG_DISPATCH_DRAINED_KEY: True}, id="never-started"),
+            pytest.param({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}, id="judge-class"),
+            pytest.param({NG_FAILURE_CLASS_KEY: "kill_shaped", "stage_index": 1}, id="multi-stage"),
+        ],
     )
-    async def test_rejects_multistage_rows_before_writing_anything(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        stage_row_in: str,
-        retry_invalid_judge_responses: bool,
+    async def test_rows_for_rollouts_with_no_result_are_not_recovered(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, omitted: dict
     ) -> None:
-        """The multi-stage check runs before the output is created, successes are seeded, or the
-        rollouts file is rewritten by the invalid-judge migration."""
-        staged_failure = {**self._failure(1), "stage_index": 1}
-        staged_invalid = {**self._success(2, reward=0.0), "stage_index": 1, "invalid_judge_response": True}
+        """A `record_omitted_rollouts` sidecar row has no response to judge, so recovery neither re-verifies it nor
+        refuses the run because of its stage."""
+        omitted_row = {
+            TASK_INDEX_KEY_NAME: 1,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            NG_NO_PERSIST_KEY: True,
+            NG_OMITTED_ROLLOUT_KEY: True,
+            **omitted,
+        }
         self._setup_fixture(
             tmp_path,
             materialized=[self._mat(t) for t in range(3)],
-            successes=[self._success(0)] + ([staged_invalid] if stage_row_in == "rollouts" else []),
-            failures=[staged_failure] if stage_row_in == "sidecar" else [],
+            successes=[self._success(0)],
+            failures=[omitted_row, self._failure(2)],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert [p[TASK_INDEX_KEY_NAME] for p in dispatched] == [2]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 2]
+
+    async def test_rejects_multistage_rows_before_writing_anything(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The multi-stage check runs before the output is created or successes are seeded."""
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(2)],
+            successes=[self._success(0)],
+            failures=[{**self._failure(1), "stage_index": 1}],
         )
         before = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
         dispatched: list = []
         self._patch(monkeypatch, dispatched)
 
         with pytest.raises(ConfigError, match="does not support multi-stage rows"):
-            await RolloutReverificationHelper().run_from_config(
-                self._make_config(tmp_path, retry_invalid_judge_responses=retry_invalid_judge_responses)
-            )
+            await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
         assert dispatched == []
         assert {name: (tmp_path / name).read_bytes() for name in before} == before
         assert not (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "recovered_failures.jsonl").exists()
 
-    def test_staged_rows_in_the_rollouts_file_are_ignored_unless_they_would_be_migrated(self, tmp_path: Path) -> None:
+    def test_staged_rows_in_the_rollouts_file_are_ignored(self, tmp_path: Path) -> None:
         staged_success = {**self._success(0), "stage_index": 1}
-        staged_invalid = {**self._success(1, reward=0.0), "stage_index": 1, "invalid_judge_response": True}
-        self._setup_fixture(tmp_path, materialized=[], successes=[staged_success, staged_invalid], failures=[])
-        rollouts = tmp_path / "rollouts.jsonl"
+        self._setup_fixture(tmp_path, materialized=[], successes=[staged_success], failures=[])
 
-        # Recovery reads only the sidecar, and without the opt-in nothing moves into it.
-        _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=False)
-        with pytest.raises(ConfigError, match="does not support multi-stage rows"):
-            _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=True)
-
-        rollouts.write_bytes(orjson.dumps(staged_success) + b"\n\n")
-        _reject_multistage_recovery_source(rollouts, retry_invalid_judge_responses=True)
+        # Recovery reads only the sidecar.
+        _reject_multistage_recovery_source(tmp_path / "rollouts.jsonl")
 
     async def test_prints_two_sources_warning(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -3292,6 +3497,37 @@ class TestRunFromConfigJudgeFailedOnly:
         assert [r[TASK_INDEX_KEY_NAME] for r in rows].count(0) == 1
         task0 = next(r for r in rows if r[TASK_INDEX_KEY_NAME] == 0)
         assert task0["reward"] == 1.0  # the seeded success, not a fresh re-verification
+
+    @pytest.mark.parametrize("case", ["writes", "stops before writing", "nothing left"])
+    async def test_drops_the_shard_list_of_its_output_once_it_writes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+    ) -> None:
+        """A resume that fails before writing, or has nothing left to write, leaves the merged rows, and the shards
+        listed for them, as they were."""
+        out = tmp_path / "recovered.jsonl"
+        recovered = [{**self._success(1), "reward": 0.9}] if case == "nothing left" else []
+        self._write(out, [self._success(0), *recovered])
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(2)],
+            successes=[self._success(0)],
+            failures=[self._failure(1)],
+        )
+        if case == "stops before writing":
+            (tmp_path / "inputs.jsonl").unlink()
+        aggregation_sources_path_for(out).write_text("{}")
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        run = RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, resume_from_cache=True))
+        if case == "stops before writing":
+            with pytest.raises(FileNotFoundError):
+                await run
+        else:
+            await run
+
+        assert len(dispatched) == (1 if case == "writes" else 0)
+        assert aggregation_sources_path_for(out).exists() is (case != "writes")
 
     async def test_resume_does_not_reseed_and_reverifies_only_still_failing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3429,24 +3665,8 @@ class TestRunFromConfigJudgeFailedOnly:
         with pytest.raises(FileNotFoundError, match="rollouts_failures.jsonl"):
             await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
-    @pytest.mark.parametrize(
-        ("retry_invalid_judge_responses", "refail_result", "expected_class"),
-        [
-            # Default: the verifier itself routes the failed judge call to the sidecar.
-            (False, {"reward": 0.0, NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}, JUDGE_FAILED_FAILURE_CLASS),
-            # Opt-in: resource servers return this semantic invalid marker directly, and reverify
-            # must normalize it into the retry sidecar itself.
-            (True, {"reward": 0.0, "invalid_judge_response": True}, JUDGE_INVALID_FAILURE_CLASS),
-        ],
-        ids=["judge_failed by default", "invalid judge response opted in"],
-    )
     async def test_resume_incrementally_recovers_judge_failures_across_invocations(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-        retry_invalid_judge_responses: bool,
-        refail_result: dict,
-        expected_class: str,
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """--judge-failed-only + --resume: a first pass recovers some judge failures while others re-fail;
         a second --resume pass re-verifies ONLY the still-failing ones and completes the population.
@@ -3464,29 +3684,26 @@ class TestRunFromConfigJudgeFailedOnly:
         def first_pass(payload: dict) -> dict:
             if payload[TASK_INDEX_KEY_NAME] == 1:
                 return {"reward": 1.0, "verdict": "correct"}
-            return refail_result
+            # The verifier itself routes the failed judge call to the sidecar.
+            return {"reward": 0.0, NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}
 
         dispatched1: list = []
         self._patch_with_result(monkeypatch, dispatched1, first_pass)
-        await RolloutReverificationHelper().run_from_config(
-            self._make_config(tmp_path, retry_invalid_judge_responses=retry_invalid_judge_responses)
-        )
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
 
         # all three judge failures were attempted; output has seeded 0 + recovered 1; 2,3 in the sidecar
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched1) == [1, 2, 3]
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 1]
         first_failures = self._read_jsonl(tmp_path / "recovered_failures.jsonl")
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in first_failures) == [2, 3]
-        assert {r[NG_FAILURE_CLASS_KEY] for r in first_failures} == {expected_class}
+        assert {r[NG_FAILURE_CLASS_KEY] for r in first_failures} == {JUDGE_FAILED_FAILURE_CLASS}
 
         # Second pass (--resume): only the still-failing 2,3 are retried (0,1 are cached in the output),
         # and now succeed.
         dispatched2: list = []
         self._patch_with_result(monkeypatch, dispatched2, lambda _p: {"reward": 1.0, "verdict": "correct"})
         returned = await RolloutReverificationHelper().run_from_config(
-            self._make_config(
-                tmp_path, resume_from_cache=True, retry_invalid_judge_responses=retry_invalid_judge_responses
-            )
+            self._make_config(tmp_path, resume_from_cache=True)
         )
 
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched2) == [2, 3]

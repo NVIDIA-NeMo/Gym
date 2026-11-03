@@ -14,14 +14,17 @@
 # limitations under the License.
 
 import asyncio
+import importlib.util
 import json
 import os
 import shlex
 import sys
+from functools import cache
 from glob import glob
+from math import isfinite
 from pathlib import Path
 from shutil import rmtree
-from signal import SIGINT
+from signal import SIGINT, SIGKILL
 from subprocess import Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -33,7 +36,8 @@ import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from pydantic import Field
+from pydantic import BaseModel, Field, ValidationError
+from rich.markup import escape
 from rich.table import Table
 from tqdm.auto import tqdm
 
@@ -47,7 +51,26 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.client.server_client import ServerClient, ServerStatus
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
+from nemo_gym.config.global_config import (
+    COMPONENT_NAME_KEY_NAME,
+    DRY_RUN_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    HEAD_SERVER_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    QUERY_KEY_NAME,
+    SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
+    SERVER_TYPE_KEYS,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    get_global_config_dict,
+)
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -57,20 +80,6 @@ from nemo_gym.environment.onboarding import (
 from nemo_gym.environment.publication import finalize_publication
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
 from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
-from nemo_gym.global_config import (
-    COMPONENT_NAME_KEY_NAME,
-    DRY_RUN_KEY_NAME,
-    JSON_OUTPUT_KEY_NAME,
-    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
-    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
-    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
-    QUERY_KEY_NAME,
-    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-    get_global_config_dict,
-)
 from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
@@ -79,17 +88,10 @@ from nemo_gym.registry import (
     read_environment_details,
     resolve_catalog_entry,
 )
-from nemo_gym.server_status import StatusCommand
-from nemo_gym.server_utils import (
-    HEAD_SERVER_KEY_NAME,
-    HeadServer,
-    ServerClient,
-    ServerInstanceDisplayConfig,
-    ServerStatus,
-    entrypoint_ray_enabled,
-    initialize_ray,
-    ray_is_installed,
-)
+from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
+from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
+from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
+from nemo_gym.server_runtime.server_status import StatusCommand
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers
@@ -347,6 +349,37 @@ def _server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
+def _server_shutdown_timeout_seconds(global_config_dict: DictConfig) -> float:
+    """The finite shared grace period for managed server process groups."""
+    value = global_config_dict.get(SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME)
+    if value is None:
+        return float(_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = float("nan")
+    if isinstance(value, bool) or not isfinite(seconds) or seconds < 0:
+        raise ConfigError(
+            f"`{SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME}` must be finite nonnegative seconds, got {value!r}."
+        )
+    return seconds
+
+
+def _signal_server_group(process: Popen, signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def _server_group_exists(process: Popen) -> bool:
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _resolve_server_dir(rel_path: Path) -> Path:
     """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
 
@@ -373,15 +406,18 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
     """Yield each server instance in the config that has an entrypoint to launch."""
     top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-    # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
+    # TODO there is a better way to resolve this that uses nemo_gym/config/global_config.py::ServerInstanceConfig
     for top_level_path in top_level_paths:
         server_config_dict = global_config_dict[top_level_path]
         if not isinstance(server_config_dict, DictConfig):
             continue
 
-        first_key = list(server_config_dict)[0]
+        # Top-level mappings may be interpolation inputs rather than server instances.
+        first_key = next((key for key in server_config_dict if key in SERVER_TYPE_KEYS), None)
+        if first_key is None:
+            continue
         server_config_dict = server_config_dict[first_key]
-        if not isinstance(server_config_dict, DictConfig):
+        if not isinstance(server_config_dict, DictConfig) or not server_config_dict:
             continue
         second_key = list(server_config_dict)[0]
         server_config_dict = server_config_dict[second_key]
@@ -529,13 +565,14 @@ class RunHelper:  # pragma: no cover
     _h2_ping_sidecar: H2PingSidecarManager | None
     # Created by `_start`, so its clock starts with the startup it measures.
     _startup: Optional[SupervisorStartup] = None
+    _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
 
         Any failure or interrupt before readiness shuts down everything started so far, then re-raises.
         Callers reach their own `shutdown()` only after this returns.
-        The spawned servers have no process group or atexit handler, so nothing else would stop them.
+        Managed servers run in their own sessions, so shutdown owns delivery of their interrupt.
         """
         self._processes = dict()
         self._head_server = None
@@ -557,6 +594,7 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
         self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
+        self._server_shutdown_timeout_seconds = _server_shutdown_timeout_seconds(global_config_dict)
         self._startup.mark("load_config")
 
         # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
@@ -623,7 +661,20 @@ class RunHelper:  # pragma: no cover
                 # starting a private cluster in each of its processes.
                 extra_env[RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME] = "0"
             extra_env |= self._startup.server_env(top_level_path, first_key)
-            process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
+            # Server entrypoints are executed as files (``python app.py``). In a source
+            # checkout, put the component root on PYTHONPATH as well as the server directory
+            # so package-qualified imports such as ``responses_api_agents.foo.helpers``
+            # resolve from the same checkout instead of an older installed Gym distribution.
+            # In a wheel install that root is the parent's site-packages; adding it would
+            # shadow each server venv's own dependencies, so skip it there.
+            process = run_command(
+                command,
+                dir_path,
+                server_name=top_level_path,
+                project_root=dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None,
+                extra_env=extra_env,
+                start_new_session=True,
+            )
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
@@ -838,28 +889,42 @@ Process `{process_name}` stderr:
         record_active_servers(0)
         shutdown_telemetry()
 
+        deadline = monotonic() + self._server_shutdown_timeout_seconds
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
-            process.send_signal(SIGINT)
+            _signal_server_group(process, SIGINT)
 
         print("Waiting for processes to finish...")
-        killed_process_names: List[str] = []
-        unreaped_process_names: List[str] = []
-        for process_name, process in self._processes.items():
+        remaining = {}
+        for name, process in self._processes.items():
             try:
-                process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+                process.wait(timeout=max(0, deadline - monotonic()))
             except TimeoutExpired:
-                process.kill()
-                killed_process_names.append(process_name)
-                # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
-                try:
-                    process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
-                except TimeoutExpired:
-                    unreaped_process_names.append(process_name)
+                remaining[name] = process
+            else:
+                # A shell can exit before a child that still owns its process group.
+                if _server_group_exists(process):
+                    remaining[name] = process
+        while remaining and monotonic() < deadline:
+            remaining = {name: process for name, process in remaining.items() if _server_group_exists(process)}
+            if remaining:
+                sleep(min(0.01, max(0, deadline - monotonic())))
+
+        killed_process_names = list(remaining)
+        # Escalate every group before waiting for any one child to be reaped.
+        for process in remaining.values():
+            _signal_server_group(process, SIGKILL)
+        reap_deadline = monotonic() + _FORCE_KILL_REAP_TIMEOUT_SEC
+        unreaped_process_names = []
+        for name, process in remaining.items():
+            try:
+                process.wait(timeout=max(0, reap_deadline - monotonic()))
+            except TimeoutExpired:
+                unreaped_process_names.append(name)
 
         if killed_process_names:
             print(
-                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout, killing instead. You may see messages like:
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {self._server_shutdown_timeout_seconds:g}s timeout, killing instead. You may see messages like:
 ```bash
 rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
 ```
@@ -1021,7 +1086,7 @@ def prefetch(
     ```bash
     # Pre-warm venvs for a specific config
     config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\\
-    resources_servers/math/configs/math.yaml"
+    resources_servers/math_with_judge/configs/math_with_judge.yaml"
     gym env prefetch "+config_paths=[${config_paths}]"
     ```
     """
@@ -1325,11 +1390,10 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models", "environment_servers")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
     for root in component_search_roots():
-        for server_type_dir in server_type_dirs:
+        for server_type_dir in SERVER_TYPE_KEYS:
             for module_path in sorted((root / server_type_dir).glob("*")):
                 if "pycache" in module_path.name or not module_path.is_dir():
                     continue
@@ -1500,6 +1564,75 @@ def init_resources_server():  # pragma: no cover
     scaffold_resources_server(directory=dirpath, checkout_root=checkout_root)
 
 
+@cache
+def _entrypoint_config_class(entrypoint_fpath: Path, module_name: str) -> type[BaseModel]:
+    """The config class of the server an entrypoint runs, the one its launch validates its block against."""
+    spec = importlib.util.spec_from_file_location(module_name, entrypoint_fpath)
+    if spec is None or spec.loader is None:  # pragma: no cover - importlib internals
+        raise ImportError(f"no import spec for {entrypoint_fpath}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec, so annotations that pydantic resolves through sys.modules are found.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    config_classes = {
+        server_class.model_fields["config"].annotation
+        for class_name in entrypoint_server_class_names(entrypoint_fpath)
+        if isinstance(server_class := getattr(module, class_name, None), type)
+        and issubclass(server_class, BaseModel)
+        and "config" in server_class.model_fields
+    }
+    if len(config_classes) != 1:
+        raise LookupError("it does not call run_webserver() on exactly one server class with a config")
+    return config_classes.pop()
+
+
+def _check_environment_server_configs(global_config_dict: DictConfig) -> List[str]:
+    """Validate each Environment Server block against its server's config class without starting it.
+
+    `gym env start` applies that class only when the server launches, after the other servers are up. Environment
+    Servers ship with Gym and need few packages of their own, so this process imports their entrypoints. A server
+    whose entrypoint does not import here is left to its launch: the returned warnings name each one.
+
+    Raises EnvironmentServerConfigError listing every invalid field, by its path in the merged config.
+    """
+    errors: List[str] = []
+    unchecked: List[str] = []
+    for server in _configured_servers(global_config_dict):
+        if server.server_type != ENVIRONMENT_SERVER_TYPE_KEY_NAME:
+            continue
+        source = f"{server.server_type}/{server.name}/{server.entrypoint_fpath}"
+        module_name = ".".join(
+            ["nemo_gym_environment_server_entrypoint", server.name, *server.entrypoint_fpath.with_suffix("").parts]
+        )
+        try:
+            config_class = _entrypoint_config_class(server.dir_path / server.entrypoint_fpath, module_name)
+        except Exception as error:  # Its own venv may have what this one lacks.
+            unchecked.append(
+                f"Could not check Environment Server '{server.top_level_path}' before launch, so `gym env start` "
+                f"checks its config when it launches. Loading {source} here failed: {type(error).__name__}: {error}"
+            )
+            continue
+        server_config = OmegaConf.to_container(server.config, resolve=True) | {"name": server.top_level_path}
+        try:
+            config_class.model_validate(server_config)
+        except ValidationError as error:
+            block_path = f"{server.top_level_path}.{server.server_type}.{server.name}"
+            errors.append(f"'{server.top_level_path}' ({source}) does not match {config_class.__name__}:")
+            errors.extend(
+                f"  {'.'.join([block_path, *map(str, detail['loc'])])}: {detail['msg']}" for detail in error.errors()
+            )
+    if errors:
+        raise EnvironmentServerConfigError(
+            "Environment Server config is invalid, so `gym env start` would fail when the server launches.\n"
+            + "\n".join(errors)
+        )
+    return unchecked
+
+
 @exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
@@ -1521,6 +1654,14 @@ def dump_config():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+    # The config prints either way, since it is what you debug a failing config with.
+    try:
+        unchecked = _check_environment_server_configs(global_config_dict)
+    except EnvironmentServerConfigError as error:
+        unchecked = [str(error)]
+    for warning in unchecked:
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
 
 
 class ManifestCommandConfig(BaseNeMoGymCLIConfig):
@@ -1615,6 +1756,8 @@ def validate() -> None:
         )
 
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    for warning in _check_environment_server_configs(global_config_dict):
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
     if incomplete_config_error is not None:
         rich.print(
             "[yellow]Warning:[/yellow] this config does not define model server configuration "
@@ -1955,8 +2098,8 @@ class SchemaConfig(RunConfig):
 
 @exit_cleanly_on_config_error
 def show_schema():  # pragma: no cover
-    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/task_data.py``)."""
-    from nemo_gym.task_data import TaskDataSchemaError, load_task_data_schema
+    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/data/task_data.py``)."""
+    from nemo_gym.data.task_data import TaskDataSchemaError, load_task_data_schema
 
     global_config_dict = get_global_config_dict()
     config = SchemaConfig.model_validate(global_config_dict)
@@ -1970,7 +2113,7 @@ def show_schema():  # pragma: no cover
     if adapter is None:
         print(
             f"{config.entrypoint} does not ship a task_data.py schema yet. "
-            "Add one exporting `TaskData` (see nemo_gym/task_data.py for the protocol)."
+            "Add one exporting `TaskData` (see nemo_gym/data/task_data.py for the protocol)."
         )
         exit(1)
     print(json.dumps(adapter.json_schema(), indent=2))

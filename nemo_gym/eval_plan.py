@@ -14,9 +14,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from nemo_gym.config_types import ConfigError
-from nemo_gym.episode_types import TaskId
-from nemo_gym.task_materialization import TASK_ID_FIELDS, materialize_task
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.core.episode import TaskId
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS, materialize_task
 
 
 EVAL_PLAN_SCHEMA = "nemo-gym.eval-plan.v1"
@@ -41,7 +41,7 @@ class PlanBenchmark(BaseModel):
 
 
 class PlanTask(BaseModel):
-    """One task: its identity and a digest of the exact input a run receives."""
+    """One task: its identity and a digest of its prepared input."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -18,16 +18,19 @@
 import inspect
 import re
 import sys
+import tomllib
 import types
 from importlib.metadata import version
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
-from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
 from nemo_gym.sandbox.providers.e2b.provider import _API_PARAM_KEYS, E2BCreateError, E2BProvider
@@ -74,9 +77,39 @@ class FakeCommandResult:
 class FakeConnectionConfig:
     integrations: list[str] = []
 
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
     @classmethod
     def set_integration(cls, integration: str) -> None:
         cls.integrations.append(integration)
+
+
+class FakeHttpResponse:
+    def __init__(self, status_code: int, payload: object) -> None:
+        self.status_code = status_code
+        self.text = str(payload)
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+class FakeApiClient:
+    """The SDK's REST API client: records each POST and answers with ``response``."""
+
+    calls: list[dict] = []
+    response = FakeHttpResponse(201, {"sandboxID": "sbx-rest"})
+
+    def __init__(self, config: FakeConnectionConfig) -> None:
+        self.config = config
+
+    def get_async_httpx_client(self) -> "FakeApiClient":
+        return self
+
+    async def post(self, url: str, json: dict) -> FakeHttpResponse:
+        FakeApiClient.calls.append({"url": url, "json": json, "config": self.config.kwargs})
+        return FakeApiClient.response
 
 
 # The real SDK's sandbox-scoped methods take `request_timeout` only -- they are
@@ -193,6 +226,12 @@ class FakeSandbox:
         _reject_connection_params("Sandbox.is_running", kwargs)
         return self.running
 
+    async def get_info(self, **kwargs):
+        _reject_connection_params("Sandbox.get_info", kwargs)
+        if not self.running:
+            raise FakeSandboxNotFound(self.sandbox_id)
+        return types.SimpleNamespace(state="running")
+
     async def kill(self, **kwargs):
         self.kill_calls.append(kwargs)
         if self.kill_outcomes:
@@ -209,6 +248,7 @@ def _fake_sdk() -> types.SimpleNamespace:
     return types.SimpleNamespace(
         AsyncSandbox=FakeSandbox,
         ConnectionConfig=FakeConnectionConfig,
+        api=types.SimpleNamespace(client_async=types.SimpleNamespace(get_api_client=FakeApiClient)),
         SandboxNotFoundException=FakeSandboxNotFound,
         NotFoundException=FakeSandboxNotFound,
         TimeoutException=FakeTimeout,
@@ -229,11 +269,15 @@ def _fake_sdk_module() -> types.ModuleType:
 def fake_e2b_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeSandbox.instances.clear()
     FakeConnectionConfig.integrations.clear()
+    FakeApiClient.calls.clear()
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _fake_sdk)
 
 
 def _spec(**kwargs) -> SandboxSpec:
     return SandboxSpec(**kwargs)
+
+
+_NETWORK = {"deny_out": ["0.0.0.0/0"], "allow_out": ["pypi.org", "deb.debian.org"]}
 
 
 # --------------------------------------------------------------------------
@@ -245,6 +289,17 @@ def test_provider_is_registered_as_builtin() -> None:
     assert get_provider_class("e2b") is E2BProvider
     assert E2BProvider.name == "e2b"
     assert e2b_pkg.E2BProvider is E2BProvider
+
+
+def test_sdk_install_contract_matches_package_metadata_and_guidance() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    with (repo_root / "pyproject.toml").open("rb") as source:
+        dependencies = tomllib.load(source)["project"]["optional-dependencies"]["sandbox"]
+
+    assert e2b_sdk.E2B_SDK_CONSTRAINT in dependencies
+    provider_dir = repo_root / "nemo_gym/sandbox/providers/e2b"
+    for relative_path in ("README.md", "configs/e2b.yaml"):
+        assert e2b_sdk.E2B_SDK_CONSTRAINT in (provider_dir / relative_path).read_text(encoding="utf-8")
 
 
 async def test_runtime_loader_sets_integration_once_per_sdk_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,10 +318,19 @@ async def test_runtime_loader_sets_integration_once_per_sdk_module(monkeypatch: 
     assert configured_transports == [True]
 
 
-async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("configured", [False, True])
+async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
+    monkeypatch: pytest.MonkeyPatch, configured: bool
+) -> None:
     import httpx
 
     from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    if configured:
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    else:
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
     sdk_module = _fake_sdk_module()
     sdk_module.__path__ = []
@@ -277,6 +341,8 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
     client_async_module.connection_retries = 2
     client_async_module.get_transport = lambda config, http2=True: object()
     client_async_module.get_envd_transport = lambda config, http2=True: object()
+    original_control_transport = client_async_module.get_transport
+    original_envd_transport = client_async_module.get_envd_transport
     sandbox_async_module = types.ModuleType("e2b.sandbox_async")
     sandbox_async_module.__path__ = []
     sandbox_main_module = types.ModuleType("e2b.sandbox_async.main")
@@ -297,6 +363,10 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
     monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
 
     e2b_sdk.require_e2b_sdk("Testing the e2b provider")
+    if not configured:
+        assert client_async_module.get_transport is original_control_transport
+        assert sandbox_main_module.get_transport is original_envd_transport
+        return
     config = types.SimpleNamespace(proxy=None)
     control_transport = client_async_module.get_transport(config)
     envd_transport = sandbox_main_module.get_transport(config)
@@ -315,21 +385,21 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatc
 def test_loader_reports_missing_optional_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "e2b", None)
 
-    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.36\.0,<3\.0\.0'"):
+    with pytest.raises(ImportError, match=r"pip install 'e2b>=2\.46\.0,<3\.0\.0'"):
         e2b_sdk.require_e2b_sdk("Testing the e2b provider")
 
 
-async def test_real_sdk_user_agent_and_call_shapes() -> None:
+async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
     e2b = pytest.importorskip("e2b", reason="e2b optional sandbox dependency is not installed")
     from e2b.api import client_async
     from e2b.sandbox_async import main as sandbox_async
 
     from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
-    installed_match = re.match(r"^(\d+)\.(\d+)", version("e2b"))
-    assert installed_match is not None
-    assert (int(installed_match[1]), int(installed_match[2])) >= (2, 36)
-    assert int(installed_match[1]) < 3
+    monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
+
+    assert version("e2b") in Requirement(e2b_sdk.E2B_SDK_CONSTRAINT).specifier
     assert set(_API_PARAM_KEYS) <= set(e2b.ApiParams.__annotations__)
 
     e2b_sdk.require_e2b_sdk("Testing the e2b provider")
@@ -337,9 +407,16 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
     products = connection.headers["User-Agent"].split()
     assert f"nemo-gym/{nemo_gym_version}" in products
     envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
-    for transport in (client_async.get_transport(connection), envd_client._transport):
+    # The REST create path posts through the SDK's API client.
+    api_client = client_async.get_api_client(
+        e2b.ConnectionConfig(api_key="k", api_url="http://gw:8080", api_headers={"Authorization": "Bearer t"})
+    ).get_async_httpx_client()
+    assert str(api_client.base_url) == "http://gw:8080"
+    assert (api_client.headers["X-API-KEY"], api_client.headers["Authorization"]) == ("k", "Bearer t")
+    for transport in (client_async.get_transport(connection), envd_client._transport, api_client._transport):
         assert isinstance(transport, GymAiohttpTransport)
     await envd_client.aclose()
+    await api_client.aclose()
 
     inspect.signature(e2b.AsyncSandbox.create).bind(
         template="base",
@@ -349,14 +426,18 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
         metadata={},
         secure=True,
         allow_internet_access=True,
+        network={"allow_out": ["pypi.org"], "deny_out": ["0.0.0.0/0"]},
+        lifecycle={"on_timeout": "pause", "auto_resume": True},
     )
-    inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", timeout=60, request_timeout=30)
     inspect.signature(e2b.AsyncSandbox.kill).bind(
         object(),
         **dict.fromkeys(_API_PARAM_KEYS),
         request_timeout=30,
     )
-    inspect.signature(e2b.AsyncSandbox.is_running).bind(object(), request_timeout=30)
+    # AsyncSandbox.kill(sandbox_id, ...) called on the class dispatches here.
+    inspect.signature(e2b.AsyncSandbox._cls_kill).bind("sbx-id", **dict.fromkeys(_API_PARAM_KEYS), request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.get_info).bind(object(), request_timeout=30)
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
         object(),
@@ -775,6 +856,75 @@ class TestCreateAndLifecycle:
         with pytest.raises(E2BCreateError, match="gateway exploded"):
             await provider.create(_spec())
 
+    async def test_network_is_passed_to_sdk_create_only_when_set(self) -> None:
+        default = await E2BProvider(create={"template": "base"}).create(_spec())
+        assert "network" not in default.raw.create_kwargs
+
+        handle = await E2BProvider(create={"template": "base", "network": _NETWORK}).create(_spec())
+        assert handle.raw.create_kwargs["network"] == _NETWORK
+
+    async def test_extension_params_create_through_rest_api_then_connect(self) -> None:
+        provider = E2BProvider(
+            connection={"api_key": "secret-key", "api_url": "http://gw:8080", "request_timeout_s": 30.0},
+            create={"template": "base", "network": _NETWORK, "custom_extension_params": {"sandbank": "all"}},
+        )
+        handle = await provider.create(
+            _spec(ttl_s=120, ready_timeout_s=90, env={"FOO": "bar"}, metadata={"run": "1"}),
+        )
+
+        [call] = FakeApiClient.calls
+        assert call["url"] == "/sandboxes"
+        # The SDK's API client takes URL, auth headers and timeout from this config.
+        assert call["config"] == {"api_key": "secret-key", "api_url": "http://gw:8080", "request_timeout": 90.0}
+        assert call["json"] == {
+            "templateID": "base",
+            "timeout": 120,
+            "secure": True,
+            "allow_internet_access": True,
+            "network": {"denyOut": ["0.0.0.0/0"], "allowOut": ["pypi.org", "deb.debian.org"]},
+            "envVars": {"FOO": "bar"},
+            "metadata": {"run": "1"},
+            "customExtensionParams": {"sandbank": "all"},
+            "autoPause": False,
+            "autoResume": {"enabled": False},
+        }
+        # Attached with connect (keeping the create timeout), not created twice.
+        assert [sandbox.sandbox_id for sandbox in FakeSandbox.instances] == ["sbx-rest"]
+        assert handle.sandbox_id == "sbx-rest"
+        assert handle.raw.create_kwargs["timeout"] == 120
+        assert handle.raw.create_kwargs["api_key"] == "secret-key"
+        assert handle.raw.killed is False
+
+    async def test_rest_create_failure_is_wrapped_and_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(400, "unknown template"))
+        provider = E2BProvider(
+            create={"template": "base", "custom_extension_params": {"sandbank": "all"}},
+            operations={"retries": 3, "retry_delay_s": 0},
+        )
+        with pytest.raises(E2BCreateError, match="HTTP 400: unknown template"):
+            await provider.create(_spec())
+
+        assert len(FakeApiClient.calls) == 1
+        assert FakeSandbox.instances == []
+
+    async def test_failed_connect_kills_the_created_sandbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        killed: list[str] = []
+
+        async def connect(cls, sandbox_id, **kwargs):
+            raise FakeTimeout("connect timed out")
+
+        async def kill(sandbox_id, **kwargs):
+            killed.append(sandbox_id)
+            return True
+
+        monkeypatch.setattr(FakeSandbox, "connect", classmethod(connect))
+        monkeypatch.setattr(FakeSandbox, "kill", staticmethod(kill))
+        provider = E2BProvider(create={"template": "base", "custom_extension_params": {"sandbank": "all"}})
+        with pytest.raises(E2BCreateError, match="connect timed out"):
+            await provider.create(_spec())
+
+        assert killed == ["sbx-rest"]
+
     async def test_status_and_close(self) -> None:
         provider = E2BProvider(create={"template": "base"})
         handle = await provider.create(_spec())
@@ -1027,6 +1177,20 @@ def test_invalid_template_config_is_rejected(create: dict[str, object]) -> None:
 
 
 @pytest.mark.parametrize(
+    ("create", "message"),
+    [
+        ({"network": ["0.0.0.0/0"]}, "create.network must be a mapping"),
+        ({"network": {"allow": ["pypi.org"]}}, "Unknown create.network keys: allow"),
+        ({"network": {"deny_out": "0.0.0.0/0"}}, "create.network.deny_out must be a list of strings"),
+        ({"custom_extension_params": "sandbank"}, "create.custom_extension_params must be a mapping"),
+    ],
+)
+def test_invalid_network_config_is_rejected(create: dict[str, object], message: str) -> None:
+    with pytest.raises((TypeError, ValueError), match=re.escape(message)):
+        E2BProvider(create=create)
+
+
+@pytest.mark.parametrize(
     ("section", "config", "message"),
     [
         ("connection", {"request_timeout_s": -1}, "connection.request_timeout_s must be >= 0"),
@@ -1048,3 +1212,152 @@ def test_invalid_template_config_is_rejected(create: dict[str, object]) -> None:
 def test_invalid_config_values_are_rejected(section: str, config: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=re.escape(message)):
         E2BProvider(**{section: config})
+
+
+async def test_create_kills_at_timeout_by_default() -> None:
+    # E2B 2.42+ omits lifecycle fields unless asked, and AgentENV then pauses timed-out
+    # sandboxes forever; the default must request deletion explicitly.
+    provider = E2BProvider(create={"template": "base"})
+    handle = await provider.create(_spec(ttl_s=60))
+    assert handle.raw.create_kwargs["lifecycle"] == {"on_timeout": "kill", "auto_resume": False}
+
+
+@pytest.mark.parametrize("auto_resume", [None, True, False])
+async def test_create_lifecycle_policy(auto_resume: bool | None) -> None:
+    provider = E2BProvider(create={"template": "base", "auto_resume": auto_resume})
+    handle = await provider.create(_spec(ttl_s=12.5))
+    assert handle.raw.create_kwargs["timeout"] == 13
+    if auto_resume is None:
+        assert "lifecycle" not in handle.raw.create_kwargs
+    else:
+        assert handle.raw.create_kwargs["lifecycle"] == {
+            "on_timeout": "pause" if auto_resume else "kill",
+            "auto_resume": auto_resume,
+        }
+
+
+@pytest.mark.parametrize("invalid", [0, 1, "false", "true", [], {}])
+def test_create_auto_resume_rejects_non_boolean(invalid: object) -> None:
+    with pytest.raises(ValueError, match="create.auto_resume must be a boolean or None"):
+        E2BProvider(create={"auto_resume": invalid})
+
+
+@pytest.mark.parametrize("auto_resume", [True, False])
+@pytest.mark.parametrize("custom_extension_params", [None, {"sandbank": "all"}])
+async def test_real_sdk_serializes_lifecycle_policy(
+    monkeypatch: pytest.MonkeyPatch, auto_resume: bool, custom_extension_params: dict | None
+) -> None:
+    pytest.importorskip("e2b")
+    import json
+
+    import httpx
+
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+    bodies = []
+
+    async def capture_request(self, request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        raise ConnectionError("captured before network")
+
+    # Install the Gym transport here, so this test never depends on test order to stay off the network.
+    monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
+    monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
+    monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", capture_request)
+    provider = E2BProvider(
+        connection={"api_key": "test-key", "validate_api_key": False},
+        create={"template": "base", "auto_resume": auto_resume, "custom_extension_params": custom_extension_params},
+    )
+    # The SDK create and the REST create (custom_extension_params) send the same lifecycle.
+    with pytest.raises(E2BCreateError, match="captured before network"):
+        await provider.create(_spec(ttl_s=7))
+    assert len(bodies) == 1
+    assert bodies[0]["autoPause"] is auto_resume
+    assert bodies[0]["autoResume"] == {"enabled": auto_resume}
+    assert bodies[0]["timeout"] == 7
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("running", SandboxStatus.RUNNING), ("paused", SandboxStatus.PAUSED), ("resuming", SandboxStatus.UNKNOWN)],
+)
+async def test_status_reads_control_plane_without_waking_sandbox(
+    monkeypatch: pytest.MonkeyPatch, state: str, expected: SandboxStatus
+) -> None:
+    provider = E2BProvider(connection={"request_timeout_s": 12}, create={"template": "base"})
+    handle = await provider.create(_spec())
+
+    async def get_info(**kwargs):
+        assert kwargs == {"request_timeout": 12}
+        return types.SimpleNamespace(state=state)
+
+    async def forbidden_health_check(**kwargs):
+        pytest.fail("Status must not send traffic that resumes a paused sandbox")
+
+    monkeypatch.setattr(handle.raw, "get_info", get_info)
+    monkeypatch.setattr(handle.raw, "is_running", forbidden_health_check)
+    assert await provider.status(handle) is expected
+
+
+async def test_status_control_plane_failure_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = E2BProvider(create={"template": "base"})
+    handle = await provider.create(_spec())
+
+    async def unavailable(**kwargs):
+        raise ConnectionError("control plane unavailable")
+
+    monkeypatch.setattr(handle.raw, "get_info", unavailable)
+    assert await provider.status(handle) is SandboxStatus.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("running", SandboxStatus.RUNNING), ("paused", SandboxStatus.PAUSED), ("gone", SandboxStatus.STOPPED)],
+)
+async def test_real_sdk_status_only_reads_control_plane(
+    monkeypatch: pytest.MonkeyPatch, state: str, expected: SandboxStatus
+) -> None:
+    pytest.importorskip("e2b")
+    import json
+
+    import httpx
+
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+
+    sandbox = {"templateID": "base", "sandboxID": "sbx-1", "clientID": "client", "envdVersion": "0.2.0"}
+    requests: list[tuple[str, str]] = []
+
+    async def fake_api(self, request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "POST" and request.url.path.endswith("/sandboxes"):
+            return httpx.Response(201, json=sandbox, request=request)
+        if request.method == "GET" and request.url.path.endswith("/sandboxes/sbx-1"):
+            if state == "gone":
+                # Killed at its timeout: the SDK's 404 must read as STOPPED, not UNKNOWN.
+                return httpx.Response(404, json={"code": 404, "message": "sandbox not found"}, request=request)
+            detail = {
+                **sandbox,
+                "startedAt": "2026-01-01T00:00:00Z",
+                "endAt": "2026-01-01T01:00:00Z",
+                "cpuCount": 2,
+                "memoryMB": 1024,
+                "diskSizeMB": 1024,
+                "state": state,
+            }
+            return httpx.Response(200, content=json.dumps(detail), request=request)
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    # Install the Gym transport here, so this test never depends on test order to stay off the network.
+    monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
+    monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
+    monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", fake_api)
+    provider = E2BProvider(connection={"api_key": "test-key", "validate_api_key": False}, create={"template": "base"})
+    handle = await provider.create(_spec())
+    requests.clear()
+
+    assert await provider.status(handle) is expected
+    # Only the control-plane GET: an envd health check would resume a paused sandbox.
+    assert [method for method, _ in requests] == ["GET"]
+    assert requests[0][1].endswith("/sandboxes/sbx-1")

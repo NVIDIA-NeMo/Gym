@@ -15,8 +15,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.global_config import get_global_config_dict
 
 
 class FlashInferConfig(BaseNeMoGymCLIConfig):

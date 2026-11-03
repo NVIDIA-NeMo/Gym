@@ -23,9 +23,9 @@ from omegaconf import DictConfig
 from prometheus_client import CollectorRegistry, Counter, Histogram, generate_latest
 from pydantic import ValidationError
 
+import nemo_gym.client.http_client as server_utils
 import nemo_gym.inference_metrics as metrics_module
-import nemo_gym.server_utils as server_utils
-from nemo_gym.exporters.wandb import WandbExporter
+from nemo_gym.artifacts.exporters.wandb import WandbExporter
 from nemo_gym.inference_metrics import InferenceMetricsCollector, InferenceMetricsConfig, collect_inference_metrics
 
 
@@ -408,7 +408,7 @@ async def test_disabled_or_no_exporter_does_not_scrape(monkeypatch):
 
 def test_wandb_progress_axis_and_automatic_steps(monkeypatch):
     run = MagicMock()
-    monkeypatch.setattr("nemo_gym.exporters.wandb.wandb.init", MagicMock(return_value=run))
+    monkeypatch.setattr("nemo_gym.artifacts.exporters.wandb.wandb.init", MagicMock(return_value=run))
     exporter = WandbExporter(
         DictConfig(
             {

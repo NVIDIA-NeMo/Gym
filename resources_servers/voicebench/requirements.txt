@@ -1,0 +1,6 @@
+-e nemo-gym[dev] @ ../../
+absl-py
+immutabledict
+langdetect
+nltk
+loguru

@@ -72,6 +72,7 @@ def _fixed_user(monkeypatch):
 
 def test_otel_is_on_by_default():
     assert _config().otel.enabled is True
+    assert _config().otel.remote_export is True
 
 
 def test_otel_can_be_disabled():
@@ -99,7 +100,7 @@ def test_otel_has_no_destination_by_default():
         {
             "services": {},
             "compute": {"c": {"type": "slurm", "account": "a"}},
-            "driver": {"container": "gym:latest", "benchmarks": {}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {}}},
             "job": {"output_path": "/remote"},
         }
     )
@@ -173,10 +174,28 @@ def test_resolve_token_honours_token_env(monkeypatch):
     assert resolve_token(_config(otel={"token_env": "MY_TOKEN"})) == "other"
 
 
-def test_resolve_token_missing_names_the_variable(monkeypatch):
-    monkeypatch.delenv("OTEL_TOKEN", raising=False)
-    with pytest.raises(ValueError, match="OTEL_TOKEN"):
-        resolve_token(_config())
+@pytest.mark.parametrize("token", [None, ""])
+def test_missing_token_disables_remote_export_with_a_warning(monkeypatch, caplog, token):
+    monkeypatch.delenv("NVAUTH_TOKEN", raising=False)
+    if token is not None:
+        monkeypatch.setenv("NVAUTH_TOKEN", token)
+    config = _config(otel={"token_env": "NVAUTH_TOKEN"})
+
+    assert resolve_token(config) is None
+    assert config.otel.enabled is True
+    assert config.otel.remote_export is False
+    assert "NVAUTH_TOKEN" in caplog.text
+    assert "otel.remote_export=false" in caplog.text
+    assert "otel/" in caplog.text
+    resolve_token(config)
+    assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize("otel", [{"enabled": False}, {"remote_export": False}])
+def test_disabled_remote_export_does_not_resolve_a_token(monkeypatch, caplog, otel):
+    monkeypatch.setenv("OTEL_TOKEN", "unused-secret")
+    assert resolve_token(_config(otel=otel)) is None
+    assert not caplog.records
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +352,24 @@ def test_collector_writes_a_local_copy_next_to_the_managed_export():
         assert managed["receivers"] == local["receivers"]
 
 
+def test_local_only_collector_needs_no_destination_or_token():
+    config = _config(otel={"remote_export": False, "endpoint": None, "service_name": None})
+    doc = _rendered(config)
+
+    assert set(doc["exporters"]) == {"file/metrics", "file/traces", "file/logs"}
+    assert set(doc["service"]["pipelines"]) == {"metrics/local", "traces/local", "logs/local"}
+    assert "span_metrics" in doc["service"]["pipelines"]["traces/local"]["exporters"]
+    assert "service.name" not in _attrs(doc, "resource/local")
+    for signal in ("metrics", "traces", "logs"):
+        local = doc["service"]["pipelines"][f"{signal}/local"]
+        assert f"file/{signal}" in local["exporters"]
+        assert doc["exporters"][f"file/{signal}"]["path"] == str(BENCH_DIR / "otel" / f"{signal}.jsonl")
+    rendered = yaml.safe_dump(doc)
+    assert "OTEL_TOKEN" not in rendered
+    assert "Authorization" not in rendered
+    assert "managed" not in rendered
+
+
 def test_the_token_never_reaches_the_job_directory_copies():
     doc = _rendered()
     assert "Authorization" in _attrs(doc, "resource/managed")
@@ -436,6 +473,15 @@ def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkey
     assert "secret-token" not in line
 
 
+def test_local_only_script_keeps_collection_without_forwarding_the_token():
+    script = _script(_config(otel={"remote_export": False}, driver=_DRIVER_WITH_INSTALL))
+    assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
+    assert "NEMO_GYM_OTEL_ENABLED=1" in _driver_line(script)
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in _driver_line(script)
+    assert "OTEL_TOKEN" not in script
+    assert "DRIVER_RC=$?" in script
+
+
 def test_script_honours_a_binary_path_on_shared_storage():
     config = _config(otel={"binary": "/shared/tools/otelcol-contrib"})
     line = next(
@@ -486,7 +532,7 @@ def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=default,verify" in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
     assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
-    assert 'uv pip install -e ".[telemetry]"' in script
+    assert 'uv pip install -e ".[telemetry,ray]"' in script
 
 
 def test_script_installs_the_sdk_of_a_configured_exporter():
@@ -496,13 +542,32 @@ def test_script_installs_the_sdk_of_a_configured_exporter():
         "mlflow_run_name": "run",
     }
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": run}}}
-    assert 'uv pip install -e ".[telemetry,mlflow]"' in _script(_config(driver=driver))
+    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
 
 
 def test_script_skips_the_sdk_of_a_partly_configured_exporter():
     # A tracking URI alone (a registry lookup) opens no exporter, so needs no SDK.
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": {"mlflow_tracking_uri": "https://x"}}}}
-    assert 'uv pip install -e ".[telemetry]"' in _script(_config(driver=driver))
+    assert 'uv pip install -e ".[telemetry,ray]"' in _script(_config(driver=driver))
+
+
+@pytest.mark.parametrize("section", ["prepare", "run"])
+def test_script_installs_mlflow_for_gitlab_dataset_storage(section):
+    # A tracking URI and token without an experiment open no exporter, but a GitLab download needs mlflow.
+    creds = {"mlflow_tracking_uri": "https://gitlab.example", "mlflow_tracking_token": "token"}
+    driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {section: creds}}}
+    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
+
+
+def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
+    run = {
+        "mlflow_tracking_uri": "https://tracking.example",
+        "mlflow_tracking_token": "token",
+        "mlflow_experiment_name": "gym",
+        "mlflow_run_name": "run",
+    }
+    driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"prepare": run, "run": run}}}
+    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
 
 
 def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
@@ -531,11 +596,78 @@ def test_script_honours_configured_gym_span_groups():
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=per_rollout,sandbox" in _driver_line(_script(config))
 
 
+def _policy_line(script):
+    return next(line for line in script.splitlines() if "--output=logs/policy-$SLURM_JOB_ID.log" in line)
+
+
+def test_vllm_traces_are_off_by_default():
+    assert "--otlp-traces-endpoint" not in _script(_config())
+
+
+def test_vllm_traces_point_the_engine_at_the_collector_over_http():
+    line = _policy_line(_script(_config(otel={"vllm_traces": True})))
+    assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in line
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
+    assert "OTEL_SERVICE_NAME=gym-vllm/policy" in line
+
+
+def test_vllm_traces_keep_the_services_own_flags_and_let_its_env_win():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm",
+                "container": "vllm:latest",
+                "model": "/checkpoint",
+                "port": 8000,
+                "extra_args": "--max-model-len 8192",
+                "env": {"OTEL_SERVICE_NAME": "lit:mine"},
+            }
+        },
+        otel={"vllm_traces": True, "component": "engine"},
+    )
+    line = _policy_line(_script(config))
+    assert "--max-model-len 8192 --otlp-traces-endpoint" in line
+    assert "OTEL_SERVICE_NAME=mine" in line
+    assert "OTEL_SERVICE_NAME=engine/policy" not in line
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
+
+
+def test_vllm_traces_need_the_collector():
+    assert "--otlp-traces-endpoint" not in _script(_config(otel={"enabled": False, "vllm_traces": True}))
+
+
+def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm_pd",
+                "container": "vllm:latest",
+                "model": "/checkpoint",
+                "port": 8000,
+                "prefill": {"node_pool": "prefill"},
+                "decode": {"node_pool": "decode"},
+            }
+        },
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}},
+            }
+        },
+        otel={"vllm_traces": True},
+    )
+    script = _script(config)
+    traced = [line for line in script.splitlines() if "--otlp-traces-endpoint" in line]
+    assert len(traced) == 1
+    assert "--port 8001" in traced[0]  # the prefill tier, on the collector's node
+
+
 def test_script_leaves_the_driver_alone_when_disabled():
     script = _script(_config(otel={"enabled": False}, driver=_DRIVER_WITH_INSTALL))
     assert "NEMO_GYM_OTEL" not in script
-    assert "uv pip install -e ." in script
-    assert "[telemetry]" not in script
+    assert 'uv pip install -e ".[ray]"' in script
 
 
 def test_script_has_no_collector_when_disabled():
@@ -595,19 +727,25 @@ def test_gym_telemetry_off_keeps_the_collector_and_skips_lens():
     script = _script(_config(otel={"gym_telemetry": False}, driver=_DRIVER_WITH_INSTALL))
     assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
     assert "NEMO_GYM_OTEL_ENABLED" not in script
-    assert "[telemetry]" not in script
+    assert 'uv pip install -e ".[ray]"' in script
 
 
-def test_submit_fails_before_staging_when_the_token_is_missing(tmp_path, monkeypatch):
+def test_submit_without_a_token_stages_and_persists_local_only_collection(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv("OTEL_TOKEN", raising=False)
-    conn = _FakeConnection([])
+    conn = _FakeConnection(["__GYM_JOB:scicode:0:111 "])
     _install(monkeypatch, conn, tmp_path)
 
-    with pytest.raises(ValueError, match="OTEL_TOKEN"):
-        SlurmExecutor().run(_executor_config(tmp_path))
+    record = SlurmExecutor().run(_executor_config(tmp_path, otel={"endpoint": None, "service_name": None}))
 
-    assert conn.commands == []
-    assert not (tmp_path / "jobs").exists()
+    bench_dir = Path(record.run_dir) / "scicode"
+    collector = yaml.safe_load((bench_dir / "otel" / "collector.yaml").read_text())
+    assert set(collector["exporters"]) == {"file/metrics", "file/traces", "file/logs"}
+    assert "OTEL_TOKEN" not in (bench_dir / "job.sh").read_text()
+    assert not conn.commands[0][0].startswith("export ")
+    resolved = yaml.safe_load((Path(record.run_dir) / RESOLVED_CONFIG_NAME).read_text())
+    assert resolved["otel"]["enabled"] is True
+    assert resolved["otel"]["remote_export"] is False
+    assert "otel.remote_export=false" in caplog.text
 
 
 def test_submit_fails_when_the_destination_is_missing(tmp_path, monkeypatch):
@@ -618,10 +756,31 @@ def test_submit_fails_when_the_destination_is_missing(tmp_path, monkeypatch):
         SlurmExecutor().run(config, dry_run=True)
 
 
-def test_dry_run_fails_when_the_token_is_missing(tmp_path, monkeypatch):
+def test_dry_run_without_a_token_keeps_local_collection(tmp_path, monkeypatch, capsys, caplog):
     monkeypatch.delenv("OTEL_TOKEN", raising=False)
-    with pytest.raises(ValueError, match="OTEL_TOKEN"):
-        SlurmExecutor().run(_executor_config(tmp_path), dry_run=True)
+    SlurmExecutor().run(_executor_config(tmp_path), dry_run=True)
+    out = capsys.readouterr().out
+    assert "file/metrics" in out
+    assert "otlp_http/managed" not in out
+    assert "OTEL_TOKEN" not in out
+    assert "otel.remote_export=false" in caplog.text
+
+
+def test_explicit_local_only_submit_ignores_available_credentials(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("NVAUTH_TOKEN", "unused-secret")
+    conn = _FakeConnection(["__GYM_JOB:scicode:0:111 "])
+    _install(monkeypatch, conn, tmp_path)
+    config = _executor_config(
+        tmp_path, otel={"remote_export": False, "token_env": "NVAUTH_TOKEN", "endpoint": None, "service_name": None}
+    )
+
+    record = SlurmExecutor().run(config)
+
+    collector = (Path(record.run_dir) / "scicode" / "otel" / "collector.yaml").read_text()
+    assert "file/metrics" in collector
+    assert "managed" not in collector
+    assert not conn.commands[0][0].startswith("export ")
+    assert not [r for r in caplog.records if r.name == obs_module.__name__]
 
 
 def test_dry_run_prints_the_collector_config(tmp_path, monkeypatch, capsys):
@@ -661,3 +820,43 @@ def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):
 
     assert not (Path(record.run_dir) / "scicode" / "otel").exists()
     assert not conn.commands[0][0].startswith("export ")
+
+
+def _engine_rollout_id_statements(doc):
+    copy, trim, write = doc["processors"]["transform/engine_rollout_id"]["trace_statements"][0]["statements"]
+    pattern = re.search(r'replace_pattern\(cache\["engine_rollout_id"\], "([^"]+)", "([^"]+)"\)', trim)
+    # The collector expands `${...}` itself, so OTTL regex syntax is written with `$$`; Go's `${1}` is
+    # Python's `\g<1>`.
+    regex = pattern.group(1).replace("$$", "$")
+    replacement = pattern.group(2).replace("$$", "$").replace("${1}", "\\g<1>")
+    return copy, trim, write, regex, replacement
+
+
+def test_collector_copies_the_rollout_id_out_of_the_engine_request_id_when_vllm_traces_are_on():
+    doc = _rendered(_config(otel={"vllm_traces": True}))
+    copy, trim, write, regex, replacement = _engine_rollout_id_statements(doc)
+    # Derived in the span-local cache; the attribute is written only while absent, so an id the span
+    # already carries is never touched, whatever its value (see the collector round trip in the PR).
+    assert copy.startswith('set(cache["engine_rollout_id"], attributes["gen_ai.request.id"])')
+    assert 'where name == "llm_request"' in copy and 'attributes["nemo.gym.rollout.id"] == nil' in copy
+    assert "IsMatch(" in copy, "only Gym's own request ids are derived"
+    assert trim.endswith('where cache["engine_rollout_id"] != nil')
+    assert write.startswith('set(attributes["nemo.gym.rollout.id"], cache["engine_rollout_id"])')
+    assert 'attributes["nemo.gym.rollout.id"] == nil' in write
+    assert "attributes[" not in trim, "the trim edits the cache, never an attribute"
+    for pipeline in ("traces", "traces/local"):
+        processors = doc["service"]["pipelines"][pipeline]["processors"]
+        assert processors.index("transform/engine_rollout_id") < processors.index(processors[-2]), pipeline
+    # Same semantics in Python's engine as in Go's for these inputs.
+    assert re.sub(regex, replacement, "chatcmpl-0-0-5bf494fb") == "0-0"
+    assert re.sub(regex, replacement, "chatcmpl-3-0-a2-deadbeef") == "3-0-a2"
+    assert re.sub(regex, replacement, "custom.id_7-00c0ffee") == "custom.id_7"
+    plain_uuid = "chatcmpl-0123456789abcdef0123456789abcdef"
+    assert re.search(regex, plain_uuid) is None, "a request id that is not Gym's is not derived"
+
+
+def test_collector_leaves_engine_spans_alone_when_vllm_traces_are_off():
+    doc = _rendered()
+    assert "transform/engine_rollout_id" not in doc["processors"]
+    for pipeline in ("traces", "traces/local"):
+        assert "transform/engine_rollout_id" not in doc["service"]["pipelines"][pipeline]["processors"]

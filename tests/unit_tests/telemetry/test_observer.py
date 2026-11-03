@@ -27,6 +27,7 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk.metrics")
 
+import nemo_gym.client.http_client
 from nemo_gym.telemetry import observer  # noqa: E402
 from nemo_gym.telemetry import setup as telemetry_setup  # noqa: E402
 
@@ -211,7 +212,7 @@ class TestRequestCounters:
     @staticmethod
     def _serve(app, receive, collected=None):
         """Run one request through the outermost middleware and return the totals, read before the observer stops."""
-        from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+        from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 
         async def send(_message):
             pass
@@ -304,6 +305,213 @@ class TestRequestCounters:
         assert observer.REQUESTS_IN_FLIGHT_INSTRUMENT not in collected()
 
 
+@pytest.mark.parametrize("prefix_middleware", ["none", "model", "model_training", "resources"])
+def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(collected, monkeypatch, prefix_middleware):
+    from fastapi import FastAPI, Response
+
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+    from nemo_gym.server_runtime import base_server
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+
+    async def run():
+        ready = asyncio.Event()
+        response_kind = "none"
+
+        class WaitingResponse(Response):
+            async def __call__(self, scope, receive, send):
+                if response_kind != "none":
+                    await send({"type": "http.response.start", "status": 200, "headers": []})
+                if response_kind == "keepalive":
+                    await send({"type": "http.response.body", "body": b": keep-alive\n\n", "more_body": True})
+                ready.set()
+                await asyncio.Event().wait()
+
+        app = FastAPI()
+        template = "/v1/chat/completions" if prefix_middleware.startswith("model") else "/work/{item_id}"
+
+        @app.post(template)
+        async def work():
+            return WaitingResponse()
+
+        if prefix_middleware.startswith("model"):
+            app.add_middleware(_CaptureMiddleware, store=None, model_server_name="test")
+        elif prefix_middleware == "resources":
+            app.add_middleware(RolloutContextMiddleware)
+        app.add_middleware(base_server.ClientDisconnectCancellationMiddleware)
+
+        async def send(_message):
+            pass
+
+        async with observer.observe_event_loop("server"):
+            for response_kind in ("none", "headers", "keepalive"):
+                for index in range(2):
+                    path = template.replace("{item_id}", f"item-{index}")
+                    if prefix_middleware == "model_training":
+                        path = f"/training-token-capture{path}"
+                    if prefix_middleware != "none":
+                        path = f"/ng-rollout/task-{index}-a0{path}"
+                    ready.clear()
+                    incoming = asyncio.Queue()
+                    await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+                    scope = {
+                        "type": "http",
+                        "method": "POST",
+                        "path": path,
+                        "raw_path": path.encode(),
+                        "headers": [],
+                        "query_string": b"",
+                        "scheme": "http",
+                        "http_version": "1.1",
+                    }
+                    task = asyncio.create_task(app(scope, incoming.get, send))
+                    await asyncio.wait_for(ready.wait(), timeout=1)
+                    await incoming.put({"type": "http.disconnect"})
+                    await asyncio.wait_for(task, timeout=1)
+
+            counts = observer.request_counts()
+            assert counts.cancelled == 6
+            assert counts.in_flight == counts.unhandled_exceptions == 0
+            assert counts.responses == {200: 4}
+            # Repeated collection reports the same cumulative totals, without an extra aggregate series.
+            for _ in range(2):
+                points = collected()[observer.REQUESTS_CANCELLED_INSTRUMENT]
+                assert len(points) == 2
+                assert {tuple(sorted(point.attributes.items())): point.value for point in points} == {
+                    (("http.route", template), ("nemo.gym.request.phase", "before_response_start")): 2,
+                    (("http.route", template), ("nemo.gym.request.phase", "response_started")): 4,
+                }
+                assert sum(point.value for point in points) == counts.cancelled
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("prefix_middleware", "request_path", "status", "route"),
+    [
+        ("none", "/ng-rollout/task-{index}/work/item-{index}", 404, "<unmatched>"),
+        ("none", "/ng-rollout/task-{index}/training-token-capture/work/item-{index}", 404, "<unmatched>"),
+        ("resources", "/ng-rollout/invalid!{index}/work/item-{index}", 404, "<unmatched>"),
+        ("resources", "/ng-rollout//work/item-{index}", 404, "<unmatched>"),
+        ("model", "/ng-rollout//work/item-{index}", 404, "<unmatched>"),
+        (
+            "resources",
+            "/ng-rollout/task-{index}/training-token-capture/work/item-{index}",
+            200,
+            "/training-token-capture/work/{item_id}",
+        ),
+    ],
+)
+def test_cancellation_route_labels_follow_server_prefix_rules(
+    collected, monkeypatch, prefix_middleware, request_path, status, route
+):
+    from fastapi import FastAPI, Response
+
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+    from nemo_gym.server_runtime import base_server
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+
+    async def run():
+        app = FastAPI()
+
+        @app.post("/work/{item_id}")
+        @app.post("/training-token-capture/work/{item_id}")
+        async def work():
+            return Response("ok")
+
+        if prefix_middleware == "model":
+            app.add_middleware(_CaptureMiddleware, store=None, model_server_name="test")
+        elif prefix_middleware == "resources":
+            app.add_middleware(RolloutContextMiddleware)
+        app.add_middleware(base_server.ClientDisconnectCancellationMiddleware)
+
+        ready = asyncio.Event()
+        statuses = []
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+            elif message["type"] == "http.response.body":
+                # Keep both successful and 404 responses in flight until the client disconnects.
+                ready.set()
+                await asyncio.Event().wait()
+
+        async with observer.observe_event_loop("server"):
+            for index in range(2):
+                path = request_path.format(index=index)
+                scope = {
+                    "type": "http",
+                    "method": "POST",
+                    "path": path,
+                    "raw_path": path.encode(),
+                    "headers": [],
+                    "query_string": b"",
+                    "scheme": "http",
+                    "http_version": "1.1",
+                    "state": {"existing": "preserved"},
+                }
+                ready.clear()
+                incoming = asyncio.Queue()
+                await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+                task = asyncio.create_task(app(scope, incoming.get, send))
+                await asyncio.wait_for(ready.wait(), timeout=1)
+                await incoming.put({"type": "http.disconnect"})
+                await asyncio.wait_for(task, timeout=1)
+                assert scope["path"] == path
+                assert scope["raw_path"] == path.encode()
+                assert scope["state"]["existing"] == "preserved"
+
+            assert statuses == [status, status]
+            counts = observer.request_counts()
+            assert counts.cancelled == 2
+            assert counts.in_flight == counts.unhandled_exceptions == 0
+            assert counts.responses == {status: 2}
+            (point,) = collected()[observer.REQUESTS_CANCELLED_INSTRUMENT]
+            assert point.value == counts.cancelled
+            assert point.attributes == {"http.route": route, "nemo.gym.request.phase": "response_started"}
+
+    asyncio.run(run())
+
+
+def test_cancellation_before_routing_uses_one_unmatched_bucket(collected, monkeypatch):
+    from nemo_gym.server_runtime import base_server
+
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+
+    async def run():
+        ready = asyncio.Event()
+
+        async def unrouted(scope, receive, send):
+            ready.set()
+            await asyncio.Event().wait()
+
+        async def send(_message):
+            pass
+
+        middleware = base_server.ClientDisconnectCancellationMiddleware(unrouted)
+        async with observer.observe_event_loop("server"):
+            for index in range(3):
+                ready.clear()
+                incoming = asyncio.Queue()
+                task = asyncio.create_task(
+                    middleware({"type": "http", "method": "POST", "path": f"/unknown/{index}"}, incoming.get, send)
+                )
+                await asyncio.wait_for(ready.wait(), timeout=1)
+                await incoming.put({"type": "http.disconnect"})
+                await asyncio.wait_for(task, timeout=1)
+            (point,) = collected()[observer.REQUESTS_CANCELLED_INSTRUMENT]
+            assert point.value == 3
+            assert point.attributes == {
+                "http.route": "<unmatched>",
+                "nemo.gym.request.phase": "before_response_start",
+            }
+
+    asyncio.run(run())
+
+
 def test_the_supervisor_hands_event_loop_settings_to_every_server(monkeypatch):
     from nemo_gym.telemetry.config import TelemetryConfig
 
@@ -327,20 +535,18 @@ def test_every_process_reports_its_pid_as_a_resource_attribute():
 
 
 def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, monkeypatch):
-    from nemo_gym import server_utils
-
     seen = []
 
     async def fake_send(*_args, **_kwargs):
         seen.append(observer.request_counts().outbound_in_flight)
         return "response"
 
-    monkeypatch.setattr(server_utils, "_request_with_retries", fake_send)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: False)
+    monkeypatch.setattr("nemo_gym.client.http_client._request_with_retries", fake_send)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _group: False)
 
     async def call():
         async with observer.observe_event_loop("server"):
-            assert await server_utils.request("GET", "http://example.invalid/x") == "response"
+            assert await nemo_gym.client.http_client.request("GET", "http://example.invalid/x") == "response"
             return observer.request_counts().outbound_in_flight
 
     assert asyncio.run(call()) == 0
@@ -352,7 +558,7 @@ def test_responses_are_counted_by_status_code_and_unhandled_errors_separately(co
     from fastapi import FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
-    from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+    from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 
     app = FastAPI()
 
@@ -451,11 +657,11 @@ class TestDriverMetrics:
     def test_output_writes_record_their_duration_and_size(self, collected):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollout_store import _record_output_write
 
         async def run():
             async with observer.observe_event_loop("driver"):
-                _record_output_write(time.perf_counter(), b"x" * 999)
+                _record_output_write(time.perf_counter(), b"x" * 999 + b"\n")
                 return collected()
 
         exported = asyncio.run(run())
@@ -466,7 +672,7 @@ class TestDriverMetrics:
     def test_nothing_is_recorded_without_an_observer(self):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollout_store import _record_output_write
 
         assert observer.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")

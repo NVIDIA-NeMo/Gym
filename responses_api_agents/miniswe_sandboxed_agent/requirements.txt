@@ -1,5 +1,7 @@
 -e nemo-gym[dev,sandbox] @ ../../
 mini-swe-agent==2.4.6
+# Newer LiteLLM imports MCP 2 response types; Gym's host runtime uses MCP 1.
+litellm==1.102.1
 mcp==1.29.0
 httpx-aiohttp==0.2.0
 opensandbox==0.1.16

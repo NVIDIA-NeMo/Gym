@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+skillsbench_max_input_tokens: 131072
+
+skillsbench_harbor_agent:
+  responses_api_agents:
+    harbor_agent_general:
+      domain: agent
+      concurrency: 8
+      datasets:
+      - name: skillsbench_official
+        type: benchmark
+        jsonl_fpath: benchmarks/skillsbench/data/skillsbench_official.jsonl
+        prepare_script: benchmarks/skillsbench/prepare.py
+        prepare_dependencies:
+        - PyYAML==6.0.3
+        # The batch launcher creates a fresh driver venv; the general adapter
+        # needs Ray there as well as in its server venv.
+        - ray[default]>=2.58.0
+        prompt_config: null
+        num_repeats: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      entrypoint: skillsbench_app.py
+      harbor_resolve_paths_from_gym_root: true
+      harbor_unique_job_names: true
+      job:
+        jobs_dir: results/skillsbench/harbor_jobs
+        datasets:
+        - path: benchmarks/skillsbench/data/tasks
+        agents:
+        - import_path: benchmarks.skillsbench.openhands_agent:SkillsBenchOpenHands
+          model_name: ${policy_model_name}
+          kwargs:
+            skill_mode: ${oc.env:SKILLSBENCH_SKILL_MODE,with-skill}
+            max_turns: 100
+            temperature: 1.0
+            top_p: 0.95
+            model_info:
+              max_input_tokens: ${skillsbench_max_input_tokens}
+              max_output_tokens: 32768
+        environment:
+          type: docker
+skillsbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: skillsbench_harbor_agent

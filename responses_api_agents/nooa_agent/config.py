@@ -23,9 +23,9 @@ from typing import Any, Literal
 from nooa import Agent
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import BaseResponsesAPIAgentConfig
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 NOOAInvocationAdapter = Callable[
@@ -81,11 +81,28 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
 
     model_config = ConfigDict(extra="forbid")
 
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = Field(
+        default=None,
+        description="Dataset/schema discovery metadata; runtime access comes from environment session grants.",
+    )
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
-    max_policy_calls: int = Field(default=10, gt=0)
-    run_timeout_secs: float = Field(default=2100, gt=0)
+    max_policy_calls: int | None = Field(
+        default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
+    )
+
+    sandbox_runner_timeout_seconds: float = Field(
+        default=21420,
+        gt=0,
+        allow_inf_nan=False,
+        description="Finite sandbox worker ceiling in seconds; separate from the environment's episode timeout.",
+    )
+    session_close_timeout_seconds: float = Field(
+        default=30,
+        gt=0,
+        allow_inf_nan=False,
+        description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
+    )
 
 
 def load_agent_class(path: str) -> type[Agent]:

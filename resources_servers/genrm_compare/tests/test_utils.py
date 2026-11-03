@@ -17,7 +17,7 @@ import json
 import pytest
 from pytest import approx
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage
+from nemo_gym.core import NeMoGymEasyInputMessage
 from resources_servers.genrm_compare.utils import (
     EMPTY_OUTPUT_PLACEHOLDER,
     GenRMOutputParseError,
@@ -147,6 +147,12 @@ class TestParseGenRMOutput:
     def test_raise_on_fail_raises_exception(self) -> None:
         """raise_on_fail=True raises GenRMOutputParseError."""
         output = "No JSON here"
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
+
+    @pytest.mark.parametrize("key", ["score_1", "score_2", "ranking"])
+    def test_boolean_scores_are_parse_failures(self, key: str) -> None:
+        output = json.dumps({"score_1": 4, "score_2": 2, "ranking": 1} | {key: True})
         with pytest.raises(GenRMOutputParseError):
             parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
 

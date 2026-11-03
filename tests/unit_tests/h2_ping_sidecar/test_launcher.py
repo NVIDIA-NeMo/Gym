@@ -690,7 +690,7 @@ class TestStartH2PingSidecar:
         assert list(gcd.judge.responses_api_models.genrm_model.base_url) == [f"{NVCF}/v1"]
 
     def test_block_is_not_a_server_instance(self):
-        from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+        from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 
         assert "sidecar" in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 

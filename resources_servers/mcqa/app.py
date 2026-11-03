@@ -18,7 +18,8 @@ from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -27,7 +28,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -384,6 +384,10 @@ def _parse_answer_with_custom_regexes(
 
 
 class MCQAResourcesServer(SimpleResourcesServer):
+    # Each verification matches the chosen option against the request: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: MCQAResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

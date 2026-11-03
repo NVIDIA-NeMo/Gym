@@ -22,7 +22,16 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -31,11 +40,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,
     DeepSWETaskStore,
@@ -318,6 +323,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         await sandbox.download(remote_path, local_path)
         return True
 
+    def _verifier_workdir(self, task: Task) -> str:
+        """Directory test.sh runs from. DeepSWE tasks live at /app; subclasses may read it from the row."""
+        return "/app"
+
     async def _run_verifier(
         self,
         sandbox: AsyncSandbox,
@@ -329,7 +338,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         try:
             command_result = await sandbox.exec(
                 "bash /tests/test.sh",
-                cwd="/app",
+                cwd=self._verifier_workdir(task),
                 timeout_s=task.config.verifier.timeout_sec,
             )
         except TimeoutError:

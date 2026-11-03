@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -23,9 +24,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
-from nemo_gym.sandbox.agent_tools import restricted_network_policy
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.agents import restricted_network_policy
+from nemo_gym.client import ServerClient
+from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.pi_agent.app import PiAgentRunRequest, PiMCPServerConfig
 from responses_api_agents.pi_sandboxed_agent import app
 from responses_api_agents.pi_sandboxed_agent.app import _RUN, PiSandboxedAgent, PiSandboxedAgentConfig
@@ -125,6 +127,22 @@ def agent(tmp_path, monkeypatch):
     return server, sandbox
 
 
+@pytest.mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(agent, caplog, monkeypatch, worker):
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    server, _ = agent
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            PiSandboxedAgent(config=server.config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in ("pi_sandboxed_agent", "legacy /run", "Use pi_agent", "tool_servers", "pi_agent/README.md"):
+        assert phrase in app.DEPRECATION_WARNING
+
+
 def request_body():
     return PiAgentRunRequest.model_validate(
         {"_ng_rollout_id": "pi-rollout", "responses_create_params": {"input": "Compute 2+2"}}
@@ -160,6 +178,18 @@ async def test_native_execution_preserves_settings_timing_and_verification(agent
     assert _RUN.get() is None
     if cleanup_fails:
         assert "Failed to stop Pi sandbox" in caplog.text
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 600), ("12.5", 12.5), ("3600", 600)])
+async def test_task_timeout_bounds_pi_execution_but_not_setup(agent, budget, expected):
+    server, sandbox = agent
+    body = request_body()
+    body.responses_create_params.metadata = None if budget is None else {"agent_timeout_sec": budget}
+    result = await server.run(SimpleNamespace(cookies={}), body)
+    setup, *_, execution = sandbox.exec.await_args_list
+    assert setup.kwargs["timeout_s"] == 600
+    assert execution.kwargs["timeout_s"] == expected
+    assert result.response.metadata["agent_timeout_sec"] == str(float(expected))
 
 
 @pytest.mark.parametrize(

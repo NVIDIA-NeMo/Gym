@@ -15,7 +15,7 @@ import pytest
 
 import nemo_gym.orchestration.build_containers as build_containers
 from nemo_gym.cli.main import main as cli_main
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.orchestration.build_containers import BuildContainerConfig, FlashInferBuilder, FlashInferConfig
 
 

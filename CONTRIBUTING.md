@@ -209,7 +209,8 @@ Gym has three CI entry points:
 workflows run automatically for verified commits from NVIDIA-NeMo members. If
 your commits are unverified, or you are an external contributor, these trusted
 workflows do not start until a qualified NVIDIA-NeMo vetter comments
-`/ok to test <full commit SHA>` on the PR. Approval applies to the current
+`/ok to test <full commit SHA>` on the PR. Use the full 40-character SHA
+(`git rev-parse HEAD`), not an abbreviation. Approval applies to the current
 head; after an unverified head changes, a qualified vetter must approve the new
 full SHA.
 GitHub-hosted checks such as lint, copyright, secrets, DCO, and the Fern preview

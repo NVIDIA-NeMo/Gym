@@ -16,6 +16,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 POLICY_MODEL_TYPE="${POLICY_MODEL_TYPE:-vllm_model}"
 GYM_PID=""
 
+
 : "${POLICY_BASE_URL:?Set POLICY_BASE_URL to the real model endpoint}"
 : "${POLICY_API_KEY:?Set POLICY_API_KEY for the real model endpoint}"
 : "${POLICY_MODEL_NAME:?Set POLICY_MODEL_NAME to the served model name}"
@@ -30,18 +31,19 @@ show_log_tail() {
 
 stop_process() {
   local pid="$1"
-  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+  if [[ -z "$pid" ]] || ! kill -0 -- "-$pid" 2>/dev/null; then
     return
   fi
-  kill -INT "$pid" 2>/dev/null || true
+  # Gym launches server wrappers and log pipes; stop the whole owned session.
+  kill -INT -- "-$pid" 2>/dev/null || true
   for _ in $(seq 1 10); do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if ! kill -0 -- "-$pid" 2>/dev/null; then
       wait "$pid" 2>/dev/null || true
       return
     fi
     sleep 1
   done
-  kill -KILL "$pid" 2>/dev/null || true
+  kill -KILL -- "-$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 }
 
@@ -61,12 +63,29 @@ command -v "$PYTHON_BIN" >/dev/null || { echo "Python executable is not availabl
 [[ "$E2E_DIR" == /* && "$E2E_DIR" != "/" ]] || { echo "E2E_DIR must be an absolute non-root path" >&2; exit 2; }
 
 mkdir -p "$RESULTS_DIR" "$WORKSPACE_DIR" "$VENV_ROOT"
+# Materialized task rows carry their own sampling settings; the collector rejects
+# sampling CLI overrides for already materialized inputs.
+"$PYTHON_BIN" - \
+  "$ROOT_DIR/resources_servers/example_session_state_mgmt/data/example_nooa_tasks.jsonl" \
+  "$RESULTS_DIR/task-input.jsonl" <<'PYTHON'
+import json
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open() as source, Path(sys.argv[2]).open("w") as target:
+    for line in source:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        row["task_input"]["responses_create_params"].update(temperature=0, max_output_tokens=2048)
+        target.write(json.dumps(row) + "\n")
+PYTHON
 unset UV_RUN_RECURSION_DEPTH
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 
 cd "$WORKSPACE_DIR"
 "$PYTHON_BIN" -c \
-  "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])" \
+  "import os, signal, sys; os.setsid(); signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])" \
   "$GYM_BIN" env start \
   --config "$ROOT_DIR/resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt_nooa.yaml" \
   --model-type "$POLICY_MODEL_TYPE" \
@@ -76,6 +95,8 @@ cd "$WORKSPACE_DIR"
   "++head_server.host=127.0.0.1" \
   "++head_server.port=$HEAD_PORT" \
   "++uv_venv_dir=$VENV_ROOT" \
+  "++observability_enabled=true" \
+  "++model_call_capture_dir=$RESULTS_DIR/model-call-capture" \
   "+nemo_gym_log_dir=$RESULTS_DIR/component-logs" \
   > "$RESULTS_DIR/gym.log" 2>&1 &
 GYM_PID=$!
@@ -85,12 +106,11 @@ GYM_PID=$!
 "$GYM_BIN" eval run \
   --no-serve \
   --agent example_session_state_mgmt_nooa_agent \
-  --input "$ROOT_DIR/resources_servers/example_session_state_mgmt/data/example.jsonl" \
+  --input "$RESULTS_DIR/task-input.jsonl" \
   --output "$RESULTS_DIR/rollouts.jsonl" \
   --limit 1 \
   --concurrency 1 \
-  --temperature 0 \
-  --max-output-tokens 2048 \
+  "++environment_server_routes.nooa-counter=example_session_state_mgmt_environment_server" \
   "++head_server.host=127.0.0.1" \
   "++head_server.port=$HEAD_PORT"
 

@@ -4,7 +4,9 @@
 """Exercise wire protocols, independent witnesses, and fail-closed reporting."""
 
 import copy
+import dataclasses
 import json
+import os
 import subprocess
 import sys
 
@@ -12,13 +14,15 @@ import psutil
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
-from scripts.harness_conformance.provider import Probe
+from scripts.harness_conformance.provider import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.base_responses_api_model import build_model_call_record
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ConfigError
 from nemo_gym.harness_capabilities.cli import json_rows
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.observability.model_calls import build_model_call_record
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -28,6 +32,18 @@ TOOL = {
     "function": {
         "name": "bash",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+}
+
+FINISH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "finish",
+        "parameters": {
+            "type": "object",
+            "properties": {"reason": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}},
+            "required": ["reason", "paths"],
+        },
     },
 }
 
@@ -42,7 +58,13 @@ def test_catalog_covers_p0_without_exposing_expectations():
 @pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
+    config = _config(
+        harness,
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+        use_agent_sessions=use_agent_sessions,
+    )
     from omegaconf import OmegaConf
 
     from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -62,15 +84,22 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         SingleAgentTurnEnvironmentServerConfig.model_validate(
             config["probe_environment"]["environment_servers"][environment_type]
         )
-        assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
         assert "resources_server" not in agent
-        assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
+        if harness == "simple":
+            assert "sandbox_provider" not in agent
+            assert "probe_sandbox" not in config
+            assert config["probe_environment"]["environment_servers"][environment_type][
+                "resources_tool_transports"
+            ] == ["direct_http"]
+        else:
+            assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
+            assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
         if harness == "codex":
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":
             assert "agent" not in agent["opencode_config"]
-    # Validate available adapters without invoking their auto-install hooks.
-    if harness != "hermes":
+    # A CI job installs only its own adapter's dependencies, so only that adapter can be imported there.
+    if os.environ.get("HARNESS") == harness:
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
@@ -78,7 +107,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 
 
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     class LegacyAgent(SimpleResponsesAPIAgent):
         pass
@@ -126,17 +155,17 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     from fastapi import HTTPException, Request
     from scripts.harness_conformance import episode
 
-    import nemo_gym.global_config
-    import nemo_gym.server_utils
-    from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-    from nemo_gym.base_responses_api_agent import (
+    import nemo_gym.config.global_config
+    import nemo_gym.server_runtime.base_server
+    from nemo_gym.agents import (
         AgentCloseSessionResponse,
         AgentSessionState,
         BaseResponsesAPIAgentConfig,
         SimpleResponsesAPIAgent,
     )
-    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+    from nemo_gym.trajectory import AgentObservationBundle
 
     calls = []
     response = NeMoGymResponse(
@@ -198,8 +227,8 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
-    monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
     if interface.endswith("error"):
         with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
@@ -241,7 +270,12 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
     from omegaconf import OmegaConf
 
-    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    config = _config(
+        "opencode",
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+    )
     server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
     header = server_client.assistant_message_header("policy_model")
     assert header is not None
@@ -259,12 +293,15 @@ def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_
     assert call.client_assistant_message_id == "assistant-message"
 
 
+@pytest.mark.parametrize("tool_name", ["bash", "exec"])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
-def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
+def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name, tool_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
     messages = [{"role": "user", "content": "Run checks"}]
-    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    tool = copy.deepcopy(TOOL)
+    tool["function"]["name"] = tool_name
+    body = {"model": "conformance-model", "messages": messages, "tools": [tool]}
     with TestClient(probe.model_app()) as client:
         for status in scenario.http_errors:
             response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
@@ -274,6 +311,8 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
             assert response.status_code == 200
             message = response.json()["choices"][0]["message"]
             call = message["tool_calls"][0]
+            assert call["id"].startswith("call_")
+            assert call["function"]["name"] == tool_name
             execution = subprocess.run(
                 json.loads(call["function"]["arguments"])["command"],
                 shell=True,
@@ -301,6 +340,86 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
         assert captures[-1]["tokens_in"] == 20 + len(scenario.http_errors) + 2
         assert captures[-1]["tokens_reasoning"] == 2
         assert captures[-1]["cached_tokens"] == 3
+
+
+def test_a_harness_that_finishes_on_a_tool_gets_a_finish_call(tmp_path):
+    probe = Probe(SCENARIO["tool_success"], tmp_path)
+    code_exec = {
+        "type": "function",
+        "function": {
+            "name": "code_exec",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        },
+    }
+    messages = [{"role": "user", "content": "Run checks"}]
+    body = {"model": "conformance-model", "messages": messages, "tools": [code_exec, FINISH_TOOL]}
+    with TestClient(probe.model_app()) as client:
+        for _ in range(2):
+            message = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]["message"]
+            call = message["tool_calls"][0]
+            assert call["function"]["name"] == "code_exec"
+            command = json.loads(call["function"]["arguments"])["cmd"]
+            execution = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}])
+        choice = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]
+    (call,) = choice["message"]["tool_calls"]
+    assert (choice["finish_reason"], choice["message"]["content"]) == ("tool_calls", None)
+    assert call["function"]["name"] == "finish"
+    assert json.loads(call["function"]["arguments"]) == {"reason": "CONFORMANCE_DONE", "paths": []}
+    assert probe.finished and not probe.violations
+    assert probe.finish_call["id"] == call["id"]
+
+
+@pytest.mark.parametrize("probe_cls", [Probe, OpenClawProbe])
+@pytest.mark.parametrize("replay", ["matched", "missing_call", "wrong_name", "wrong_arguments", "wrong_result"])
+def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, probe_cls, replay):
+    probe = probe_cls(SCENARIO["tool_success"], tmp_path)
+    body = {"model": "probe", "messages": [], "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        message = client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+        call = message["tool_calls"][0]
+        original_id = call["id"]
+        assert original_id.startswith("call_")
+        execution = subprocess.run(
+            json.loads(call["function"]["arguments"])["command"],
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        call["id"] = original_id.replace("_", "")
+        # Replay may serialize equivalent arguments differently.
+        call["function"]["arguments"] = json.dumps(json.loads(call["function"]["arguments"]), separators=(",", ":"))
+        if replay == "wrong_name":
+            call["function"]["name"] = "other_tool"
+        if replay == "wrong_arguments":
+            call["function"]["arguments"] = '{"command":"false"}'
+        body["messages"] = [] if replay == "missing_call" else [message]
+        body["messages"].append(
+            {
+                "role": "tool",
+                "tool_call_id": "other" if replay == "wrong_result" else call["id"],
+                "content": execution.stdout,
+            }
+        )
+        response = client.post("/v1/chat/completions", json=body)
+    accepted = probe_cls is OpenClawProbe and replay == "matched"
+    assert response.status_code == (200 if accepted else 409)
+    assert probe.tool_calls[0]["result_seen"] == accepted
+    assert probe.tool_calls[0]["id"] == original_id
+    assert probe.attempts[0]["response"]["choices"][0]["message"]["tool_calls"][0]["id"] == original_id
+    assert probe.attempts[1]["request"] == body
+
+
+def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):
+    probe = Probe(dataclasses.replace(SCENARIO["tool_success"], tool_steps=0), tmp_path)
+    finish = copy.deepcopy(FINISH_TOOL)
+    finish["function"]["parameters"]["properties"]["paths"] = {"type": "integer"}
+    body = {"model": "conformance-model", "messages": [], "tools": [finish]}
+    with TestClient(probe.model_app()) as client:
+        message = client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+    assert message["content"] == "CONFORMANCE_DONE" and "tool_calls" not in message
+    assert probe.finished and probe.finish_call is None
 
 
 @pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
@@ -377,6 +496,40 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
     assert probe.seeded == 1
 
 
+@pytest.mark.parametrize("name,exercised", [("model_error", True), ("tool_success", False)])
+def test_only_a_terminal_error_episode_is_inspected_from_its_failure_record(tmp_path, name, exercised):
+    (tmp_path / "rollouts.jsonl").write_text("")
+    (tmp_path / "rollouts_failures.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_failure_class": "environment_server_failed"})
+        + "\n"
+    )
+
+    result = inspect_episode(SCENARIO[name], tmp_path, {"returncode": 1, "timed_out": False})
+
+    assert result["exercised"] is exercised
+    assert result["delivery"] == "failure_record"
+
+
+def test_verifier_accepts_the_answer_in_the_finish_call(tmp_path):
+    probe = Probe(SCENARIO["tool_success"], tmp_path)
+    probe.finish_call = {
+        "id": "call-finish",
+        "name": "finish",
+        "arguments": {"reason": "CONFORMANCE_DONE", "paths": []},
+    }
+    arguments = json.dumps({"reason": "CONFORMANCE_DONE", "paths": []})
+    body = {
+        "response": {
+            "output": [{"type": "function_call", "call_id": "call-finish", "name": "finish", "arguments": arguments}]
+        }
+    }
+    with TestClient(probe.resources_app()) as client:
+        client.post("/seed_session", json={})
+        response = client.post("/ng-rollout/0-0/verify", json=body)
+    assert response.json()["reward"] == 1.0
+    assert probe.verifications == [{"reward": 1.0, "answer_seen": True}]
+
+
 @pytest.fixture
 def retained_episode(tmp_path):
     # Contract fixture only: used to prove a green artifact cannot hide a missing live probe.
@@ -393,44 +546,77 @@ def retained_episode(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "mutation,failed_check",
+    "mutation",
     [
-        (None, None),
-        ("skipped_verifier", "verifier.outcome"),
-        ("wrong_reward", "verifier.saved_reward"),
-        ("masked", "verifier.saved_outcome"),
-        ("incomplete", "verifier.saved_outcome"),
-        ("missing_completion", "evaluation.evaluation_completed"),
+        None,
+        "missing_response",
+        "completed",
+        "missing_error",
+        "lost_detail",
+        "missing_metadata",
+        "missing_outcome",
+        "malformed_outcome",
+        "unknown_kind",
+        "unregistered_kind",
+        "wrong_status",
+        "invalid_status",
     ],
 )
-def test_terminal_model_error_still_requires_completed_unmasked_verification(retained_episode, mutation, failed_check):
+def test_terminal_model_error_must_be_reported_to_environment(retained_episode, mutation):
+    directory, witness = retained_episode
+    witness["attempts"] = [
+        {"status_code": 400, "request": {}, "response": {"error": {"message": "controlled model failure"}}}
+    ]
+    response = {"status": "failed", "error": {"code": "server_error", "message": "HTTP 400: controlled model failure"}}
+    response["metadata"] = {
+        AGENT_OUTCOME_METADATA_KEY: json.dumps({"failure_kind": "model_request_error", "status_code": 400})
+    }
+    witness["agent_responses"] = [response]
+    if mutation == "missing_response":
+        witness["agent_responses"] = []
+    elif mutation == "completed":
+        response["status"] = "completed"
+    elif mutation == "missing_error":
+        response["error"] = None
+    elif mutation == "lost_detail":
+        response["error"]["message"] = "unknown failure"
+    elif mutation == "missing_metadata":
+        del response["metadata"]
+    elif mutation == "missing_outcome":
+        response["metadata"] = {}
+    elif mutation is not None:
+        response["metadata"][AGENT_OUTCOME_METADATA_KEY] = {
+            "malformed_outcome": "{",
+            "unknown_kind": json.dumps({"failure_kind": "unknown"}),
+            "unregistered_kind": json.dumps({"failure_kind": "invented"}),
+            "wrong_status": json.dumps({"failure_kind": "model_request_error", "status_code": 503}),
+            "invalid_status": json.dumps({"failure_kind": "model_request_error", "status_code": "400"}),
+        }[mutation]
+    (directory / "witness.json").write_text(json.dumps(witness))
+    result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
+    check = next(c for c in result["checks"] if c["id"] == "model.terminal_error")
+    assert check["status"] == ("pass" if mutation is None else "fail")
+
+
+@pytest.mark.parametrize("graded,masked,reward", [(True, False, 0.0), (True, False, 1.0), (False, True, 0.0)])
+def test_terminal_error_does_not_prescribe_grading_policy(retained_episode, graded, masked, reward):
     directory, witness = retained_episode
     bundle = directory / "rollouts.jsonl"
     record = json.loads(bundle.read_text())
-    # A rejected policy call produces no final answer; grading must still happen.
-    witness["verifications"][0]["answer_seen"] = False
-    if mutation == "skipped_verifier":
-        witness["verifications"] = []
-    elif mutation == "wrong_reward":
-        record["reward"] = 1.0
-    elif mutation == "masked":
-        record.update(mask_sample=True, failure_kind="agent_request_failed", failure_reason="HTTP 400")
-    elif mutation == "incomplete":
-        record.update(evaluation_completed=False, failure_kind="verifier_error", failure_reason="not graded")
-    elif mutation == "missing_completion":
-        del record["evaluation_completed"]
+    record.update(evaluation_completed=graded, mask_sample=masked, reward=reward)
+    witness["verifications"] = [{"reward": reward, "answer_seen": False}] if graded else []
     bundle.write_text(json.dumps(record) + "\n")
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
     checks = {c["id"]: c for c in result["checks"]}
-    assert checks["verifier.answer"]["status"] == "not_applicable"
-    if failed_check:
-        assert checks[failed_check]["status"] == "fail"
-        assert result["verdict"] == "not_fulfilled"
-    else:
-        assert result["evidence"]["TE-6"]["artifact_verdict"] == "fulfilled"
-        for check_id in ("verifier.outcome", "verifier.saved_reward", "verifier.saved_outcome"):
-            assert checks[check_id]["status"] == "pass"
+    for check_id in (
+        "verifier.answer",
+        "verifier.outcome",
+        "verifier.saved_reward",
+        "verifier.saved_outcome",
+        "evaluation.evaluation_completed",
+    ):
+        assert checks[check_id]["status"] == "not_applicable"
 
 
 def test_behavior_failure_does_not_erase_artifact_success(retained_episode):
@@ -589,7 +775,8 @@ def test_witness_detects_changed_payload_even_when_attempt_identity_matches(reta
     assert "canonical" in " ".join(result["issues"])
 
 
-def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error", [ValueError, ConfigError])
+def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch, error):
     from scripts.harness_conformance import runner
 
     inspected = []
@@ -597,7 +784,7 @@ def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch
 
     def fail_inspection(scenario, directory, execution):
         inspected.append(scenario.name)
-        raise ValueError("truncated rollout")
+        raise error("truncated rollout")
 
     monkeypatch.setattr(runner, "inspect_episode", fail_inspection)
     summary, code = run_suite(harnesses=["pi"], scenarios=SCENARIOS[:2], output=tmp_path / "run", timeout=1)
@@ -698,9 +885,12 @@ def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path
     result = inspect_episode(SCENARIO["model_error"], tmp_path, {"returncode": 1, "timed_out": False})
     checks = {c["id"]: c for c in result["checks"]}
     assert checks["calls.outcome"]["status"] == "fail"
-    assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
+    # A failure record is inspected, so the evidence it lacks blocks the check rather than its absence.
+    reason = "required input is unavailable" if delivery == "missing" else "blocked by model_calls.present"
+    assert checks["calls.outcome"]["reasons"][0].startswith(reason)
     assert checks["tool_calls.present"]["status"] == "not_applicable"
-    assert checks["evaluation.reward"]["status"] == "fail"
+    assert checks["evaluation.reward"]["status"] == "not_applicable"
+    assert checks["model.terminal_error"]["status"] == "fail"
     assert checks["turns.present"]["status"] == "not_applicable"
     assert checks["steps.attempt_accounting"]["status"] == "not_applicable"
     assert result["evidence"]["TE-1"]["verdict"] == "not_fulfilled"
@@ -730,3 +920,47 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+def test_manifest_backed_episode_reaches_conformance_report(retained_episode):
+    from nemo_gym.rollout_recovery import RunManifest
+    from nemo_gym.rollout_store import RolloutStore
+
+    directory, _ = retained_episode
+    output = directory / "rollouts.jsonl"
+    result = json.loads(output.read_text())
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    source = directory / "inputs.jsonl"
+    source.write_text(json.dumps(rows[0]) + "\n")
+    manifest = RunManifest.create(source, rows, {}, {})
+    with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(result | row)
+    report = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert report["verdict"] == "fulfilled", report["issues"]
+
+
+def test_cli_reports_configuration_error_as_execution_error(tmp_path, monkeypatch, capsys):
+    from scripts.harness_conformance import runner
+
+    def fail(**kwargs):
+        raise ConfigError("conflicting recovery history")
+
+    monkeypatch.setattr(runner, "run_suite", fail)
+    assert main(["--output", str(tmp_path / "run")]) == 2
+    assert "runner_error: conflicting recovery history" in capsys.readouterr().err
+
+
+def test_missing_judge_reference_fails_p1_without_blocking_p0(retained_episode):
+    from dataclasses import replace
+
+    directory, _ = retained_episode
+    scenario = replace(SCENARIO["verifier_failure"], judge_verifier=True)
+    result = inspect_episode(scenario, directory, {"returncode": 0, "timed_out": False})
+    check = next(c for c in result["checks"] if c["id"] == "verifier.judge_reference")
+    assert check["tier"] == "P1"
+    assert check["status"] == "fail"
+    assert result["behavioral_status"] == "fail"
+    assert result["verdict"] == "fulfilled"
+    assert all(c["status"] in {"pass", "not_applicable"} for c in result["checks"] if c["tier"] == "P0")

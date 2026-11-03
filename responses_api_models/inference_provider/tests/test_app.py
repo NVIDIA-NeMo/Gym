@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_responses_api_model import CaptureStore, read_model_call_records
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.models import CaptureStore
+from nemo_gym.observability.model_calls import read_model_call_records
 from responses_api_models.inference_provider.app import (
     InferenceProvider,
     InferenceProviderConfig,
@@ -128,6 +128,37 @@ class TestInferenceProvider:
         assert response.status_code == 200
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
+
+    async def test_embeddings(self) -> None:
+        server = _make_server(model="my-embed-model")
+        client = TestClient(server.setup_webserver())
+
+        # A minimal OpenAI-compatible reply: base64 vectors, no usage or object fields.
+        provider_json = {"data": [{"embedding": "AACAPwAAAEA=", "index": 0}], "model": "my-embed-model"}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value=provider_json)
+
+        response = client.post("/v1/embeddings", json={"input": "hi", "model": "ignored", "encoding_format": "base64"})
+
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", model="my-embed-model", encoding_format="base64"
+        )
+
+    async def test_embeddings_extra_body_merge(self) -> None:
+        server = _make_server(model="my-embed-model", extra_body={"dimensions": 256, "user": "config-user"})
+        client = TestClient(server.setup_webserver())
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value={"data": []})
+
+        response = client.post("/v1/embeddings", json={"input": "hi", "user": "request-user"})
+
+        assert response.status_code == 200
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", user="request-user", dimensions=256, model="my-embed-model"
+        )
+        assert server.config.extra_body == {"dimensions": 256, "user": "config-user"}
 
     async def test_model_default_from_config(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(model="my-configured-model")
@@ -371,7 +402,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Hello from the model!")
 
@@ -404,7 +435,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         async def mock_create_chat(**kwargs):
             return _mock_chat_response()
@@ -421,7 +452,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         async def mock_create_chat(**kwargs):
             return _mock_chat_response()
@@ -453,7 +484,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(
             content=None,
@@ -511,7 +542,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="<think>Let me reason about this...</think>The answer is 42.")
 
@@ -538,7 +569,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="<think>Let me reason about this...</think>The answer is 42.")
 
@@ -584,7 +615,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Hi!")
         mock_data["usage"] = {
@@ -644,7 +675,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Truncated output...", finish_reason="length")
 
@@ -665,7 +696,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="", finish_reason="content_filter")
 
@@ -696,7 +727,7 @@ class TestResponses:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         client.post("/v1/responses", json={"input": "hello world"})
 
@@ -708,7 +739,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         called_kwargs = {}
 

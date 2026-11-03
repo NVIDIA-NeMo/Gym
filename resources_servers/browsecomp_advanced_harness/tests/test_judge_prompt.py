@@ -21,7 +21,7 @@ because the reply then does not parse. These pin the pieces that carry that risk
 import os
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchResourcesServer,
     TavilySearchResourcesServerConfig,

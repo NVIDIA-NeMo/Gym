@@ -2,3 +2,6 @@
 jsonschema>=4.25.1,<5
 # Includes the public scoped lifecycle hooks used for Gym observability.
 nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@051472343211914222e24ce36d8752f4e86bbe43
+# Keep the CLI and benchmark packages on the same revision as NOOA core.
+nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz#subdirectory=packages/nooa-cli
+nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz#subdirectory=packages/nooa-bench
