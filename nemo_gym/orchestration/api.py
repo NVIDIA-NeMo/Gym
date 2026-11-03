@@ -509,11 +509,20 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+    # Host variables that must take precedence over values baked into the Pyxis image.
+    container_env: list[str] = []
 
     @field_validator("env")
     @classmethod
     def _resolve_env_prefixes(cls, v: dict[str, str], info: ValidationInfo) -> dict[str, str]:
         return resolve_env_dict(v, saved_config=bool(info.context and info.context.get(SAVED_CONFIG)))
+
+    @field_validator("container_env")
+    @classmethod
+    def _validate_container_env(cls, v: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in v):
+            raise ValueError("container_env entries must be environment variable names")
+        return v
 
 
 class JobConfig(_StrictModel):

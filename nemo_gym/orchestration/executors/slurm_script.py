@@ -1165,8 +1165,12 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    driver_container_env_flag = (
+        f" --container-env={','.join(config.driver.container_env)}" if config.driver.container_env else ""
+    )
     driver_srun = (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f"{driver_container_env_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
