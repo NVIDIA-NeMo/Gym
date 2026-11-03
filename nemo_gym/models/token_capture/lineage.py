@@ -542,7 +542,7 @@ class InMemoryLineageStore:
 
     async def put(self, entry: TokenEntry) -> None:
         """Publish one committed entry to the worker-local index."""
-        self.index.for_rollout(entry.rollout_id).add_entry(entry)
+        self.index.for_rollout(entry.capture_key).add_entry(entry)
 
     def is_process_shared(self) -> bool:
         return False
@@ -629,16 +629,16 @@ class InMemoryLineageStore:
         return bool(self.index.for_rollout(rollout_id).by_call_id)
 
     async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.models.token_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        capture_keys = validate_rollout_ids(capture_keys)
+        capture_keys = validate_capture_keys(capture_keys)
         self._retired.update(capture_keys)
         return self._remove(capture_keys)
 
     async def delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.models.token_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        capture_keys = validate_rollout_ids(capture_keys)
+        capture_keys = validate_capture_keys(capture_keys)
         self._retired.difference_update(capture_keys)
         return self._remove(capture_keys)
 
@@ -657,9 +657,9 @@ class InMemoryLineageStore:
 
     async def delete_unstarted(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Delete the rollouts no ``mark_started`` names; see ``FileLineageStore.delete_unstarted``."""
-        from nemo_gym.models.token_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        return await self.delete([key for key in validate_rollout_ids(rollout_ids) if key not in self._started])
+        return await self.delete([key for key in validate_capture_keys(rollout_ids) if key not in self._started])
 
     async def close(self) -> None:
         self.index.clear()
@@ -1233,9 +1233,9 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._retire, capture_keys)
 
     def _retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.models.token_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        capture_keys = validate_rollout_ids(capture_keys)
+        capture_keys = validate_capture_keys(capture_keys)
         for capture_key in capture_keys:
             with self._locked(capture_key):
                 fence = self._retired_path(capture_key)
@@ -1252,9 +1252,9 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._delete, capture_keys)
 
     def _delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.models.token_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        return self._remove(validate_rollout_ids(capture_keys), unretire=True)
+        return self._remove(validate_capture_keys(capture_keys), unretire=True)
 
     def mark_started(self, rollout_id: str) -> None:
         """Record, for every server sharing this ledger, that a restored attempt has started.
@@ -1284,9 +1284,9 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._delete_unstarted, rollout_ids)
 
     def _delete_unstarted(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.models.token_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        return self._remove(validate_rollout_ids(rollout_ids), unretire=True, unless_started=True)
+        return self._remove(validate_capture_keys(rollout_ids), unretire=True, unless_started=True)
 
     def _remove(
         self, rollout_ids: list[str], *, unretire: bool = False, unless_started: bool = False

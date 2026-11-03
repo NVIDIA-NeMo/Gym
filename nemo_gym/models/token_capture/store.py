@@ -61,14 +61,14 @@ def validate_rollout_id(rollout_id: str) -> str:
     return rollout_id
 
 
-def validate_rollout_ids(rollout_ids: Sequence[str]) -> list[str]:
+def validate_capture_keys(capture_keys: Sequence[str]) -> list[str]:
     """Validate a whole batch before anything changes, and drop duplicates.
 
-    A bare string is rejected: it is a sequence of one-character rollout IDs.
+    A bare string is rejected: it is a sequence of one-character capture keys.
     """
-    if isinstance(rollout_ids, str):
-        raise TypeError(f"expected a sequence of rollout ids, got the string {rollout_ids!r}")
-    return list(dict.fromkeys(validate_rollout_id(rollout_id) for rollout_id in rollout_ids))
+    if isinstance(capture_keys, str):
+        raise TypeError(f"expected a sequence of rollout ids, got the string {capture_keys!r}")
+    return list(dict.fromkeys(validate_rollout_id(capture_key) for capture_key in capture_keys))
 
 
 class TokenCaptureStore:
@@ -254,7 +254,7 @@ class TokenCaptureStore:
         canonical = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
         line = canonical + b"\n"
         digest = self._entry_digest(canonical)
-        rollout_id = entry.rollout_id
+        rollout_id = entry.capture_key
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
             if state.get("retired", False):
@@ -485,7 +485,7 @@ class TokenCaptureStore:
         removed, absent, to_clear = [], [], []
         unsynced = False
         try:
-            for rollout_id in validate_rollout_ids(rollout_ids):
+            for rollout_id in validate_capture_keys(rollout_ids):
                 with self._locked(rollout_id):
                     had_records = self._has_records(rollout_id)
                     state = self._read_state(rollout_id)
@@ -541,7 +541,7 @@ class TokenCaptureStore:
         ID after this returns must not see the old fence or records come back after a crash.
         """
         removed, absent = [], []
-        rollout_ids = validate_rollout_ids(rollout_ids)
+        rollout_ids = validate_capture_keys(rollout_ids)
         if not rollout_ids:
             return {"removed": removed, "absent": absent}
         try:

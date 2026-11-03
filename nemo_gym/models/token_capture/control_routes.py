@@ -171,12 +171,12 @@ class RolloutControlClient:
         return await self._remove("delete", capture_keys)
 
     async def _remove(self, action: str, capture_keys: Sequence[str]) -> RolloutRemoval:
-        from nemo_gym.models.token_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_capture_keys
 
         # Validate and deduplicate the whole list before the first request. Batch by batch, a bare string
         # would become one-character IDs, an invalid ID in a later batch would fail after earlier batches
         # had changed state, and an ID repeated across batches would be reported both removed and absent.
-        capture_keys = validate_rollout_ids(capture_keys)
+        capture_keys = validate_capture_keys(capture_keys)
         result = RolloutRemoval()
         for start in range(0, len(capture_keys), MAX_LEDGER_BATCH):
             batch = capture_keys[start : start + MAX_LEDGER_BATCH]

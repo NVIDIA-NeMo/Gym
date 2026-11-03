@@ -347,16 +347,16 @@ class _ExternalBackend:
         self.lineage = InMemoryLineageStore()
 
     async def commit(self, entry: TokenEntry) -> None:
-        if entry.rollout_id in self.frozen:
-            raise RuntimeError(f"Token capture for rollout {entry.rollout_id} is already frozen")
-        rollout = self.entries.setdefault(entry.rollout_id, {})
+        if entry.capture_key in self.frozen:
+            raise RuntimeError(f"Token capture for rollout {entry.capture_key} is already frozen")
+        rollout = self.entries.setdefault(entry.capture_key, {})
         previous = rollout.get(entry.model_call_id)
         if previous is not None and previous != entry:
             raise ValueError(f"Conflicting model call {entry.model_call_id}")
         if previous is None:
             rollout[entry.model_call_id] = entry
             await self.lineage.put(entry)
-            self.versions[entry.rollout_id] = self.versions.get(entry.rollout_id, 0) + 1
+            self.versions[entry.capture_key] = self.versions.get(entry.capture_key, 0) + 1
 
 
 class _ExternalSink:

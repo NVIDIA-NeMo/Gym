@@ -1267,7 +1267,7 @@ class TestCaptureFriendlyTranscript:
             )
             served.id = f"resp_{call_id}"
             entry = TokenEntry(
-                rollout_id="rollout",
+                capture_key="rollout",
                 model_call_id=call_id,
                 response_id=served.id,
                 prompt_token_ids=[1],

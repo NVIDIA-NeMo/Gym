@@ -617,7 +617,7 @@ async def capture_tokens(
                 reason="not_attempted",
             )
         entry = TokenEntry(
-            rollout_id=context.capture_key,
+            capture_key=context.capture_key,
             model_call_id=context.model_call_id,
             model=context.model or str(payload.get("model") or ""),
             prompt_token_ids=info["prompt_token_ids"],
@@ -661,7 +661,7 @@ async def commit_entry(
     context = _CAPTURE_CONTEXT.get()
     if context is None:
         return
-    if entry.rollout_id != context.capture_key or entry.model_call_id != context.model_call_id:
+    if entry.capture_key != context.capture_key or entry.model_call_id != context.model_call_id:
         if await _mark_incomplete(context):
             logger.warning(
                 "Training-token capture identity mismatch for model call %s of rollout %s.",

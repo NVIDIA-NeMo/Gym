@@ -10145,7 +10145,7 @@ class TestTokenCaptureRetention:
     @staticmethod
     def _entry(rollout_id: str, mcid: str) -> TokenEntry:
         return TokenEntry(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id=mcid,
             prompt_token_ids=[1, 2, 3],
             generation_token_ids=[4, 5],
@@ -10195,7 +10195,7 @@ class TestFinalizeRolloutTokenCapture:
     @staticmethod
     def _capture(store: TokenCaptureStore) -> None:
         entry = TokenEntry(
-            rollout_id="0-0",
+            capture_key="0-0",
             model_call_id="c1",
             prompt_token_ids=[1, 2, 3],
             generation_token_ids=[4, 5],
@@ -10229,7 +10229,7 @@ class TestFinalizeRolloutTokenCapture:
 
         store.delete_now(["0-0"])
         replacement = TokenEntry(
-            rollout_id="0-0",
+            capture_key="0-0",
             model_call_id="new",
             prompt_token_ids=[1],
             generation_token_ids=[2],
@@ -10330,7 +10330,7 @@ class TestFinalizeRolloutTokenCapture:
     async def test_a_failed_build_keeps_its_records_and_reports_why(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
         malformed = TokenEntry(
-            rollout_id="0-0",
+            capture_key="0-0",
             model_call_id="c1",
             prompt_token_ids=[1, 2],
             generation_token_ids=[4, 5],
