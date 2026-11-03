@@ -2859,20 +2859,31 @@ class OpenSandboxProvider:
                 LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
 
         def retry_delete(error: BaseException) -> bool:
-            if terminal_delete_error(error):
-                return False
-            return isinstance(error, TimeoutError) or _is_retryable_sdk_operation_error(error)
+            # This predicate is a safety constraint; the shared outcome policy
+            # still selects whether the observed failure should be retried.
+            return not terminal_delete_error(error)
 
         # DELETE is idempotent, so a lost reply can be reconciled. Attempts and
         # backoff share one budget; failure keeps the SDK handle usable for retry.
-        async with asyncio.timeout(self._operations.close_timeout_s):
-            await self._await_sdk_operation(
-                kill_ignore_missing,
+        try:
+            async with asyncio.timeout(self._operations.close_timeout_s):
+                await self._await_sdk_operation(
+                    kill_ignore_missing,
+                    operation="kill",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=self._operations.close_timeout_s,
+                    is_retryable=retry_delete,
+                    replay_safe=True,
+                )
+        except TimeoutError as error:
+            failure = sandbox_failure(
                 operation="kill",
                 sandbox_id=handle.sandbox_id,
-                timeout_s=self._operations.close_timeout_s,
-                is_retryable=retry_delete,
+                cause=error,
+                reason="OpenSandbox deletion recovery deadline expired; deletion is unconfirmed",
             )
+            observe_failure(failure)
+            raise failure from error
 
         close_error: Exception | None = None
         try:
