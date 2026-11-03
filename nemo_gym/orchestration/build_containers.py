@@ -293,7 +293,7 @@ class FlashInferBuilder(BaseBuilder):
             # Scan all architectures, including cached specializations not used at startup.
             module_roots = set(env.FLASHINFER_AOT_DIRS)
             cache_roots = {Path((root / "old-cache-root").read_text()), env.FLASHINFER_CACHE_DIR,
-                           Path("/opt/super-vl-evals/flashinfer-warmup-workspace")}
+                           Path("/opt/flashinfer-warmup-workspace")}
             for cache_root in cache_roots:
                 module_roots.update(cache_root.glob("**/cached_ops"))
             for module_root in sorted(module_roots):
@@ -320,8 +320,8 @@ class FlashInferBuilder(BaseBuilder):
 
             # These derived caches/plans describe the previous installation. Recreate
             # them during warmup instead of validating stale manifests or reusing graphs.
-            rm -rf /opt/super-vl-evals/flashinfer-autotune-cache \
-                /opt/super-vl-evals/vllm-cache /opt/super-vl-evals/prims-cute-cache
+            rm -rf /opt/flashinfer-autotune-cache \
+                /opt/vllm-cache /opt/prims-cute-cache
 
             exit 0
             """

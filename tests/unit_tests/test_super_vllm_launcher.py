@@ -919,7 +919,7 @@ sleep() { "$TEST_SLEEP" 0.01; }
                     env={"SAVE_WARMED_CONTAINER": f"{root}/warmed.sqsh"} if mode == "warmup" else {}
                 )
                 setup = "baked_cache=" + serving.split("baked_cache=", 1)[1].split("# Custom images", 1)[0]
-                setup = setup.replace("/opt/super-vl-evals", str(root))
+                setup = setup.replace("/opt", str(root))
                 inspect = r"""
 printf '%s\n' "${VLLM_CACHE_ROOT-unset}" "${VLLM_ENABLE_STARTUP_PLAN-unset}" "${FLASHINFER_WORKSPACE_BASE-unset}"
 """

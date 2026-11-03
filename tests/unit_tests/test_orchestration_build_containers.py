@@ -667,7 +667,7 @@ def test_warmup_example_uses_shared_slurm_config(monkeypatch):
     assert resolved.slurm["partition"] == "batch"
     assert resolved.slurm["qos"] == "interactive"
     assert not {"SBATCH_ACCOUNT", "SBATCH_PARTITION", "SBATCH_QOS", "SBATCH_TIMELIMIT"} & resolved.warmup.env.keys()
-    assert resolved.warmup.env["MOUNTS"] == f"/lustre:/lustre,{ROOT}:/opt/Gym"
+    assert resolved.warmup.env["MOUNTS"] == f"{ROOT}:{ROOT},{ROOT}:/opt/Gym"
     assert "CONTAINER" not in resolved.warmup.env
     assert resolved.slurm["gpus-per-node"] == "4"
     assert "SBATCH_GRES" not in resolved.warmup.env
