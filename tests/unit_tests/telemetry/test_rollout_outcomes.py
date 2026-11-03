@@ -133,7 +133,11 @@ def test_original_routing_labels_are_not_replaced_by_saved_record(collected_metr
     assert _by_attrs(collected_metrics) == {_key(**attrs): 1}
 
 
+@pytest.mark.parametrize(
+    "retryable_infrastructure", [False, True], ids=["unknown-kill-stops", "known-infrastructure-retries"]
+)
 async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
+    retryable_infrastructure,
     runner_config,
     collected_metrics,
     monkeypatch,  # noqa: F811
@@ -146,6 +150,10 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     async def post(**kwargs):
         row = kwargs["json"]
         if row["_ng_task_index"] == 1 and row["_ng_attempt_index"] == 0:
+            if retryable_infrastructure:
+                return FakeResponse(
+                    200, {"_ng_failure_class": "infrastructure_error", "failure_kind": "transport_timeout"}
+                )
             return FakeResponse(200, {"_ng_failure_class": "kill_shaped", "_ng_no_persist": True})
         if row["_ng_task_index"] == 2:
             return FakeResponse(200, {"_ng_failure_class": "skipped", "_ng_failure_terminal": True})
@@ -154,9 +162,12 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     post_mock = AsyncMock(side_effect=post)
     install_fake_server_client(monkeypatch, post_mock)
     await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
+    failure_attrs = {OUTCOME: "failed", DISPATCH: "my_agent", CLASS: "kill_shaped"}
+    if retryable_infrastructure:
+        failure_attrs.update({CLASS: "infrastructure_error", KIND: "transport_timeout"})
     expected = {
         _key(**{OUTCOME: "scored", DISPATCH: "my_agent"}): 1,
-        _key(**{OUTCOME: "failed", DISPATCH: "my_agent", CLASS: "kill_shaped"}): 1,
+        _key(**failure_attrs): 1,
         _key(**{OUTCOME: "omitted", DISPATCH: "my_agent", CLASS: "skipped"}): 1,
     }
     assert _by_attrs(collected_metrics) == expected
@@ -165,12 +176,14 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     assert (coverage["successful"], coverage["failed"], coverage["intentionally_omitted"]) == (1, 1, 1)
     runner_config.resume_from_cache = True
     await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
-    expected[_key(**{OUTCOME: "scored", DISPATCH: "my_agent"})] = 2
+    # An unknown interruption grants no automatic retry. A known infrastructure failure can resume,
+    # and only its newly persisted successful attempt contributes another scored counter.
+    expected[_key(**{OUTCOME: "scored", DISPATCH: "my_agent"})] = 1 + int(retryable_infrastructure)
     assert _by_attrs(collected_metrics) == expected
-    assert post_mock.await_count == 4
+    assert post_mock.await_count == 3 + int(retryable_infrastructure)
     await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
     assert _by_attrs(collected_metrics) == expected
-    assert post_mock.await_count == 4
+    assert post_mock.await_count == 3 + int(retryable_infrastructure)
 
 
 async def test_outcome_rejected_by_storage_is_not_counted(runner_config, collected_metrics, monkeypatch):  # noqa: F811
