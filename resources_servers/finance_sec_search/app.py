@@ -685,6 +685,10 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             self._fence.mark_closed(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
+    async def retire_session_state(self, session_id: str) -> None:
+        # A checkpoint retired the session's attempt, and its later requests are refused, so nothing would release it.
+        self._release_session(session_id)
+
     def setup_webserver(self) -> FastAPI:
         """Register API routes."""
         app = super().setup_webserver()

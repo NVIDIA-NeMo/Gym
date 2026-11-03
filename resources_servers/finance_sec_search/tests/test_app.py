@@ -1749,6 +1749,17 @@ class TestResourcesSessions:
         assert lifetimes.holds("fresh")
 
     @pytest.mark.asyncio
+    async def test_retired_attempt_releases_its_session(self, server) -> None:
+        await server.seed_session(_mock_request(), _typed_seed())
+        server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
+
+        await server.retire_session_state(_TEST_SESSION_ID)
+
+        assert _TEST_SESSION_ID not in server._data_storage
+        assert _TEST_SESSION_ID not in server._session_start_times
+        assert _TEST_SESSION_ID not in server._typed_seeds
+
+    @pytest.mark.asyncio
     async def test_seed_discards_sessions_older_than_ttl(self, server) -> None:
         await server.seed_session(_mock_request("abandoned"), _typed_seed("abandoned"))
         server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
