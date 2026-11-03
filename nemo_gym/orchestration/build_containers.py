@@ -27,12 +27,22 @@ class FlashInferConfig(BaseNeMoGymCLIConfig):
     cpus_per_task: int
 
 
+class VLLMConfig(BaseNeMoGymCLIConfig):
+    """Install vLLM Python and Rust sources while reusing a compatible CUDA/C++ wheel."""
+
+    repo: str
+    branch: str
+    version: str
+    precompiled_wheel_commit: str
+
+
 class BuildContainerConfig(BaseNeMoGymCLIConfig):
     input_container_fpath: Path
     output_container_fpath: Path
     log_file: Optional[Path] = None
 
     slurm: Dict[str, Any] = Field(default_factory=dict)
+    vllm: Optional[VLLMConfig] = None
     flashinfer: Optional[FlashInferConfig] = None
 
     def model_post_init(self, context: Any, /) -> None:
@@ -295,6 +305,144 @@ class FlashInferBuilder(BaseBuilder):
         }
 
 
+class VLLMBuilder(BaseBuilder):
+    """Build a thin vLLM installation with Rust artifacts from the pinned source."""
+
+    config: VLLMConfig
+    _head_sha: Optional[str] = PrivateAttr(default=None)
+
+    async def perform_preflight_checks(self) -> None:
+        """Resolve the branch once so a queued build installs the checked commit."""
+        self._head_sha = None
+        self._head_sha = await self._preflight_check_git_repo(self.config.repo, self.config.branch)
+
+    def get_srun_command_str(self) -> str:
+        """Reuse wheel CUDA/C++ binaries, rebuild Rust, and verify the installed package."""
+        if self._head_sha is None:
+            raise RuntimeError("Run vLLM preflight checks before generating the build command")
+
+        script = dedent(
+            r"""
+            set -Eeuo pipefail
+            BUILD_DIR=$(mktemp -d /tmp/vllm-build.XXXXXX)
+            export BUILD_DIR
+            trap 'cd /; rm -rf "$BUILD_DIR"' EXIT
+            command -v python >/dev/null || ln -sf "$(command -v python3)" /usr/local/bin/python
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            apt-get install -y --no-install-recommends git ca-certificates curl build-essential pkg-config perl \
+                2>&1 | tail -5
+            python3 -m pip install uv 2>&1 | tail -3
+
+            git init "$BUILD_DIR/source"
+            git -C "$BUILD_DIR/source" remote add origin "$VLLM_REPO"
+            git -C "$BUILD_DIR/source" fetch --depth=1 origin "$VLLM_HEAD_SHA"
+            git -C "$BUILD_DIR/source" checkout --detach FETCH_HEAD
+            cd "$BUILD_DIR/source"
+            vllm_sha=$(git rev-parse HEAD)
+            test "$vllm_sha" = "$VLLM_HEAD_SHA"
+
+            # The wheel supplies CUDA/C++ code; only Python, Rust and the script's
+            # allowed metadata/documentation changes can differ from that wheel.
+            git fetch --depth=1 https://github.com/vllm-project/vllm.git "$VLLM_PRECOMPILED_WHEEL_COMMIT"
+            precompiled_base_sha=$(git rev-parse 'FETCH_HEAD^{commit}')
+            changed_files=$(git diff --name-only "$precompiled_base_sha" HEAD --)
+            unsupported_changes=$(
+                printf '%s\n' "$changed_files" | grep -Ev \
+                    '(^$|\.(py|txt|yaml)$|^rust/|^rust-toolchain\.toml$|^tools/build_rust\.sh$|^docs/.*\.md$)' || true
+            )
+            if [[ -n "$unsupported_changes" ]]; then
+                echo "ERROR: precompiled CUDA/C++ build cannot consume these changes (Rust is rebuilt separately):" >&2
+                echo "$unsupported_changes" >&2
+                exit 1
+            fi
+
+            export VLLM_USE_PRECOMPILED=1
+            export VLLM_PRECOMPILED_WHEEL_COMMIT
+            export SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION"
+            uv pip install --system . --prerelease=allow --torch-backend=auto --index-strategy unsafe-best-match
+
+            # Installation copies wheel Rust artifacts too. Rebuild AFTER installing
+            # and unset both reuse switches so the source and launcher stay in sync.
+            uv pip install --system 'setuptools>=77.0.3,<81' 'setuptools-scm>=9.2.0' 'setuptools-rust>=1.9.0' wheel
+            env -u VLLM_USE_PRECOMPILED -u VLLM_USE_PRECOMPILED_RUST bash tools/build_rust.sh
+            installed_vllm_dir=$(cd / && python3 -c \
+                'import vllm; from pathlib import Path; print(Path(vllm.__file__).parent)')
+            install -m 755 vllm/vllm-rs "$installed_vllm_dir/vllm-rs"
+            cmp vllm/vllm-rs "$installed_vllm_dir/vllm-rs"
+            for rust_extension in vllm/_rust_*.so; do
+                [[ -f "$rust_extension" ]] || continue
+                install -m 755 "$rust_extension" "$installed_vllm_dir/"
+            done
+
+            # Validate installed files, not imports shadowed by the source checkout.
+            cd /
+            python3 - "$installed_vllm_dir" <<'PY'
+            import ast
+            import subprocess
+            import sys
+            from pathlib import Path
+
+            package = Path(sys.argv[1])
+            tree = ast.parse((package / "v1/utils.py").read_text())
+            manager = next(node for node in tree.body
+                           if isinstance(node, ast.ClassDef) and node.name == "RustFrontendProcessManager")
+            flags = {node.value for node in ast.walk(manager)
+                     if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("--")}
+            help_text = subprocess.check_output([str(package / "vllm-rs"), "frontend", "--help"], text=True)
+            missing = flags - set(help_text.split())
+            if missing:
+                raise SystemExit(f"Installed Rust frontend does not support Python launcher flags: {sorted(missing)}")
+            print("Rust frontend accepts the installed Python launcher's flags")
+            PY
+            python3 - <<'PY'
+            import torch
+            import vllm
+            from vllm.vllm_flash_attn import flash_attn_varlen_func
+            from vllm.model_executor.models.registry import ModelRegistry
+
+            assert "NemotronH_Omni_Reasoning_V3" in ModelRegistry.get_supported_archs()
+            print(f"vLLM {vllm.__version__}; torch {torch.__version__}")
+            PY
+
+            rm -rf /opt/uv/cache /root/.cache/uv /root/.cache/pip /var/lib/apt/lists/* 2>/dev/null || true
+            apt-get clean || true
+            rm -rf "$BUILD_DIR/source"
+            find /usr/lib/aarch64-linux-gnu /usr/local/cuda-13.0 -name '*_static*.a' -delete 2>/dev/null || true
+            """
+        ).lstrip()
+        return join(["bash", "-c", script, "vllm-build"])
+
+    def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        """Pass build configuration as literal environment values."""
+        if self._head_sha is None:
+            raise RuntimeError("Run vLLM preflight checks before generating the build environment")
+        return {
+            "BASE_IMAGE": str(container_config.input_container_fpath),
+            "VLLM_REPO": self.config.repo,
+            "VLLM_BRANCH": self.config.branch,
+            "VLLM_HEAD_SHA": self._head_sha,
+            "VLLM_VERSION": self.config.version,
+            "VLLM_PRECOMPILED_WHEEL_COMMIT": self.config.precompiled_wheel_commit,
+        }
+
+    def get_srun_slurm_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        """Build into the working image used by all container stages."""
+        return {
+            "job-name": "build-vllm",
+            "nodes": "1",
+            "ntasks": "1",
+            "segment": "1",
+            "gpus-per-node": "4",
+            "mem": "0",
+            "time": "01:00:00",
+            "container-image": str(container_config.output_container_fpath),
+            "no-container-mount-home": True,
+            "container-save": str(container_config.output_container_fpath),
+            "export": "ALL",
+        }
+
+
 class BuildContainerHelper(BaseModel):
     config: BuildContainerConfig
 
@@ -313,13 +461,18 @@ class BuildContainerHelper(BaseModel):
         shutil.copy(self.config.input_container_fpath, self.config.output_container_fpath)
         print("Copied input container fpath to output (not finished, just starting)")
 
-        if self.config.flashinfer:
-            fib = FlashInferBuilder(config=self.config.flashinfer, log_file=self.config.log_file)
-            await fib.perform_preflight_checks()
+        builders: list[BaseBuilder] = []
+        if self.config.vllm is not None:
+            builders.append(VLLMBuilder(config=self.config.vllm, log_file=self.config.log_file))
+        if self.config.flashinfer is not None:
+            builders.append(FlashInferBuilder(config=self.config.flashinfer, log_file=self.config.log_file))
+
+        for builder in builders:
+            await builder.perform_preflight_checks()
             command_output = await self._run_single_srun(
-                builder_command_str=fib.get_srun_command_str(),
-                builder_env_vars=fib.get_srun_env_vars(self.config),
-                builder_srun_slurm_vars=fib.get_srun_slurm_vars(self.config),
+                builder_command_str=builder.get_srun_command_str(),
+                builder_env_vars=builder.get_srun_env_vars(self.config),
+                builder_srun_slurm_vars=builder.get_srun_slurm_vars(self.config),
             )
             if command_output.returncode != 0:
                 raise RuntimeError(
