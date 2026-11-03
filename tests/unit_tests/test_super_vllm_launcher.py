@@ -1444,7 +1444,8 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
         self.require_batch_bash()
         stubs = r"""
 scontrol() { printf '%s\n' node0 node1 node2 node3 node4 node5 node6 node7; }
-srun() { printf '%s\0' "$@"; printf '\0'; return "$TEST_SERVER_STATUS"; }
+# Keep captured argv separate from the launcher's startup messages on stdout.
+srun() { { printf '%s\0' "$@"; printf '\0'; } >&2; return "$TEST_SERVER_STATUS"; }
 """
         for mode in ("independent", "coupled"):
             for server_status in (0, 7):
@@ -1466,7 +1467,7 @@ srun() { printf '%s\0' "$@"; printf '\0'; return "$TEST_SERVER_STATUS"; }
                         },
                     )
                     self.assertEqual(status, server_status, stderr)
-                    steps = stdout.removesuffix("\0\0").split("\0\0")
+                    steps = stderr.removesuffix("\0\0").split("\0\0")
                     self.assertEqual(len(steps), 1)
                     args = steps[0].split("\0")
                     self.assertIn("--nodes=8", args)
