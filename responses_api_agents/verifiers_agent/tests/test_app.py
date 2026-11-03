@@ -28,6 +28,7 @@ from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
     _NoStoreCookieJar,
+    _rollout_error_fact,
 )
 from responses_api_agents.verifiers_agent.app import (
     logger as agent_app_logger,
@@ -847,3 +848,128 @@ class TestProgrammaticRubricOfRealEnvironments:
         env = self._tool_env(correct)
         env.rubric.rubrics[1].weights[0] = 1.0
         assert _programmatic_rubric(env) is False
+
+
+class TestRolloutErrorFact:
+    """The error a rollout ended on is recorded on the row as a typed fact; the reward and the mask do not change."""
+
+    @pytest.mark.parametrize(
+        "error, expected",
+        [
+            (None, None),
+            ({}, None),
+            (
+                {
+                    "error": "ModelError",
+                    "message": "Error code: 502 - {'detail': 'Bad Gateway'}",
+                    "error_chain_repr": "ModelError(...) -> InternalServerError('Error code: 502')",
+                    "error_chain_str": "ModelError -> InternalServerError",
+                },
+                {"type": "ModelError", "status_code": 502, "kind_candidate": "http_5xx"},
+            ),
+            (
+                {
+                    "error": "ModelError",
+                    "message": "Request timed out.",
+                    "error_chain_repr": "ModelError('Request timed out.') -> APITimeoutError('Request timed out.')",
+                    "error_chain_str": "ModelError -> APITimeoutError",
+                },
+                {"type": "ModelError", "status_code": None, "kind_candidate": "timeout"},
+            ),
+            (
+                {
+                    "error": "ModelError",
+                    "message": "Connection error.",
+                    "error_chain_repr": "ModelError('Connection error.') -> APIConnectionError('Connection error.')",
+                    "error_chain_str": "ModelError -> APIConnectionError",
+                },
+                {"type": "ModelError", "status_code": None, "kind_candidate": "connection"},
+            ),
+            (
+                {
+                    "error": "RateLimitError",
+                    "message": "Error code: 429",
+                    "error_chain_repr": "",
+                    "error_chain_str": "",
+                },
+                {"type": "RateLimitError", "status_code": 429, "kind_candidate": "http_429"},
+            ),
+            (
+                {
+                    "error": "SandboxError",
+                    "message": "sandbox died",
+                    "error_chain_repr": "SandboxError('sandbox died')",
+                    "error_chain_str": "SandboxError",
+                },
+                {"type": "SandboxError", "status_code": None, "kind_candidate": "infra"},
+            ),
+            (
+                {
+                    "error": "EmptyModelResponseError",
+                    "message": "empty",
+                    "error_chain_repr": "EmptyModelResponseError('empty')",
+                    "error_chain_str": "EmptyModelResponseError",
+                },
+                {"type": "EmptyModelResponseError", "status_code": None, "kind_candidate": "model_response"},
+            ),
+            ("sandbox quota exceeded", {"type": None, "status_code": None, "kind_candidate": "other"}),
+        ],
+    )
+    def test_the_fact_types_the_error(self, error, expected) -> None:
+        fact = _rollout_error_fact(error)
+        if expected is None:
+            assert fact is None
+            return
+        assert {key: fact[key] for key in expected} == expected
+        assert set(fact) == {"type", "chain", "status_code", "kind_candidate", "message_head"}
+
+    def test_the_message_head_is_bounded(self) -> None:
+        fact = _rollout_error_fact({"error": "ValueError", "message": "x" * 5000})
+        assert len(fact["message_head"]) == 500
+
+    def _run(self, error) -> dict:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            return [{"reward": 0.0, "metrics": {}, "completion": [], "trajectory": [], "error": error}]
+
+        env = MagicMock()
+        env.run_group = fake_run_group
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={"task_idx": 0, "responses_create_params": {"input": [{"role": "user", "content": "hi"}]}},
+            )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_a_rollout_that_ended_on_an_error_records_it_on_the_row(self) -> None:
+        body = self._run(
+            {
+                "error": "ModelError",
+                "message": "Error code: 503",
+                "error_chain_repr": "ModelError('Error code: 503')",
+                "error_chain_str": "ModelError",
+            }
+        )
+        assert body["rollout_error"]["kind_candidate"] == "http_5xx" and body["rollout_error"]["status_code"] == 503
+        assert body["response"]["rollout_error"] == body["rollout_error"]
+        # recorded only: the score and the mask are what they were
+        assert body["reward"] == 0.0 and not body.get("mask_sample") and body.get("failure_kind") is None
+
+    def test_a_clean_rollout_has_no_field(self) -> None:
+        body = self._run(None)
+        assert "rollout_error" not in body and "rollout_error" not in body["response"]

@@ -18,6 +18,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import traceback
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
@@ -228,6 +229,59 @@ class _ResponseIdRecordingClient(NeMoRLChatCompletionsClient):
         return response
 
 
+# Names in a rollout error's class chain (verifiers.errors and the transport errors they wrap) and the kind each
+# suggests, first match wins: a transport timeout or connection error inside a ModelError or a ToolError is named
+# as such. A candidate only: it is recorded for counting and changes no score.
+_ROLLOUT_ERROR_KIND_CANDIDATES = (
+    ("OverlongPromptError", "overlong_prompt"),
+    ("Timeout", "timeout"),
+    ("Connection", "connection"),
+    ("InfraError", "infra"),
+    ("SandboxError", "infra"),
+    ("TunnelError", "infra"),
+    ("ToolError", "tool"),
+    ("ModelResponseError", "model_response"),
+    ("ModelError", "model_response"),
+)
+_STATUS_CODE = re.compile(r"(?:Error code|status(?:_code)?)\s*[:=]?\s*(\d{3})\b", re.IGNORECASE)
+_ROLLOUT_ERROR_MESSAGE_CHARS = 500
+
+
+def _rollout_error_fact(error: Any) -> Optional[dict[str, Any]]:
+    """The error a verifiers rollout ended on, as a typed fact for the row: ``type`` (the raised class),
+    ``chain`` (the class chain, outermost first), ``status_code`` (an HTTP status named in the error, if any),
+    ``kind_candidate`` (``http_5xx``, ``http_429``, ``http_4xx``, then by class: ``overlong_prompt``,
+    ``model_response``, ``tool``, ``infra``, ``timeout``, ``connection``, else ``other``) and ``message_head``.
+    None when the rollout ended without one."""
+    if not error:
+        return None
+    if isinstance(error, Mapping):
+        error_type = error.get("error") if isinstance(error.get("error"), str) else None
+        chain = error.get("error_chain_str") if isinstance(error.get("error_chain_str"), str) else error_type
+        message = error.get("message") or error.get("error_chain_repr") or error_type or ""
+        detail = f"{message} {error.get('error_chain_repr') or ''}"
+    else:
+        error_type, chain, message = None, None, str(error)
+        detail = message
+    match = _STATUS_CODE.search(detail)
+    status_code = int(match.group(1)) if match else None
+    if status_code is not None and status_code >= 500:
+        kind = "http_5xx"
+    elif status_code == 429:
+        kind = "http_429"
+    elif status_code is not None and status_code >= 400:
+        kind = "http_4xx"
+    else:
+        kind = next((kind for name, kind in _ROLLOUT_ERROR_KIND_CANDIDATES if name in (chain or "")), "other")
+    return {
+        "type": error_type,
+        "chain": chain,
+        "status_code": status_code,
+        "kind_candidate": kind,
+        "message_head": str(message)[:_ROLLOUT_ERROR_MESSAGE_CHARS],
+    }
+
+
 class VerifiersNeMoGymResponse(NeMoGymResponse):
     ng_trajectory: Optional[TrajectoryRecord] = Field(default=None, exclude_if=lambda value: value is None)
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
@@ -239,6 +293,8 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
     exported_state: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
+    # The error the rollout ended on (``_rollout_error_fact``), absent when it ended without one.
+    rollout_error: Optional[dict[str, Any]] = Field(default=None, exclude_if=lambda value: value is None)
     parallel_tool_calls: bool = True
     tool_choice: str = "auto"
     tools: list = Field(default_factory=list)
@@ -254,6 +310,9 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # The error the rollout ended on, on the row itself so a run's rollout errors can be counted; recorded only, it
+    # does not change the reward or mask the sample.
+    rollout_error: Optional[dict[str, Any]] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 # The reward functions of the request being scored that raised; verifiers scores such a function 0.0 and goes on.
@@ -741,6 +800,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 reward=reward,
                 metrics=metrics,
                 exported_state=exported_state,
+                rollout_error=_rollout_error_fact(rollout_output.get("error")),
             )
         except Exception as e:
             logger.error(f"Exception in responses(): {type(e).__name__}: {e}")
@@ -767,6 +827,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 responses_create_params=body.responses_create_params,
                 response=resp,
                 reward=resp.reward,
+                rollout_error=resp.rollout_error,
             )
             if failures:
                 # verifiers scored each reward function that raised as 0.0; that zero is no grade of the answer.
