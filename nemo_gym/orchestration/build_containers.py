@@ -8,7 +8,7 @@ from asyncio import create_subprocess_shell
 from asyncio.subprocess import PIPE, STDOUT
 from os import killpg
 from pathlib import Path
-from shlex import join, quote
+from shlex import join, quote, split
 from signal import SIGKILL
 from tempfile import TemporaryDirectory
 from textwrap import dedent
@@ -81,6 +81,34 @@ class WarmupConfig(BaseNeMoGymCLIConfig):
         return values
 
 
+class RunConfig(BaseNeMoGymCLIConfig):
+    """Submit an evaluation with the built image, using literal environment values and arguments."""
+
+    env: dict[str, str | int | float | bool]
+    args: list[str] = Field(min_length=1)
+
+    @field_validator("args", mode="before")
+    @classmethod
+    def parse_args(cls, value: object) -> object:
+        """Accept an argv list or shell-style quoting and line continuations, without shell expansion."""
+        if isinstance(value, str):
+            return split(value.replace("\\\n", ""))
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def validate_env(cls, values: dict[str, str | int | float | bool]) -> dict[str, str | int | float | bool]:
+        """Keep submission settings valid and prevent accidental warmup exports."""
+        for key, value in values.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ValueError(f"Invalid run environment variable: {key!r}")
+            if key in {"CONTAINER", "SAVE_WARMED_CONTAINER", "SBATCH_WAIT"}:
+                raise ValueError(f"{key} is managed by the run stage; omit it from run.env")
+            if isinstance(value, str) and "\0" in value:
+                raise ValueError(f"Run environment variable {key} contains a NUL byte")
+        return values
+
+
 class BuildContainerConfig(BaseNeMoGymCLIConfig):
     input_container_fpath: Path
     output_container_fpath: Path
@@ -91,6 +119,8 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     flashinfer: Optional[FlashInferConfig] = None
     mooncake: Optional[MooncakeConfig] = None
     warmup: Optional[WarmupConfig] = None
+    run: Optional[RunConfig] = None
+    run_only: bool = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -573,6 +603,54 @@ class MooncakeBuilder(BaseBuilder):
 class BuildContainerHelper(BaseModel):
     config: BuildContainerConfig
 
+    def _slurm_launcher_env(self) -> dict[str, str]:
+        mapping = {
+            "account": "SBATCH_ACCOUNT",
+            "partition": "SBATCH_PARTITION",
+            "qos": "SBATCH_QOS",
+            "gpus-per-node": "SBATCH_GPUS_PER_NODE",
+            "gres": "SBATCH_GRES",
+        }
+        return {env_var: str(self.config.slurm[key]) for key, env_var in mapping.items() if key in self.config.slurm}
+
+    async def run_container(self) -> None:
+        """Submit the YAML's run configuration without rebuilding or modifying the image."""
+        config = self.config.run
+        if config is None:
+            raise ValueError("Define run.env and run.args in the container config before using --run")
+        launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
+        if not launcher.is_file():
+            raise FileNotFoundError(f"Launcher not found: {launcher}. Run from the Gym checkout.")
+        if not self.config.output_container_fpath.is_file():
+            raise FileNotFoundError(f"Built image not found: {self.config.output_container_fpath}")
+        env = self._slurm_launcher_env()
+        env.update(
+            {key: str(int(value)) if isinstance(value, bool) else str(value) for key, value in config.env.items()}
+        )
+        env["CONTAINER"] = str(self.config.output_container_fpath)
+        if not env.get("EXPERIMENT_NAME"):
+            raise ValueError("Set run.env.EXPERIMENT_NAME for the evaluation run")
+        self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
+        Path("slurm-logs").mkdir(exist_ok=True)
+        command = join(
+            [
+                "env",
+                "-u",
+                "SAVE_WARMED_CONTAINER",
+                "-u",
+                "SBATCH_WAIT",
+                *(f"{key}={value}" for key, value in env.items()),
+                "bash",
+                str(launcher),
+                *config.args,
+            ]
+        )
+        result = await _run_command(command, self.config.log_file)
+        if result.returncode:
+            raise RuntimeError(
+                f"Evaluation submission failed with returncode {result.returncode}. See {self.config.log_file}"
+            )
+
     async def run(self) -> None:
         try:
             await self._run()
@@ -630,16 +708,7 @@ class BuildContainerHelper(BaseModel):
                 key: str(int(value)) if isinstance(value, bool) else str(value)
                 for key, value in self.config.warmup.env.items()
             }
-            slurm_env_vars = {
-                "account": "SBATCH_ACCOUNT",
-                "partition": "SBATCH_PARTITION",
-                "qos": "SBATCH_QOS",
-                "gpus-per-node": "SBATCH_GPUS_PER_NODE",
-                "gres": "SBATCH_GRES",
-            }
-            for key, env_var in slurm_env_vars.items():
-                if key in self.config.slurm:
-                    env[env_var] = str(self.config.slurm[key])
+            env.update(self._slurm_launcher_env())
             env.update(
                 CONTAINER=str(output),
                 SAVE_WARMED_CONTAINER=str(warmed),
@@ -718,7 +787,7 @@ def main() -> None:
     """Run container build stages using Gym's resolved configuration."""
     global_config_dict = get_global_config_dict()
     bch = BuildContainerHelper(config=BuildContainerConfig.model_validate(global_config_dict))
-    asyncio.run(bch.run())
+    asyncio.run(bch.run_container() if bch.config.run_only else bch.run())
 
 
 if __name__ == "__main__":

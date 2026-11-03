@@ -16,7 +16,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 import nemo_gym.orchestration.build_containers as build_containers
@@ -30,6 +29,7 @@ from nemo_gym.orchestration.build_containers import (
     FlashInferConfig,
     MooncakeBuilder,
     MooncakeConfig,
+    RunConfig,
     VLLMBuilder,
     VLLMConfig,
     WarmupConfig,
@@ -658,8 +658,11 @@ def test_warmup_rejects_invalid_or_managed_env(key):
 
 def test_warmup_example_uses_shared_slurm_config(monkeypatch):
     monkeypatch.setenv("PWD", str(ROOT))
-    config = OmegaConf.load(ROOT / BENCHMARK / "build_container_configs/prims.yaml")
-    resolved = BuildContainerConfig.model_validate(OmegaConf.to_container(config, resolve=True))
+    monkeypatch.setattr(
+        sys, "argv", ["test", f"+config_paths=[{ROOT / BENCHMARK / 'build_container_configs/prims.yaml'}]"]
+    )
+    config = GlobalConfigDictParser().parse(GlobalConfigDictParserConfig(skip_load_from_dotenv=True))
+    resolved = BuildContainerConfig.model_validate(config)
     assert resolved.vllm is not None
     assert resolved.flashinfer is not None
     assert resolved.warmup.env["NUM_PREFILL_NODES"] == 2
@@ -672,6 +675,124 @@ def test_warmup_example_uses_shared_slurm_config(monkeypatch):
     assert resolved.slurm["gpus-per-node"] == "4"
     assert "SBATCH_GRES" not in resolved.warmup.env
     assert "SBATCH_GPUS_PER_NODE" not in resolved.warmup.env
+    assert resolved.run.env == {
+        **resolved.warmup.env,
+        "EXPERIMENT_NAME": "opencode_swe_verified/super_3.5_GA-BF16-p2d2-dp4tp1-prims",
+        "SBATCH_TIMELIMIT": "01:30:00",
+    }
+    assert resolved.run.args == [
+        "--config",
+        "responses_api_models/vllm_model/configs/vllm_model.yaml",
+        "--config",
+        "benchmarks/swebench/verified/opencode.yaml",
+        "++swebench_verified_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=2700",
+        "++num_samples_in_parallel=1024",
+    ]
+
+
+@pytest.mark.parametrize("entrypoint", ["gym", "module"])
+def test_run_cli_uses_yaml_without_building(entrypoint, tmp_path, monkeypatch):
+    config = tmp_path / "build.yaml"
+    config.write_text(
+        "input_container_fpath: missing.sqsh\noutput_container_fpath: output.sqsh\n"
+        "warmup:\n  env:\n    MODEL: /models/test\n"
+        "run:\n  env:\n    _copy: warmup.env\n    SBATCH_TIMELIMIT: '01:30:00'\n"
+        "  args: --config evaluation.yaml ++num_samples_in_parallel=1024\n"
+    )
+    monkeypatch.setattr(
+        build_containers,
+        "get_global_config_dict",
+        lambda: GlobalConfigDictParser().parse(GlobalConfigDictParserConfig(skip_load_from_dotenv=True)),
+    )
+    captured = []
+
+    async def capture(self):
+        captured.append(self.config)
+
+    build = AsyncMock(side_effect=AssertionError("Must not rebuild"))
+    monkeypatch.setattr(BuildContainerHelper, "run", build)
+    monkeypatch.setattr(BuildContainerHelper, "run_container", capture)
+    args = ["--run", "--config", str(config), "++run.env.SBATCH_TIMELIMIT=02:00:00"]
+    if entrypoint == "gym":
+        monkeypatch.setattr(sys, "argv", ["gym", "build-containers", *args])
+        cli_main()
+    else:
+        monkeypatch.setattr(sys, "argv", [build_containers.__file__, *args])
+        runpy.run_path(build_containers.__file__, run_name="__main__")
+    build.assert_not_called()
+    assert len(captured) == 1
+    assert captured[0].run.env == {"MODEL": "/models/test", "SBATCH_TIMELIMIT": "02:00:00"}
+    assert captured[0].warmup.env == {"MODEL": "/models/test"}
+    assert captured[0].run.args == ["--config", "evaluation.yaml", "++num_samples_in_parallel=1024"]
+
+
+@pytest.mark.parametrize("status", [0, 37])
+async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeypatch, status):
+    benchmark = tmp_path / BENCHMARK
+    benchmark.mkdir(parents=True)
+    for name in ("sbatch_external_vllm.sh", "save_warmed_vllm_container.py"):
+        shutil.copyfile(ROOT / BENCHMARK / name, benchmark / name)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sbatch = bin_dir / "sbatch"
+    sbatch.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open('submitted.jsonl', 'a') as f:\n"
+        "    f.write(json.dumps({'env': dict(os.environ), 'args': sys.argv[1:]}) + '\\n')\n"
+        "print('12345')\n"
+        f"sys.exit({status})\n"
+    )
+    sbatch.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("USER", "run-test")
+    monkeypatch.setenv("NODELIST", "")
+    monkeypatch.setenv("SAVE_WARMED_CONTAINER", "must-not-export.sqsh")
+    monkeypatch.setenv("SBATCH_WAIT", "1")
+    config = BuildContainerConfig(
+        input_container_fpath="missing.sqsh",
+        output_container_fpath="built image.sqsh",
+        slurm={"account": "build-account", "partition": "batch", "qos": "interactive", "gres": "gpu:4"},
+        run=RunConfig(
+            env={
+                "MODEL": "/models/test",
+                "VLLM_CONFIG": "serving.sh",
+                "MOUNTS": f"{tmp_path}:/opt/Gym",
+                "EXPERIMENT_NAME": "eval-test",
+                "NUM_PREFILL_NODES": 2,
+                "NUM_DECODE_NODES": 2,
+                "ENABLE_MOONCAKE": True,
+                "SBATCH_TIMELIMIT": "01:30:00",
+                "SBATCH_QOS": "short",
+            },
+            args='--config model.yaml \\\n--config benchmark.yaml \\\n"++text=spaces $(touch INJECTED)"',
+        ),
+    )
+    config.output_container_fpath.write_bytes(b"built and warmed")
+    config.log_file.write_text("existing build log\n")
+    launch = BuildContainerHelper(config=config).run_container()
+    if status:
+        with pytest.raises(RuntimeError, match=f"returncode {status}"):
+            await launch
+    else:
+        await launch
+    submissions = [json.loads(line) for line in (tmp_path / "submitted.jsonl").read_text().splitlines()]
+    assert len(submissions) == (1 if status else 2)
+    job = submissions[0]
+    assert "--time=01:30:00" in job["args"]
+    assert job["env"]["SBATCH_ACCOUNT"] == "build-account"
+    assert job["env"]["SBATCH_QOS"] == "short"
+    assert job["env"]["SBATCH_GRES"] == "gpu:4"
+    assert job["env"]["ENABLE_MOONCAKE"] == "1"
+    assert job["env"]["CONTAINER"] == str(config.output_container_fpath)
+    assert "SBATCH_WAIT" not in job["env"]
+    assert "SAVE_WARMED_CONTAINER" not in job["env"]
+    prepare = next(line for line in job["env"]["eval_command"].splitlines() if line.startswith("gym eval prepare "))
+    assert shlex.split(prepare)[3:-1] == config.run.args
+    assert config.output_container_fpath.read_bytes() == b"built and warmed"
+    assert config.log_file.read_text().startswith("existing build log\n")
+    assert not (tmp_path / "INJECTED").exists()
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "missing", "empty", "cancel"])
