@@ -455,6 +455,17 @@ class TestEnvironmentCatalog:
             "      - {name: test, type: benchmark, jsonl_fpath: test.jsonl}\n",
             encoding="utf-8",
         )
+        # Malformed: `datasets` is not a list, so the config declares no dataset and is not runnable.
+        configs.joinpath("broken.yaml").write_text(
+            "resource:\n"
+            "  resources_servers:\n"
+            "    mcqa: {entrypoint: app.py, domain: knowledge}\n"
+            "agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      datasets: 1\n",
+            encoding="utf-8",
+        )
         pure = tmp_path / "resources_servers" / "judge" / "configs"
         pure.mkdir(parents=True)
         pure.joinpath("judge.yaml").write_text(

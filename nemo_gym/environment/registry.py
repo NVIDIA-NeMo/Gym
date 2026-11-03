@@ -156,6 +156,14 @@ def _legacy_entry(name: str, config_path: Path, kind: CatalogKind) -> Environmen
     return EnvironmentCatalogEntry(kind="benchmark", **values)
 
 
+def _dataset_blocks(server_config: DictConfig | dict) -> List[DictConfig | dict]:
+    """The dataset mappings a server block declares; none when ``datasets`` is not a list, as in a malformed config."""
+    datasets = server_config.get("datasets")
+    if not isinstance(datasets, (list, ListConfig)):
+        return []
+    return [dataset for dataset in datasets if isinstance(dataset, (dict, DictConfig))]
+
+
 def _runnable_resource_config(
     config_path: Path,
 ) -> tuple[CatalogKind, Optional[str], Optional[str]] | None:
@@ -172,8 +180,7 @@ def _runnable_resource_config(
         dataset
         for group, _name, config in servers
         if group == "responses_api_agents"
-        for dataset in (config.get("datasets") or [])
-        if isinstance(dataset, (dict, DictConfig))
+        for dataset in _dataset_blocks(config)
     ]
     if not datasets:
         return None
@@ -383,9 +390,8 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
                 value = str(server_config["value"])
         elif group_key == "responses_api_agents":
             agents.append(server_name)
-            agent_datasets = server_config.get("datasets")
-            for dataset in agent_datasets if isinstance(agent_datasets, (list, ListConfig)) else []:
-                if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
+            for dataset in _dataset_blocks(server_config):
+                if dataset.get("name"):
                     datasets.append(str(dataset["name"]))
 
     return {

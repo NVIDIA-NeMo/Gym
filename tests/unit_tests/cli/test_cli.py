@@ -1839,6 +1839,14 @@ class TestListEnvironments:
         malformed = tmp_path / "environments" / "malformed" / "config.yaml"
         malformed.parent.mkdir(parents=True)
         malformed.write_text("malformed: ${unclosed\n", encoding="utf-8")
+        # Discovery reads resources-server configs for datasets; this one's is not a list, so it is not an entry.
+        not_runnable = tmp_path / "resources_servers" / "not_runnable" / "configs" / "not_runnable.yaml"
+        not_runnable.parent.mkdir(parents=True)
+        not_runnable.write_text(
+            "rs:\n  resources_servers:\n    not_runnable: {entrypoint: app.py}\n"
+            "agent:\n  responses_api_agents:\n    simple_agent: {datasets: 1}\n",
+            encoding="utf-8",
+        )
         monkeypatch.setattr("nemo_gym.registry.component_search_roots", lambda: [tmp_path])
 
         monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", lambda: OmegaConf.create({"json": True}))
