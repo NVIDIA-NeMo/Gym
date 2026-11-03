@@ -92,7 +92,6 @@ from nemo_gym.config.global_config import (
     label_runs,
     pairing_override_enabled,
     resolve_dataset_agent,
-    taskset_environment_server_name,
 )
 from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import (
@@ -679,38 +678,6 @@ def _native_episode_record(row: Dict, response: Any) -> Dict:
         raise InvalidRolloutResult(str(error)) from error
 
 
-def _caller_episode_record(row: Mapping[str, Any], result: Any, *, collector_built: bool = False) -> Any:
-    """The result ``run_examples(..., episode_records=True)`` hands back for one row.
-
-    A flat row's result is returned unchanged. For a materialized row, an Environment Server reply must be a
-    ``BaseEpisodeResponse`` for the dispatched episode and task, with a finite ``reward`` when it has one, as
-    ``gym eval run`` requires; otherwise this raises ``InvalidRolloutResult`` (``StaleRolloutResult`` for another
-    attempt). The reply becomes its flat ``_episode_record``. A result Gym built itself (``collector_built``: a
-    drained row or a routed ``/run`` failure, known from where it was built, never from its content) is kept.
-    Either way, the row's ``task_data`` provenance stamps (task and dataset digests) are added where the record
-    does not set them.
-
-    A reply that carries a failure class gets ``reward`` 0.0 and ``mask_sample`` True, the fields of a masked
-    verify response (see ``lost_session_verification``), so a trainer that reads them drops the episode instead
-    of scoring it. That covers a handled failure, whose class is its ``failure_kind`` when it names one, and a
-    result marked ``judge_failed``.
-    """
-    if _materialized_taskset(row) is None or isinstance(result, RolloutFailureRecord):
-        return result
-    from_environment_server = not collector_built
-    if from_environment_server:
-        result = _native_episode_record(row, result)
-        reward = result.get("reward")
-        if "reward" in result and (type(reward) not in (int, float) or not isfinite(reward)):
-            raise InvalidRolloutResult("An episode reward, when present, must be finite.")
-    for key, value in _task_data_provenance(row).items():
-        result.setdefault(key, value)
-    if from_environment_server and result.get(NG_FAILURE_CLASS_KEY) is not None:
-        result["reward"] = 0.0
-        result[MASK_SAMPLE_KEY] = True
-    return result
-
-
 @dataclass(frozen=True)
 class _CompletedRollout:
     """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
@@ -726,9 +693,6 @@ class _CompletedRollout:
     # The `/run` wall clock in seconds, success or failure; None for a row that never started.
     elapsed_s: Optional[float] = None
     dispatch_span_context: Optional["SpanContext"] = None
-    # True when Gym built ``result`` because `/run` gave no reply (a drained row, a routed `/run` failure).
-    # Set where the result is built, so a reply's own fields can never claim it.
-    collector_built: bool = False
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -2988,13 +2952,11 @@ class _RowResultIterator:
     """Map completion metadata to ``(row, result)`` for the direct collection APIs.
 
     A thin map over the internal completion iterator that keeps its ``aclose()`` reachable, so a
-    direct caller can stop collecting and cancel the rollouts still in flight. With ``episode_records``,
-    every outcome it hands back, awaited or drained, carries ``_caller_episode_record``'s view of the result.
+    direct caller can stop collecting and cancel the rollouts still in flight.
     """
 
-    def __init__(self, completions: Iterator[Future], *, episode_records: bool = False):
+    def __init__(self, completions: Iterator[Future]):
         self._completions = completions
-        self._episode_records = episode_records
         self._closed = False
 
     def __iter__(self):
@@ -3005,15 +2967,10 @@ class _RowResultIterator:
             raise StopIteration
         return self._without_metadata(next(self._completions))
 
-    def _caller_result(self, completed: _CompletedRollout) -> Tuple[Dict, Dict | RolloutFailureRecord]:
-        if self._episode_records:
-            return completed.row, _caller_episode_record(
-                completed.row, completed.result, collector_built=completed.collector_built
-            )
+    @staticmethod
+    async def _without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
+        completed = await future
         return completed.row, completed.result
-
-    async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
-        return self._caller_result(await future)
 
     async def aclose(self) -> None:
         """Cancel unfinished rollouts and await the end of their client tasks in this process.
@@ -3065,15 +3022,8 @@ class _RowResultIterator:
                 outcome.set_exception(error)
                 outcome.exception()
             else:
-                # A result episode_records cannot convert fails its own outcome, as it would when awaited, so the
-                # other drained outcomes, transferred only once, are not lost with it.
-                try:
-                    caller_result = self._caller_result(task.result())
-                except Exception as error:
-                    outcome.set_exception(error)
-                    outcome.exception()
-                else:
-                    outcome.set_result(caller_result)
+                result = task.result()
+                outcome.set_result((result.row, result.result))
             outcomes.append(outcome)
         return outcomes
 
@@ -4837,52 +4787,23 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         environment_group = global_config_dict[environment_server_name]["environment_servers"]
         return environment_server_attributed_agent(next(iter(environment_group.values())))
 
-    @staticmethod
-    def _stamp_taskset_environment_servers(examples: list[dict[str, Any]], global_config_dict: DictConfig) -> None:
-        """Stamp each unstamped materialized row with the Environment Server its taskset routes to.
-
-        ``gym eval run`` stamps these rows while preprocessing (``_environment_server_for_config_row``); a direct
-        ``run_examples`` caller such as a trainer hands rows straight from the dataset. Without the stamp they would
-        reach ``resolve_task_sources``, which knows only agent and resources-server instances. A row already stamped,
-        by an explicit ``environment_server_name`` or by preprocessing, keeps its server. A taskset without a route
-        fails before any dispatch.
-        """
-        for row in examples:
-            if NG_ENVIRONMENT_SERVER_KEY in row:
-                continue
-            taskset = _materialized_taskset(row)
-            if taskset is None:
-                continue
-            environment_server = taskset_environment_server_name(global_config_dict, taskset)
-            if environment_server is None:
-                raise ValueError(
-                    f"No environment server route is configured for taskset {taskset!r}; "
-                    f"set environment_server_routes.{taskset}"
-                )
-            row[NG_ENVIRONMENT_SERVER_KEY] = environment_server
-
     @classmethod
     def _stamp_environment_server_agent_refs(
         cls,
         examples: list[dict[str, Any]],
         global_config_dict: DictConfig,
-        *,
-        include_materialized: bool = False,
     ) -> None:
-        """Stamp environment-server-routed rows with the bound agent.
+        """Stamp compatibility-routed rows with the bound agent.
 
-        Compatibility-routed rows never reach ``resolve_task_sources``, so without this they carry no
+        These rows never reach ``resolve_task_sources``, so without this they carry no
         ``agent_ref`` and results, aggregate metrics and reward profiling lose the agent
         they ran on. A row that already names an agent is left alone; the name is validated
         against the environment server by ``_validate_environment_servers``. Materialized tasks are
-        skipped unless ``include_materialized``: they carry no agent by design, and the records ``gym eval run``
-        stores for them are not the legacy shape this key belongs to. ``run_examples`` includes them, so a direct
-        caller reads the agent its row ran on, as it does for a row routed by ``task_source``.
+        skipped: they carry no agent by design, and their result projection is not the
+        legacy shape this key belongs to.
         """
         for row in examples:
-            if NG_ENVIRONMENT_SERVER_KEY not in row:
-                continue
-            if _materialized_taskset(row) is not None and not include_materialized:
+            if NG_ENVIRONMENT_SERVER_KEY not in row or _materialized_taskset(row) is not None:
                 continue
             if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is not None:
                 continue
@@ -5026,7 +4947,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
         run_timing: Optional[RunTimingReport] = None,
-        stamp_materialized_agent_refs: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -5046,19 +4966,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         ``interleave_by_agent`` is enabled by the full evaluation path. Lower-level callers retain
         the order they supplied.
-
-        ``stamp_materialized_agent_refs`` also names the bound agent on materialized rows; only ``run_examples``
-        sets it, so the records Gym stores for those rows stay unattributed.
         """
         server_client = self.setup_server_client(head_server_config)
         if environment_server_name is not None:
             for row in examples:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
-        self._stamp_taskset_environment_servers(examples, server_client.global_config_dict)
         self._validate_environment_servers(examples, server_client.global_config_dict)
-        self._stamp_environment_server_agent_refs(
-            examples, server_client.global_config_dict, include_materialized=stamp_materialized_agent_refs
-        )
+        self._stamp_environment_server_agent_refs(examples, server_client.global_config_dict)
         direct_agent_examples = [row for row in examples if NG_ENVIRONMENT_SERVER_KEY not in row]
         self.resolve_task_sources(direct_agent_examples, server_client.global_config_dict)
         self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
@@ -5139,7 +5053,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             rollout_latency_ms=None,
                             environment_server=server_name,
                             environment_server_type=server_type,
-                            collector_built=True,
                         )
 
                 if is_global_aiohttp_client_request_debug_enabled():
@@ -5249,7 +5162,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
-                        collector_built=True,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
@@ -5319,7 +5231,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
-        episode_records: bool = False,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5327,16 +5238,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Rows are dispatched as given: task_sources are resolved and agent names validated here,
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
-
-        A materialized task row (``task_id.taskset`` plus ``task_input``) is routed by its taskset through
-        ``environment_server_routes``, as ``gym eval run`` routes it, unless ``environment_server_name`` or the row
-        already names an Environment Server; a taskset without a route raises before any row is dispatched, even when
-        the row carries an ``agent_ref``: the taskset route, not the agent, picks the Environment Server. The row is
-        also stamped with the ``agent_ref`` of the agent that Environment Server binds (its ``agent_server``, or its
-        only agent; a server in front of several agents without an ``agent_server`` binds none, and the row stays
-        unattributed), so it names the agent it ran on (``gym eval run`` leaves the records it stores for these rows
-        unattributed). Its ``/run`` reply is the Environment Server's ``BaseEpisodeResponse``; ``episode_records``
-        below flattens it.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
@@ -5383,8 +5284,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Rows start in the order given, once the returned iterator is first consumed.
 
         A row that ran resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
-        returned — no Gym-private fields are added to ``result`` unless ``episode_records`` (below) asks for a
-        materialized row's flat episode record. A row that produced no `/run`
+        returned — no Gym-private fields are added to ``result``. A row that produced no `/run`
         result resolves to a Gym-built ``result`` carrying Gym-private fields instead: a row drained
         by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
@@ -5393,19 +5293,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
-
-        ``episode_records=True`` resolves each materialized row's result to a flat episode record instead: a
-        ``BaseEpisodeResponse`` becomes the result's own fields (or the ``_ng_failure_*`` fields of a handled
-        failure) plus ``_ng_task_id`` and the row's ``task_data`` provenance (``_ng_digest``,
-        ``_ng_dataset_digest``). A reply that carries a failure class (a handled failure, with or without a
-        ``failure_kind``, or a result marked ``judge_failed``) also gets ``reward`` 0.0 and ``mask_sample`` True, so a
-        trainer masks the episode instead of scoring it. Results Gym built itself (drained rows, routed ``/run``
-        failures) and flat rows' results are not masked. It applies to every outcome the iterator hands back,
-        including those from ``aclose_and_drain()``. A reply that is not an episode response for the dispatched
-        episode and task, or whose reward is not finite (``InvalidRolloutResult``, ``StaleRolloutResult``), raises
-        from its own outcome, as ``gym eval run`` rejects it.
-        ``run_outcomes`` also flattens these replies, as typed outcomes on copies of the rows; ``episode_records``
-        keeps ``run_examples``' dispatch controls and the ``agent_ref`` it resolves on the caller's rows.
         """
 
         return _RowResultIterator(
@@ -5419,10 +5306,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
-                stamp_materialized_agent_refs=True,
                 **({"retry_requests": False} if not retry_requests else {}),
-            ),
-            episode_records=episode_records,
+            )
         )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
