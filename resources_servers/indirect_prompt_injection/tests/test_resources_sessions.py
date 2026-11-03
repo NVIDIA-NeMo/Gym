@@ -15,15 +15,18 @@
 """The IPI server serves the typed resources sessions API through its real routes, next to an Agent's /run seed."""
 
 import json
+import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
+from omegaconf import DictConfig
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from nemo_gym.server_runtime import CHECKPOINT_CLOSE_FOLLOWS_HEADER, ResourcesSeedSessionRequest
 from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.indirect_prompt_injection.app import IPIResourcesServer, IPIResourcesServerConfig
 
@@ -36,10 +39,15 @@ TASK_DATA = {key: value for key, value in ROW.items() if key not in ("responses_
 MESSAGE = {"recipient": "records@clinic.example", "subject": "Session check", "body": "Sent before the repeated seed"}
 
 
-def make_server() -> IPIResourcesServer:
+def make_server(*, checkpoint: bool = False) -> IPIResourcesServer:
+    server_client = MagicMock(spec=ServerClient)
+    if checkpoint:
+        server_client.global_config_dict = DictConfig(
+            {"checkpoint": {"enabled": True, "control_auth_token": "test-token"}}
+        )
     return IPIResourcesServer(
         config=IPIResourcesServerConfig(host="", port=0, entrypoint="", name="indirect_prompt_injection"),
-        server_client=MagicMock(spec=ServerClient),
+        server_client=server_client,
     )
 
 
@@ -95,7 +103,7 @@ def test_follows_the_session_contract() -> None:
     )
 
 
-def test_a_typed_session_keeps_its_environment_until_close() -> None:
+def test_a_typed_verify_releases_the_environment_and_preserves_its_retry() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
 
@@ -110,8 +118,14 @@ def test_a_typed_session_keeps_its_environment_until_close() -> None:
 
     verified = client.post("/verify", json=verify_json()).json()
     assert (verified["reward"], verified["mask_sample"], verified["injection_followed"]) == (1.0, False, False)
-    # The Environment Server closes after verifying, so verify leaves the session for that close.
-    assert "resources-session" in server.session_id_to_env
+    assert "resources-session" not in server.session_id_to_env
+    assert "resources-session" not in server._typed_sessions
+    resent = client.post("/verify", json=verify_json()).json()
+    assert (resent["reward"], resent["mask_sample"]) == (1.0, False)
+    # A delayed seed acknowledgement cannot recreate the released environment.
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert "resources-session" not in server.session_id_to_env
+    assert client.post("/send_message", json=MESSAGE).status_code == 404
 
     # The close names the session, so it releases it without the seed's cookie.
     client.cookies.clear()
@@ -174,3 +188,114 @@ def test_an_agents_run_verify_without_a_seed_is_masked() -> None:
     verified = client.post("/verify", json=verify_json()).json()
 
     assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
+
+
+@pytest.mark.parametrize("state", ["active", "verified", "closed"])
+def test_a_run_seed_cannot_overwrite_a_typed_session(state: str) -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    if state == "verified":
+        assert client.post("/verify", json=verify_json()).status_code == 200
+    elif state == "closed":
+        assert client.post("/close_session", json=close_json()).status_code == 200
+    original = server.session_id_to_env.get("resources-session")
+    assert client.post("/seed_session", json=ROW | {"environment": {}}).status_code == 409
+    assert server.session_id_to_env.get("resources-session") is original
+
+
+def test_a_typed_seed_cannot_take_over_a_run_session() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=ROW).status_code == 200
+    [session_id] = server.session_id_to_env
+    original = server.session_id_to_env[session_id]
+    assert client.post("/seed_session", json=seed_json(session_id)).status_code == 409
+    assert server.session_id_to_env[session_id] is original
+
+
+def test_a_failed_environment_copy_leaves_no_binding_and_can_be_retried() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    with patch("resources_servers.indirect_prompt_injection.app.copy.deepcopy", side_effect=MemoryError):
+        assert client.post("/seed_session", json=seed_json()).status_code == 500
+    assert server._typed_sessions == {}
+    assert server.session_id_to_env == {}
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert client.post("/send_message", json=MESSAGE).status_code == 200
+
+
+def test_checkpoint_wait_verify_leaves_no_untracked_environment() -> None:
+    server = make_server(checkpoint=True)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/ng-rollout/rollout/seed_session", json=seed_json()).status_code == 200
+    assert server._checkpoint.readiness().counts["sessions"] == 1
+    verified = client.post(
+        "/ng-rollout/rollout/verify", json=verify_json(), headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
+    )
+    assert verified.status_code == 200
+    assert server._checkpoint.readiness().counts["sessions"] == 0
+    assert server.session_id_to_env == {}
+    assert server._typed_sessions == {}
+    assert client.post("/ng-rollout/rollout/verify", json=verify_json()).json()["mask_sample"] is False
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_checkpoint_retirement_releases_an_unverified_environment(typed: bool) -> None:
+    server = make_server(checkpoint=True)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/ng-rollout/rollout/seed_session", json=seed_json() if typed else ROW).status_code == 200
+    retired = client.post(
+        "/ng-control/v1/checkpoint/retire",
+        json={"checkpoint_id": "retire", "deadline_ts": time.time() + 5, "episode_ids": [EPISODE.model_dump()]},
+        headers={"authorization": "Bearer test-token"},
+    )
+    assert retired.status_code == 200, retired.text
+    assert server.session_id_to_env == {}
+    assert server._typed_sessions == {}
+
+
+def test_verified_identity_expires_and_close_still_checks_the_episode() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    with patch("nemo_gym.server_runtime.base_resources_server.monotonic", return_value=0):
+        assert client.post("/seed_session", json=seed_json()).status_code == 200
+        assert client.post("/verify", json=verify_json()).json()["reward"] == 1.0
+        other = EpisodeId(rollout_id="other", attempt=0)
+        assert client.post("/seed_session", json=seed_json(episode_id=other)).status_code == 409
+        assert client.post("/close_session", json=close_json() | {"episode_id": other.model_dump()}).status_code == 409
+    with patch("nemo_gym.server_runtime.base_resources_server.monotonic", return_value=301):
+        assert client.post("/verify", json=verify_json()).json()["mask_sample"] is True
+        assert client.post("/seed_session", json=seed_json(episode_id=other)).status_code == 200
+        assert client.post("/send_message", json=MESSAGE).status_code == 200
+
+
+@pytest.mark.parametrize("field", ["resources_session_id", "episode_id", "task_id", "task_data"])
+def test_a_malformed_typed_seed_cannot_fall_back_to_a_run_seed(field: str) -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    body = seed_json()
+    body.pop(field)
+    # An extra top-level environment also must not let a malformed typed seed use the /run arm.
+    body["environment"] = {}
+    assert client.post("/seed_session", json=body).status_code == 422
+    assert server._typed_sessions == {}
+
+
+def test_repeated_runs_rotate_the_cookie_and_keep_the_previous_verify_retry() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=ROW).status_code == 200
+    [first_id] = server.session_id_to_env
+    first_cookies = dict(client.cookies)
+    first = client.post("/verify", json=verify_json()).json()
+    assert client.post("/seed_session", json=ROW).status_code == 200
+    [second_id] = server.session_id_to_env
+    assert second_id != first_id
+    assert client.post("/send_message", json=MESSAGE).status_code == 200
+    second = client.post("/verify", json=verify_json()).json()
+    assert (first["reward"], second["reward"]) == (1.0, 1.0)
+    client.cookies.clear()
+    client.cookies.update(first_cookies)
+    assert client.post("/verify", json=verify_json()).json()["mask_sample"] is False
+    assert server.session_id_to_env == {}

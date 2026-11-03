@@ -15,10 +15,11 @@
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, TaskId
@@ -119,22 +120,25 @@ class IPIVerifyResponse(BaseVerifyResponse):
     thinking_incomplete: bool = False
 
 
+def _reject_typed_seed(value: object) -> object:
+    if isinstance(value, dict) and any(field in value for field in ResourcesSeedSessionRequest.model_fields):
+        raise ValueError("A resources session seed must satisfy ResourcesSeedSessionRequest")
+    return value
+
+
 class IPIResourcesServer(SimpleResourcesServer):
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     # The episode and task each typed seed bound its resources_session_id to.
-    # These sessions keep their environment until /close_session; an Agent's /run never closes, so /verify releases
-    # the sessions it seeds.
     _typed_sessions: Dict[str, Tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _fence: ResourcesSessionFence = PrivateAttr()
-    # Sessions of an Agent's /run whose verify released them. The HTTP client sends a verify again when the
-    # connection drops, and the score reads only the request, so that resend is scored rather than masked.
-    _verified_run_sessions: ClosedResourcesSessionRecords[None] = PrivateAttr()
+    # Verify needs only the request. Keep the identity, not the environment, for its HTTP retry window.
+    _verified_sessions: ClosedResourcesSessionRecords[Optional[Tuple[EpisodeId, TaskId]]] = PrivateAttr()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
-        self._verified_run_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -142,27 +146,41 @@ class IPIResourcesServer(SimpleResourcesServer):
         return app
 
     async def seed_session(
-        self, request: Request, body: ResourcesSeedSessionRequest | IPISeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | Annotated[IPISeedSessionRequest, BeforeValidator(_reject_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         if not isinstance(body, ResourcesSeedSessionRequest):
             session_id = request.session[SESSION_ID_KEY]
-            self.session_id_to_env[session_id] = copy.deepcopy(body.environment)
+            async with self._fence.locked(session_id):
+                self._fence.raise_if_closed(session_id)
+                if session_id in self._typed_sessions or self._verified_sessions.get(session_id) is not None:
+                    raise ResourcesSessionConflictError("The session cookie belongs to a typed resources session")
+                # A new /run may reuse its caller's cookie. Keep the previous verify's retry record independent.
+                if session_id in self._verified_sessions:
+                    session_id = str(uuid4())
+                environment = copy.deepcopy(body.environment)
+                self.session_id_to_env[session_id] = environment
+                request.session[SESSION_ID_KEY] = session_id
             logger.debug("seed_session: sid=%s", session_id)
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)
-            identity = self._typed_sessions.get(session_id)
+            identity = self._typed_sessions.get(session_id) or self._verified_sessions.get(session_id)
             if identity is None:
+                if session_id in self.session_id_to_env or session_id in self._verified_sessions:
+                    raise ResourcesSessionConflictError("resources_session_id belongs to a session seeded by /run")
                 try:
                     task = TaskData.model_validate(body.task_data)
                 except ValidationError as error:
                     raise ResourcesSeedRejectedError(
                         f"task_data is not an indirect_prompt_injection task: {error}"
                     ) from error
+                environment = copy.deepcopy(task.environment)
+                self.session_id_to_env[session_id] = environment
                 self._typed_sessions[session_id] = (body.episode_id, body.task_id)
-                self.session_id_to_env[session_id] = copy.deepcopy(task.environment)
             elif identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
             # A repeated seed keeps the environment the session's tool calls changed.
@@ -178,7 +196,7 @@ class IPIResourcesServer(SimpleResourcesServer):
             closed_episode = self._fence.closed_episode(session_id)
             if closed_episode is not None and closed_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-            identity = self._typed_sessions.get(session_id)
+            identity = self._typed_sessions.get(session_id) or self._verified_sessions.get(session_id)
             if identity is not None and identity[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._release(session_id)
@@ -188,6 +206,13 @@ class IPIResourcesServer(SimpleResourcesServer):
     def _release(self, session_id: str) -> None:
         self.session_id_to_env.pop(session_id, None)
         self._typed_sessions.pop(session_id, None)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        async with self._fence.locked(session_id):
+            identity = self._typed_sessions.get(session_id) or self._verified_sessions.get(session_id)
+            self._release(session_id)
+            if identity is not None:
+                self._fence.mark_closed(session_id, identity[0])
 
     async def route_tool_call(self, tool_name: str, body: ToolCallRequest, request: Request) -> ToolCallResponse:
         session_id = request.session[SESSION_ID_KEY]
@@ -210,7 +235,9 @@ class IPIResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: IPIVerifyRequest) -> IPIVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self.session_id_to_env and session_id not in self._verified_run_sessions:
+        if self._fence.closed_episode(session_id) is not None or (
+            session_id not in self.session_id_to_env and session_id not in self._verified_sessions
+        ):
             # Never seeded, closed, or gone with a restart: the server no longer holds the environment the agent's
             # tool calls read, so a trajectory free of the injected call cannot be told from a resisted attack.
             lost = lost_session_verification("No seeded indirect_prompt_injection session for this verify")
@@ -261,8 +288,9 @@ class IPIResourcesServer(SimpleResourcesServer):
                 verification_type=body.injection.verification_type,
             )
         finally:
-            if session_id not in self._typed_sessions and self.session_id_to_env.pop(session_id, None) is not None:
-                self._verified_run_sessions.remember(session_id, None)
+            if session_id in self.session_id_to_env:
+                self._verified_sessions.remember(session_id, self._typed_sessions.get(session_id))
+                self._release(session_id)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         metrics: Dict[str, Any] = {}
