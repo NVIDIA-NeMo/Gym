@@ -2090,3 +2090,451 @@ def test_transcript_to_atif_needs_identity_and_at_least_one_message() -> None:
         transcript_to_atif([], [], session_id=" ", agent_name="a", agent_version="1")
     with pytest.raises(AtifExportError, match="contains no messages"):
         _transcript([], [])
+
+
+def _v2_rollout() -> dict[str, Any]:
+    rollout = _canonical_rollout(agent_name="opencode_agent")
+    trajectory = rollout["ng_trajectory"]
+    trajectory["schema_version"] = "2.0"
+    trajectory["capture_key"] = trajectory.pop("rollout_id")
+    trajectory["invocations"][0]["agent_instance"] = None
+    for turn in trajectory["turns"]:
+        turn["agent_instance"] = None
+    trajectory["model_calls"][0]["response"]["output"] = copy.deepcopy(trajectory["turns"][0]["answer"])
+    for model_call in trajectory["model_calls"]:
+        model_call["agent_instance"] = None
+        model_call["clock_domain"] = "model-host:unix"
+    for tool in trajectory["tool_calls"]:
+        tool.update(
+            kind="tool_call",
+            span_id=f"span-{tool['tool_call_id']}",
+            agent_instance=None,
+            native_tool_call_id=tool["tool_call_id"],
+            parent_span_id=None,
+            model_call_id="model-call-1",
+            failure_id=None,
+            timings=[
+                {
+                    "boundary": "lifecycle",
+                    "timing_source": "opencode:part-state",
+                    "clock_domain": "sandbox:unix",
+                    "started_at": tool.pop("started_at"),
+                    "completed_at": tool.pop("completed_at"),
+                    "duration_ms": tool.pop("duration_ms"),
+                    "duration_source": "reported",
+                }
+            ],
+        )
+        tool.pop("timing_source")
+    return rollout
+
+
+def _export_v2(rollout: dict[str, Any]) -> AtifTrajectoryV1_7:
+    return gym_rollout_to_atif(
+        rollout, session_id="evaluation-42", agent_version="2.3.1", compatibility_profile="v2-conversation"
+    )
+
+
+def test_v2_projection_requires_explicit_profile_and_preserves_legacy_export() -> None:
+    with pytest.raises(AtifExportError, match="requires compatibility_profile=v2-conversation"):
+        gym_rollout_to_atif(_v2_rollout(), session_id="evaluation-42", agent_version="2.3.1")
+    legacy = _canonical_rollout()
+    assert _export_v2(legacy) == gym_rollout_to_atif(legacy, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_v2_projection_keeps_exact_timing_evidence_and_reports_compatibility_loss() -> None:
+    rollout = _v2_rollout()
+    original = copy.deepcopy(rollout)
+    result = _export_v2(rollout)
+    assert rollout == original
+    wire = json.loads(encode_atif_trajectory(result))
+    provenance = wire["extra"]["nemo_gym"]
+    assert provenance["source"]["schema_version"] == "2.0"
+    assert provenance["source"]["capture_key"] == "rollout-3-7"
+    assert provenance["tool_timing"]["tool_calls"] == rollout["ng_trajectory"]["tool_calls"]
+    assert provenance["tool_timing"]["invocations"] == [{"invocation_id": "root", "agent_instance": None}]
+    assert provenance["tool_timing"]["turns"] == [
+        {"invocation_id": "root", "turn_no": index, "agent_instance": None} for index in (1, 2)
+    ]
+    assert provenance["tool_timing"]["model_calls"][0] == {
+        "model_call_id": "model-call-1",
+        "agent_instance": None,
+        "clock_domain": "model-host:unix",
+    }
+    assert provenance["conversion"]["status"] == "partial"
+    assert provenance["conversion"]["profile"] == "ng-trajectory-v2-conversation-to-atif-v1"
+    assert [warning["code"] for warning in provenance["conversion"]["warnings"]] == [
+        "native_turns_extension_required",
+        "v2_timing_extension_required",
+    ]
+    scalar = result.steps[2].observation.results[0].extra["nemo_gym"]
+    assert scalar["duration_ms"] == 100.0
+    assert scalar["timing_source"] == "harness"
+
+
+@pytest.mark.parametrize(
+    ("measurement", "expected"),
+    [
+        ({"started_at": 1700000001.0}, {"started_at": 1700000001.0, "timing_source": "artifact"}),
+        ({"duration_ms": 0.0, "duration_source": "reported"}, {"duration_ms": 0.0, "timing_source": "artifact"}),
+        ({"duration_ms": 12.0, "duration_source": "monotonic"}, {"duration_ms": 12.0, "timing_source": "artifact"}),
+    ],
+)
+def test_v2_projection_preserves_partial_and_duration_only_measurements(measurement: dict, expected: dict) -> None:
+    rollout = _v2_rollout()
+    tool = rollout["ng_trajectory"]["tool_calls"][0]
+    tool["timings"] = [
+        {
+            "boundary": "transcript",
+            "timing_source": "saved:transcript",
+            "clock_domain": None,
+            "started_at": None,
+            "completed_at": None,
+            "duration_ms": None,
+            **measurement,
+        }
+    ]
+    result = _export_v2(rollout)
+    assert result.steps[2].observation.results[0].extra["nemo_gym"] == expected
+    assert result.extra["nemo_gym"]["tool_timing"]["tool_calls"][0]["timings"] == tool["timings"]
+
+
+def test_v2_projection_does_not_choose_between_timing_boundaries_or_invent_empty_timing() -> None:
+    rollout = _v2_rollout()
+    tools = rollout["ng_trajectory"]["tool_calls"]
+    tools[0]["timings"].append(
+        {
+            "boundary": "executor",
+            "timing_source": "sandbox:executor",
+            "clock_domain": "sandbox:monotonic",
+            "duration_ms": 70.0,
+            "duration_source": "monotonic",
+        }
+    )
+    tools[1]["timings"] = []
+    result = _export_v2(rollout)
+    assert all(observation.extra is None for observation in result.steps[2].observation.results)
+    extra = result.extra["nemo_gym"]
+    assert extra["tool_timing"]["tool_calls"] == tools
+    assert extra["conversion"]["warnings"][-1]["code"] == "multiple_timing_boundaries_not_projected"
+    assert extra["conversion"]["warnings"][-1]["span_id"] == tools[0]["span_id"]
+
+
+@pytest.mark.parametrize("mutation", ["retry", "gap", "failed", "unknown", "nested", "wrong-model", "no-model"])
+def test_v2_projection_rejects_unsupported_shapes_without_discarding_evidence(mutation: str) -> None:
+    rollout = _v2_rollout()
+    trajectory = rollout["ng_trajectory"]
+    tool = trajectory["tool_calls"][0]
+    if mutation == "retry":
+        trajectory["tool_calls"].append({**copy.deepcopy(tool), "span_id": "second-execution"})
+    elif mutation == "gap":
+        trajectory["gaps"] = [{"code": "tool_timing_unavailable", "span_id": tool["span_id"]}]
+    elif mutation in {"failed", "unknown"}:
+        tool["status"] = mutation
+    elif mutation == "nested":
+        trajectory["invocations"].append({"invocation_id": "child", "parent_invocation_id": "root"})
+    elif mutation == "wrong-model":
+        tool["model_call_id"] = "model-call-2"
+    else:
+        tool["model_call_id"] = None
+    original = copy.deepcopy(rollout)
+    with pytest.raises(AtifExportError):
+        _export_v2(rollout)
+    assert rollout == original
+
+
+@pytest.mark.parametrize("field", ["schema_version", "boundary", "status", "capture_key"])
+def test_v2_projection_validates_versions_enums_and_capture_aliases(field: str) -> None:
+    rollout = _v2_rollout()
+    trajectory = rollout["ng_trajectory"]
+    if field == "schema_version":
+        trajectory[field] = "3.0"
+    elif field == "capture_key":
+        trajectory["rollout_id"] = "different-capture"
+    elif field == "boundary":
+        trajectory["tool_calls"][0]["timings"][0]["boundary"] = "invented"
+    else:
+        trajectory["tool_calls"][0]["status"] = "invented"
+    with pytest.raises(AtifExportError):
+        _export_v2(rollout)
+
+
+def test_v2_batch_export_passes_explicit_profile_and_keeps_manifest_hashes(tmp_path: Path) -> None:
+    source = tmp_path / "rollouts.jsonl"
+    _write_jsonl(source, [_v2_rollout()])
+    config = _export_config(source, tmp_path / "atif").model_copy(update={"compatibility_profile": "v2-conversation"})
+    result = export_rollouts_to_atif(config)
+    manifest = json.loads(result.manifest_fpath.read_text())
+    exported = result.output_dirpath / manifest["trajectory_path"]
+    assert manifest["expected_sha256"] == hashlib.sha256(exported.read_bytes()).hexdigest()
+    assert json.loads(exported.read_text())["extra"]["nemo_gym"]["conversion"]["status"] == "partial"
+
+
+def test_v2_projection_retains_explicit_failure_events_even_when_they_are_surplus() -> None:
+    rollout = _v2_rollout()
+    failures = {
+        "earlier-model-failure": {
+            "boundary": "model",
+            "failure_kind": "model_transport_error",
+            "failure_reason": "service unavailable",
+        }
+    }
+    rollout["ng_trajectory"]["failure_events"] = failures
+    result = _export_v2(rollout)
+    assert result.extra["nemo_gym"]["tool_timing"]["failure_events"] == failures
+
+
+@pytest.mark.parametrize(
+    "ownership", ["matching", "nullable-root", "nullable-evidence", "mismatched-tools", "mismatched-models"]
+)
+def test_v2_projection_checks_known_root_instance_ownership_before_projection(ownership: str) -> None:
+    rollout = _v2_rollout()
+    source = rollout["ng_trajectory"]
+    source["invocations"][0]["agent_instance"] = None if ownership == "nullable-root" else "instance-A"
+    for tool in source["tool_calls"]:
+        tool["agent_instance"] = None if ownership in {"nullable-evidence", "mismatched-models"} else "instance-A"
+    for call in source["model_calls"]:
+        call["agent_instance"] = None if ownership == "nullable-evidence" else "instance-A"
+    if ownership == "mismatched-tools":
+        # Tools and their model calls agree with each other but disagree with the root.
+        for evidence in source["tool_calls"] + source["model_calls"]:
+            evidence["agent_instance"] = "instance-B"
+    elif ownership == "mismatched-models":
+        source["model_calls"][1]["agent_instance"] = "instance-B"
+    if ownership.startswith("mismatched"):
+        with pytest.raises(AtifExportError):
+            _export_v2(rollout)
+    else:
+        result = _export_v2(rollout)
+        assert result.extra["nemo_gym"]["tool_timing"]["tool_calls"] == source["tool_calls"]
+
+
+@pytest.mark.parametrize(
+    "code", ["tool_agent_instance_unavailable", "tool_clock_domain_unavailable", "tool_duration_source_unavailable"]
+)
+def test_v2_projection_keeps_scoped_provenance_gaps_and_reports_each_warning(code: str) -> None:
+    rollout = _v2_rollout()
+    source = rollout["ng_trajectory"]
+    tool = source["tool_calls"][0]
+    tool["timings"][0]["clock_domain"] = None
+    tool["timings"][0]["duration_source"] = None
+    gap = {
+        "code": code,
+        "span_id": tool["span_id"],
+        "invocation_id": "root",
+        "agent_instance": None,
+        "detail": "lifecycle",
+    }
+    source["gaps"] = [gap]
+    original = copy.deepcopy(rollout)
+    encoded = json.loads(encode_atif_trajectory(_export_v2(rollout)))
+    extra = encoded["extra"]["nemo_gym"]
+    assert rollout == original
+    assert extra["tool_timing"]["gaps"] == [gap]
+    assert extra["tool_timing"]["tool_calls"] == source["tool_calls"]
+    assert {"code": "source_timing_provenance_gap", "gap": gap} in extra["conversion"]["warnings"]
+    assert extra["conversion"]["status"] == "partial"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "tool_model_call_unavailable",
+        "tool_model_call_ambiguous",
+        "tool_attempt_identity_unavailable",
+        "tool_timing_conflict",
+    ],
+)
+def test_v2_projection_still_rejects_identity_request_and_conflicting_evidence_gaps(code: str) -> None:
+    rollout = _v2_rollout()
+    rollout["ng_trajectory"]["gaps"] = [{"code": code, "span_id": "span-call-read"}]
+    with pytest.raises(AtifExportError, match="gaps"):
+        _export_v2(rollout)
+
+
+@pytest.mark.parametrize("scope", [None, "unknown-span"])
+def test_v2_projection_rejects_unscoped_or_unresolved_provenance_gaps(scope: str | None) -> None:
+    rollout = _v2_rollout()
+    rollout["ng_trajectory"]["gaps"] = [{"code": "tool_clock_domain_unavailable", "span_id": scope}]
+    with pytest.raises(AtifExportError):
+        _export_v2(rollout)
+
+
+def test_legacy_strict_export_still_rejects_provenance_gaps() -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["gaps"] = [{"code": "tool_clock_domain_unavailable", "invocation_id": "root"}]
+    with pytest.raises(AtifExportError, match="gaps"):
+        gym_rollout_to_atif(rollout, session_id="s", agent_version="1")
+
+
+def _native_v2_rollout() -> dict[str, Any]:
+    rollout = _v2_rollout()
+    source = rollout["ng_trajectory"]
+    for index, turn in enumerate(source["turns"]):
+        turn["answer"] = copy.deepcopy(turn["answer"])
+        turn["question"] = None
+        turn["step_count"] = index + 1  # Native steps, not cumulative tool-call counts.
+        turn["source_message_id"] = f"native-message-{index}"
+        turn["reasoning_content"] = {"native_reasoning": ["retained", index]}
+        call = source["model_calls"][index]
+        call["client_session_id"] = "root"
+        call["client_assistant_message_id"] = turn["source_message_id"]
+        for item in turn["answer"]:
+            item["opaque_native_evidence"] = {"bytes": [1, 2], "unknown": None}
+            if item["type"] == "function_call":
+                item["id"] = f"native-part-{item['call_id']}"
+                item["arguments"] = json.loads(item["arguments"])
+            else:
+                item["content"][0]["id"] = "native-text-part"
+    return rollout
+
+
+@pytest.mark.parametrize("reverse_turns", [False, True])
+def test_v2_conversation_uses_persisted_anchors_and_retains_native_turns_without_rewriting(
+    reverse_turns: bool,
+) -> None:
+    rollout = _native_v2_rollout()
+    source = rollout["ng_trajectory"]
+    if reverse_turns:
+        source["turns"].reverse()
+    original = copy.deepcopy(rollout)
+    wire = json.loads(encode_atif_trajectory(_export_v2(rollout)))
+    assert rollout == original
+    assert wire["extra"]["nemo_gym"]["source_turns"] == source["turns"]
+    agent_steps = [step for step in wire["steps"] if step["source"] == "agent"]
+    assert [step["extra"]["nemo_gym"]["source_turn"]["index"] for step in agent_steps] == (
+        [1, 0] if reverse_turns else [0, 1]
+    )
+    assert [step["extra"]["nemo_gym"]["source_turn"]["model_call_id"] for step in agent_steps] == [
+        "model-call-1",
+        "model-call-2",
+    ]
+    assert agent_steps[0]["tool_calls"][0]["arguments"] == {"query": "relay"}
+    assert agent_steps[1]["message"][0]["text"] == "Both records contain the same value."
+    for step in agent_steps:
+        extra = step["extra"]["nemo_gym"]
+        turn = source["turns"][extra["source_turn"]["index"]]
+        assert turn["question"] is None
+        assert "turn" not in extra  # No v1 cumulative-tool-count claim.
+        assert extra["source_turn"]["source_message_id"] == turn["source_message_id"]
+    assert agent_steps[0]["extra"]["nemo_gym"]["model_call"]["request"] == source["model_calls"][0]["request"]
+    assert agent_steps[0]["extra"]["nemo_gym"]["model_call"]["response"] == source["model_calls"][0]["response"]
+    warnings = wire["extra"]["nemo_gym"]["conversion"]["warnings"]
+    assert any(warning["code"] == "native_turns_extension_required" for warning in warnings)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing-message-id",
+        "duplicate-message-id",
+        "missing-call-id",
+        "duplicate-call-id",
+        "duplicate-turn-anchors",
+        "unmatched-extra-turn",
+        "missing-reference",
+        "duplicate-reference",
+        "conflicting-captured-message",
+        "missing-source-message",
+        "conflicting-captured-session",
+        "conflicting-source-model",
+        "failed-native-output",
+        "different-requesting-models",
+    ],
+)
+def test_v2_conversation_rejects_unproven_or_conflicting_associations(mutation: str) -> None:
+    rollout = _native_v2_rollout()
+    source = rollout["ng_trajectory"]
+    first, last = source["turns"]
+    if mutation == "missing-message-id":
+        last["answer"][0].pop("id")
+    elif mutation == "duplicate-message-id":
+        last["answer"].append(copy.deepcopy(last["answer"][0]))
+    elif mutation == "missing-call-id":
+        first["answer"][0].pop("call_id")
+    elif mutation == "duplicate-call-id":
+        first["answer"].append(copy.deepcopy(first["answer"][0]))
+    elif mutation == "duplicate-turn-anchors":
+        last["answer"] = copy.deepcopy(first["answer"])
+    elif mutation == "unmatched-extra-turn":
+        source["turns"].append({**copy.deepcopy(last), "turn_no": 3})
+    elif mutation == "missing-reference":
+        first["model_calls"] = []
+    elif mutation == "duplicate-reference":
+        first["model_calls"] *= 2
+    elif mutation == "conflicting-captured-message":
+        source["model_calls"][0]["client_assistant_message_id"] = "another-message"
+    elif mutation == "missing-source-message":
+        first["source_message_id"] = None
+    elif mutation == "conflicting-captured-session":
+        source["model_calls"][0]["client_session_id"] = "another-session"
+    elif mutation == "conflicting-source-model":
+        first["source_model_ref"] = {"type": "responses_api_models", "name": "another-model"}
+    elif mutation == "failed-native-output":
+        last["answer"][0]["status"] = "failed"
+    else:
+        tool = source["tool_calls"][0]
+        tool["model_call_id"] = "model-call-2"
+        # Valid raw request evidence for the second model: failure must still be the
+        # multi-tool group's conflicting requesting ownership, not absent capture.
+        native_call = next(item for item in first["answer"] if item["call_id"] == tool["tool_call_id"])
+        source["model_calls"][1]["response"] = {"output": [copy.deepcopy(native_call)]}
+    original = copy.deepcopy(rollout)
+    with pytest.raises(AtifExportError):
+        _export_v2(rollout)
+    assert rollout == original
+
+
+def test_v2_conversation_batch_rejection_publishes_no_partial_output(tmp_path: Path) -> None:
+    good = _native_v2_rollout()
+    bad = copy.deepcopy(good)
+    bad["_ng_task_index"] = 4
+    bad["ng_trajectory"]["turns"][1]["answer"][0].pop("id")
+    source = tmp_path / "rollouts.jsonl"
+    _write_jsonl(source, [good, bad])
+    config = _export_config(source, tmp_path / "atif").model_copy(update={"compatibility_profile": "v2-conversation"})
+    with pytest.raises(AtifExportError, match="line 2"):
+        export_rollouts_to_atif(config)
+    assert not config.output_dirpath.exists()
+
+
+def test_v2_conversation_retains_a_unique_pair_reference_when_text_capture_has_no_model_call_id() -> None:
+    rollout = _native_v2_rollout()
+    source = rollout["ng_trajectory"]
+    final_call = source["model_calls"][1]
+    final_call.pop("model_call_id")
+    ref = {key: final_call["response_metadata"][key] for key in ("model_ref", "response_id")}
+    source["turns"][1]["model_calls"] = [ref]
+    source["invocations"][0]["model_calls"][1] = ref
+    final_step = _export_v2(rollout).steps[-1]
+    association = final_step.extra["nemo_gym"]["source_turn"]
+    assert association["model_call_id"] is None
+    assert association["model_call_ref"] == ref
+    assert association["index"] == 1
+
+
+@pytest.mark.parametrize("turns", [None, 1])
+def test_v2_conversation_rejects_invalid_turns_container_as_export_error(turns: Any) -> None:
+    rollout = _native_v2_rollout()
+    rollout["ng_trajectory"]["turns"] = turns
+    with pytest.raises(AtifExportError, match="invalid v2.0 trajectory"):
+        _export_v2(rollout)
+
+
+def test_v2_conversation_invalid_turns_rows_are_reported_together_without_partial_output(tmp_path: Path) -> None:
+    good = _native_v2_rollout()
+    rows = [good]
+    for index, turns in enumerate([None, 1], start=4):
+        row = copy.deepcopy(good)
+        row["_ng_task_index"] = index
+        row["ng_trajectory"]["turns"] = turns
+        rows.append(row)
+    source = tmp_path / "rollouts.jsonl"
+    _write_jsonl(source, rows)
+    config = _export_config(source, tmp_path / "atif").model_copy(update={"compatibility_profile": "v2-conversation"})
+    with pytest.raises(AtifExportError, match=r"rejected 2 row\(s\)") as exc:
+        export_rollouts_to_atif(config)
+    assert "line 2: ng_trajectory: invalid v2.0 trajectory" in str(exc.value)
+    assert "line 3: ng_trajectory: invalid v2.0 trajectory" in str(exc.value)
+    assert not config.output_dirpath.exists()
+    assert not list(tmp_path.glob(".atif.tmp-*"))

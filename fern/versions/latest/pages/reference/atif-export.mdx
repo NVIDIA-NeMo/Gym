@@ -50,5 +50,76 @@ under the ATIF root's `extra.nemo_gym` namespace rather than overloading the age
 | Conversion status | `complete` | Confirms that the supported normalized `ng_trajectory` profile was mapped without omission; it does not attest to the contents of opaque provider payloads. |
 | Conversion warnings | Not emitted by strict v1 | Reserved for a future best-effort mode that can describe information it could not represent. |
 
-The initial strict converter does not emit partial files or conversion warnings. Unsupported or lossy inputs fail validation.
-A future best-effort mode would need an explicit `partial` status and structured warnings rather than reusing `complete`.
+The default strict converter does not emit partial files or conversion warnings. Unsupported or lossy inputs fail validation.
+
+
+## Export v2 conversations explicitly
+
+To export a supported `ng_trajectory` version `2.0` rollout, select the compatibility profile:
+
+```bash
+gym eval export atif \
+    +rollouts_jsonl_fpath=results/rollouts.jsonl \
+    +output_dirpath=results/atif \
+    +session_id=eval-2026-11-03 \
+    +agent_version=1.2.3 \
+    +compatibility_profile=v2-conversation
+```
+
+Python callers pass `compatibility_profile="v2-conversation"` to `gym_rollout_to_atif`. The default `strict-v1` profile rejects
+v2 input. The conversation profile also accepts v1 records using the unchanged strict conversion, so one exporter configuration
+can cover a migration. Unknown schema versions and invalid timing boundaries or statuses fail validation.
+
+This profile builds ATIF content from the normalized root invocation conversation. It accepts one completed root invocation,
+text and generic function calls with completed results, and exactly one proven captured model call per exported agent step.
+It rejects nested invocations, repeated normalized `tool_call_id` values, failed or unfinished tools, and structural or
+request-correlation gaps. Unknown identity never becomes a guessed association.
+
+Each native turn must reference one captured model call. Tool groups join through their normalized call IDs and the tools'
+requesting `model_call_id`; every tool in a group must agree with the same native turn and model call. Text-only groups join
+through a unique persisted assistant message ID in the native turn's answer. The supported native answer anchor shape is a
+list of `function_call` items with `call_id`, or one assistant `message` item with `id`. Missing, duplicate or ambiguous
+anchors reject the export. Turn order, text and timestamps do not select a match. Known invocation, turn and model instances
+must agree. Captured session and assistant-message IDs, when present, must match the native invocation and `source_message_id`.
+
+Native turns remain unchanged under root `extra.nemo_gym.source_turns`. Questions may remain null; native step counts keep
+the producer's meaning; native answer and reasoning payloads remain opaque evidence, including fields not represented by
+Responses items. Each exported agent step records its `source_turn` association under `extra.nemo_gym`, including the index
+in that original turn list and its model-call ID. This profile does not emit the strict-v1 `turn.step_count` metadata because
+that field describes cumulative tool-call counts. ATIF step IDs and final step counts still count the exported steps.
+
+The conversation is not asserted to be the exact provider request. Actual captured requests and responses remain unchanged
+in each step's `extra.nemo_gym.model_call`; no conversation prefix is inserted as a missing native question. The v2 profile
+uses the same model-completion, token-accounting and supported conversation checks as strict v1, without requiring native
+turn payloads to duplicate that conversation. A completed tool may retain only a start or a duration without changing its
+reported outcome.
+
+The root `extra.nemo_gym.tool_timing` extension retains the original v2 tool records, including nulls and empty measurement
+lists, plus capture identity, invocation/turn/model instance identity, model clocks, failure events and source gaps. Its tool records
+preserve span/native/parent/requesting-model/failure IDs and each measurement's boundary, source, clock domain and duration
+provenance.
+Three provenance gaps are accepted when scoped to one exported tool attempt: `tool_agent_instance_unavailable`,
+`tool_clock_domain_unavailable`, and `tool_duration_source_unavailable`. They remain in the extension and each produces a
+`source_timing_provenance_gap` warning. No missing instance, clock or duration source is invented. Every other source gap
+still rejects the export, including missing or ambiguous requesting-model joins and missing execution-attempt identity.
+
+The original values remain available even where the scalar projection cannot express them:
+
+| V2 evidence | Compatibility mapping |
+| --- | --- |
+| One timing boundary | Known endpoints and duration are copied independently. Executor maps to `executor`, transcript to `artifact`, and lifecycle/event receipt to `harness`. |
+| Several timing boundaries | Scalar timing is omitted; all measurements remain in the extension. No boundary is selected implicitly. |
+| Empty timing list or unknown duration | Remains unavailable; no zero duration is invented. A reported zero remains zero. |
+| Attempt, instance, parent and requesting-model identity; failure links; clocks and detailed sources | Retained in `extra.nemo_gym.tool_timing`; the v1 scalar fields do not express these semantics. |
+
+V2 exports identify their conversion as `ng-trajectory-v2-conversation-to-atif-v1` with `status: partial` and structured
+`warnings`. `native_turns_extension_required` identifies the native-turn preservation boundary and distinguishes conversation
+content from provider requests. `v2_timing_extension_required` reports the need to read the timing extension; `multiple_timing_boundaries_not_projected`
+names each attempt whose scalar timing was omitted. The `partial` status describes the compatibility mapping, not an
+unfinished tool. Consumers that ignore the extension lose v2 identity and timing provenance and must not interpret lifecycle
+or transcript evidence as executor timing. Gym's ATIF reverification reconstructs the supported conversation; it does not
+restore this v2 timing contract.
+
+The exporter validates every row before publishing the output directory and manifest. Rejected v2 input leaves no partial
+batch. To roll back a consuming path, keep that producer path explicitly projected to v1 or use the default `strict-v1`
+profile with v1 inputs; changing a v2 schema label does not make its records compatible.
