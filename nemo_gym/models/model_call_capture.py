@@ -78,7 +78,7 @@ class ModelExecutionOutcome(TypedDict):
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
     local_response_reason: str | None
-    # Set when the adapter lowered the calls output budget to fit the engines context window and sent it again.
+    # Set when the adapter lowered the call's output budget to fit the engine's context window and sent it again.
     requested_max_tokens: NotRequired[int]
     applied_max_tokens: NotRequired[int]
     # The same refit as one event: ``requested_max_tokens``, the engine's ``window`` and ``applied_max_tokens``.

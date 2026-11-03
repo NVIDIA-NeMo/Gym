@@ -34,7 +34,7 @@ The job script begins with a prologue that runs before any service starts. Each 
 
 It then queues a sentinel for that successor, `sbatch --dependency=afterany:<successor>`. The sentinel continues the chain only if the successor dies after it started and before its own prologue recorded it; otherwise it exits without doing work.
 
-If a job finishes successfully, its queued successor has a dependency that can never be satisfied, and Slurm cancels it. That cancellation satisfies the sentinel's dependency, so a sentinel left in the queue starts and exits at once; cancel it to save the allocation (its ID is in `.gym_followup_sentinel.<job ID>`).
+If a job finishes successfully, its queued successor has a dependency that can never be satisfied, and Slurm cancels it. That cancellation satisfies the sentinel's dependency, so a sentinel left in the queue would start and exit at once. A job whose driver finishes the run therefore ends the chain itself: after the driver step it cancels its queued sentinel and successor and journals both, with their job IDs and the `scancel` result, in `chain-end-journal.jsonl`, so no allocation starts for a finished run. In a `job.sh` rendered before that, or when the journal reports `scancel_failed`, cancel the sentinel yourself (its ID is in `.gym_followup_sentinel.<job ID>`).
 
 What the next job does with the previous job's state:
 
@@ -62,15 +62,17 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | `.gym_job_chain` | The Slurm job ID of every job in the chain, one per line. |
 | `.gym_accumulated_walltime` | Seconds of walltime consumed by finished jobs. Compared with `max_walltime`. |
 | `.gym_infra_retries` | Count of infrastructure retries so far. |
+| `.gym_infra_retry_extension` | Infrastructure retries added to the configured cap, written only by `gym eval resubmit --recover --extend-retries`. |
 | `.gym_followup_queued.<job ID>` | The observed successor job ID, or an unresolved submission claim. An unresolved claim cannot authorize another submission. |
 | `.gym_followup_sentinel.<job ID>` | The job ID of the sentinel queued for that job's successor. |
 | `.gym_driver_failure.<job ID>` | The failure kind that job's driver left when it failed in a way the next job would repeat. |
+| `.gym_chain_incomplete` | Why the chain stopped before the run finished (no eligible retries, the walltime cap, a cancel or unknown accounting). A chain that continues removes it. |
 
 ## Recover from saved evidence
 
 For a submitted Slurm benchmark, recovery reads the existing materialized inventory, results, failure sidecar, quality report, scheduler state and retry/time counters before choosing an action. It requires the saved resumable configuration and a job script that supports budget-preserving recovery.
 
-For managed rollouts on a remote host, recovery uses the saved `driver.gym_install` repository and immutable commit to run the authoritative Store reader over SSH. The temporary installation and read are bounded to five minutes; recovery checks the imported source, exact job directory, stable artifact snapshots and saved submission configuration. An unavailable runtime, an unpinned ref, or an older pinned version without the reader stops recovery. It does not silently upgrade the saved version or copy saved answers to the caller.
+For managed rollouts on a remote host, recovery uses the saved `driver.gym_install` repository and immutable commit to run the authoritative Store reader over SSH. The temporary installation and read are bounded by a size-aware limit (see `NEMO_GYM_REMOTE_READER_TIMEOUT_S` below), with one retry at twice the bound after a timeout or a failed SSH hop; recovery checks the imported source, exact job directory, stable artifact snapshots and saved submission configuration. An unavailable runtime, an unpinned ref, or an older pinned version without the reader stops recovery. It does not silently upgrade the saved version or copy saved answers to the caller.
 
 Use the submission ID printed by `gym eval submit` and the benchmark name. Select an aggregate entry by its saved `agent_ref.name` and, where needed, `_ng_environment_server`; its position in the aggregate array is not an identity.
 
@@ -109,12 +111,20 @@ each user one core, so both readers can run in a Slurm step instead:
   bound plus 60 s, and the job name `gym-reader-<GYM_READER_TOKEN>`. If the recovery process or its SSH connection
   ends while the Store reader runs in a step, Gym cancels the step by name.
 - `NEMO_GYM_REMOTE_READER_SRUN_WAIT_S` (default 120): a step that has not started by then is cancelled by name, at
-  most 60 s is spent waiting for it to leave the queue, and the reader runs on the login host.
+  most 60 s is spent waiting for it to leave the queue, and the reader then takes the fallback below. If the
+  cancelled step is not confirmed gone, no second reader is started on the login host.
 - `NEMO_GYM_REMOTE_READER_MAX` (default 8): when the user already has this many `gym-reader-*` steps running or
-  pending, or `squeue` fails, the reader runs on the login host.
+  pending, the reader queues instead: it counts them again every 10 s for up to
+  `NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S` seconds (default 600; 0 does not wait) and runs in its step once one ends,
+  printing `gym-reader progress: queued behind N reader steps`. A cap still reached after that wait, or a failing
+  `squeue`, takes the fallback below.
+- `NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK` (default `forbid`; `allow` permits it): whether a reader that cannot run in
+  its step may read on the login host instead. Forbidden, the read does not run and nothing is read or decided from
+  the login host; stderr says `gym: the reader did not run: ...`.
 
-When a reader ran on a remote host, the gate task reports `reader_host` and `collector_host` (`login` or `cpu:<job id>`),
-and `reader_fallback_reason` and `collector_fallback_reason` when a reader stayed on the login host.
+When a reader ran on a remote host, the gate task reports `reader_host` and `collector_host` (`login`, `cpu:<job id>`, `none` when the reader did not
+run, or `unconfirmed` when a cancelled step was not confirmed gone), and `reader_fallback_reason` and
+`collector_fallback_reason` when a reader stayed on the login host or did not run.
 
 The optional unhealthy fraction is a **per-rollout** criterion for the existing quality report. It is not a response or trial denominator. Response failures are reported by cause and rate under `failures` and never fail the gate. Evaluation health, the trial gate, rejects at 2% from its known-failure lower bound. Below that threshold, it can pass when source-bound agent, model-attempt, supported client-executed function-tool, and verifier observations join across every expected identity and repeat. The verifier must record an actually executed programmatic grading calculation bound to the saved response and reward. Unjoined recovered failures, unsupported hosted or custom tools, unobserved judge dependencies, sandbox lifecycle gaps, and historical records without grading observations remain unknown; a low failure count alone does not certify them. Missing report-source identity, unsupported multi-source summaries, malformed counters or missing runtime facts remain unknown.
 
@@ -126,13 +136,13 @@ grading operation for it, for example a benchmark whose resources server does no
 observed how such a trial was graded, so it is unverified: it counts neither as healthy nor as a failure, and the
 trial gate stays unknown. `unobserved_reason` names the resources servers, and the trial reason reads
 `trial: UNOBSERVED <n> of <N> expected trials: ..., so the run is unverified, not healthy`. A run in which every
-trial is unobserved is never healthy; its gate status is `FAILED`, with that reason, even at full score and coverage.
+trial is unobserved is never healthy; its gate status is `UNVERIFIED`, with that reason, even at full score and coverage.
 
 Only supply `--mlflow-run-id ID --mlflow-status FINISHED` after observing that exact backend run and status. Those flags do not perform an export. Acceptance also requires a current content-bound receipt recording rollout delivery. The postrun exporter writes this receipt. A fresh live MLflow activation can also write it for the same run after final collection and health artifacts are stable, acknowledged rollout/config/metric delivery matches those artifacts, and the backend confirms completion. Resumed activations and incomplete delivery remain unverified; legacy run-ID-only markers do not satisfy this check. A successful recovery invocation is therefore separate from confirmed tracking delivery.
 
 Rollout export projection version 1 retains the canonical `ng_trajectory` identities, invocation and verifier outcomes, model/tool joins, timing, failure evidence, and observation gaps. It omits invocation conversations, turn question/answer/reasoning payloads, raw model requests/responses, and tool outputs. Omitted payloads remain unavailable; the projection does not by itself establish response health or saved-answer reverification. Delivery receipts include `rollout_projection_version: 1` and bind the acknowledged projection to the saved artifacts. Older receipts without this field do not verify canonical evidence delivery and are not overwritten or automatically re-exported.
 
-Automatic recovery preserves spent history and rollout attempts, and a recovery allocation consumes one remaining retry when it starts. For a capped run, every recorded allocation must have terminal scheduler accounting, consistent with the stored budget epoch. The last allocation's elapsed time is preserved before scheduling. Automatic resubmit rechecks the collected chain, counters, reset offset, saved configuration and follow-up claims under its existing submission lock before changing files or submitting. If any changed, it refuses and requires fresh evidence. Before starting services, the generated prologue limits the current Slurm allocation to the remaining walltime and verifies the scheduler readback. It only decreases the existing limit and rounds the remaining allowance down to whole minutes; less than one minute, failed updates or unknown accounting stop the job. Slurm enforces the time limit with the cluster's normal termination grace. A Slurm requeue of the same job ID stops before work or counter resets: these counters cannot establish the elapsed time of the prior incarnation. Recover only when complete terminal accounting is available.
+Automatic recovery preserves spent history and rollout attempts, and a recovery allocation consumes one remaining retry when it starts. The first allocation end of a rollout that was in flight is free; from the second end on, each one charges the affected rows one attempt (`rollout_allocation_ended`, retried under the attempt cap). For a capped run, every recorded allocation must have terminal scheduler accounting, consistent with the stored budget epoch. The last allocation's elapsed time is preserved before scheduling. Automatic resubmit rechecks the collected chain, counters, reset offset, saved configuration and follow-up claims under its existing submission lock before changing files or submitting. If any changed, it refuses and requires fresh evidence. Before starting services, the generated prologue limits the current Slurm allocation to the remaining walltime and verifies the scheduler readback. It only decreases the existing limit and rounds the remaining allowance down to whole minutes; less than one minute, failed updates or unknown accounting stop the job. Slurm enforces the time limit with the cluster's normal termination grace. A Slurm requeue of the same job ID stops before work or counter resets: these counters cannot establish the elapsed time of the prior incarnation. Recover only when complete terminal accounting is available.
 
 A run that ended before its task inventory was written has nothing to recover, and recovery answers `fresh-restart`: resubmit it as a fresh run with a longer walltime. Without `--max-walltime`, the reason says that it is required and names the command, `gym eval resubmit <GYM_JOB_ID> <BENCHMARK> --recover --max-walltime HH:MM:SS --walltime-reason TEXT`. With a `--max-walltime` longer than the recorded walltime, recovery queues the run as a fresh run with fresh retry and walltime budgets, records `plan: FRESH-RESTART`, `why` and both walltimes in `walltime-extension-journal.jsonl`, writes the same facts to `.gym_chain_incomplete` until the queued job continues the chain, and leaves the saved artifacts as they are. While a job of the run is live, recovery answers NOOP and queues nothing.
 
@@ -143,6 +153,7 @@ Without `--recover`, ordinary `gym eval resubmit` keeps its existing explicit-re
 - `max_walltime` applies to all continuation paths, including `--recover`. A capped job needs permission to read and decrease its own Slurm time limit with `scontrol`; failure stops before services or another successor start. Existing job scripts are not silently rewritten: stage the new generated prologue to obtain these guards.
 - If queueing a successor fails, the job prints a warning (`Failed to submit auto-resume follow-up`) and carries on. `sbatch` can fail after it created the job, so check with `squeue --me --all`. A missing queue entry does not prove that a successor never ran. Automatic continuation remains stopped until the complete queue and terminal accounting are reconciled, including guard-stopped allocations. Requeueing does not repair unknown accounting or reset its stop state.
 - A job that finds its predecessor `CANCELLED` stops the chain. Because each job queues its successor before doing work, a successor may already be waiting in the queue when you cancel; check `squeue --me --all` and cancel any job still pending: the IDs of a job's successor and its sentinel are in `.gym_followup_queued.<job ID>` and `.gym_followup_sentinel.<job ID>`, and `.gym_job_chain` lists the jobs that have run.
+- An empty `sacct` reply for the previous job is retried: the job asks up to 6 times, 10 seconds apart, and then stops the chain with accounting unknown instead of resuming, so a scheduler whose accounting lags by about a minute stops chains. The stop's log line names the continuation, `gym eval resubmit <GYM_JOB_ID> <BENCHMARK> --recover --max-walltime HH:MM:SS --walltime-reason TEXT`, adding `--extend-retries N` when the retries are spent, and `gym eval resubmit --recover --inspect` reports it too; the `.gym_chain_incomplete` marker keeps the bare reason.
 - `resumable` does not work with a benchmark `command`, because resuming relies on `gym eval run`'s cache.
 - The `gym-job.json` record contains the first job's ID only.
 

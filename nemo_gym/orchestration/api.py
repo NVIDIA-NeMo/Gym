@@ -423,12 +423,14 @@ ComputeConfig = Annotated[
 
 
 class ResumeConfig(_StrictModel):
-    # Non-timeout failures, including preemption/node loss, are retried at most this many times.
+    # Infrastructure retries the chain admits, at most this many: preemption, node failure and boot failure, or a
+    # retry the saved evidence names after another stop. A generic FAILED, an out-of-memory kill or a deadline stops
+    # the chain instead.
     # Scheduler TIMEOUT continues planned segments within max_walltime; it is not a model timeout.
     max_retries: int = Field(default=3, ge=0)
     # Optional cap on the chain's total accumulated walltime, as a Slurm-style
     # duration string (e.g. "48:00:00"). None means resume until max_retries is
-    # hit on a non-timeout failure, or the job completes/is cancelled.
+    # spent on infrastructure failures, or the job completes/is cancelled.
     max_walltime: str | None = None
     # Partial overrides of the recovery outcome policy (RecoveryOutcomePolicyConfig): `by_failure_kind`,
     # `by_status_code` and `default_action` choose which saved failures recovery retries, re-judges (verify) or
