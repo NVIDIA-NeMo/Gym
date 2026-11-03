@@ -1494,7 +1494,7 @@ def substep_tests(r):
     return {"steps": len(steps), "passed": sum(steps), "num_steps_total": count(r.get("num_steps_total")),
             "num_steps_passed": count(r.get("num_steps_passed")), "problem_accuracy": boolean(r.get("problem_accuracy")),
             "environment_results": len(environments) if isinstance(environments, list) else None}
-import json, re
+import hashlib, json, re
 JUDGE_VERDICT = re.compile(r"^(?:\[\[(A=B|A!=B)\]\]|judgement:\s*(yes|no))$", re.IGNORECASE)
 def unit_tests(r):
     # Saved per-test unit test results of the answer's extracted code (True passes; False or an error code does
@@ -1560,6 +1560,14 @@ def native_score(r):
     diagnostics = r.get("native_diagnostics")
     return {"weighted_score": finite(metrics.get("weighted_score")), "execution": finite(metrics.get("execution")),
             "diagnostics": isinstance(diagnostics, dict) and bool(diagnostics)}
+def saved_model_patch(r):
+    # Whether the row saved the workspace patch its verifier grades, intact: model_patch hashes (UTF-8) to the saved
+    # model_patch_sha256. False for a patch field without an intact patch (never collected, or not matching its
+    # digest), None for a row without one. The patch itself stays local.
+    if "model_patch" not in r and "model_patch_sha256" not in r:
+        return None
+    patch, digest = r.get("model_patch"), r.get("model_patch_sha256")
+    return isinstance(patch, str) and isinstance(digest, str) and hashlib.sha256(patch.encode("utf-8")).hexdigest() == digest
 def judge_verdicts(value):
     # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
     # not parse; the label text stays local.
@@ -1618,6 +1626,7 @@ def grading_facts(r):
         "node_f1": node_f1(r),
         "guarded_objectives": guarded_objectives(r),
         "native_score": native_score(r),
+        "saved_model_patch": saved_model_patch(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -1743,8 +1752,10 @@ def rows(name, skip=0):
                 reward_file = session_reward(r)
                 if reward_file is not None:
                     facts["session_reward"] = reward_file
-                # A zero is a fact (a wrong answer's library_reward, a passing exit code), so compare by identity.
-                if any(value is not None and value is not False and value != [] for value in facts.values()):
+                # A zero is a fact (a wrong answer's library_reward, a passing exit code), so compare by identity; so
+                # is a patch field without an intact patch.
+                if facts["saved_model_patch"] is False or any(
+                        value is not None and value is not False and value != [] for value in facts.values()):
                     selected["_ng_collected_grading_facts"] = facts
                 adaptations = r.get("agent_adaptations")
                 if isinstance(adaptations, dict):
@@ -6283,6 +6294,7 @@ def judge_job_note(job: Mapping[str, Any]) -> str:
 REVERIFY_JUDGE = "judge"
 REVERIFY_VERIFY_TRANSPORT = "verify_transport"
 REVERIFY_UNGRADED = "ungraded"
+REVERIFY_VERIFIER = "verifier"
 _REVERIFY_JUDGE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE})
 
 
@@ -6347,12 +6359,23 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
     return grading_artifact(row) is None and not _model_failure(row)
 
 
+def _saved_model_patch(row: Mapping[str, Any]) -> bool:
+    """Whether the row saved the workspace patch its verifier graded, intact: the collector's projected fact, else the
+    same check on a full saved row (``saved_model_patch``)."""
+    facts = row.get("_ng_collected_grading_facts")
+    if isinstance(facts, Mapping) and "saved_model_patch" in facts:
+        return facts["saved_model_patch"] is True
+    return _collector_function("saved_model_patch")(row) is True
+
+
 def reverification_cause(row: Mapping[str, Any]) -> str | None:
     """Why a saved result row is re-verified from its saved answer, or None when it is not.
 
     ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``), or scored while
     its judge gave no verdict or its grading did not resolve (``_judge_unparseable``).
     ``REVERIFY_VERIFY_TRANSPORT``: masked because its verify call was lost in transport (``_verify_transport_failure``).
+    ``REVERIFY_VERIFIER``: masked because its verifier produced no verdict (``verifier_error``), with the workspace
+    patch it graded saved intact (``saved_model_patch``): the verifier runs again on that patch, never the agent.
     ``REVERIFY_UNGRADED``: scored, but no grading was recorded for it (``_grading_unrecorded``).
     Only a result with a saved answer qualifies; a failures-sidecar row, a result a re-verification already settled
     (its settlement is its grading) and every other masked result do not. ``row`` is a collector projection, or a
@@ -6368,6 +6391,8 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
     if row.get("mask_sample") is True:
         if row.get("failure_kind") in _REVERIFY_JUDGE_KINDS:
             return REVERIFY_JUDGE
+        if row.get("failure_kind") == VERIFIER_ERROR and _saved_model_patch(row):
+            return REVERIFY_VERIFIER
         return REVERIFY_VERIFY_TRANSPORT if _verify_transport_failure(row) else None
     if row.get("evaluation_completed") is False or _reward(row) is None:
         return None

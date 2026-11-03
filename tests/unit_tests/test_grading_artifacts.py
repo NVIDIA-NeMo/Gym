@@ -43,6 +43,7 @@ NO_FACTS = {
     "node_f1": None,
     "guarded_objectives": None,
     "native_score": None,
+    "saved_model_patch": None,
 }
 
 

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import json
 
 import pytest
@@ -59,7 +60,7 @@ def test_reverify_refuses_to_drop_the_saved_patch(patch):
             "response": {"output": []},
         },
     )
-    with pytest.raises(ConfigError, match="saved model_patch replay is unsupported"):
+    with pytest.raises(ConfigError, match="saved model_patch replay needs the verifier's own patch"):
         _build_verify_payload(pair)
     assert pair.rollout["model_patch"] == patch
     assert pair.input["patch"] == "reference patch"
@@ -88,7 +89,44 @@ def test_typed_ungraded_patch_cannot_fall_back_to_reference_patch(patch):
             "response": {"output": []},
         },
     )
-    with pytest.raises(ConfigError, match="saved model_patch replay is unsupported"):
+    with pytest.raises(ConfigError, match="saved model_patch replay needs the verifier's own patch"):
         _build_verify_payload(pair)
     assert pair.rollout["model_patch"] == patch
     assert pair.input["patch"] == "reference patch"
+
+
+def test_an_ungraded_saved_patch_is_replayed_as_itself():
+    # The verifier produced no verdict for this patch: re-verification sends the saved patch with its saved digest,
+    # never the task's reference patch.
+    patch = "diff --git a/x b/x\n+\u00e9\n"
+    pair = InputRolloutPair(
+        input={"patch": "reference patch"},
+        rollout={
+            "failure_kind": "verifier_error",
+            "evaluation_completed": False,
+            "mask_sample": True,
+            "model_patch": patch,
+            "model_patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            "response": {"output": []},
+        },
+    )
+    payload = _build_verify_payload(pair)
+    assert payload["saved_model_patch"] == patch
+    assert payload["saved_model_patch_sha256"] == pair.rollout["model_patch_sha256"]
+    assert payload["patch"] == "reference patch"
+
+
+def test_a_saved_patch_that_does_not_hash_to_its_digest_is_not_replayed():
+    pair = InputRolloutPair(
+        input={"patch": "reference patch"},
+        rollout={
+            "failure_kind": "verifier_error",
+            "evaluation_completed": False,
+            "mask_sample": True,
+            "model_patch": "saved patch",
+            "model_patch_sha256": "0" * 64,
+            "response": {"output": []},
+        },
+    )
+    with pytest.raises(ConfigError, match="saved model_patch replay needs the verifier's own patch"):
+        _build_verify_payload(pair)

@@ -85,6 +85,36 @@ def ungraded(task: int = 0, **extra) -> dict:
     return ident(task, reward=1.0, response=ANSWER, ng_trajectory=trajectory, **extra)
 
 
+def verifier_patch_masked(task: int = 0, *, intact: bool = True) -> dict:
+    """A result masked because its verifier produced no verdict for the workspace patch it was given, saved with the
+    patch and its sha256 (``intact`` False: the saved patch does not hash to the saved digest)."""
+    import hashlib
+
+    patch = "diff --git a/x b/x\n+fix\n"
+    digest = hashlib.sha256(patch.encode("utf-8")).hexdigest() if intact else "0" * 64
+    reason = "Verifier did not produce /logs/verifier/reward.json"
+    event = {
+        "event_id": f"verify-{task}",
+        "boundary": "resources_server",
+        "operation": "verify",
+        "stage": "verification",
+        "failure_kind": "verifier_error",
+        "failure_reason": reason,
+    }
+    return ident(
+        task,
+        reward=0.0,
+        mask_sample=True,
+        evaluation_completed=False,
+        response=ANSWER,
+        failure_kind="verifier_error",
+        failure_reason=reason,
+        _ng_failure_events={event["event_id"]: event},
+        model_patch=patch,
+        model_patch_sha256=digest,
+    )
+
+
 # --- the selector ---------------------------------------------------------------------------------------------------
 
 
@@ -505,3 +535,45 @@ async def test_a_rejudgment_that_again_lacks_a_game_verdict_settles_once_and_the
     for _ in range(2):  # later passes judge nothing: no loop
         assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
     assert len(verifier["posted"]) == 1
+
+
+# --- a verifier that produced no verdict for a saved patch ----------------------------------------------------------
+
+
+def test_a_verifier_error_with_its_saved_patch_intact_is_reverified_from_that_patch() -> None:
+    assert reverification_cause(saved_row_evidence(verifier_patch_masked())) == "verifier"
+    # A saved patch that does not hash to its digest, or none at all, is no verifier input: the mask stays.
+    assert reverification_cause(saved_row_evidence(verifier_patch_masked(intact=False))) is None
+    assert reverification_cause(saved_row_evidence(verifier_unmeasurable())) is None
+    # A judge failure keeps its own cause.
+    judge = verifier_patch_masked() | {"failure_kind": "judge_unparseable"}
+    assert reverification_cause(saved_row_evidence(judge)) == "judge"
+
+
+def test_recover_decides_reverify_for_a_verifier_error_with_its_saved_patch() -> None:
+    d = decide_recovery(
+        materialized=inventory(3),
+        results=[scored(0), verifier_patch_masked(1), verifier_patch_masked(2, intact=False)],
+        failures=[],
+        budget=OK_BUDGET,
+    )
+    assert d.identities[IdentityState.JUDGE_RECOVERABLE] == [(1, 0)]
+    assert d.identities[IdentityState.MASKED] == [(2, 0)]
+
+
+def test_the_cluster_projection_reverifies_a_saved_patch_without_carrying_it(tmp_path) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rows = [verifier_patch_masked(0), verifier_patch_masked(1, intact=False)]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in inventory(2)))
+    (artifacts / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (artifacts / "rollouts_failures.jsonl").write_text("")
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)], capture_output=True, text=True, check=True
+    )
+    assert "diff --git" not in raw.stdout
+    d = decide_from_collected(
+        CollectedEvidence.model_validate_json(raw.stdout), max_infra_retries=3, max_walltime_s=None, live_job=False
+    )
+    assert d.identities[IdentityState.JUDGE_RECOVERABLE] == [(0, 0)]
+    assert d.identities[IdentityState.MASKED] == [(1, 0)]

@@ -243,3 +243,66 @@ def test_a_masked_infrastructure_result_with_only_a_no_generation_placeholder_is
     _run(tmp_path, [[_masked("session_lost") | placeholder]])
     _, decision = _decide(tmp_path, allocation_cut=False)
     assert decision.counts == {"scored": 1, "retryable": 1}, decision.reason
+
+
+# A masked row whose saved transcript holds no gradeable artifact has no answer for the contract: it is an omission,
+# and running it again is the ordinary infrastructure retry. "Never regenerate" applies to a gradeable answer only.
+
+
+def _agent_sandbox_verified():
+    """The verifier graded the agent's own sandbox (a terminal task's container), which is gone after the rollout."""
+    return {
+        "ng_trajectory": {
+            "verifier_invocations": [
+                {
+                    "invocation_id": "v1",
+                    "status": "completed",
+                    "sandbox_observations": [
+                        {"role": "agent", "provider": "p"},
+                        {"role": "verifier", "provider": "p"},
+                    ],
+                }
+            ]
+        }
+    }
+
+
+def _patch(intact):
+    import hashlib
+
+    patch = "diff --git a/x b/x\n"
+    return {"model_patch": patch, "model_patch_sha256": hashlib.sha256(patch.encode()).hexdigest() if intact else "0"}
+
+
+@pytest.mark.parametrize(
+    "kind,fields",
+    [
+        ("session_lost", {"model_patch": None}),
+        ("verifier_error", {"model_patch": None}),
+        ("verifier_error", _agent_sandbox_verified()),
+    ],
+    ids=["patch-never-collected", "verifier-patch-never-collected", "agent-sandbox-graded"],
+)
+def test_a_masked_transcript_without_a_gradeable_artifact_is_an_infrastructure_retry(tmp_path, kind, fields):
+    output, _ = _run(tmp_path, [[_masked(kind) | _ANSWER | fields]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert [(row["_ng_task_index"], row["_ng_attempt_index"]) for row in store.pending()] == [(1, 1)]
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "retryable": 1}, decision.reason
+    assert _evidence(decision, (1, 0)).failure_kind == kind
+
+
+@pytest.mark.parametrize(
+    "kind,fields",
+    [
+        ("verifier_error", {}),
+        ("session_lost", {}),
+        ("verifier_error", _patch(intact=True)),
+        ("judge_failed", _agent_sandbox_verified()),
+    ],
+    ids=["text-answer", "text-answer-session-lost", "intact-patch", "judge-failure"],
+)
+def test_a_masked_result_with_a_gradeable_answer_is_not_sampled_again(tmp_path, kind, fields):
+    output, _ = _run(tmp_path, [[_masked(kind) | _ANSWER | fields]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == []

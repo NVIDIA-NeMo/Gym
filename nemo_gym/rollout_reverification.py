@@ -711,10 +711,22 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     saved_patch_failure = _is_judge_failure(pair.rollout) or (
         pair.rollout.get("failure_kind") == VERIFIER_ERROR and pair.rollout.get("evaluation_completed") is False
     )
-    if saved_patch_failure and isinstance(pair.rollout.get("model_patch"), str):
-        # This projection only carries the response, not a saved workspace patch. Do not silently
-        # grade another patch (for example the task's reference patch) or ask the agent for a new one.
-        raise ConfigError("reverify: saved model_patch replay is unsupported; retain the original patch and failure")
+    saved_patch = pair.rollout.get("model_patch")
+    replay_patch = False
+    if saved_patch_failure and isinstance(saved_patch, str):
+        # Only the patch the verifier graded is graded again, never another patch (the task's reference patch, say)
+        # and never a new one from the agent: it must hash to the saved digest, and it goes to /verify as itself.
+        digest = pair.rollout.get("model_patch_sha256")
+        if (
+            _is_judge_failure(pair.rollout)
+            or not isinstance(digest, str)
+            or (hashlib.sha256(saved_patch.encode("utf-8")).hexdigest() != digest)
+        ):
+            raise ConfigError(
+                "reverify: saved model_patch replay needs the verifier's own patch with its saved sha256; retain the "
+                "original patch and failure"
+            )
+        replay_patch = True
     response = _rollout_response(pair.rollout)
     task_input = pair.input.get("task_input")
     if not isinstance(task_input, dict):
@@ -736,6 +748,9 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     for key in ("deliverables_dir", "reference_ids"):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
+    if replay_patch:
+        payload["saved_model_patch"] = saved_patch
+        payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
     # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
     # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
     for key in _IDENTITY_KEYS:
