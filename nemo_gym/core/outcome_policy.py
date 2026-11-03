@@ -16,7 +16,10 @@ if TYPE_CHECKING:
 
 
 class OutcomeAction(StrEnum):
-    """Mutually exclusive grading or episode-failure action."""
+    """Action selected for one boundary decision.
+
+    Each boundary restricts supported actions and enforces their prerequisites.
+    """
 
     VERIFY = "verify"
     RETRY = "retry"

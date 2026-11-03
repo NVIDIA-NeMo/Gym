@@ -332,61 +332,27 @@ Rewrites are ordered. The first matching `from` prefix wins.
 
 ## Error Handling
 
-Providers that have not migrated to the shared failure contract use these creation exceptions:
-
-- `SandboxCreateError` for sandbox allocation or readiness failures.
-- `SandboxCreateVerificationError` when a created sandbox fails Gym readiness verification.
-
 Command process exits, including nonzero exits, return `SandboxExecResult`. OpenSandbox allocation, readiness, lifecycle and runtime failures
 raise the shared `NgFailureEvent` with `boundary="sandbox"`. Its registered `failure_kind`, `operation`,
 HTTP status when observed, `sandbox` details and explicit cause carry the evidence; callers apply their
 own outcome policy. A failure kind does not decide attribution, retryability, health or a zero score.
 
-| Failure kind | Observed condition |
-| --- | --- |
-| `provider_create_timeout` | The create/reconnect readiness deadline expired without a confirmed Pending observation. |
-| `provider_create_pending` | An attempt-owned sandbox was observed Pending when its create deadline expired. |
-| `provider_not_ready` | A newly created sandbox failed the configured readiness probe, or the SDK reported it unhealthy. |
-| `provider_setup_failed` | Sandbox setup or a required runtime check failed. |
-| `provider_internal_error` | The SDK reported an internal failure without a recognized transport cause. |
-| `provider_pty_unavailable` | The PTY session is missing, detached, closed or has lost its connection. |
-| `provider_pty_busy` | The PTY server refused attachment because another client holds the session. |
-| `provider_protocol_error` | An SDK response or PTY frame lacked required protocol fields. |
-| `provider_request_failed` | A provider request failed without a more specific classification. |
-| `provider_unavailable` | A transport failure or unavailable-backend HTTP response. |
-| `provider_credentials_rejected` | An observed HTTP 401 or 403 from the provider. |
-| `provider_io_timeout` | A provider request or file transfer timed out; remote completion is unknown. |
-| `provider_status_unavailable` | The budget for obtaining an already-submitted command's status expired. |
-| `provider_command_timeout` | Gym observed its own command-session deadline expire; cleanup is handled separately. |
-| `provider_command_outcome_unknown` | Command outcome fields are absent/contradictory, or a PTY connection was lost. |
-| `provider_oom_killed` | Explicit terminal `OOMKilled` lifecycle reason or current-container inspect evidence. |
+The registered kinds and their meanings live in
+[failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py).
+The `provider_*` namespace covers sandboxes, browsers and containers; `boundary="sandbox"` identifies
+the API boundary for sandbox events.
 
 A command exit code of 137, a signal kill near a deadline, an error message, or a sidecar's OOM does not
 establish the command's cause. Forward `NgFailureEvent` unchanged when only forwarding; when reporting
 a distinct failure at a caller's boundary, create its event and use `raise ... from error`.
 
-OpenSandbox uses this contract for creation/readiness, lifecycle requests, command execution, file requests and
-PTY failures. Replace catches of its former `OpenSandboxCreate*Error`, `OpenSandboxSetupError` and
-`SandboxPtyError` with `NgFailureEvent` plus an explicit boundary/kind check. Other providers retain their
-existing exception contracts. Invalid local configuration still raises `ValueError`; cancellation propagates.
-PTY `read(timeout_s=...)` and `wait_exit(timeout_s=...)` retain `TimeoutError` for a caller's bounded wait:
+Other built-in providers can raise `SandboxCreateError` for allocation or readiness failures and
+`SandboxCreateVerificationError` for a failed Gym readiness check. The `NgFailureEvent` contract above
+describes OpenSandbox.
+
+Invalid local configuration raises `ValueError`; cancellation propagates.
+PTY `read(timeout_s=...)` and `wait_exit(timeout_s=...)` raise `TimeoutError` when the caller's bounded wait expires:
 that timeout alone does not mean the PTY or command failed.
 
 In resources servers and agents, forward OpenSandbox failures to the owning task boundary for its outcome
-policy. An infrastructure failure alone does not justify a zero reward:
-
-```python
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_runtime import FailureBoundary
-from nemo_gym.typed_exceptions import NgFailureEvent
-
-
-sandbox = AsyncSandbox(provider_config, spec)
-try:
-    await sandbox.start()
-except NgFailureEvent as error:
-    if error.boundary != FailureBoundary.SANDBOX:
-        raise
-    # Preserve the event and its causes for the task boundary's policy and report.
-    raise
-```
+policy. Allow the event to propagate with its causes. An infrastructure failure alone does not justify a zero reward.
