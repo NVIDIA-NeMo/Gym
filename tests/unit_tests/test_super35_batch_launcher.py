@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.lmarena_v2 import prepare as lmarena_prepare
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,6 +66,7 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         SERVING,
         BUILDER,
         BENCHMARK / "sbatch_external_vllm.sh",
+        BENCHMARK / "save_warmed_vllm_container.py",
         BENCHMARK / "batch_configs/core.yaml",
         BENCHMARK / "batch_configs/swe.yaml",
     ):

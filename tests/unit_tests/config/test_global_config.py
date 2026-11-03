@@ -62,7 +62,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
-from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
 class TestGlobalConfig:
@@ -90,6 +90,7 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "server_spinup_timeout_seconds": 600,
+            "server_shutdown_timeout_seconds": 1,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
@@ -3473,7 +3474,7 @@ class TestComposeUnboundAgent:
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
         }
 
-    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent"])
+    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
     def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
         config = self._session_environment_config(harness_type)
         server_before = OmegaConf.to_container(
