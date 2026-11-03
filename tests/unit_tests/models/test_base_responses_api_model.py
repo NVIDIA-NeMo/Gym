@@ -1002,6 +1002,11 @@ def test_a_model_root_url_carries_the_sampling_segment_last():
             == "http://h:1/ng-rollout/r1/ng-sampling/run"
         )
         assert apply_rollout_prefix("http://h:1", "r1", trace_context=False) == "http://h:1/ng-rollout/r1"
+        # An explicit segment applies even to a URL shared across rollouts, such as a sidecar's null.
+        assert (
+            apply_rollout_prefix("http://h:1", "r1", trace_context=False, model_sampling="null")
+            == "http://h:1/ng-rollout/r1/ng-sampling/null"
+        )
     # Rollout prefixes for resources servers never carry it.
     with model_sampling_context("values"):
         assert rollout_path_prefix("r1") == "/ng-rollout/r1"

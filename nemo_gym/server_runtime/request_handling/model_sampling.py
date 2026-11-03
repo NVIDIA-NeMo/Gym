@@ -219,6 +219,10 @@ class CallerSamplingMiddleware:
     trains, so its judges and tools keep their own sampling, or their Model Server's ``sampling_overrides``.
     """
 
+    # Read by MCP auto-exposure: the segment is set for the whole /mcp request, and direct MCP dispatch runs each tool
+    # inside that request, so a tool's model calls keep it.
+    applies_to_mcp_requests = True
+
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 

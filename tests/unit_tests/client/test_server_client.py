@@ -397,10 +397,12 @@ class TestServerClient:
                 True,
                 "/ng-rollout/4-2/ng-sampling/OWN/v1/responses",
             ),
-            # Only a Model Server's generation routes carry it: not its other routes, nor any other server.
+            # An agent's generation route carries it too: an agent's call to its own /v1/responses keeps the run's
+            # values, so the model calls it makes carry them. Other routes and other servers do not.
+            ("agent", "/v1/responses", False, "/ng-sampling/SEG/v1/responses"),
+            ("agent", "/run", False, "/run"),
             ("policy_model", "/v1/embeddings", False, "/v1/embeddings"),
             ("resources", "/verify", False, "/verify"),
-            ("agent", "/v1/responses", False, "/v1/responses"),
         ],
     )
     async def test_ServerClient_gives_model_calls_the_current_sampling_segment(
