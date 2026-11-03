@@ -129,6 +129,10 @@ def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
     return response
 
 
+def _function_tool(name: str) -> dict[str, Any]:
+    return {"type": "function", "name": name, "parameters": {"type": "object", "properties": {}}, "strict": False}
+
+
 class TestApp:
     def test_resource_only_metadata_is_not_sent_to_policy(self) -> None:
         body = NeMoGymResponseCreateParamsNonStreaming(
@@ -692,7 +696,10 @@ class TestApp:
         assert seed.status_code == 200
 
         with pytest.raises(RuntimeError, match="no direct HTTP tool access"):
-            client.post("/v1/responses", json={"input": [{"role": "user", "content": "weather?"}]})
+            client.post(
+                "/v1/responses",
+                json={"input": [{"role": "user", "content": "weather?"}], "tools": [_function_tool("get_weather")]},
+            )
         assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["model"]
         direct_request.assert_not_awaited()
 
@@ -842,7 +849,10 @@ class TestApp:
         server_client.post = AsyncMock(side_effect=post)
         body = SimpleAgentRunRequest.model_validate(
             {
-                "responses_create_params": {"input": [{"role": "user", "content": "question"}]},
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "question"}],
+                    "tools": [_function_tool("lookup")],
+                },
                 "instance_id": 0,
                 "_ng_task_index": 4,
                 "_ng_rollout_index": 1,
@@ -1187,7 +1197,10 @@ class TestApp:
         dotjson_mock.cookies = MagicMock()
         server.server_client.post.return_value = dotjson_mock
 
-        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+        res = client.post(
+            "/v1/responses",
+            json={"input": [{"role": "user", "content": "hello"}], "tools": [_function_tool("my_tool")]},
+        )
         assert res.status_code == 200
 
         # The resources server must not be called for a malformed tool call —
@@ -1752,7 +1765,7 @@ class TestCheckpointContinuation:
             return _mock_response(_TOOL_CALL_RESPONSE if model_calls == 1 else _FINAL_RESPONSE)
 
         server_client.post = AsyncMock(side_effect=post)
-        body = NeMoGymResponseCreateParamsNonStreaming(input="weather?")
+        body = NeMoGymResponseCreateParamsNonStreaming(input="weather?", tools=[_function_tool("get_weather")])
         original = _RecordingActivation()
         first, *_ = await server._create_episode(body, model_url_path="/v1/responses", activation=original)
 
@@ -1783,7 +1796,7 @@ class TestCheckpointContinuation:
             return _mock_response(_TOOL_CALL_RESPONSE if model_calls < 3 else _FINAL_RESPONSE)
 
         server_client.post = AsyncMock(side_effect=post)
-        body = NeMoGymResponseCreateParamsNonStreaming(input="weather?")
+        body = NeMoGymResponseCreateParamsNonStreaming(input="weather?", tools=[_function_tool("get_weather")])
         original = _RecordingActivation()
         _, trajectory, *_ = await server._create_episode(
             body, model_url_path="/v1/responses", collect_trajectory=True, activation=original
@@ -2301,7 +2314,7 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
 def _legacy_run_request(attempt: int) -> SimpleAgentRunRequest:
     return SimpleAgentRunRequest.model_validate(
         {
-            "responses_create_params": {"input": "weather?"},
+            "responses_create_params": {"input": "weather?", "tools": [_function_tool("get_weather")]},
             TASK_INDEX_KEY_NAME: 0,
             ROLLOUT_INDEX_KEY_NAME: 0,
             ATTEMPT_INDEX_KEY_NAME: attempt,
@@ -3059,7 +3072,11 @@ async def test_a_restored_session_s_direct_http_tool_calls_reach_the_restored_re
         await fresh.post("/ng-control/v1/checkpoint/resume", json=_checkpoint("r1"), headers=_RESOURCES_AUTH)
         request = MagicMock(cookies={}, session={AGENT_SESSION_COOKIE_KEY: _SESSION_ID}, headers={})
         request.path_params = {"rollout_id": "rollout-a1"}
-        await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="weather?"))
+        await server.responses(
+            request,
+            Response(),
+            NeMoGymResponseCreateParamsNonStreaming(input="weather?", tools=[_function_tool("get_weather")]),
+        )
 
     assert paths == ["/ng-rollout/rollout-a1/get_weather"]
     # The restored count of one, and the replacement's call.
@@ -3272,7 +3289,7 @@ async def test_exhausted_model_retries_preserve_partial_work_without_repeating_t
     monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
 
     response, trajectory, _, _ = await server._create_episode(
-        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        NeMoGymResponseCreateParamsNonStreaming(input="hello", tools=[_function_tool("bash")]),
         model_url_path="/ng-rollout/rollout/v1/responses",
         in_session=True,
         tool_access=DirectHTTPToolAccess(name="resources", base_url="http://resources", required=True),
@@ -3293,3 +3310,76 @@ async def test_exhausted_model_retries_preserve_partial_work_without_repeating_t
         assert response.usage.total_tokens == 28
     else:
         assert response.usage is None
+
+
+def _tool_call_response(*names: str) -> MagicMock:
+    calls = [
+        {"type": "function_call", "id": f"fc-{index}", "call_id": f"call-{index}", "name": name, "arguments": "{}"}
+        for index, name in enumerate(names)
+    ]
+    return _mock_response(
+        {
+            "id": "tool-response",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": calls,
+        }
+    )
+
+
+@pytest.mark.parametrize("name", ["verify", "../verify", "lookup/../../close_session"])
+async def test_a_tool_the_request_does_not_declare_is_not_called(name: str, monkeypatch: MonkeyPatch) -> None:
+    # The name is the last part of the tool URL, so an undeclared name could reach any route of the server.
+    server, client = _make_agent(True)
+    client.post = AsyncMock(side_effect=[_tool_call_response(name), _message_response("final")])
+    tool = AsyncMock()
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", tool)
+
+    _, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello", tools=[_function_tool("lookup")]),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        tool_access=DirectHTTPToolAccess(name="resources", base_url="http://resources/tools", required=True),
+        collect_trajectory=True,
+    )
+
+    tool.assert_not_awaited()
+    second_request = client.post.await_args_list[1].kwargs["json"].model_dump()
+    assert json.loads(second_request["input"][-1]["output"]) == {"error": f"Unknown tool {name!r}"}
+    assert (trajectory.tool_calls[0].status, trajectory.tool_calls[0].error_type) == ("failed", "unknown_tool")
+
+
+async def test_a_run_without_a_grant_does_not_send_an_undeclared_tool_to_the_resources_server() -> None:
+    server, client = _make_agent(False)
+    client.post = AsyncMock(side_effect=[_tool_call_response("verify"), _message_response("final")])
+
+    await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello", tools=[_function_tool("lookup")]),
+        model_url_path="/v1/responses",
+    )
+
+    assert [call.kwargs["server_name"] for call in client.post.await_args_list] == ["model", "model"]
+
+
+async def test_declared_tools_are_called_including_the_tools_of_a_namespace(monkeypatch: MonkeyPatch) -> None:
+    server, client = _make_agent(False)
+    client.post = AsyncMock(side_effect=[_tool_call_response("lookup", "search"), _message_response("final")])
+    tool = AsyncMock(return_value=_mock_response(content="ok"))
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", tool)
+    namespace = {"type": "namespace", "name": "crm", "description": "CRM tools", "tools": [_function_tool("search")]}
+
+    await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello", tools=[_function_tool("lookup"), namespace]),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        tool_access=DirectHTTPToolAccess(name="resources", base_url="http://resources", required=True),
+    )
+
+    assert [call.kwargs["url"] for call in tool.await_args_list] == [
+        "http://resources/lookup",
+        "http://resources/search",
+    ]
