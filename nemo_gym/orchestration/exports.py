@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.artifacts.exporter_registry import RUN_EXPORTER_CONFIGS
+from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, EXPORT_RESULT_SUFFIX, EXPORTS_DIRNAME, ROLLOUTS_FILENAME
 
 
 if TYPE_CHECKING:
@@ -26,7 +27,9 @@ if TYPE_CHECKING:
 
 
 # Set per benchmark by the orchestrator, so a submit config may not set them.
-RESERVED_SETTINGS = ("rollouts_jsonl_fpath", "result_json_fpath", "exporter")
+ROLLOUTS_JSONL_FPATH_KEY = "rollouts_jsonl_fpath"
+RESULT_JSON_FPATH_KEY = "result_json_fpath"
+RESERVED_SETTINGS = (ROLLOUTS_JSONL_FPATH_KEY, RESULT_JSON_FPATH_KEY, "exporter")
 _GYM_JOB_ID_PREFIX = "gym-job-"
 
 
@@ -72,8 +75,8 @@ def export_run_settings(
     """
     run_name = f"{benchmark_name}-{gym_job_id}"
     full = deepcopy(settings)
-    full["rollouts_jsonl_fpath"] = str(bench_dir / "artifacts" / "rollouts.jsonl")
-    full["result_json_fpath"] = str(bench_dir / "exports" / f"{name}.result.json")
+    full[ROLLOUTS_JSONL_FPATH_KEY] = str(bench_dir / ARTIFACTS_DIRNAME / ROLLOUTS_FILENAME)
+    full[RESULT_JSON_FPATH_KEY] = str(bench_dir / EXPORTS_DIRNAME / f"{name}{EXPORT_RESULT_SUFFIX}")
     if name == "mlflow":
         full.setdefault("mlflow_run_name", run_name)
     elif name == "wandb":
@@ -81,7 +84,7 @@ def export_run_settings(
     elif name == "atif":
         submission = gym_job_id.removeprefix(_GYM_JOB_ID_PREFIX)
         full.setdefault("session_id", f"gym-submit-{benchmark_name}-{submission}")
-        full.setdefault("output_dirpath", str(bench_dir / "exports" / "atif"))
+        full.setdefault("output_dirpath", str(bench_dir / EXPORTS_DIRNAME / name))
     elif name == "evalrdl":
         full.setdefault("label", run_name)
         full.setdefault("run_dir", str(bench_dir))

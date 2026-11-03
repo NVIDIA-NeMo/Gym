@@ -33,6 +33,7 @@ from nemo_gym.artifacts.exporters import load_run_exporter_class
 from nemo_gym.artifacts.exporters.base import ExportResult, ExportState
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import RunExportConfig
+from nemo_gym.orchestration.exports import RESULT_JSON_FPATH_KEY
 
 
 RUNNING_STATE = "running"
@@ -72,7 +73,7 @@ def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
     """
     # Only the result file is read here; the rest of the shared settings are validated inside the recording
     # boundary below, so an error in them is written to the result file too.
-    result_fpath = TypeAdapter(Optional[Path]).validate_python(global_config_dict.get("result_json_fpath"))
+    result_fpath = TypeAdapter(Optional[Path]).validate_python(global_config_dict.get(RESULT_JSON_FPATH_KEY))
     if result_fpath is not None:
         previous = _read_state(result_fpath)
         if previous in _FINAL_STATES:

@@ -65,6 +65,7 @@ from nemo_gym.orchestration.executors.script_templates import (
 )
 from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
+from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, EVAL_SUCCEEDED_FILENAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
 
 
 _SCRIPT_TEMPLATE = """\
@@ -223,7 +224,7 @@ def _render_service_command(
     return (
         f"# service: {name}\n"
         f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
-        f" --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
+        f" --output={LOGS_DIRNAME}/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -1113,7 +1114,7 @@ def build_sbatch_script(
     # checkout instead of the job directory -- the run completes, exits 0, and
     # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
     # in the job directory without constraining cwd.
-    output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
+    output_path = f"+output_jsonl_fpath={remote_bench_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)
@@ -1205,7 +1206,7 @@ def build_sbatch_script(
     driver_srun = (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
+        f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     # Every service step but the collector, whose loss costs telemetry, not the run.
     watched = [
@@ -1214,7 +1215,7 @@ def build_sbatch_script(
         for step in (_ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name])
     ]
     marker_definition = (
-        f'{EVAL_SUCCEEDED_MARKER_ENV}={shlex.quote(str(remote_bench_dir / "eval.succeeded"))}".${{SLURM_JOB_ID}}"\n'
+        f'{EVAL_SUCCEEDED_MARKER_ENV}={shlex.quote(str(remote_bench_dir / EVAL_SUCCEEDED_FILENAME))}".${{SLURM_JOB_ID}}"\n'
         if export_tail is not None
         else ""
     )

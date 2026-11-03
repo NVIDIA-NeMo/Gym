@@ -18,6 +18,8 @@ import re
 import shlex
 from pathlib import Path
 
+from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
+
 
 _RAY_PRELUDE = """\
 # Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
@@ -225,8 +227,8 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
         'while kill -0 "$gym_run_pid" 2>/dev/null; do wait "$gym_run_pid"; gym_run_rc=$?; done',
         "trap - TERM INT",
         "set -e",
-        f"mkdir -p {bench}/exports || true",
-        f'echo "$gym_run_rc" > {bench}/eval.exit || true',
+        f"mkdir -p {bench}/{EXPORTS_DIRNAME} || true",
+        f'echo "$gym_run_rc" > {bench}/{EVAL_EXIT_FILENAME} || true',
         'if [ "$gym_run_rc" -eq 0 ]; then',
         f'    [ -z "${{{EVAL_SUCCEEDED_MARKER_ENV}:-}}" ] || : > "${EVAL_SUCCEEDED_MARKER_ENV}" || true',
         *(
