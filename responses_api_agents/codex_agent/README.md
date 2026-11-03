@@ -387,3 +387,11 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The
+OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
+other than `inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
+`sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `codex/` as the installer lays them out,
+and setup checks that it reports `codex-cli <codex_version>` instead of installing.

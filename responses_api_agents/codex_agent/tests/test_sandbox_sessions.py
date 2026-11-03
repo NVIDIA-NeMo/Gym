@@ -2800,6 +2800,104 @@ def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
         )
 
 
+def owned_seed_with_search_grant() -> dict:
+    body = seed().model_dump(mode="json")
+    body["sandbox_access"] = None
+    body["tool_accesses"] = [mcp_grant("search", required=False, url="http://resources.example:7000/mcp")]
+    return body
+
+
+def seed_owned(agent, sandbox, body: dict):
+    """Seed an agent-owned session; return the spec it started the sandbox with and the seed response."""
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body)
+    return (sandbox.start.await_args.args[0] if sandbox.start.await_args else None), created
+
+
+@pytest.mark.parametrize(
+    ("network_access", "allowed"),
+    [
+        ("inherit", None),
+        ("model_only", ["model.example"]),
+        ("model_and_tools", ["model.example", "resources.example"]),
+    ],
+)
+def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, network_access, allowed):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = network_access
+    sandbox.expected_workdir = "/workspace"
+
+    spec, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+
+    assert created.status_code == 200, created.text
+    policy = spec.provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+
+
+def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setup):
+    agent, sandbox = setup
+    agent.config.network_access = "model_only"
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 422
+        assert "borrowed" in created.text
+        factory.connect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reported", ["codex-cli 0.144.4", "codex-cli 0.143.0"])
+def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.sandbox_runtime_dir = "/opt/codex-runtime"
+    sandbox.expected_workdir = "/workspace"
+    execute = sandbox.execute
+
+    async def report_version(command, **kwargs):
+        if command.endswith("codex.js --version"):
+            return SimpleNamespace(error_type=None, return_code=0, stdout=reported + "\n", stderr="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = report_version
+
+    _, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    assert (
+        "/opt/codex-runtime/node/bin/node /opt/codex-runtime/codex/node_modules/@openai/codex/bin/codex.js --version"
+        in commands
+    )
+    assert not any("install_codex_runtime.sh" in command for command in commands)
+    assert not any(path.endswith("/install_codex_runtime.sh") for path in sandbox.files)
+    if reported == "codex-cli 0.144.4":
+        assert created.status_code == 200, created.text
+    else:
+        assert created.status_code >= 500
+        sandbox.stop.assert_awaited_once()
+
+
+def test_runtime_dir_must_be_absolute(setup):
+    agent, _ = setup
+    with pytest.raises(ValidationError):
+        CodexAgentConfig.model_validate({**agent.config.model_dump(), "sandbox_runtime_dir": "opt/codex"})
+
+
 def test_owned_stop_failure_blocks_close_until_retry(setup):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
