@@ -71,6 +71,24 @@ def test_an_environment_reward_beside_a_verifier_that_ran_does_not_observe_a_sel
     assert covered is False and passed is None, reason
 
 
+def test_a_self_grading_agents_trial_without_a_verifier_is_observed_through_its_rubrics_saved_score():
+    # No verifier ran: the agent's own rubric saved its guardrail-gated score and the counts it follows from.
+    collected = _agent_owned(record=None)
+    for row in collected.results:
+        row["_ng_collected_grading_facts"] = {
+            "guarded_objectives": {
+                "aa_headline": row["reward"],
+                "objectives_passed": row["reward"],
+                "objectives_total": 1.0,
+                "guardrails_violated": 0.0,
+                "guardrails_total": 1.0,
+            }
+        }
+    passed, reason, counts, covered = _gate(collected)
+    assert covered is True and passed is True, reason
+    assert counts["unobserved"] == 0
+
+
 # The verdict an earlier self-grading agent run had before agents could own their verifier, read from that code.
 UNOBSERVED_REASON = (
     "no completed grading operation or grading record was recorded by the verifier (a resources server the run "
