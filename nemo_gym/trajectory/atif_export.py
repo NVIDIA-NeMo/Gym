@@ -16,12 +16,13 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,6 +62,7 @@ from nemo_gym.trajectory.atif_v1_7 import (
     AtifToolCall,
     AtifTrajectoryV1_7,
 )
+from nemo_gym.trajectory.trajectory_format import project_trajectory_v1
 from nemo_gym.trajectory.trajectory_record import ModelCallRef, TrajectoryModelCall, TrajectoryRecord
 
 
@@ -75,6 +77,7 @@ class ExportAtifConfig(RunExportConfig):
     output_dirpath: Path
     session_id: str = Field(min_length=1)
     agent_version: str = Field(min_length=1)
+    compatibility_profile: Literal["strict-v1", "v2-conversation"] = "strict-v1"
 
     @field_validator("session_id", "agent_version")
     @classmethod
@@ -264,7 +267,7 @@ def _preflight_conversation(conversation: Any, *, path: str) -> None:
             _preflight_parts(item.get("output"), path=f"{item_path}.output", supported_fields=input_part_fields)
 
 
-def _preflight_raw_trajectory(value: Any) -> None:
+def _preflight_trajectory_envelope(value: Any) -> None:
     if not isinstance(value, dict):
         return
 
@@ -282,15 +285,6 @@ def _preflight_raw_trajectory(value: Any) -> None:
                     path=f"{invocation_path}.model_calls",
                 )
 
-    turns = value.get("turns")
-    if isinstance(turns, list):
-        for index, turn in enumerate(turns):
-            if isinstance(turn, dict):
-                turn_path = f"ng_trajectory.turns[{index}]"
-                for field_name in ("question", "answer", "reasoning_content"):
-                    _preflight_conversation(turn.get(field_name), path=f"{turn_path}.{field_name}")
-                _preflight_model_call_refs(turn.get("model_calls"), path=f"{turn_path}.model_calls")
-
     model_calls = value.get("model_calls")
     if isinstance(model_calls, list):
         for index, model_call in enumerate(model_calls):
@@ -302,6 +296,21 @@ def _preflight_raw_trajectory(value: Any) -> None:
                     metadata.get("model_ref"),
                     path=f"ng_trajectory.model_calls[{index}].response_metadata.model_ref",
                 )
+
+
+def _preflight_raw_trajectory(value: Any) -> None:
+    _preflight_trajectory_envelope(value)
+    if not isinstance(value, dict):
+        return
+
+    turns = value.get("turns")
+    if isinstance(turns, list):
+        for index, turn in enumerate(turns):
+            if isinstance(turn, dict):
+                turn_path = f"ng_trajectory.turns[{index}]"
+                for field_name in ("question", "answer", "reasoning_content"):
+                    _preflight_conversation(turn.get(field_name), path=f"{turn_path}.{field_name}")
+                _preflight_model_call_refs(turn.get("model_calls"), path=f"{turn_path}.model_calls")
 
 
 def _json_value(value: Any) -> Any:
@@ -721,6 +730,119 @@ def _resolve_model_call(ref: ModelCallRef, calls: _ModelCallIndex, *, path: str)
     return index, call
 
 
+def _apply_model_metadata(group: _AgentGroup, call: TrajectoryModelCall, *, timestamp: float, path: str) -> None:
+    """Apply verified model outcome, usage and opaque capture evidence to one exported step."""
+    metadata = call.response_metadata
+    if metadata.response_status not in (None, "completed"):
+        raise _path_error(path, f"model call is {metadata.response_status!r}, not completed")
+    if metadata.error_category is not None:
+        raise _path_error(path, "model call contains provider error evidence")
+    if metadata.status_code is not None and not 200 <= metadata.status_code < 300:
+        raise _path_error(path, f"model call returned non-success status {metadata.status_code}")
+    if metadata.model is not None and not metadata.model.strip():
+        raise _path_error(f"{path}.model_calls[0].model", "cannot be blank")
+
+    finish_reason = metadata.finish_reason
+    if finish_reason is not None and not finish_reason.strip():
+        raise _path_error(f"{path}.model_calls[0].finish_reason", "cannot be blank")
+    normalized_finish_reason = finish_reason.strip().lower() if finish_reason is not None else None
+    if normalized_finish_reason in _KNOWN_INCOMPLETE_FINISH_REASONS:
+        raise _path_error(path, f"finish reason {finish_reason!r} indicates an incomplete model response")
+    dialect = metadata.dialect
+    if finish_reason is not None and dialect == "chat":
+        allowed_chat_reasons = {"tool_calls", "function_call"} if group.step.tool_calls else {"stop"}
+        if normalized_finish_reason not in allowed_chat_reasons:
+            raise _path_error(
+                path,
+                f"Chat finish reason {finish_reason!r} does not prove a completed response",
+            )
+    if finish_reason is not None and dialect == "messages":
+        allowed_messages_reasons = {"tool_use"} if group.step.tool_calls else {"end_turn", "stop_sequence"}
+        if normalized_finish_reason not in allowed_messages_reasons:
+            raise _path_error(
+                path,
+                f"Messages stop reason {finish_reason!r} does not prove a completed response",
+            )
+    if group.step.tool_calls and normalized_finish_reason in {"stop", "end_turn", "stop_sequence"}:
+        raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured tool calls")
+    if not group.step.tool_calls and normalized_finish_reason in {"tool_calls", "tool_use", "function_call"}:
+        raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured text-only output")
+
+    try:
+        group.step.timestamp = datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError) as exc:
+        raise _path_error(f"{path}.timestamp", "cannot be represented as an ISO 8601 timestamp") from exc
+    group.step.model_name = metadata.model
+    group.step.llm_call_count = 1
+    stats = call.token_stats
+    if stats.total_tokens is not None:
+        for field_name, value in (
+            ("prompt_tokens", stats.prompt_tokens),
+            ("completion_tokens", stats.completion_tokens),
+            ("reasoning_tokens", stats.reasoning_tokens),
+            ("cached_tokens", stats.cached_tokens),
+        ):
+            if value is not None and value > stats.total_tokens:
+                raise _path_error(path, f"model-call {field_name} exceeds total_tokens")
+        if (
+            stats.prompt_tokens is not None
+            and stats.completion_tokens is not None
+            and stats.prompt_tokens + stats.completion_tokens > stats.total_tokens
+        ):
+            raise _path_error(path, "model-call prompt_tokens plus completion_tokens exceeds total_tokens")
+    if (
+        stats.cached_tokens is not None
+        and stats.prompt_tokens is not None
+        and stats.cached_tokens > stats.prompt_tokens
+    ):
+        raise _path_error(
+            path,
+            "model-call cached_tokens exceeds prompt_tokens; cached tokens must be a subset",
+        )
+    if (
+        stats.reasoning_tokens is not None
+        and stats.completion_tokens is not None
+        and stats.reasoning_tokens > stats.completion_tokens
+    ):
+        raise _path_error(
+            path,
+            "model-call reasoning_tokens exceeds completion_tokens; reasoning tokens must be a subset",
+        )
+    if any(
+        value is not None
+        for value in (
+            stats.prompt_tokens,
+            stats.completion_tokens,
+            stats.reasoning_tokens,
+            stats.total_tokens,
+            stats.cached_tokens,
+        )
+    ):
+        extra = {
+            key: value
+            for key, value in {
+                "reasoning_tokens": stats.reasoning_tokens,
+                "total_tokens": stats.total_tokens,
+            }.items()
+            if value is not None
+        }
+        group.step.metrics = AtifStepMetrics(
+            prompt_tokens=stats.prompt_tokens,
+            completion_tokens=stats.completion_tokens,
+            cached_tokens=stats.cached_tokens,
+            # Match Relay's ATIF extension shape so Gym's importer and
+            # other consumers can recover normalized usage details.
+            extra=extra or None,
+        )
+    source_items = _source_item_ids(group)
+    group.step.extra = {
+        "nemo_gym": {
+            "model_call": call.model_dump(mode="json", exclude_none=True),
+            **({"source_items": source_items} if source_items else {}),
+        }
+    }
+
+
 def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> set[int]:
     if len(trajectory.turns) != len(groups):
         raise _path_error(
@@ -764,121 +886,18 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> set
         if call_index in used_calls:
             raise _path_error(f"{path}.model_calls[0]", "model call is referenced by more than one turn")
         used_calls.add(call_index)
-        metadata = call.response_metadata
-        if metadata.response_status not in (None, "completed"):
-            raise _path_error(path, f"model call is {metadata.response_status!r}, not completed")
-        if metadata.error_category is not None:
-            raise _path_error(path, "model call contains provider error evidence")
-        if metadata.status_code is not None and not 200 <= metadata.status_code < 300:
-            raise _path_error(path, f"model call returned non-success status {metadata.status_code}")
-        if metadata.model is not None and not metadata.model.strip():
-            raise _path_error(f"{path}.model_calls[0].model", "cannot be blank")
-
-        finish_reason = metadata.finish_reason
-        if finish_reason is not None and not finish_reason.strip():
-            raise _path_error(f"{path}.model_calls[0].finish_reason", "cannot be blank")
-        normalized_finish_reason = finish_reason.strip().lower() if finish_reason is not None else None
-        if normalized_finish_reason in _KNOWN_INCOMPLETE_FINISH_REASONS:
-            raise _path_error(path, f"finish reason {finish_reason!r} indicates an incomplete model response")
-        dialect = metadata.dialect
-        if finish_reason is not None and dialect == "chat":
-            allowed_chat_reasons = {"tool_calls", "function_call"} if group.step.tool_calls else {"stop"}
-            if normalized_finish_reason not in allowed_chat_reasons:
-                raise _path_error(
-                    path,
-                    f"Chat finish reason {finish_reason!r} does not prove a completed response",
-                )
-        if finish_reason is not None and dialect == "messages":
-            allowed_messages_reasons = {"tool_use"} if group.step.tool_calls else {"end_turn", "stop_sequence"}
-            if normalized_finish_reason not in allowed_messages_reasons:
-                raise _path_error(
-                    path,
-                    f"Messages stop reason {finish_reason!r} does not prove a completed response",
-                )
-        if group.step.tool_calls and normalized_finish_reason in {"stop", "end_turn", "stop_sequence"}:
-            raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured tool calls")
-        if not group.step.tool_calls and normalized_finish_reason in {"tool_calls", "tool_use", "function_call"}:
-            raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured text-only output")
-
-        try:
-            group.step.timestamp = datetime.fromtimestamp(turn.timestamp, UTC).isoformat().replace("+00:00", "Z")
-        except (OverflowError, OSError, ValueError) as exc:
-            raise _path_error(f"{path}.timestamp", "cannot be represented as an ISO 8601 timestamp") from exc
-        group.step.model_name = metadata.model
-        group.step.llm_call_count = 1
-        stats = call.token_stats
-        if stats.total_tokens is not None:
-            for field_name, value in (
-                ("prompt_tokens", stats.prompt_tokens),
-                ("completion_tokens", stats.completion_tokens),
-                ("reasoning_tokens", stats.reasoning_tokens),
-                ("cached_tokens", stats.cached_tokens),
-            ):
-                if value is not None and value > stats.total_tokens:
-                    raise _path_error(path, f"model-call {field_name} exceeds total_tokens")
-            if (
-                stats.prompt_tokens is not None
-                and stats.completion_tokens is not None
-                and stats.prompt_tokens + stats.completion_tokens > stats.total_tokens
-            ):
-                raise _path_error(path, "model-call prompt_tokens plus completion_tokens exceeds total_tokens")
-        if (
-            stats.cached_tokens is not None
-            and stats.prompt_tokens is not None
-            and stats.cached_tokens > stats.prompt_tokens
-        ):
-            raise _path_error(
-                path,
-                "model-call cached_tokens exceeds prompt_tokens; cached tokens must be a subset",
-            )
-        if (
-            stats.reasoning_tokens is not None
-            and stats.completion_tokens is not None
-            and stats.reasoning_tokens > stats.completion_tokens
-        ):
-            raise _path_error(
-                path,
-                "model-call reasoning_tokens exceeds completion_tokens; reasoning tokens must be a subset",
-            )
-        if any(
-            value is not None
-            for value in (
-                stats.prompt_tokens,
-                stats.completion_tokens,
-                stats.reasoning_tokens,
-                stats.total_tokens,
-                stats.cached_tokens,
-            )
-        ):
-            extra = {
-                key: value
-                for key, value in {
-                    "reasoning_tokens": stats.reasoning_tokens,
-                    "total_tokens": stats.total_tokens,
-                }.items()
-                if value is not None
-            }
-            group.step.metrics = AtifStepMetrics(
-                prompt_tokens=stats.prompt_tokens,
-                completion_tokens=stats.completion_tokens,
-                cached_tokens=stats.cached_tokens,
-                # Match Relay's ATIF extension shape so Gym's importer and
-                # other consumers can recover normalized usage details.
-                extra=extra or None,
-            )
-        source_items = _source_item_ids(group)
-        group.step.extra = {
-            "nemo_gym": {
-                "turn": {
-                    "turn_no": turn.turn_no,
-                    "step_count": turn.step_count,
-                    **({"resolved": turn.resolved} if turn.resolved is not None else {}),
-                },
-                "model_call": call.model_dump(mode="json", exclude_none=True),
-                **({"source_items": source_items} if source_items else {}),
-            }
+        _apply_model_metadata(group, call, timestamp=turn.timestamp, path=path)
+        group.step.extra["nemo_gym"]["turn"] = {
+            "turn_no": turn.turn_no,
+            "step_count": turn.step_count,
+            **({"resolved": turn.resolved} if turn.resolved is not None else {}),
         }
 
+    _validate_invocation_calls(trajectory, calls, used_calls)
+    return used_calls
+
+
+def _validate_invocation_calls(trajectory: TrajectoryRecord, calls: _ModelCallIndex, used_calls: set[int]) -> None:
     invocation_call_indices: list[int] = []
     for index, ref in enumerate(trajectory.invocations[0].model_calls):
         call_index, _ = _resolve_model_call(
@@ -899,6 +918,104 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> set
             "ng_trajectory.invocations[0].model_calls",
             f"must reference every turn-selected model call; missing indices: {sorted(missing_from_invocation)}",
         )
+
+
+def _native_turn_anchors(answer: Any, *, path: str) -> tuple[set[str], set[str]]:
+    """Read persisted call/message identities; native payload values remain opaque."""
+    if not isinstance(answer, list):
+        raise _path_error(path, "expected native answer items with persisted call or message IDs")
+    calls: set[str] = set()
+    messages: set[str] = set()
+    for item in answer:
+        if not isinstance(item, dict) or item.get("type") not in {"function_call", "message"}:
+            continue
+        kind = item["type"]
+        if kind == "message" and item.get("role") != "assistant":
+            raise _path_error(path, "native message anchor must identify assistant output")
+        key = "call_id" if kind == "function_call" else "id"
+        identity = item.get(key)
+        if not isinstance(identity, str) or not identity.strip():
+            raise _path_error(path, f"native {kind} anchor requires a non-empty {key}")
+        if item.get("status") not in (None, "completed"):
+            raise _path_error(path, "native answer anchor contains non-completed output evidence")
+        target = calls if kind == "function_call" else messages
+        if identity in target:
+            raise _path_error(path, f"duplicate native {kind} anchor {identity!r}")
+        target.add(identity)
+    return calls, messages
+
+
+def _apply_conversation_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> set[int]:
+    """Associate canonical content through persisted IDs, never native payload equality or order."""
+    if len(trajectory.turns) != len(groups):
+        raise _path_error("ng_trajectory.turns", "expected one native turn for each exported agent step")
+    invocation = trajectory.invocations[0]
+    calls = _model_call_index(trajectory.model_calls)
+    turn_calls: list[tuple[int, TrajectoryModelCall]] = []
+    anchors: list[tuple[set[str], set[str]]] = []
+    for index, turn in enumerate(trajectory.turns):
+        path = f"ng_trajectory.turns[{index}]"
+        if turn.invocation_id != invocation.invocation_id:
+            raise _path_error(path, "native turn does not belong to the exported invocation")
+        if len(turn.model_calls) != 1:
+            raise _path_error(path, "native turn requires exactly one captured model reference")
+        call_index, call = _resolve_model_call(turn.model_calls[0], calls, path=f"{path}.model_calls[0]")
+        known_instances = {
+            value
+            for value in (invocation.agent_instance, turn.agent_instance, call.agent_instance)
+            if value is not None
+        }
+        if len(known_instances) > 1:
+            raise _path_error(path, "native turn and captured call have conflicting agent instance ownership")
+        if call.client_session_id is not None and call.client_session_id != turn.invocation_id:
+            raise _path_error(path, "captured session does not match the native invocation")
+        if call.client_assistant_message_id is not None and call.client_assistant_message_id != turn.source_message_id:
+            raise _path_error(path, "captured assistant message does not match the native source_message_id")
+        if (
+            turn.source_model_ref is not None
+            and call.response_metadata.model_ref is not None
+            and turn.source_model_ref != call.response_metadata.model_ref
+        ):
+            raise _path_error(path, "native source model conflicts with the captured model reference")
+        turn_calls.append((call_index, call))
+        anchors.append(_native_turn_anchors(turn.answer, path=f"{path}.answer"))
+
+    tools = {tool.tool_call_id: tool for tool in trajectory.tool_calls}
+    used_turns: set[int] = set()
+    used_calls: set[int] = set()
+    for group in groups:
+        call_ids = {call.tool_call_id for call in group.step.tool_calls or []}
+        message_ids = {item.id for item in group.answer if isinstance(item, NeMoGymResponseOutputMessage)}
+        if not call_ids and (len(message_ids) != 1 or not all(message_ids)):
+            raise _path_error(
+                "ng_trajectory.invocations[0].conversation", "text output requires one persisted message ID"
+            )
+        candidates = [index for index, anchor in enumerate(anchors) if anchor == (call_ids, message_ids)]
+        if len(candidates) != 1 or candidates[0] in used_turns:
+            raise _path_error("ng_trajectory.turns", "missing, duplicate or ambiguous persisted output anchors")
+        index = candidates[0]
+        turn = trajectory.turns[index]
+        call_index, call = turn_calls[index]
+        path = f"ng_trajectory.turns[{index}]"
+        if call_index in used_calls:
+            raise _path_error(path, "captured model call belongs to more than one exported step")
+        if call_ids and any(
+            tools[identity].model_call_id != call.model_call_id or call.model_call_id is None for identity in call_ids
+        ):
+            raise _path_error(path, "all tools in a step must name the native turn's captured requesting model call")
+        used_turns.add(index)
+        used_calls.add(call_index)
+        _apply_model_metadata(group, call, timestamp=turn.timestamp, path=path)
+        group.step.extra["nemo_gym"]["source_turn"] = {
+            "index": index,
+            "invocation_id": turn.invocation_id,
+            "agent_instance": turn.agent_instance,
+            "turn_no": turn.turn_no,
+            "source_message_id": turn.source_message_id,
+            "model_call_id": call.model_call_id,
+            "model_call_ref": turn.model_calls[0].model_dump(mode="json", exclude_none=True),
+        }
+    _validate_invocation_calls(trajectory, calls, used_calls)
     return used_calls
 
 
@@ -919,7 +1036,156 @@ def _final_metrics(groups: list[_AgentGroup], *, total_steps: int) -> AtifFinalM
     )
 
 
-def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_version: str) -> AtifTrajectoryV1_7:
+# These omissions limit timing provenance without making the conversation or its joins
+# ambiguous. Every other coverage gap remains outside this compatibility profile.
+_V2_TIMING_PROVENANCE_GAPS = frozenset(
+    {"tool_agent_instance_unavailable", "tool_clock_domain_unavailable", "tool_duration_source_unavailable"}
+)
+
+
+def _validate_v2_projection_ownership(source: TrajectoryRecord) -> None:
+    """Check identities before the v1 projection discards agent-instance scoping."""
+    if len(source.invocations) != 1:
+        return  # The strict converter reports the unsupported invocation structure.
+    invocation = source.invocations[0]
+    if invocation.agent_instance is not None:
+        for tool in source.tool_calls:
+            if tool.agent_instance is not None and tool.agent_instance != invocation.agent_instance:
+                raise _path_error("ng_trajectory.tool_calls", "tool agent instance differs from the root invocation")
+        calls = _model_call_index(source.model_calls)
+        for index, ref in enumerate(invocation.model_calls):
+            _, call = _resolve_model_call(ref, calls, path=f"ng_trajectory.invocations[0].model_calls[{index}]")
+            if call.agent_instance is not None and call.agent_instance != invocation.agent_instance:
+                raise _path_error("ng_trajectory.model_calls", "model agent instance differs from the root invocation")
+
+    for gap in source.gaps:
+        if gap.code not in _V2_TIMING_PROVENANCE_GAPS:
+            continue
+        matches = [
+            tool
+            for tool in source.tool_calls
+            if gap.span_id is not None
+            and tool.span_id == gap.span_id
+            and (gap.agent_instance is None or gap.agent_instance == tool.agent_instance)
+            and (gap.invocation_id is None or gap.invocation_id == tool.invocation_id)
+        ]
+        if len(matches) != 1:
+            raise _path_error("ng_trajectory.gaps", "timing provenance gap must identify one exported tool attempt")
+
+
+def gym_rollout_to_atif(
+    rollout: dict[str, Any],
+    *,
+    session_id: str,
+    agent_version: str,
+    compatibility_profile: Literal["strict-v1", "v2-conversation"] = "strict-v1",
+) -> AtifTrajectoryV1_7:
+    """Export strict v1 turns or explicitly associate v2 conversation content with native turns.
+
+    The v2 profile retains native turns in ``extra.nemo_gym.source_turns`` and timing
+    evidence in ``extra.nemo_gym.tool_timing``, reporting both compatibility boundaries. Both profiles reject unsupported
+    conversation structure, structural gaps, failed executions and ambiguous tool attempts.
+    """
+    if compatibility_profile not in {"strict-v1", "v2-conversation"}:
+        raise _path_error("compatibility_profile", "expected strict-v1 or v2-conversation")
+    raw = rollout.get("ng_trajectory")
+    version = raw.get("schema_version", "1.0") if isinstance(raw, dict) else None
+    if not isinstance(raw, dict) or version == "1.0":
+        return _gym_rollout_v1_to_atif(rollout, session_id=session_id, agent_version=agent_version)
+    if version != "2.0":
+        raise _path_error("ng_trajectory.schema_version", f"unsupported version {version!r}")
+    if compatibility_profile != "v2-conversation":
+        raise _path_error("ng_trajectory.schema_version", "v2 requires compatibility_profile=v2-conversation")
+
+    _validate_json_value(rollout, path="rollout")
+    _preflight_trajectory_envelope(raw)
+    raw_turns = raw.get("turns", [])
+    if isinstance(raw_turns, list):
+        for index, turn in enumerate(raw_turns):
+            if isinstance(turn, dict):
+                _preflight_model_call_refs(turn.get("model_calls"), path=f"ng_trajectory.turns[{index}].model_calls")
+                _preflight_model_ref(
+                    turn.get("source_model_ref"), path=f"ng_trajectory.turns[{index}].source_model_ref"
+                )
+    try:
+        source = TrajectoryRecord.model_validate(raw, strict=True)
+    except (TypeError, ValidationError) as exc:
+        raise _path_error("ng_trajectory", "invalid v2.0 trajectory") from exc
+    _validate_v2_projection_ownership(source)
+    projected = project_trajectory_v1(source.model_dump(mode="json"))
+    projected["gaps"] = [gap for gap in projected.get("gaps", []) if gap["code"] not in _V2_TIMING_PROVENANCE_GAPS]
+    exported = _export_trajectory(
+        rollout,
+        TrajectoryRecord.model_validate(projected, strict=True),
+        session_id=session_id,
+        agent_version=agent_version,
+        apply_turns=lambda _projected, groups: _apply_conversation_turns(source, groups),
+    )
+
+    provenance = exported.extra["nemo_gym"]
+    provenance["source"]["schema_version"] = "2.0"
+    provenance["source"]["capture_key"] = source.capture_key
+    # Preserve native payloads as evidence, including null questions and producer counts.
+    # The ATIF conversation does not claim to reconstruct the provider's actual request.
+    provenance["source_turns"] = copy.deepcopy(raw.get("turns", []))
+    provenance["tool_timing"] = {
+        "schema_version": "2.0",
+        "capture_key": source.capture_key,
+        "tool_calls": copy.deepcopy(raw.get("tool_calls", [])),
+        "failure_events": copy.deepcopy(raw.get("failure_events", {})),
+        "gaps": copy.deepcopy(raw.get("gaps", [])),
+        "invocations": [
+            {key: copy.deepcopy(inv[key]) for key in ("invocation_id", "agent_instance") if key in inv}
+            for inv in raw.get("invocations", [])
+        ],
+        "turns": [
+            {key: copy.deepcopy(turn[key]) for key in ("invocation_id", "turn_no", "agent_instance") if key in turn}
+            for turn in raw.get("turns", [])
+        ],
+        "model_calls": [
+            {
+                key: copy.deepcopy(call[key])
+                for key in ("model_call_id", "agent_instance", "clock_domain")
+                if key in call
+            }
+            for call in raw.get("model_calls", [])
+        ],
+    }
+    provenance["conversion"] = {
+        "profile": "ng-trajectory-v2-conversation-to-atif-v1",
+        "status": "partial",
+        "warnings": [
+            {
+                "code": "native_turns_extension_required",
+                "detail": "ATIF content comes from the normalized invocation conversation. Native turns remain "
+                "unchanged in extra.nemo_gym.source_turns; conversation prefixes do not assert provider requests. "
+                "Captured requests remain in each step's model_call extension.",
+            },
+            {
+                "code": "v2_timing_extension_required",
+                "detail": "Attempt, instance, parent, requesting-model and failure identities, timing boundaries, "
+                "clock domains and duration provenance are retained only in extra.nemo_gym.tool_timing.",
+            },
+            *[
+                {"code": "source_timing_provenance_gap", "gap": copy.deepcopy(gap)}
+                for gap in raw.get("gaps", [])
+                if gap["code"] in _V2_TIMING_PROVENANCE_GAPS
+            ],
+            *[
+                {
+                    "code": "multiple_timing_boundaries_not_projected",
+                    "span_id": tool.span_id,
+                    "detail": "Scalar timing omitted; all measurements remain in extra.nemo_gym.tool_timing.",
+                }
+                for tool in source.tool_calls
+                if len(tool.timings) > 1
+            ],
+        ],
+    }
+    return exported
+
+
+def _gym_rollout_v1_to_atif(rollout: dict[str, Any], *, session_id: str, agent_version: str) -> AtifTrajectoryV1_7:
     """Convert one rollout row, rejecting any structure Gym cannot represent completely."""
 
     if not isinstance(session_id, str) or not session_id.strip():
@@ -933,6 +1199,24 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
         trajectory = TrajectoryRecord.model_validate(raw_trajectory, strict=True)
     except (TypeError, ValidationError) as exc:
         raise _path_error("ng_trajectory", "missing or invalid v1.0 trajectory") from exc
+    return _export_trajectory(
+        rollout, trajectory, session_id=session_id, agent_version=agent_version, apply_turns=_apply_turns
+    )
+
+
+def _export_trajectory(
+    rollout: dict[str, Any],
+    trajectory: TrajectoryRecord,
+    *,
+    session_id: str,
+    agent_version: str,
+    apply_turns: Callable[[TrajectoryRecord, list[_AgentGroup]], set[int]],
+) -> AtifTrajectoryV1_7:
+    """Share supported conversation grouping and ATIF assembly across explicit profiles."""
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise _path_error("session_id", "expected a non-empty string")
+    if not isinstance(agent_version, str) or not agent_version.strip():
+        raise _path_error("agent_version", "expected a non-empty string")
     if trajectory.gaps:
         raise _path_error("ng_trajectory.gaps", "source coverage gaps are not supported by strict export")
     if not trajectory.task_id.strip() or not trajectory.rollout_id.strip():
@@ -963,7 +1247,7 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
     rollout_index = _index(rollout, ROLLOUT_INDEX_KEY_NAME, path=ROLLOUT_INDEX_KEY_NAME)
 
     steps, groups = _build_groups(trajectory, invocation)
-    used_model_call_indices = _apply_turns(trajectory, groups)
+    used_model_call_indices = apply_turns(trajectory, groups)
     surplus_model_calls = [
         call.model_dump(mode="json", exclude_none=True)
         for index, call in enumerate(trajectory.model_calls)
@@ -1065,6 +1349,7 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
                         row,
                         session_id=config.session_id,
                         agent_version=config.agent_version,
+                        compatibility_profile=config.compatibility_profile,
                     )
                     encoded = _encoded_trajectory(trajectory)
                     digest = hashlib.sha256(encoded).hexdigest()
