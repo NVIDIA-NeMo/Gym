@@ -146,11 +146,15 @@ on that host reuse the cache. An inspection and a recovery decide the same from 
 and the read hashes its sources when it opens, parses and closes them: a file that changes under
 it makes the decision stop ("unstable sources"), so never edit a run while you read it.
 
-The read runs inside the run's pinned Gym, so a run pinned before a recovery rule existed does not
-have that rule: its inspect decides by the older code. To read it by a newer Gym, add
-`--repin <full commit of the Gym you run the command from> --repin-reason "<why>"` to the inspect.
-It reads the Store at that commit, previews the repinned plan and dispatches nothing; dispatch it
-with the same options without `--inspect`. The repin target must be the Gym that runs the command.
+A run pinned at another Gym commit than the one you run the command from is planned with the
+installed Gym's rules, so a rule added after the run's pin applies without any option. When that
+plan needs the installed revision to run (a re-judge, whose job runs the installed recovery source,
+or a resubmit the pinned revision would plan differently), the recovery moves the run to the
+installed commit itself: an automatic repin, journaled in `repin-journal.jsonl` with its reason.
+Otherwise the pin stays. The report says which (`pin_plan`, and a warning "planned on <installed>
+for a run pinned at <old>"), and `--inspect` shows the same decision. `--no-auto-repin` keeps the
+pin and refuses that case, naming `--repin`; `--repin <full commit> --repin-reason "<why>"` stays the
+explicit way to move a run, and the repin target must be the Gym that runs the command.
 
 Where readers run in Slurm steps (`NEMO_GYM_REMOTE_READER_SRUN`), an inspect that could not read
 returns `UNKNOWN` with "nothing was read or decided". That is not a problem of the run: read the

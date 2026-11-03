@@ -2685,6 +2685,20 @@ class SlurmExecutor(BaseExecutor):
         ]
         return commands, journals
 
+    def installed_commit(self) -> str | None:
+        """The Gym commit this launcher runs; the same value the judge-only job and a repin are checked against."""
+        return installed_gym_commit()
+
+    def gym_pin(self, record: SubmissionRecord) -> str | None:
+        """The full Gym commit the run's saved config pins its driver to; None when there is none or it is unreadable."""
+        try:
+            with get_connection(record.hostname) as conn:
+                install = self._saved_config(conn, Path(record.run_dir)).driver.gym_install
+        except (OSError, RuntimeError, ValueError):
+            return None
+        ref = install.ref if install is not None else None
+        return ref if ref is not None and re.fullmatch(r"[0-9a-f]{40}", ref) else None
+
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
         """The resolved config `persist()` saved for this run, so a resubmit repeats what submit did."""

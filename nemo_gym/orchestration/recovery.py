@@ -375,6 +375,9 @@ class RecoveryOutcome(BaseModel):
     judge_job: dict[str, Any] | None = None
     # The GYM_READER_TOKEN a login-host Store reader of this recovery carries; None for a caller that sets none.
     reader_token: str | None = None
+    # For a run pinned at another Gym commit than the launcher's: the installed and pinned commits, whether the
+    # recovery moves the run to the installed one (``repin``), whether --no-auto-repin refused that, and why.
+    pin_plan: dict[str, Any] | None = None
     # A --max-walltime raise checked against the partition before any evidence is read: the partition, its MaxTime
     # (as sinfo prints it, None when unknown), the requested chain cap, the walltime each segment requests, why it
     # was refused (None when it fits), and a note when MaxTime is unknown or segments are shorter than the raise.

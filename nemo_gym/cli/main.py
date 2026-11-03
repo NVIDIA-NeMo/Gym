@@ -741,6 +741,9 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--repin and --repin-reason need --recover")
     if (repin is None) != (repin_reason is None):
         args._parser.error("--repin and --repin-reason go together")
+    no_auto_repin = getattr(args, "no_auto_repin", False)
+    if no_auto_repin and (not getattr(args, "recover", False) or repin is not None):
+        args._parser.error("--no-auto-repin needs --recover and cannot be used with --repin")
     if getattr(args, "extend_retries", None) is not None and not getattr(args, "recover", False):
         args._parser.error("--extend-retries needs --recover")
     extend_attempts = getattr(args, "extend_attempts", None)
@@ -818,6 +821,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         if getattr(args, "recover", False):
             operation = inspect_recovery if inspect_only else recover
             extra = {} if repin is None else {"repin": repin, "repin_reason": repin_reason}
+            if no_auto_repin:
+                extra["auto_repin"] = False
             if getattr(args, "extend_retries", None) is not None:
                 extra["extend_retries"] = args.extend_retries
             if getattr(args, "extend_attempts", None) is not None:
@@ -2004,6 +2009,15 @@ COMMANDS = {
                     metavar="NAME",
                     help="With --recover: the QOS of the judge-only job, for a site where the CPU partition's default "
                     "QOS refuses it and neither a saved CPU node pool nor NEMO_GYM_REMOTE_READER_SRUN (-q) names one.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--no-auto-repin",
+                    action="store_true",
+                    help="With --recover: keep the run's Gym pin. A run pinned at another commit is planned with "
+                    "this Gym's rules; when that plan needs this revision to run, the recovery refuses and names "
+                    "--repin instead of moving the run to it automatically.",
                 ),
             ),
             Flag(

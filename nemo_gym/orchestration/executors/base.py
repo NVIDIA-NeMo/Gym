@@ -69,6 +69,16 @@ class BaseExecutor(ABC):
         raises.
         """
 
+    def installed_commit(self) -> str | None:
+        """The Gym commit this launcher runs, as ``installed_gym_commit`` reports it."""
+        from nemo_gym.orchestration.jobs import installed_gym_commit
+
+        return installed_gym_commit()
+
+    def gym_pin(self, record: SubmissionRecord) -> str | None:
+        """The full Gym commit the run's saved config pins its driver to; None when there is none or it is unknown."""
+        return None
+
     def recovery_evidence(
         self,
         record: SubmissionRecord,
