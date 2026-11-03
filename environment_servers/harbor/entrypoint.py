@@ -449,7 +449,8 @@ class HarborEntrypointMixin:
 
         That is Harbor's order: ``up --wait`` gates on the image HEALTHCHECK, then ``run_healthcheck()``
         runs the task's, before the agent user is set. Both run as the container's user (``user``, the
-        image's ``User`` by name or integer uid; ``None`` is root): the daemon runs the image check in the image
+        image's ``User`` or the explicit Compose main user, by name or integer uid; ``None`` is root):
+        the daemon runs the image check in the image
         ``WorkingDir``, Harbor's exec runs the task check in the task workdir (``[environment].workdir`` is
         the ``cwd`` of its execs, harbor 0.22.0 ``environments/docker/docker.py`` 1104, never the
         container's directory). ``workdir`` is that directory, the one the seed prepared

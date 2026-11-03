@@ -498,6 +498,10 @@ class TestGroup:
             "keepalive",
             "cleared-entrypoint",
             "disabled-healthcheck",
+            "disabled-healthcheck-with-test",
+            "image-healthcheck-none",
+            "overlay-healthcheck-none",
+            "task-healthcheck",
             "entrypoint",
             "healthcheck",
             "command",
@@ -527,18 +531,25 @@ class TestGroup:
             config["Entrypoint"] = ["/entry.sh"]
         elif startup == "keepalive":
             config["Entrypoint"] = ["sh", "-c", "sleep infinity"]
-        elif startup in ("healthcheck", "disabled-healthcheck"):
+        elif startup in ("healthcheck", "disabled-healthcheck", "disabled-healthcheck-with-test"):
             config["Healthcheck"] = {"Test": ["CMD", "true"]}
+        elif startup == "image-healthcheck-none":
+            config["Healthcheck"] = {"Test": ["NONE"]}
         with overlay.files[0].open("a") as file:
             if startup == "cleared-entrypoint":
                 file.write("    entrypoint: []\n")
             elif startup == "disabled-healthcheck":
                 file.write("    healthcheck:\n      disable: true\n")
+            elif startup == "disabled-healthcheck-with-test":
+                file.write('    healthcheck: {test: ["CMD", "true"], disable: true}\n')
+            elif startup == "overlay-healthcheck-none":
+                file.write('    healthcheck: {test: ["NONE"]}\n')
         run = "RUN true\n" if with_run else ""
+        toml = HEALTHCHECK_TOML if startup == "task-healthcheck" else TASK_TOML
         server, task, *_ = overlay_server(
             tmp_path,
             monkeypatch,
-            toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "root"\n').replace(
+            toml=toml.replace("[agent]\n", '[agent]\nuser = "root"\n').replace(
                 "[verifier]\n", '[verifier]\nuser = "root"\n'
             ),
             dockerfile=f"FROM ubuntu:24.04\n{run}USER app:app\nWORKDIR /app\n",
@@ -551,7 +562,16 @@ class TestGroup:
         write_image_config(
             task.path.parent, "org/memory:1", Cmd=["memory-server"], Healthcheck={"Test": ["CMD", "true"]}
         )
-        if startup in ("none", "keepalive", "cleared-entrypoint", "disabled-healthcheck", "explicit-hook-user"):
+        if startup in (
+            "none",
+            "keepalive",
+            "cleared-entrypoint",
+            "disabled-healthcheck",
+            "disabled-healthcheck-with-test",
+            "image-healthcheck-none",
+            "overlay-healthcheck-none",
+            "explicit-hook-user",
+        ):
             compose = await harbor_app.HarborEnvironmentServer._create_compose(server, task, "r1")
             try:
                 assert compose._ready
@@ -604,6 +624,45 @@ class TestGroup:
             assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
         finally:
             await compose.stop()
+
+    @pytest.mark.parametrize(
+        "compose_user,expected_user",
+        [("root", "root"), (0, 0), ("0", 0), ("12345", 12345), ("operator", "operator"), (None, "app"), ("", "app")],
+    )
+    @pytest.mark.parametrize("with_run", [False, True], ids=["pull", "overlay"])
+    async def test_seed_task_healthcheck_uses_main_user(
+        self, tmp_path, monkeypatch, compose_user, expected_user, with_run
+    ):
+        overlay = volume_free_overlay(tmp_path)
+        with overlay.files[0].open("a") as file:
+            file.write(f"    user: {json.dumps(compose_user)}\n")
+        run = "RUN true\n" if with_run else ""
+        image_user = "app" if compose_user in (None, "") else "app:app"
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=HEALTHCHECK_TOML.replace("[agent]\n", '[agent]\nuser = "other"\n').replace(
+                "[verifier]\n", '[verifier]\nuser = "root"\n'
+            ),
+            dockerfile=f"FROM ubuntu:24.04\n{run}USER {image_user}\nWORKDIR /app\n",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entry.sh"]},
+            overlay=overlay,
+        )
+        sandbox = FakeSandbox()
+
+        async def created_group(task, episode_key):
+            compose, _, _ = await start_real_group(monkeypatch, server, task, sandbox)
+            return compose
+
+        monkeypatch.setattr(server, "_create_compose", created_group)
+        try:
+            session = await server._seed(episode(task), "r1")
+            (check,) = [r for r in sandbox.execs if r["command"] == "test -f /app/ready.txt"]
+            assert check["user"] == ("root" if expected_user == 0 else expected_user)
+            assert entrypoint_exec_of(sandbox)["user"] == expected_user
+            assert session.agent_user == "other"
+        finally:
+            await server._stop_sandbox("r1")
 
     @pytest.mark.parametrize("compose_user", ["root", "0", "null", '""'])
     async def test_explicit_job_user_replaces_an_unused_image_group(self, tmp_path, monkeypatch, compose_user):

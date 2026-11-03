@@ -1969,7 +1969,14 @@ class HarborEnvironmentServer(
             # name a uid resolved to, or the integer uid when it names no user (OpenSandbox's native `uid=` exec
             # path, where the string the task wrote would be looked up as an account name and fail).
             session.agent_user = sandbox.default_user
-            image_user = await self._image_user_name(sandbox, task, names)
+            # The task healthcheck uses main's container user, independently of the later agent.
+            image_user = None
+            if compose is not None and task.config.environment.healthcheck is not None:
+                image_user = compose.document["services"]["main"].get("user")
+            if image_user in (None, ""):
+                image_user = await self._image_user_name(sandbox, task, names)
+            elif isinstance(image_user, str) and image_user.isdecimal():
+                image_user = int(image_user)
             # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do. For a
             # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir
             # is idempotent there and still makes the whole tree.

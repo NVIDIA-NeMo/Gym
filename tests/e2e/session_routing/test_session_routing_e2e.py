@@ -323,6 +323,21 @@ async def _seed(client: aiohttp.ClientSession, url: str, index: int) -> dict[str
     return _cookies(response)
 
 
+async def _seed_each_worker(deployment: Deployment) -> list[dict[str, str]]:
+    url = deployment.url("resources")
+    # A shared TCP listener may send every connection to one worker. Seed through each worker's
+    # private socket to guarantee sessions on every worker; callers verify over TCP.
+    async with contextlib.AsyncExitStack() as stack:
+        clients = [
+            await stack.enter_async_context(
+                aiohttp.ClientSession(connector=aiohttp.UnixConnector(path), cookie_jar=aiohttp.DummyCookieJar())
+            )
+            for path in deployment.resources_sockets()
+        ]
+        assert len(clients) == WORKERS
+        return await asyncio.gather(*(_seed(clients[index % len(clients)], url, index) for index in range(EPISODES)))
+
+
 async def _verify(client: aiohttp.ClientSession, url: str, index: int, cookies: dict) -> aiohttp.ClientResponse:
     return await _post(client, f"{url}/verify", _verify_body(index), cookies)
 
@@ -348,10 +363,11 @@ def test_state_stored_at_seed_is_found_at_verify(deployment: Deployment) -> None
     url = deployment.url("resources")
 
     async def run_all() -> list[tuple[float, dict[str, str]]]:
+        sessions = await _seed_each_worker(deployment)
         async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as client:
 
             async def one(index: int) -> tuple[float, dict[str, str]]:
-                cookies = await _seed(client, url, index)
+                cookies = sessions[index]
                 response = await _verify(client, url, index, cookies)
                 assert response.status == 200, await response.text()
                 return (await response.json())["reward"], cookies
@@ -361,8 +377,8 @@ def test_state_stored_at_seed_is_found_at_verify(deployment: Deployment) -> None
     results = asyncio.run(run_all())
     assert Counter(reward for reward, _ in results) == Counter({1.0: EPISODES})
     owners = {deployment.claimant(_session_id(cookies)) for _, cookies in results}
-    # Sessions were spread over several workers, so most verifies landed on a worker that did not seed them.
-    assert len(owners) > 1
+    # Even one shared TCP connection must route checks to sessions owned by every worker.
+    assert len(owners) == WORKERS
 
 
 MCP_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -429,21 +445,6 @@ def test_every_request_is_access_logged_once_with_several_workers(deployment: De
 def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployment) -> None:
     url = deployment.url("resources")
 
-    async def seed_all() -> list[dict[str, str]]:
-        # A shared TCP listener may send every connection to one worker. Seed through each worker's
-        # private socket so the exit test has both lost and surviving sessions, then verify over TCP.
-        async with contextlib.AsyncExitStack() as stack:
-            clients = [
-                await stack.enter_async_context(
-                    aiohttp.ClientSession(connector=aiohttp.UnixConnector(path), cookie_jar=aiohttp.DummyCookieJar())
-                )
-                for path in deployment.resources_sockets()
-            ]
-            assert len(clients) == WORKERS
-            return await asyncio.gather(
-                *(_seed(clients[index % len(clients)], url, index) for index in range(EPISODES))
-            )
-
     async def verify_all(sessions: list[dict[str, str]]) -> tuple[list[aiohttp.ClientResponse], list[float]]:
         # A new client, so no pooled connection to the killed worker is reused.
         async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as client:
@@ -452,7 +453,7 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
             )
             return responses, [(await r.json())["reward"] for r in responses if r.status == 200]
 
-    sessions = asyncio.run(seed_all())
+    sessions = asyncio.run(_seed_each_worker(deployment))
     # Kill a worker with seeded sessions while the other workers retain theirs.
     owner_of = {_session_id(cookies): deployment.claimant(_session_id(cookies)) for cookies in sessions}
     owners = Counter(owner_of.values())

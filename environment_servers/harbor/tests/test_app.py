@@ -4670,6 +4670,7 @@ class TestGeneralization:
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = False
 
             async def start(self):
@@ -4772,6 +4773,7 @@ class TestGeneralization:
             ):
                 groups.append(self)
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = 0
 
             async def start(self):

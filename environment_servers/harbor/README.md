@@ -604,9 +604,10 @@ credentials of the sandbox provider block (`images.auth`), the same way as any p
 is created with the Dockerfile's final `USER` (or `[agent].user`) as the default for every command, on every
 provider, not only for the overlay `RUN` lines. An overlay task starts without that default, because its
 `RUN` lines may be what creates the user, and switches to it once they have run. A numeric `USER 1000` is
-resolved to its name in the image with `getent` first, because OpenSandbox and PTY sessions switch user by
-name. When the uid names no user, the number stays and the seed logs a warning: Docker accepts a uid as
-it is, the other providers cannot run commands as it.
+resolved to its name in the image with `getent` first. When the uid names no user, it is passed as an integer
+user ID: Docker and OpenSandbox's plain exec support it. Other providers, and OpenSandbox's PTY and bash
+sessions, still need a named user. A `uid:gid` pair is supported only on Docker. These limits apply with or
+without a job-level Compose overlay.
 
 | Setting or feature | Behavior in this layer |
 | --- | --- |

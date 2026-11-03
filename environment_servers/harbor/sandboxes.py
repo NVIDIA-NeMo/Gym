@@ -731,6 +731,7 @@ class HarborSandboxMixin:
             and main.get("user") in (None, "")
             and (
                 startup_command
+                or task.config.environment.healthcheck is not None
                 or any(hook.get("user") in (None, "") for hook in main.get("post_start") or [])
                 or (
                     bool(healthcheck.get("test"))
