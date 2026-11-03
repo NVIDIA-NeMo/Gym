@@ -66,7 +66,7 @@ from nemo_gym.config.config_types import (
     maybe_get_server_instance_config,
 )
 from nemo_gym.config.secret_utils import recursively_hide_secrets
-from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
+from nemo_gym.orchestration.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.telemetry.setup import (

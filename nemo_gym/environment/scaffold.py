@@ -841,7 +841,7 @@ def _rollout_driver() -> str:
             _global_config_dict: Mapping[str, Any],
         ) -> None:
             """TODO: Replace this delegation with custom rollout coordination."""
-            from nemo_gym.rollout_collection import RolloutCollectionHelper
+            from nemo_gym.rollouts import RolloutCollectionHelper
 
             await RolloutCollectionHelper().run_from_config(rollout_collection_config)
         '''
