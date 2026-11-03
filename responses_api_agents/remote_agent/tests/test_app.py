@@ -35,7 +35,10 @@ from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
     RemoteAgent,
     RemoteAgentConfig,
+    RemoteAgentDeadlineError,
     RemoteAgentRunRequest,
+    RemoteAgentTerminalError,
+    _raised_class_name,
     normalize_remote_url,
 )
 
@@ -164,7 +167,7 @@ class FakeRemoteResponse:
 class FakeServerClientResponse:
     """Stands in for an aiohttp ClientResponse from a Gym server via ServerClient."""
 
-    def __init__(self, body: dict, cookies=None, status: int = 200):
+    def __init__(self, body: dict | str, cookies=None, status: int = 200):
         self._body = body
         self.cookies = cookies or {}
         self.status = status
@@ -236,7 +239,7 @@ def wire_gym(
     """A ServerClient mock that emulates the Gym side: seed_session and verify on the
     resources server, tool routes via tool_handler, and — the load-bearing part — the
     /v1/responses self-post routed into the agent's REAL responses() with the exception
-    middleware emulated (exceptions become a 500 body carrying repr(e))."""
+    middleware emulated (exceptions become a 500 body that is the JSON string repr(e))."""
     calls = []
 
     async def _post(server_name, url_path, json=None, cookies=None, **kwargs):
@@ -253,7 +256,7 @@ def wire_gym(
             try:
                 result = await agent.responses(make_request(dict(cookies or {})), fastapi_response, params)
             except Exception as e:  # noqa: BLE001 -- emulate SimpleServer's exception middleware
-                return FakeServerClientResponse({"error": repr(e)}, status=500)
+                return FakeServerClientResponse(repr(e), status=500)
             out_cookies = SimpleCookie()
             for header_value in fastapi_response.headers.getlist("set-cookie"):
                 out_cookies.load(header_value)
@@ -837,7 +840,7 @@ class TestStatefulToolsEndToEnd:
                 try:
                     result = await agent.responses(make_request(dict(cookies or {})), fastapi_response, params)
                 except Exception as e:  # noqa: BLE001
-                    return FakeServerClientResponse({"error": repr(e)}, status=500)
+                    return FakeServerClientResponse(repr(e), status=500)
                 out_cookies = SimpleCookie()
                 for header_value in fastapi_response.headers.getlist("set-cookie"):
                     out_cookies.load(header_value)
@@ -1056,6 +1059,42 @@ class TestReviewFindingPins:
                     "nemo_gym.server_runtime.base_resources_server", fromlist=["AggregateMetricsRequest"]
                 ).AggregateMetricsRequest(verify_responses=[])
             )
+
+
+class TestRaisedClassName:
+    """run() recovers the class the exception middleware serialized into the self-post's 500 body, by exact name."""
+
+    @pytest.mark.parametrize("error_class", [RemoteAgentTerminalError, RemoteAgentDeadlineError])
+    def test_the_leading_class_name_of_the_json_string_body(self, error_class) -> None:
+        body = json.dumps(repr(error_class("it failed")))
+        assert _raised_class_name(body) == error_class.__name__
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (repr(RemoteAgentDeadlineError("raw text")), "RemoteAgentDeadlineError"),
+            (
+                json.dumps({"detail": repr(RemoteAgentTerminalError("x")), "ng_trajectory": {}}),
+                "RemoteAgentTerminalError",
+            ),
+            (json.dumps(repr(RuntimeError("saw RemoteAgentDeadlineError upstream"))), "RuntimeError"),
+            (json.dumps("saw RemoteAgentTerminalError(x) upstream"), None),
+            (json.dumps("Hit an exception in agent calling an inner server: boom"), None),
+            (json.dumps({"detail": None}), None),
+            ("", None),
+            ("null", None),
+        ],
+    )
+    def test_other_bodies(self, body: str, expected) -> None:
+        assert _raised_class_name(body) == expected
+
+    @pytest.mark.parametrize("name", ["RemoteAgentDeadlineError", "RemoteAgentTerminalError"])
+    async def test_an_error_that_only_mentions_the_name_is_not_classified_by_it(self, monkeypatch, name) -> None:
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=RuntimeError(f"saw {name} upstream")))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert name in result["error"]
+        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
+        assert NG_TERMINAL_KEY not in result and "timeouts" not in result
 
 
 class TestDeadlineEvidence:

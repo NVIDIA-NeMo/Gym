@@ -36,6 +36,7 @@ sidecar and retries on resume.
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 from traceback import print_exc
@@ -111,7 +112,7 @@ class RemoteAgentError(RuntimeError):
 class RemoteAgentDeadlineError(RemoteAgentError):
     """The remote ``/v1/responses`` request outlived ``remote_responses_timeout_secs``; retryable on resume.
 
-    Like ``RemoteAgentTerminalError``, its NAME crosses the HTTP self-post: run() matches it in the 500 body to record
+    Like ``RemoteAgentTerminalError``, its NAME crosses the HTTP self-post: run() reads it from the 500 body to record
     the deadline as typed evidence.
     """
 
@@ -132,9 +133,24 @@ class RemoteAgentTerminalError(RemoteAgentError):
     """A failure that will not fix itself on retry (e.g. an invalid response shape).
 
     run() reaches responses() over an HTTP self-post, so this class's NAME is the wire
-    contract: the exception middleware serializes it into the 500 body and run() matches
-    the name string to set the terminal routing flag.
+    contract: the exception middleware serializes it into the 500 body and run() reads
+    the name from it to set the terminal routing flag.
     """
+
+
+def _raised_class_name(body: str) -> Optional[str]:
+    """The class name of the exception the server's exception middleware serialized into a 500 body, or None.
+
+    The body is the JSON string ``repr(e)`` (or, when observations ride along, an object whose ``detail`` is that
+    string), so the raised class is the leading ``Name(``; a name merely mentioned in a message does not count."""
+    try:
+        decoded = json.loads(body)
+    except ValueError:
+        decoded = body
+    if isinstance(decoded, dict):
+        decoded = decoded.get("detail")
+    match = re.match(r"(\w+)\(", decoded) if isinstance(decoded, str) else None
+    return match.group(1) if match else None
 
 
 def normalize_remote_url(url: str) -> str:
@@ -467,9 +483,10 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         except Exception as e:
             content = getattr(e, "response_content", b"")
             text = content.decode(errors="replace") if isinstance(content, (bytes, bytearray)) else str(content)
-            # Terminal classification crosses the HTTP self-post boundary by exception NAME:
-            # the middleware serialized the raised RemoteAgentTerminalError into the 500 body.
-            terminal = "RemoteAgentTerminalError" in text
+            # Terminal and deadline classification cross the HTTP self-post boundary by exception NAME:
+            # the middleware serialized the raised error into the 500 body.
+            raised = _raised_class_name(text)
+            terminal = raised == RemoteAgentTerminalError.__name__
             detail = text or f"{type(e).__name__}: {e}"
             deadline = (
                 _Deadline(
@@ -479,7 +496,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                     operation="agent",
                     cause=e,
                 )
-                if "RemoteAgentDeadlineError" in text
+                if raised == RemoteAgentDeadlineError.__name__
                 else None
             )
             return self._failure_response(
