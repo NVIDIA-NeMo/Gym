@@ -18,6 +18,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from nemo_gym.cli import eval as eval_cli
 from nemo_gym.cli import main as cli_main
+from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
@@ -26,7 +27,6 @@ from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionRecord
 from nemo_gym.orchestration.recovery import JUDGE_JOB_JOURNAL_NAME, RecoveryAction
 from nemo_gym.orchestration.submit import inspect_recovery, recover
-from nemo_gym.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore

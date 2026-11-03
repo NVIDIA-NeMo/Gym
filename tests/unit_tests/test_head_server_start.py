@@ -14,11 +14,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import nemo_gym.cli.env as env_module
-from nemo_gym.cli.env import HeadServerUnresponsiveError, RunHelper, ServerStartFailedError
+import nemo_gym.orchestration.server_supervisor as env_module
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME
 from nemo_gym.core.failure_kinds import SERVER_START_FAILED
+from nemo_gym.orchestration.server_supervisor import HeadServerUnresponsiveError, RunHelper, ServerStartFailedError
 from tests.unit_tests.test_server_start_failed import taken_port as taken_port
 
 

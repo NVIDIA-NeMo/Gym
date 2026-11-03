@@ -10,7 +10,7 @@ import pytest
 
 from nemo_gym import rollout_reverification
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_reverification import (
+from nemo_gym.eval.rollout_reverification import (
     RolloutReverificationConfig,
     bind_judge_failures,
     due_judge_failures,
@@ -155,13 +155,14 @@ async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_
         return reply
 
     client = MagicMock(global_config_dict={}, post=post)
-    monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
     monkeypatch.setattr(
-        "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: {"agent": "judge_rs"}
+        "nemo_gym.eval.rollout_reverification._build_agent_to_resources_server_mapping",
+        lambda _: {"agent": "judge_rs"},
     )
-    monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.raise_for_status", AsyncMock())
     monkeypatch.setattr(
-        "nemo_gym.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda reply: reply.verified)
+        "nemo_gym.eval.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda reply: reply.verified)
     )
 
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
@@ -191,13 +192,14 @@ def _verifier(monkeypatch, reply) -> list[int]:
         return response
 
     client = MagicMock(global_config_dict={}, post=post)
-    monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
     monkeypatch.setattr(
-        "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: {"agent": "judge_rs"}
+        "nemo_gym.eval.rollout_reverification._build_agent_to_resources_server_mapping",
+        lambda _: {"agent": "judge_rs"},
     )
-    monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.raise_for_status", AsyncMock())
     monkeypatch.setattr(
-        "nemo_gym.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda r: r.verified)
+        "nemo_gym.eval.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda r: r.verified)
     )
     return posted
 

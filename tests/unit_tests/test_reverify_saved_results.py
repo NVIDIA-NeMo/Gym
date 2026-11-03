@@ -15,6 +15,7 @@ import pytest
 from aiohttp import ClientPayloadError
 
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.eval.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
@@ -26,7 +27,6 @@ from nemo_gym.orchestration.recovery import (
     reverification_cause,
     saved_row_evidence,
 )
-from nemo_gym.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
 from nemo_gym.rollouts.rollout_records import logical_rollout_id, rejudge_predecessor_id
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -293,13 +293,13 @@ def verifier(monkeypatch):
         return reply
 
     client = MagicMock(global_config_dict={}, post=post, get=get)
-    monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
     monkeypatch.setattr(
-        "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: {"agent": "rs"}
+        "nemo_gym.eval.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: {"agent": "rs"}
     )
-    monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.raise_for_status", AsyncMock())
     monkeypatch.setattr(
-        "nemo_gym.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda reply: reply.verified)
+        "nemo_gym.eval.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda reply: reply.verified)
     )
     return state
 
@@ -357,7 +357,7 @@ async def test_a_result_scored_in_a_separate_rescoring_output_is_still_settled_i
 ) -> None:
     """A rescore of the run into a separate output (``gym eval reverify`` on a managed run) scores the saved answer
     there and leaves the run as it was; the run's own settle still grades that answer and settles it, once."""
-    import nemo_gym.rollout_reverification as reverify
+    import nemo_gym.eval.rollout_reverification as reverify
     from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
 
     monkeypatch.setattr(reverify, "get_exporters", list)
