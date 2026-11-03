@@ -302,3 +302,124 @@ def test_profiler_suppresses_collection_errors():
         host_collector=lambda: (_ for _ in ()).throw(RuntimeError("host sample failed")),
     )
     profiler.sample_once()
+
+
+def test_cpu_time_counts_new_processes_in_full_and_live_ones_by_their_increase():
+    from nemo_gym.telemetry.memory import ProcessCpuTimes, cpu_time_since
+
+    previous = {(10, 1.0): ProcessCpuTimes(5.0, 1.0), (11, 1.0): ProcessCpuTimes(2.0, 0.5)}
+    current = {
+        (10, 1.0): ProcessCpuTimes(7.0, 1.5),  # live: +2 user, +0.5 system
+        (12, 3.0): ProcessCpuTimes(1.0, 0.25),  # new since the previous sample: all of it
+        (11, 9.0): ProcessCpuTimes(0.5, 0.0),  # pid 11 reused by a new process: counted from zero
+    }
+
+    used = cpu_time_since(previous, current)
+
+    assert used == ProcessCpuTimes(user_seconds=3.5, system_seconds=0.75)
+
+
+def test_a_process_missing_from_one_walk_is_not_counted_again_when_it_reappears():
+    from nemo_gym.telemetry.memory import ProcessCpuTimes, cpu_time_since, next_cpu_baseline
+
+    still_running = lambda key: False  # noqa: E731
+    samples = [
+        {(10, 5): ProcessCpuTimes(10.0, 0.0)},
+        {},  # the walk missed it once
+        {(10, 5): ProcessCpuTimes(12.0, 0.0)},
+    ]
+    baseline: dict = {}
+    total = 0.0
+    for current in samples:
+        total += cpu_time_since(baseline, current).user_seconds
+        baseline = next_cpu_baseline(baseline, current, has_exited=still_running)
+
+    assert total == pytest.approx(12.0)
+
+
+@pytest.mark.parametrize(
+    ("read_error", "exited"),
+    [(FileNotFoundError(), True), (PermissionError(), False), (OSError("I/O"), False)],
+    ids=["pid gone", "unreadable", "I/O error"],
+)
+def test_only_a_missing_proc_entry_confirms_an_exit(monkeypatch, read_error, exited):
+    from nemo_gym.telemetry.memory import process_has_exited
+
+    def unreadable(pid):
+        raise read_error
+
+    monkeypatch.setattr(memory_telemetry, "_stat_fields", unreadable)
+
+    assert process_has_exited((10, 5)) is exited
+
+
+def test_an_exited_process_is_forgotten():
+    from nemo_gym.telemetry.memory import ProcessCpuTimes, next_cpu_baseline
+
+    baseline = next_cpu_baseline({(10, 5): ProcessCpuTimes(10.0, 0.0)}, {}, has_exited=lambda key: True)
+
+    assert baseline == {}
+
+
+def test_collects_the_cpu_time_of_a_child_in_a_real_process_tree():
+    if not memory_telemetry.process_tree_memory_supported():
+        pytest.skip("needs Linux procfs")
+    from nemo_gym.telemetry.memory import collect_process_tree_cpu
+
+    # Burns CPU for a moment, then says so and waits, so it is alive and has used CPU when the tree is read.
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time\nwhile time.process_time() < 0.2: pass\nprint(1, flush=True)\ntime.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        child.stdout.readline()
+        times = collect_process_tree_cpu(os.getpid())
+    finally:
+        child.kill()
+        child.wait()
+
+    child_times = [cpu for (pid, _started), cpu in times.items() if pid == child.pid]
+    assert child_times and child_times[0].user_seconds + child_times[0].system_seconds >= 0.1
+
+
+@requires_lens
+def test_the_profiler_adds_each_servers_cpu_time_since_its_previous_sample(collected_metrics):
+    from nemo_gym.telemetry.memory import MemoryProfiler, ProcessCpuTimes
+
+    samples = iter(
+        [
+            {(10, 1.0): ProcessCpuTimes(2.0, 1.0)},
+            {(10, 1.0): ProcessCpuTimes(5.0, 1.5), (11, 2.0): ProcessCpuTimes(1.0, 0.0)},
+        ]
+    )
+    profiler = MemoryProfiler(
+        [ServerMemoryTarget(name="judge", server_type="resources_servers", pid=10)],
+        interval_seconds=60,
+        collector=lambda pid: ProcessTreeMemory(rss_bytes=1, pss_bytes=1, process_count=1),
+        host_collector=lambda: HostMemory(used_bytes=1, available_bytes=1, total_bytes=2),
+        cpu_collector=lambda pid: next(samples),
+    )
+
+    profiler.sample_once()
+    profiler.sample_once()
+
+    points = {point.attributes["cpu.mode"]: point for point in collected_metrics()["gym.server.cpu.time"]}
+    assert points["user"].value == pytest.approx(6.0)  # 2, then +3 and the new child's 1
+    assert points["system"].value == pytest.approx(1.5)
+    assert points["user"].attributes["nemo.gym.server.name"] == "judge"
+
+
+@requires_lens
+def test_records_host_cpu_capacity(collected_metrics):
+    from nemo_gym.telemetry.memory import record_host_cpu_capacity
+
+    record_host_cpu_capacity()
+
+    metrics = collected_metrics()
+    assert metrics["gym.host.cpu.logical"][0].value >= 1
+    if hasattr(os, "sched_getaffinity"):
+        assert 1 <= metrics["gym.host.cpu.allowed"][0].value <= metrics["gym.host.cpu.logical"][0].value
