@@ -45,7 +45,6 @@ NO_FACTS = {
     "native_score": None,
     "saved_model_patch": None,
     "collected_patch": False,
-    "sandboxed_session": False,
 }
 
 

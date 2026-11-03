@@ -1633,8 +1633,6 @@ def grading_facts(r):
         "native_score": native_score(r),
         "saved_model_patch": saved_model_patch(r),
         "collected_patch": collected_patch(r),
-        # A sandboxed session verify response (the agent session with its resource limit): it graded the agent's sandbox.
-        "sandboxed_session": isinstance(r.get("session_id"), str) and "sandbox_resource_limit" in r,
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
