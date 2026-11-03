@@ -554,6 +554,89 @@ VERIFY_BODY = {
 
 
 class TestResourcesSessions:
+    def test_checkpoint_failed_verify_cleanup_stays_owned_until_retry(self) -> None:
+        manager = FakePythonToolManager()
+        server, app = _session_server(manager)
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        server.server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test-only"}}
+        server.setup_resources_checkpoint(app)
+        client = TestClient(app, raise_server_exceptions=False)
+        prefix = "/ng-rollout/rollout"
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post(prefix + "/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        manager.cleanup_error = RuntimeError("cleanup failed")
+        first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
+        assert first.status_code == 500
+        assert server.checkpoint_participant.is_open("rs-1")
+        assert "rs-1" in server._session_episodes
+        assert "rs-1" in manager.python_sessions
+        manager.cleanup_error = None
+        second = client.post(prefix + "/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["reward"] == 1.0
+        assert not server.checkpoint_participant.is_open("rs-1")
+        assert server._session_episodes == {}
+        assert manager.python_sessions == {}
+
+    def test_checkpoint_verify_releases_active_identity_but_allows_score_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import nemo_gym.server_runtime.base_resources_server as base_resources
+
+        server, app = _session_server(FakePythonToolManager())
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        server.server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test-only"}}
+        server.setup_resources_checkpoint(app)
+        client = TestClient(app)
+        prefix = "/ng-rollout/rollout"
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post(prefix + "/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        assert server.checkpoint_participant.is_open("rs-1")
+
+        first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
+        assert first.status_code == 200 and first.json()["reward"] == 1.0
+        # Default wait verification unbinds before the HTTP reply. A replacement may never send close.
+        assert not server.checkpoint_participant.is_open("rs-1")
+        assert server._session_episodes == {}
+        assert server._verified_sessions.get("rs-1") == (EPISODE_ID, TaskId.model_validate(_seed("rs-1")["task_id"]))
+        second = client.post(prefix + "/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["reward"] == 1.0
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 409
+        assert client.post(prefix + "/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 404
+        wrong_close = _close("rs-1") | {"episode_id": {"rollout_id": "different", "attempt": 0}}
+        assert client.post(prefix + "/close_session", json=wrong_close).status_code == 409
+
+        now = base_resources.monotonic()
+        monkeypatch.setattr(
+            base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
+        )
+        assert server._verified_sessions.get("rs-1") is None
+        assert server._verification_metrics.get("rs-1") is None
+
+    async def test_checkpoint_retire_releases_owned_python_state_and_retries_failure(self) -> None:
+        from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+
+        tool_manager = FakePythonToolManager()
+        server, _ = _session_server(tool_manager)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        request.json = AsyncMock(return_value={"code": "print(4)"})
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await server.execute_tool("stateful_python_code_exec", request)
+        participant = ResourcesParticipant(server, "restart_only")
+        participant.seeded("rs-1", EPISODE_ID)
+        tool_manager.cleanup_error = RuntimeError("sandbox unavailable")
+        with pytest.raises(RuntimeError, match="sandbox unavailable"):
+            await participant.retire(EPISODE_ID)
+        assert "rs-1" in participant._sessions and "rs-1" in tool_manager.python_sessions
+        tool_manager.cleanup_error = None
+        await participant.retire(EPISODE_ID)
+        assert tool_manager.python_sessions == {} and server._timing_by_session == {}
+        assert server._session_episodes == {} and participant._sessions == {}
+
     async def test_cancelled_python_call_keeps_ownership_until_close(
         self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -717,7 +800,7 @@ class TestResourcesSessions:
             await tool._sandbox.close()
             await http_client.close()
 
-    def test_failed_cleanup_at_verify_keeps_the_score(self) -> None:
+    def test_failed_cleanup_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
         tool_manager = FakePythonToolManager()
         server, app = _session_server(tool_manager)
         client = TestClient(app, raise_server_exceptions=False)
@@ -730,7 +813,7 @@ class TestResourcesSessions:
 
         verified = client.post("/verify", json=VERIFY_BODY)
 
-        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
+        assert verified.status_code == 500
         # The python session stays owned, so the close retries the release and reports its failure.
         assert "rs-1" in tool_manager.python_sessions
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
@@ -838,6 +921,31 @@ class TestResourcesSessions:
             assert "rs-1" not in server._timing_by_session
         finally:
             await asyncio.gather(tool_call, close, return_exceptions=True)
+
+    @pytest.mark.parametrize("first_call_fails", [False, True])
+    def test_verify_retry_keeps_metrics_after_detailed_timings_are_released(self, first_call_fails: bool) -> None:
+        tool_manager = FakePythonToolManager()
+        server, app = _session_server(tool_manager)
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        recorded = server._timing_by_session["rs-1"][0]
+        expected_seconds = recorded["execution_time_seconds"]
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(
+            side_effect=[RuntimeError("verifier reply lost") if first_call_fails else verifier_reply, verifier_reply]
+        )
+
+        first = client.post("/verify", json=VERIFY_BODY)
+        assert first.status_code == (500 if first_call_fails else 200)
+        # Either the delegated reply or this first HTTP response can be lost. The caller retries the same body.
+        second = client.post("/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["reward"] == 1.0
+        assert second.json()["num_tool_calls"] == 1
+        assert second.json()["total_tool_execution_time_seconds"] == expected_seconds
+        assert server._timing_by_session == {} and tool_manager.python_sessions == {}
+        assert server.server_client.post.await_count == 2
 
     def test_verify_then_close_releases_once_more_harmlessly(self) -> None:
         tool_manager = FakePythonToolManager()

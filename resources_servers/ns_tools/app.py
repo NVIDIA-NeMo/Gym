@@ -55,6 +55,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -242,10 +243,15 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     # The episode and task each Environment Server seed bound to its resources_session_id.
     _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = {}
     _fence: ResourcesSessionFence = PrivateAttr()
+    # Verify unbinds checkpoint ownership; keep only expiring identity for retries and the eventual close.
+    _verified_sessions: ClosedResourcesSessionRecords[tuple[EpisodeId, TaskId]] = PrivateAttr()
+    _verification_metrics: ClosedResourcesSessionRecords[Dict[str, float | int]] = PrivateAttr()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        self._verification_metrics = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -435,7 +441,11 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # The session middleware always sets the session ID, which keys the stateful python session.
         session_id = request.session[SESSION_ID_KEY]
-        if self._fence.closed_episode(session_id) is not None:
+        if (
+            self._fence.closed_episode(session_id) is not None
+            or session_id in self._verified_sessions
+            or session_id in self._verification_metrics
+        ):
             raise ResourcesSessionLostError(f"ns_tools session {session_id} is closed")
 
         if session_id not in self._timing_by_session:
@@ -519,12 +529,24 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         resources_session_id = body.resources_session_id
         async with self._fence.locked(resources_session_id):
             self._fence.raise_if_closed(resources_session_id)
+            if resources_session_id in self._verified_sessions:
+                raise ResourcesSessionConflictError("resources session has already been verified")
             identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         # Tool calls and verify find the python session by the cookie, so it must name this resources session.
         request.session[SESSION_ID_KEY] = resources_session_id
         return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        """Release Python state before checkpoint retirement forgets its owning attempt."""
+        async with self._fence.locked(session_id):
+            if self.tool_manager is not None:
+                await self.tool_manager.cleanup_request(session_id)
+            self._timing_by_session.pop(session_id, None)
+            identity = self._session_episodes.pop(session_id, None)
+            if identity is not None:
+                self._fence.mark_closed(session_id, identity[0])
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Release the session's python session and tool timings, even when verify never ran.
@@ -539,7 +561,9 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 if closed_episode != body.episode_id:
                     raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
-            identity = self._session_episodes.get(resources_session_id)
+            identity = self._session_episodes.get(resources_session_id) or self._verified_sessions.get(
+                resources_session_id
+            )
             if identity is not None and identity[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             # Verify has already released a verified episode's python session; cleaning up again is a no-op.
@@ -554,8 +578,12 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     # Verification
     # --------------------------------------------------------
 
-    def _aggregate_timing_metrics(self, session_id: Optional[str]) -> Dict[str, Any]:
+    def _aggregate_timing_metrics(self, session_id: Optional[str]) -> Dict[str, float | int]:
         """Aggregate tool execution timing metrics for a session."""
+        if session_id:
+            previous = self._verification_metrics.get(session_id)
+            if previous is not None:
+                return previous
         tool_timings = self._timing_by_session.pop(session_id, []) if session_id else []
 
         total_tool_time = sum(t["execution_time_seconds"] for t in tool_timings)
@@ -564,13 +592,18 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         tool_timeout_count = sum(1 for t in tool_timings if t.get("is_internal_timeout"))
         tool_request_timeout_count = sum(1 for t in tool_timings if t.get("is_request_timeout"))
 
-        return {
+        metrics = {
             "total_tool_execution_time_seconds": total_tool_time,
             "num_tool_calls": num_tool_calls,
             "avg_tool_call_time_seconds": avg_tool_time,
             "tool_timeout_count": tool_timeout_count,
             "tool_request_timeout_count": tool_request_timeout_count,
         }
+        if session_id:
+            # A lost verify reply must not turn this rollout into one with zero tool calls. Keep only the
+            # aggregate for the routing retry window; release the detailed timing list and Python state.
+            self._verification_metrics.remember(session_id, metrics)
+        return metrics
 
     async def verify(self, request: Request, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
         """
@@ -590,7 +623,12 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 **(body.model_dump() | lost_session_verification(f"ns_tools session {session_id} is closed"))
             )
         try:
-            metrics = self._aggregate_timing_metrics(session_id)
+            if session_id:
+                # Finish any accepted tool call before freezing the aggregate for retries.
+                async with self._fence.locked(session_id):
+                    metrics = self._aggregate_timing_metrics(session_id)
+            else:
+                metrics = self._aggregate_timing_metrics(session_id)
             if self.config.verbose_tool_logging:
                 logger.info(
                     f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
@@ -629,14 +667,16 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 **metrics,
             )
         finally:
-            if self.tool_manager is not None and session_id:
+            if session_id:
                 # Under the fence, so a tool call still running for this session records its python session first.
                 async with self._fence.locked(session_id):
-                    try:
+                    # A successful verify reply ends checkpoint ownership. Cleanup failure must fail the
+                    # request too, so its retry or checkpoint retirement can still find the Python state.
+                    if self.tool_manager is not None:
                         await self.tool_manager.cleanup_request(session_id)
-                    except Exception:
-                        # The score stands; the python session stays owned, so /close_session retries the release.
-                        logger.exception("Could not release the python session of ns_tools session %s", session_id)
+                    identity = self._session_episodes.pop(session_id, None)
+                    if identity is not None:
+                        self._verified_sessions.remember(session_id, identity)
 
     # --------------------------------------------------------
     # Cleanup
