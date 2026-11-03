@@ -31,20 +31,23 @@ UPLOAD_ALLOWANCE_S = 3600
 RESUME_IDENTITY_SUFFIX = "manifest.identity.json"
 
 
-def _without_resume_identity(run_dir: Path, workdir: Path) -> Path:
-    """The run directory to upload: as it is, or, when it holds a resume identity, a mirror without that file.
+def _without_resume_identity(run_dir: Path, workdir: Path, rollouts_dir: Path | None = None) -> Path:
+    """The run directory to upload: as it is, or, when the rollouts' directory (``rollouts_dir``, by default the run
+    directory itself) holds a resume identity, a mirror without that file.
 
     The mirror, under `workdir` and named like the run directory, has the run's directories and a link to each of its
     files, so nothing is copied and the run directory is left as it is.
     """
-    if not any(path.name.endswith(RESUME_IDENTITY_SUFFIX) for path in run_dir.iterdir()):
+    rollouts_dir = run_dir if rollouts_dir is None else rollouts_dir
+    if not any(path.name.endswith(RESUME_IDENTITY_SUFFIX) for path in rollouts_dir.iterdir()):
         return run_dir
+    identity_dir = rollouts_dir.relative_to(run_dir)
     mirror = workdir / "upload" / run_dir.name
     for directory, subdirectories, names in os.walk(run_dir):
         relative = Path(directory).relative_to(run_dir)
         (mirror / relative).mkdir(parents=True, exist_ok=True)
         for name in names + [name for name in subdirectories if (Path(directory) / name).is_symlink()]:
-            if relative == Path(".") and name.endswith(RESUME_IDENTITY_SUFFIX):
+            if relative == identity_dir and name.endswith(RESUME_IDENTITY_SUFFIX):
                 continue
             (mirror / relative / name).symlink_to(Path(directory, name).absolute())
     return mirror
@@ -63,6 +66,13 @@ class EvalRDLExportConfig(RunExportConfig):
     parallel: int = Field(default=4, ge=1, description="Number of parallel upload parts.")
     wait: bool = Field(default=True, description="Block until EvalRDL has a verdict on the upload.")
     timeout: float = Field(default=1800, gt=0, description="Seconds to wait for the verdict.")
+    run_dir: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Directory to upload as the run; it must contain the rollouts file. "
+            "Defaults to the directory the rollouts file is in."
+        ),
+    )
     url: Optional[str] = Field(
         default=None, description="EvalRDL service: `prod`, `stg` or a URL. Defaults to the SDK's own choice."
     )
@@ -110,6 +120,9 @@ class EvalRDLExporter(IsolatedExporter):
             raise ExportPreparationError(unexportable)
         # `absolute`, not `resolve`: a symlinked rollouts file must not move the upload to its target's directory.
         rollouts = artifacts.rollouts_jsonl_fpath.absolute()
+        run_dir = self.config.run_dir.absolute() if self.config.run_dir is not None else rollouts.parent
+        if not rollouts.is_relative_to(run_dir):
+            raise ExportPreparationError(f"`run_dir` {run_dir} does not contain the rollouts file {rollouts}.")
         others = sorted(
             path.name
             for path in rollouts.parent.glob("*rollouts.jsonl")
@@ -122,7 +135,7 @@ class EvalRDLExporter(IsolatedExporter):
             )
         config = self.config
         return {
-            "run_dir": str(_without_resume_identity(rollouts.parent, workdir)),
+            "run_dir": str(_without_resume_identity(run_dir, workdir, rollouts.parent)),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,

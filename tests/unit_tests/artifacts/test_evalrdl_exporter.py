@@ -203,6 +203,30 @@ class TestRunDirectory:
         assert {"quality_summary.json", "model-calls", "gpqa_rollouts_resolved_config.yaml"} <= set(call["files"])
         assert sorted(p.name for p in tmp_path.iterdir() if p.name != fake_sdk["log"].name) == before
 
+    def test_a_run_dir_above_the_rollouts_directory_is_uploaded_instead(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        artifacts = _make_run(artifacts_dir)
+        (tmp_path / "eval.exit").write_text("0")
+
+        _exporter(artifacts, tmp_path, run_dir=str(tmp_path)).export(artifacts)
+
+        call = _sdk_call(fake_sdk)
+        assert call["path"] == str(tmp_path.resolve())
+        assert {"artifacts", "eval.exit"} <= set(call["files"])
+
+    def test_a_run_dir_that_does_not_hold_the_rollouts_is_refused(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        result = _exporter(artifacts, tmp_path, run_dir=str(elsewhere)).export(artifacts)
+
+        assert result.state == "failed"
+        assert "does not contain the rollouts file" in result.error
+
     def test_a_relative_rollouts_path_is_uploaded_by_its_absolute_directory(
         self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
     ) -> None:
