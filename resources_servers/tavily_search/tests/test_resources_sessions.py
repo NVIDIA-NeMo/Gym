@@ -14,17 +14,22 @@
 # limitations under the License.
 """tavily_search serves the typed resources sessions API through its real routes, next to unseeded tool callers."""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
-from resources_servers.tavily_search.app import TavilySearchResourcesServer, TavilySearchResourcesServerConfig
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
+from resources_servers.tavily_search.app import (
+    TavilySearchRequest,
+    TavilySearchResourcesServer,
+    TavilySearchResourcesServerConfig,
+)
 
 
 EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
@@ -143,7 +148,41 @@ def test_a_late_tool_call_does_not_recreate_a_closed_session() -> None:
     assert verified["metrics"] == {"async_tavily_calls": []}
 
 
-def test_a_seed_whose_task_data_is_not_a_task_is_refused_for_good() -> None:
+async def test_a_search_in_flight_across_close_does_not_recreate_the_session() -> None:
+    server = make_server()
+    searching, finish = asyncio.Event(), asyncio.Event()
+
+    async def slow_search(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        searching.set()
+        await finish.wait()
+        return SEARCH_RESULTS
+
+    server._async_tavily_clients[0].search = slow_search
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "resources-session"}
+    await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(seed_json()))
+    search = asyncio.create_task(server.web_search(request, TavilySearchRequest(query="capital of France")))
+    await asyncio.wait_for(searching.wait(), timeout=5)
+
+    await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(close_json()))
+    finish.set()
+    await asyncio.wait_for(search, timeout=5)
+
+    # The search records its call on the metrics it read before the close, not on a new record.
+    assert "resources-session" not in server._session_id_to_metrics
+
+
+def test_a_seed_for_the_same_episode_and_another_task_is_refused() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+
+    other_task = client.post("/seed_session", json=seed_json(task_id=TaskId(taskset="tavily_search", task_id="1")))
+
+    assert other_task.status_code == 409
+
+
+def test_a_seed_whose_task_data_is_not_a_task_is_refused_and_records_nothing() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
 
