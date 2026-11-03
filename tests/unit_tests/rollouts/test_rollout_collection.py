@@ -14033,6 +14033,15 @@ class TestResumeTerminalGateUsesTheLatestAttempt:
         )
         assert [row[TASK_INDEX_KEY_NAME] for row in counted] == ([] if 1 in got else [1])
 
+    def test_the_summary_names_a_judge_failure_left_to_recovery(self, tmp_path: Path, capsys) -> None:
+        # A non-terminal judge failure is not run again (verification recovery judges its answer): resume says so.
+        judge = {**failing_row(1), NG_FAILURE_CLASS_KEY: "judge_failed", "reward": 0.0}
+        _, got = self._resume(tmp_path, [judge])
+        assert got == {2: None}
+        out = capsys.readouterr().out
+        assert "- 1 kept answers, judge failures or unclassified executions → not run again (left to recovery)" in out
+        assert "- 0 sidecar-terminal → not retried" in out
+
     def test_a_final_failure_after_the_interruption_is_terminal_again(self, tmp_path: Path) -> None:
         judge = {**failing_row(1), **self._JUDGE}
         sidecar = [

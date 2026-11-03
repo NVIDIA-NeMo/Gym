@@ -188,3 +188,30 @@ def test_a_judge_failure_resume_leaves_to_recovery_is_counted_and_named(tmp_path
 def test_every_judge_failure_is_left_to_verification_recovery(failure_class):
     # The registered judge_unparseable is a judge failure too: its answer is judged again, never regenerated.
     assert has_unclassified_execution_failure(_route_failure_row(_ng_failure_class=failure_class))
+
+
+def test_an_omitted_report_does_not_lift_a_terminal_failure(tmp_path):
+    # The omitted flag only stops vetoing a retry; a failure the producer marked terminal still stays final.
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps(rows[0]) + chr(10))
+
+    def prepare():
+        return rows, RunManifest.create(source, rows, {}, {}).model_copy(update={"max_rollout_attempts": 3})
+
+    output = artifacts / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = dict(rows[0])
+        store.allocate_attempt(row)
+        failure = _lost_connection_row(_ng_failure_events_omitted=True, _ng_failure_terminal=True)
+        failure["_ng_failure_record"] = failure["_ng_failure_record"] | {
+            "run_id": store.manifest.run_id,
+            "episode_id": {"rollout_id": "0-0", "attempt": row["_ng_attempt_index"]},
+            "failure": failure["_ng_failure_record"]["failure"] | {"terminal": True},
+        }
+        store.record_outcome(row | failure)
+    reader = RolloutStore.read(output)
+    assert not has_unclassified_execution_failure(failure)
+    assert reader.pending() == [] and reader.coverage()["stopped_not_retried"] == 0
