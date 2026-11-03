@@ -18,8 +18,8 @@ import json
 
 import pytest
 
-from nemo_gym.rollout_recovery import RunManifest, has_unclassified_execution_failure
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore, RunManifest
+from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
 
 
 def _lost_connection_row(**extra):

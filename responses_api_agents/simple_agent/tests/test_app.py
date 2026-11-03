@@ -40,7 +40,9 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentOutcome,
     AgentSeedSessionRequest,
+    check_agent_seed_rejected,
 )
+from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.config import (
@@ -64,7 +66,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
 from nemo_gym.failure_transport import FailureHeader
-from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     AgentSessionParticipant,
@@ -90,8 +92,6 @@ from nemo_gym.server_runtime import (
     StaleAttemptError,
 )
 from nemo_gym.server_runtime.episode_types import FailureEvent, SdkErrorDetails
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.trajectory import TrajectoryRecord
 from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from responses_api_agents.simple_agent.app import (

@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client as http_client
 import nemo_gym.client.openai_client as model_client
-import nemo_gym.rollout_collection as collection
+import nemo_gym.rollouts.rollout_collection as collection
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
@@ -23,7 +23,7 @@ from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLega
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore
 from resources_servers.equivalence_llm_judge.app import LLMJudgeResourcesServer, LLMJudgeResourcesServerConfig
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig

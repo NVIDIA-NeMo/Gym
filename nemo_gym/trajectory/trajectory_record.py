@@ -32,7 +32,7 @@ from nemo_gym.server_runtime.episode_types import FailureReport
 
 
 if TYPE_CHECKING:
-    from nemo_gym.observability.model_calls import ModelCallRecord
+    from nemo_gym.trajectory.model_call_record import ModelCallRecord
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"

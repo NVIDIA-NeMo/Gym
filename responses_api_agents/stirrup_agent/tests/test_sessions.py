@@ -13,13 +13,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, agent_tools
+from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
 from nemo_gym.agents.utils import uv_bootstrap
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from nemo_gym.testing.failure_assertions import raises_agent_failure
 from responses_api_agents.stirrup_agent import app, sandbox
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig
 from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app

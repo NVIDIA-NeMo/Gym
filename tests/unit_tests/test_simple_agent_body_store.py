@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client as http_client
 import nemo_gym.client.openai_client as model_client
-import nemo_gym.rollout_collection as collection
+import nemo_gym.rollouts.rollout_collection as collection
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -25,7 +25,7 @@ from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 from tests.unit_tests.models.test_responses_api_model_streaming import _EchoModel
 from tests.unit_tests.test_agent_environment_collection_failures import MODEL_REPLY, _serve

@@ -26,8 +26,8 @@ from nemo_gym.agents.base_responses_api_agent import AggregateMetricsRequest
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
-from nemo_gym.rollout_recovery import has_saved_generation
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
 
 # Import the adapter before Tau2 so it can set TAU2_DATA_DIR before Tau2

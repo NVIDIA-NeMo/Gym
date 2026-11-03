@@ -106,10 +106,10 @@ async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tm
         server._cleanup_workspace.assert_called_once_with("synthetic-session")
 
     # Persist the actual registered verifier reply through the normal collection writer.
-    import nemo_gym.rollout_collection as collection
-    from nemo_gym.rollout_store import RolloutStore
-    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
-    from tests.unit_tests.test_rollout_recovery import failing_row
+    import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.rollouts import RolloutStore
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_recovery import failing_row
 
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
     source = tmp_path / "input.jsonl"
@@ -146,7 +146,7 @@ async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tm
 async def assert_browsecomp_received_unparseable_verdict_keeps_zero_and_transport_observations(
     monkeypatch, error_first
 ):
-    from tests.unit_tests.test_rollout_collection import FakeResponse
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse
 
     module = import_module("resources_servers.browsecomp_advanced_harness.app")
     fixtures = import_module("resources_servers.browsecomp_advanced_harness.tests.test_app")

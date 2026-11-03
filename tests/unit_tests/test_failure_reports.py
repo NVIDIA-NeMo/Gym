@@ -21,7 +21,7 @@ from nemo_gym.failure_transport import (
     observe_reply,
     reply_failure_report,
 )
-from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
 from nemo_gym.server_runtime.episode_types import (
     BaseEpisodeResponse,

@@ -24,7 +24,7 @@ import orjson
 import pytest
 from scipy.stats import t
 
-import nemo_gym.rollout_collection as collection
+import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.comparison.diff import (
     build_flip_summary,
     build_metric_rows,
@@ -1699,9 +1699,9 @@ async def test_compare_reads_fresh_metrics_after_aggregation_through_alias(
 ):
     from unittest.mock import AsyncMock
 
-    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
-    from nemo_gym.rollout_records import coverage_path_for
-    from tests.unit_tests.test_rollout_collection import (
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
+    from tests.unit_tests.rollouts.test_rollout_collection import (
         FakeResponse,
         compute_aggregate_metrics,
         failing_row,
@@ -1746,10 +1746,10 @@ async def test_compare_reads_fresh_metrics_after_aggregation_through_alias(
 async def test_aggregation_and_compare_retain_legacy_alias_sidecars(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
 
-    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
-    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
     from nemo_gym.utils.path_utils import failures_path_for
-    from tests.unit_tests.test_rollout_collection import (
+    from tests.unit_tests.rollouts.test_rollout_collection import (
         FakeResponse,
         compute_aggregate_metrics,
         failing_row,
@@ -1787,9 +1787,9 @@ async def test_aggregate_destination_with_competing_alias_companions_is_unchange
     from unittest.mock import AsyncMock
 
     from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
-    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
     from nemo_gym.utils.path_utils import failures_path_for
-    from tests.unit_tests.test_rollout_collection import (
+    from tests.unit_tests.rollouts.test_rollout_collection import (
         FakeResponse,
         compute_aggregate_metrics,
         failing_row,
@@ -1880,7 +1880,7 @@ async def test_metrics_only_aggregation_refuses_a_symlink_to_another_run(tmp_pat
 
 @pytest.mark.parametrize("destination_kind", ["dangling_alias", "direct", "directory_alias"])
 async def test_metrics_only_aggregation_allows_explicit_or_new_output(tmp_path, fake_aggregation, destination_kind):
-    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
 
     source = tmp_path / "shards" / "source.jsonl"
     _rows(source, 2)

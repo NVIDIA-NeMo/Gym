@@ -16,7 +16,7 @@ import orjson
 import pytest
 from omegaconf import OmegaConf
 
-import nemo_gym.rollout_collection as collector
+import nemo_gym.rollouts.rollout_collection as collector
 from environment_servers.single_agent_turn.tests.test_app import (
     _agent_response,
     _environment_server,
@@ -24,8 +24,7 @@ from environment_servers.single_agent_turn.tests.test_app import (
     _Response,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore
 from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.terminal_bench_4 import lifecycle, verifier
 from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer, atomic_json
@@ -255,7 +254,7 @@ async def persisted(tmp_path, monkeypatch, case, reward, measured):
         monkeypatch.setattr(collector, "setup_server_client_utils", lambda *a, **k: client)
         monkeypatch.setattr(collector, "raise_for_status", status)
         monkeypatch.setattr(collector, "get_response_json", payload)
-        from nemo_gym.rollout_recovery import IncompleteEvaluationError
+        from nemo_gym.rollouts import IncompleteEvaluationError
 
         for resume in (False, True):
             try:

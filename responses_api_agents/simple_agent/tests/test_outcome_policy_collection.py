@@ -14,27 +14,22 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 import nemo_gym.client.http_client
-import nemo_gym.rollout_collection
+import nemo_gym.rollouts.rollout_collection
 from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
 from nemo_gym.metrics import compute_aggregate_metrics
-from nemo_gym.rollout_collection import (
-    NG_FAILURE_COUNTS_AS_ZERO_KEY,
-    NG_TERMINAL_KEY,
-    RolloutCollectionConfig,
-    RolloutCollectionHelper,
-    _failures_path_for,
-)
+from nemo_gym.rollouts import NG_TERMINAL_KEY, RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import NG_FAILURE_COUNTS_AS_ZERO_KEY, _failures_path_for
 from responses_api_agents.simple_agent.app import SimpleAgentConfig, SimpleAgentOutcomePolicyConfig
 
 
 @pytest.fixture
 def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     get_global_config_dict = MagicMock(return_value={})
-    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", get_global_config_dict)
     return get_global_config_dict
 
 
@@ -73,7 +68,7 @@ def install_fake_server_client(monkeypatch: pytest.MonkeyPatch, post: AsyncMock)
         }
     )
     monkeypatch.setattr(
-        nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
+        nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
     )
 
     async def raise_for_status(response: FakeResponse) -> None:
@@ -83,8 +78,8 @@ def install_fake_server_client(monkeypatch: pytest.MonkeyPatch, post: AsyncMock)
     async def get_response_json(response: FakeResponse) -> dict | None:
         return response.payload
 
-    monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", raise_for_status)
-    monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", raise_for_status)
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_response_json", get_response_json)
     return server_client
 
 

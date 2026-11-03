@@ -134,7 +134,7 @@ from nemo_gym.utils.path_utils import materialized_path_for
 
 
 if TYPE_CHECKING:
-    from nemo_gym.rollout_collection import RolloutCollectionConfig
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
 
 
 logger = logging.getLogger(__name__)
@@ -599,7 +599,7 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
     from nemo_gym.data.dataset_preparation import TrainDataProcessor
-    from nemo_gym.rollout_collection import (
+    from nemo_gym.rollouts.rollout_collection import (
         E2ERolloutCollectionConfig,
         RolloutCollectionConfig,
         RolloutCollectionHelper,
@@ -710,7 +710,7 @@ def e2e_rollout_collection():  # pragma: no cover
         try:
             # Health deferred with aggregation is not disabled: `gym eval aggregate` reports it.
             if driver_path and not rollout_collection_config.disable_aggregation:
-                from nemo_gym.rollout_health import capture_dirs_for_health
+                from nemo_gym.rollouts.rollout_health import capture_dirs_for_health
 
                 if health_check_enabled:
                     # The driver ran with the check disabled, so a built-in collector in it recorded "disabled".
@@ -766,7 +766,7 @@ def _exit_if_terminated() -> None:
 
 
 def _remove_health_reports(output_fpath: Path) -> None:
-    from nemo_gym.rollout_health import _remove_health_reports as remove_reports
+    from nemo_gym.rollouts.rollout_health import _remove_health_reports as remove_reports
 
     remove_reports(output_fpath)
 
@@ -781,7 +781,7 @@ def _health_check_collected_rollouts(
     disabled: bool = False,
 ) -> None:
     """Report collected health using the CLI's shutdown state."""
-    from nemo_gym.rollout_health import _health_check_collected_rollouts as report
+    from nemo_gym.rollouts.rollout_health import _health_check_collected_rollouts as report
 
     report(
         output_fpath,
@@ -808,8 +808,8 @@ def _check_collection_completion(
 
 def _check_saved_completion(output: Path) -> None:
     """Distinguish a valid partial run from successful CLI completion."""
-    from nemo_gym.rollout_records import coverage_path_for
-    from nemo_gym.rollout_recovery import IncompleteEvaluationError, has_only_intentional_gaps
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError, has_only_intentional_gaps
 
     coverage = coverage_path_for(output.resolve())
     if coverage.exists():
@@ -839,7 +839,7 @@ def _check_saved_completion(output: Path) -> None:
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.telemetry.setup import (
         configure_telemetry_env,
         init_telemetry,
@@ -876,7 +876,7 @@ def collect_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
-    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
     global_config = get_global_config_dict()
     config = RolloutAggregationConfig.model_validate(global_config)
@@ -901,7 +901,7 @@ def health_check_rollouts(
     ``RunHealthLimits``) overrides only that persisted limit, and ``None`` removes it; a limit not set keeps its
     persisted value.
     """
-    from nemo_gym.rollout_health import health_check_run_dir
+    from nemo_gym.rollouts.rollout_health import health_check_run_dir
 
     return health_check_run_dir(
         run_dir,
@@ -958,7 +958,7 @@ def reward_profile():  # pragma: no cover
         coverage_by_agent,
         select_measured,
     )
-    from nemo_gym.rollout_collection import loads_jsonl_line
+    from nemo_gym.rollouts.rollout_collection import loads_jsonl_line
 
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
@@ -1241,7 +1241,7 @@ def _patterns(args: argparse.Namespace, name: str) -> list[str]:
 def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     """Entry point for ``gym eval run <target> ...``."""
     from nemo_gym.cli.main import _merge_config_paths, dispatch
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     if getattr(args, "no_serve", False):
         args._parser.error("A Harbor target starts its own servers; drop --no-serve")
@@ -1421,7 +1421,7 @@ def _resolved_collection(tokens: list[str], prepared: PreparedTaskset) -> "Rollo
         reset_global_config_dict,
         translate_interpolation_error,
     )
-    from nemo_gym.rollout_collection import RolloutCollectionConfig
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
 
     sys.argv = [sys.argv[0], *tokens]
     # These tokens, not whatever this process resolved before them (the run config did not exist yet); the
@@ -1502,7 +1502,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
     results never share a folder with a model's.
     """
     from nemo_gym.cli.main import _merge_config_paths, dispatch
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     # Evaluation and reference validation must never share inputs, configs, or cached results.
     try:
