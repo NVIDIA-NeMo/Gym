@@ -679,8 +679,8 @@ def _native_episode_record(row: Dict, response: Any) -> Dict:
         raise InvalidRolloutResult(str(error)) from error
 
 
-def _stored_episode_record(row: Mapping[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
-    """The record ``gym eval run`` stores for a materialized row's ``/run`` result.
+def _flat_episode_record(row: Mapping[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a materialized row's ``/run`` result into an episode record.
 
     The row went out as an episode request, so an Environment Server reply is a ``BaseEpisodeResponse``: its
     identity is checked against the dispatched episode and it becomes ``_episode_record``
@@ -698,15 +698,15 @@ def _stored_episode_record(row: Mapping[str, Any], result: Dict[str, Any]) -> Di
 def _caller_episode_record(row: Mapping[str, Any], result: Any) -> Any:
     """The result ``run_examples(..., episode_records=True)`` hands back for one row.
 
-    For a materialized row it is the record ``gym eval run`` stores (``_stored_episode_record``). A handled
-    Environment Server failure also gets ``reward`` 0.0 and ``mask_sample`` True, the fields of a masked verify
-    response (see ``lost_session_verification``), so a trainer that reads them drops the episode instead of
-    scoring it. Such a failure is matched by its class or, when it names a ``failure_kind`` (which then becomes
-    its class), by its legacy class. A flat row's result is returned unchanged.
+    For a materialized row it is the flat episode record (``_flat_episode_record``). A handled Environment
+    Server failure also gets ``reward`` 0.0 and ``mask_sample`` True, the fields of a masked verify response (see
+    ``lost_session_verification``), so a trainer that reads them drops the episode instead of scoring it. Such a
+    failure is matched by its class or, when it names a ``failure_kind`` (which then becomes its class), by its
+    legacy class. A flat row's result is returned unchanged.
     """
     if _materialized_taskset(row) is None or not isinstance(result, dict):
         return result
-    record = _stored_episode_record(row, result)
+    record = _flat_episode_record(row, result)
     if matches_failure_class(record, {ENVIRONMENT_SERVER_FAILURE_CLASS}):
         record["reward"] = 0.0
         record[MASK_SAMPLE_KEY] = True
@@ -5379,7 +5379,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         A row that ran resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
         returned — no Gym-private fields are added to ``result`` unless ``episode_records`` (below) asks for a
-        materialized row's stored record. A row that produced no `/run`
+        materialized row's flat episode record. A row that produced no `/run`
         result resolves to a Gym-built ``result`` carrying Gym-private fields instead: a row drained
         by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
@@ -5389,13 +5389,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
 
-        ``episode_records=True`` resolves each materialized row's result to the record fields ``gym eval run`` stores
-        for it instead (without the collector's own bookkeeping): a ``BaseEpisodeResponse`` becomes the result's own
-        fields (or the ``_ng_failure_*`` fields of a handled failure) plus ``_ng_task_id`` and the row's
-        ``task_data`` provenance (``_ng_digest``, ``_ng_dataset_digest``). A handled Environment Server failure also
-        gets ``reward`` 0.0 and ``mask_sample`` True, so a trainer masks the episode instead of scoring it. Flat rows'
+        ``episode_records=True`` resolves each materialized row's result to a flat episode record instead: a
+        ``BaseEpisodeResponse`` becomes the result's own fields (or the ``_ng_failure_*`` fields of a handled
+        failure) plus ``_ng_task_id`` and the row's ``task_data`` provenance (``_ng_digest``,
+        ``_ng_dataset_digest``). A handled Environment Server failure, with or without a ``failure_kind``, also gets
+        ``reward`` 0.0 and ``mask_sample`` True, so a trainer masks the episode instead of scoring it. Flat rows'
         results are unaffected. It applies to every outcome the iterator hands back, including those from
-        ``aclose_and_drain()``; a reply that cannot be converted raises from its own outcome.
+        ``aclose_and_drain()``. A reply that cannot be converted, or whose episode or task does not match the
+        dispatched row (``InvalidRolloutResult``, ``StaleRolloutResult``), raises from its own outcome.
+        ``run_outcomes`` also flattens these replies, as typed outcomes on copies of the rows; ``episode_records``
+        keeps ``run_examples``' dispatch controls and the ``agent_ref`` it resolves on the caller's rows.
         """
 
         return _RowResultIterator(

@@ -104,6 +104,7 @@ from nemo_gym.rollout_collection import (
     NG_DIGEST_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
+    NG_FAILURE_LEGACY_CLASS_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
@@ -140,6 +141,7 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
 )
 from nemo_gym.rollout_health import health_check_run_dir
+from nemo_gym.rollout_outcomes import InvalidRolloutResult, StaleRolloutResult
 from nemo_gym.rollout_records import prepare_append as _drop_truncated_tail
 from nemo_gym.rollout_recovery import manifest_path_for, matches_failure_class
 from nemo_gym.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
@@ -13400,6 +13402,38 @@ class TestRunExamplesMaterializedTasks:
         assert record["reward"] == 0.0
         assert record[MASK_SAMPLE_KEY] is True
 
+    async def test_episode_records_mask_a_handled_failure_that_names_its_kind(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A failure that names its kind carries the kind as its class; it is still a handled Environment Server
+        # failure, so it is masked like one.
+        failure = {"failure_reason": "task budget exceeded", "terminal": False, "failure_kind": "harbor:task_deadline"}
+        self._install(monkeypatch, self._reply(failure=failure))
+
+        _, record = await next(
+            RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True)
+        )
+
+        assert record[NG_FAILURE_CLASS_KEY] == "harbor:task_deadline"
+        assert record[NG_FAILURE_LEGACY_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert record["reward"] == 0.0
+        assert record[MASK_SAMPLE_KEY] is True
+
+    @pytest.mark.parametrize(
+        ("mismatch", "error"),
+        [
+            ({"episode_id": {"rollout_id": "0-0", "attempt": 1}}, StaleRolloutResult),
+            ({"task_id": {"taskset": "my_taskset", "task_id": "task-2"}}, InvalidRolloutResult),
+        ],
+    )
+    async def test_episode_records_reject_a_reply_for_another_episode(
+        self, monkeypatch: pytest.MonkeyPatch, mismatch: dict, error: type[Exception]
+    ) -> None:
+        self._install(monkeypatch, self._reply(result={"reward": 1.0}) | mismatch)
+
+        with pytest.raises(error):
+            await next(RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True))
+
     async def test_episode_records_keep_a_gym_built_result_unmasked(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A row the dispatch budget never started keeps Gym's drained result, named by its inputs as gym eval run
         # stores it; it is not an Environment Server failure, so it is not scored or masked here.
@@ -13425,10 +13459,11 @@ class TestRunExamplesMaterializedTasks:
 
         assert result == reply
 
-    async def test_episode_records_apply_to_drained_outcomes(self) -> None:
+    @pytest.mark.parametrize("failure_kind", [None, "harbor:task_deadline"])
+    async def test_episode_records_apply_to_drained_outcomes(self, failure_kind: str | None) -> None:
         gate = asyncio.Event()
         started = []
-        failure = {"failure_reason": "sandbox lost", "terminal": False}
+        failure = {"failure_reason": "sandbox lost", "terminal": False, "failure_kind": failure_kind}
 
         async def rollout() -> _CompletedRollout:
             started.append(True)
@@ -13451,7 +13486,8 @@ class TestRunExamplesMaterializedTasks:
 
             _, record = await drained
 
-            assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+            assert record[NG_FAILURE_CLASS_KEY] == (failure_kind or ENVIRONMENT_SERVER_FAILURE_CLASS)
+            assert matches_failure_class(record, {ENVIRONMENT_SERVER_FAILURE_CLASS})
             assert record["reward"] == 0.0
             assert record[MASK_SAMPLE_KEY] is True
         finally:
