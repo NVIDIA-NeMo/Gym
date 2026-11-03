@@ -152,6 +152,11 @@ The invocation references `call-1`. Tool timing joins the conversation output th
 
 ## Add Evidence to a Custom Agent
 
+Materialized task rows use the scalar `task_id.task_id` for trajectory and turn task IDs.
+A valid explicit row `trajectory_identity` overrides both task and rollout IDs. Otherwise,
+rollout IDs retain the capture identity and retry attempt suffix. Match these IDs when
+supplying producer `ng_trajectory` records and their turns.
+
 Preserve the [rollout URL prefix](/main/model-server/model-call-capture#if-you-build-a-custom-agent)
 and return an `AgentObservationBundle` as `ng_agent_observations`:
 
