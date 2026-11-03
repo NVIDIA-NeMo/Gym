@@ -1415,9 +1415,22 @@ def decide_recovery(
         return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON)
     segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
+        # A chain stops once less than a minute of its walltime remains, so name that budget too when it is spent.
+        walltime_spent = (
+            budget.walltime_capped
+            and budget.walltime_used_s is not None
+            and budget.max_walltime_s is not None
+            and budget.max_walltime_s - budget.walltime_used_s < 60
+        )
         return decision(
             RecoveryAction.STOP,
-            f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})",
+            f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})"
+            + (
+                f", and the stored walltime budget is used ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s"
+                "; less than a minute is left): raise both in one call"
+                if walltime_spent
+                else ""
+            ),
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
