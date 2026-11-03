@@ -134,6 +134,14 @@ EXPORT_RECEIPT_MISSING_REASON = (
 # Appended in the job dir by a job whose driver step finished the run: how the chain ended there and the sentinel and
 # follow-up it had queued and then cancelled, each with its job id and whether scancel took it.
 CHAIN_END_JOURNAL_NAME = "chain-end-journal.jsonl"
+# The driver's exit when nothing is eligible for another attempt (gym eval run's stop exit code), and what a job
+# that exits with it writes and journals when it ends its own chain.
+NO_ELIGIBLE_RETRY_EXIT = 76
+NO_ELIGIBLE_RETRY = "no_eligible_retry"
+NO_ELIGIBLE_RETRY_REASON = (
+    "No tasks are eligible for retry: the job ended its chain itself, with nothing queued after it; inspect "
+    "terminal failures, omissions and exhausted budgets, then continue with gym eval resubmit --recover."
+)
 # The files an export receipt binds (`_artifact_version` in the exporters), by receipt key, in the job's artifacts.
 _RECEIPT_ARTIFACTS = (
     ("rollouts_jsonl_fpath", "rollouts.jsonl"),
@@ -775,11 +783,21 @@ _EPILOGUE_TEMPLATE = """\
 _gym_driver_rc=$?
 _gym_end_own_chain() {{
     local _rc=$1 _ended=run_complete _role _file _id _result _cancelled=""
-    # A job whose driver failed has its follow-up start, and that prologue decides; an incomplete run continues.
-    [[ $_rc == 0 ]] && _gym_run_complete || return $_rc
+    if [[ $_rc == {no_eligible_retry_exit} ]]; then
+        # Nothing is eligible for another attempt: the follow-up would start on a full allocation only to write this
+        # stop and exit, so the job writes it and cancels what it queued. A deliberate stop already there stays.
+        _ended={no_eligible_retry}
+        if [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+            echo "{no_eligible_retry_reason}" > "$_incomplete_file"
+            echo "{no_eligible_retry_reason}"
+        fi
+    # A job whose driver failed otherwise has its follow-up start, and that prologue decides; an incomplete run
+    # continues.
+    elif [[ $_rc != 0 ]] || ! _gym_run_complete; then
+        return $_rc
     # This job COMPLETEs: Slurm would cancel its afternotok follow-up, and the follow-up's sentinel would then start on
     # a full allocation only to write the record below and exit. A deliberate stop already in the marker stays.
-    if [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+    elif [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
         if _gym_export_required && ! _gym_receipt_current; then
             _ended={export_receipt_missing}
             echo "{export_receipt_missing_reason}" > "$_incomplete_file"
@@ -924,9 +942,14 @@ def render_resume_epilogue() -> str:
 
     When the driver step succeeded and the run is complete, it writes the record the follow-up or its sentinel would
     have written, cancels the sentinel and then the follow-up it queued, and journals both in
-    ``CHAIN_END_JOURNAL_NAME``, so no allocation starts for a finished run. The job keeps the driver step's status.
+    ``CHAIN_END_JOURNAL_NAME``, so no allocation starts for a finished run. A driver that exits
+    ``NO_ELIGIBLE_RETRY_EXIT`` (nothing is eligible for another attempt) ends its chain the same way, with the
+    ``NO_ELIGIBLE_RETRY_REASON`` stop. The job keeps the driver step's status.
     """
     return _EPILOGUE_TEMPLATE.format(
+        no_eligible_retry_exit=NO_ELIGIBLE_RETRY_EXIT,
+        no_eligible_retry=NO_ELIGIBLE_RETRY,
+        no_eligible_retry_reason=NO_ELIGIBLE_RETRY_REASON,
         provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
         export_receipt_missing=EXPORT_RECEIPT_MISSING,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,

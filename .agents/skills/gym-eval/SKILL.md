@@ -108,7 +108,8 @@ ends the chain and writes the kind and the way out to `.gym_chain_incomplete`:
 | A resumed segment saved no rollout | Its walltime was shorter than the setup (Gym install, server start) plus one rollout, so the next segment would repeat it. | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. |
 
 The driver's own exit code tells the chain what happened: 75, unfinished work, the chain continues;
-1, no progress in the segment, one infra retry is spent; 76, nothing eligible, a typed stop. Only
+1, no progress in the segment, one infra retry is spent; 76, nothing eligible, a typed stop that the
+segment writes itself, cancelling the follow-up it queued so no allocation starts just to stop. Only
 `PREEMPTED`, `NODE_FAIL` and `BOOT_FAIL` spend an infra retry. A segment the scheduler requeued
 leaves its elapsed time unknown, and the chain stops with unknown accounting (step 5).
 
