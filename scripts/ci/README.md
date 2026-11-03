@@ -1,4 +1,69 @@
-# CPU CI contract
+# Shared CI contracts
+
+## Package approvals
+
+`check-review-approvals.sh` evaluates `.github/CODEOWNERS` on GitHub and GitLab. GitHub Teams
+are the membership source. GitLab groups and GitLab CODEOWNERS sections are not used. The shell
+entry point delegates matching and API calls to a Python standard-library helper; Gym is not installed.
+
+```bash
+bash scripts/ci/check-review-approvals.sh github --repository NVIDIA-NeMo/Gym --number 123
+bash scripts/ci/check-review-approvals.sh gitlab --project-id "$CI_PROJECT_ID" --number "$CI_MERGE_REQUEST_IID"
+```
+
+Both modes require `GH_TOKEN` or `GITHUB_TOKEN` with organization-members read access. GitLab
+also requires `GITLAB_TOKEN` and `CI_API_V4_URL`. Exit codes are 0 for satisfied ownership, 1 for
+missing approvals, and 2 for API, configuration, or evidence errors. `--output FILE` saves the
+structured verdict and its head SHA.
+
+Each changed file uses the last matching standard CODEOWNERS rule. One member of any team on
+that line must approve: the specialist team and `frontier-evals` are alternatives. Different
+packages require their respective approvals; one Frontier Eval approval can cover every package.
+Paths outside the package map retain a maintainer fallback with Frontier Eval as an alternative;
+CI infrastructure and the existing BioNeMo overrides keep their dedicated owners.
+`# suggest:` comments never gate approval. Renames check old and new paths. The checker rejects
+truncated file lists, author approvals, and GitHub approvals for an older head. GitLab must reset
+approvals on push, which is verified through its API. A changing evidence snapshot fails the check.
+
+Policy and identity links come from the immutable target commit, not the submitted branch. The
+checker itself must execute from trusted target-branch code. GitHub uses `pull_request_target`, plus
+a secret-free review-event workflow followed by `workflow_run`. It posts the `Package approvals`
+commit status against the actual PR head. Use its `workflow_dispatch` input to reevaluate a specific
+PR after a team membership change, including removal of a previously eligible approver.
+
+`.github/reviewer-identities.json` links stable GitLab and GitHub numeric account IDs; it does not
+duplicate groups. Initial links were resolved through the corporate SSO audit and provider APIs.
+A new team member without a verified identity link can approve on GitHub; GitLab ignores that
+person's approval until the link is added. Display names and usernames are not authorization keys.
+
+The GitLab adapter executes on a webhook-triggered pipeline of protected `nv-internal-main`. It
+appends `Package approvals` to the exact MR head pipeline using `pipeline_id`. The existing
+"pipelines must succeed" setting then enforces the verdict. Approval removal reruns the checker
+and changes the job to failed. The trigger job needs protected, masked `GH_TOKEN` (members read)
+and `GITLAB_TOKEN` (project API) variables. No organization-management PAT is needed by this check.
+
+Deployment order:
+
+1. Merge and mirror the policy, identity links, checker, and trusted CI configuration.
+2. Register a GitLab merge-request webhook for the pipeline-trigger API on protected
+   `nv-internal-main`, including approval, unapproval, and source-update events. Its payload is
+   supplied through GitLab's `TRIGGER_PAYLOAD` file. Keep the trigger token outside the repository.
+   Retry this trusted pipeline to refresh the verdict after a GitHub team membership change.
+3. Verify missing approval, specialist approval, Frontier Eval approval, approval removal, and a
+   source push on test PRs/MRs. Include fork PRs and renames.
+4. Require the GitHub `Package approvals` commit status, restricted to the configured bot App.
+   Keep GitLab's successful-pipeline requirement enabled. Disable native code-owner approval
+   requirements only after both provider checks have been verified.
+
+Local validation without the Gym runtime:
+
+```bash
+python tests/unit_tests/test_review_approvals.py
+shellcheck scripts/ci/check-review-approvals.sh
+actionlint .github/workflows/review-approval-event.yml .github/workflows/review-approvals.yml
+```
+
+## CPU CI contract
 
 These scripts are the portable execution contract shared by GitHub Actions and the internal
 NeMo CI adapter. `contract-version` contains the interface version expected by the adapter.

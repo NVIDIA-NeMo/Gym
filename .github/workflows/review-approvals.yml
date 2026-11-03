@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Package approvals
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_run:
+    workflows: [Review approval event]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      number:
+        description: Pull request to reevaluate after a team membership change
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      requests: ${{ steps.requests.outputs.requests }}
+    steps:
+      - id: requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_NUMBER: ${{ inputs.number }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request_target ]]; then
+            requests="$(jq -cn --argjson number "$PR_NUMBER" '[$number]')"
+          elif [[ "$EVENT_NAME" == workflow_run ]]; then
+            requests="$(jq -c '[.workflow_run.pull_requests[]?.number] | unique' "$GITHUB_EVENT_PATH")"
+            if [[ "$requests" == '[]' ]]; then
+              requests="$(gh api --paginate "repos/$REPO/commits/$EVENT_SHA/pulls" --jq '.[] | select(.state == "open") | .number' | jq -sc unique)"
+            fi
+          else
+            requests="$(jq -cn --arg number "$DISPATCH_NUMBER" '[$number | tonumber | select(. > 0 and . == floor)]')"
+          fi
+          printf 'requests=%s\n' "$requests" | tee -a "$GITHUB_OUTPUT"
+
+  check:
+    needs: resolve
+    if: needs.resolve.outputs.requests != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        number: ${{ fromJSON(needs.resolve.outputs.requests) }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: package-approvals-${{ matrix.number }}
+      cancel-in-progress: true
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.BOT_ID }}
+          private-key: ${{ secrets.BOT_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-members: read
+          permission-contents: read
+          permission-pull-requests: read
+          permission-statuses: write
+      - id: metadata
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ matrix.number }}
+        run: |
+          gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/request.json"
+          jq -er '"head=" + .head.sha, "base=" + .base.sha' "$RUNNER_TEMP/request.json" | tee -a "$GITHUB_OUTPUT"
+      - name: Mark approval evaluation pending
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.metadata.outputs.head }}
+        run: |
+          jq -n '{state:"pending", context:"Package approvals", description:"Evaluating current package approvals"}' > "$RUNNER_TEMP/status.json"
+          gh api --method POST "repos/$REPO/statuses/$HEAD_SHA" --input "$RUNNER_TEMP/status.json"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.metadata.outputs.base }}
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ matrix.number }}
+          HEAD_SHA: ${{ steps.metadata.outputs.head }}
+        run: |
+          bash scripts/ci/check-review-approvals.sh github --repository "$REPO" --number "$PR_NUMBER" --output "$RUNNER_TEMP/approvals.json"
+          jq -e --arg head "$HEAD_SHA" '.head == $head' "$RUNNER_TEMP/approvals.json"
+      - name: Publish approval verdict
+        if: always() && steps.metadata.outputs.head != ''
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.metadata.outputs.head }}
+          OUTCOME: ${{ steps.check.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          state=failure
+          if [[ "$OUTCOME" == success ]]; then state=success; fi
+          jq -n --arg state "$state" --arg url "$RUN_URL" '{state:$state, context:"Package approvals", description:"Package approval policy evaluated", target_url:$url}' > "$RUNNER_TEMP/status.json"
+          gh api --method POST "repos/$REPO/statuses/$HEAD_SHA" --input "$RUNNER_TEMP/status.json"

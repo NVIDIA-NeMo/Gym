@@ -8,6 +8,7 @@ stages:
 # This file is mirrored from GitHub but is active only for internal merge requests.
 workflow:
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == "nv-internal-main"'
     - if: >-
         $CI_PIPELINE_SOURCE == "merge_request_event" &&
         $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "nv-internal-main"
@@ -17,6 +18,16 @@ variables:
   NEMO_CI_REF: "main"
   TESTS_TO_RUN_ON_THIS_COMMIT: "nightly"
   TEST_REGEX_ON_THIS_COMMIT: "NONE"
+
+gym-package-approvals:
+  stage: test
+  image: python:3.13-slim
+  resource_group: gym-package-approvals
+  script:
+    - python3 -I .gitlab/ci/check_review_approvals.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == "nv-internal-main"'
+  allow_failure: false
 
 gym-cpu-ci:
   stage: test
