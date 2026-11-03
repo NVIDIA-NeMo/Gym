@@ -23,8 +23,10 @@ from pytest import MonkeyPatch
 
 import nemo_gym.orchestration.export_step as runner
 from nemo_gym.artifacts.exporters.base import ExportResult, ExportState
+from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
+from nemo_gym.artifacts.exporters.wandb_config import WandbExportConfig
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
-from nemo_gym.config.config_types import ConfigError, MLflowExportConfig, RunExportConfig, WandbExportConfig
+from nemo_gym.config.config_types import ConfigError, RunExportConfig
 
 
 class FakeExporter:

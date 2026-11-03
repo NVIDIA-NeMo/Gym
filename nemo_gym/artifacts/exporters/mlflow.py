@@ -37,7 +37,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.artifacts.exporters import run_failed
 from nemo_gym.artifacts.exporters.base import BaseExporter
-from nemo_gym.config.config_types import MLFlowConfig, MLflowExportConfig, RunExportConfig
+from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
+from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
