@@ -99,10 +99,9 @@ def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
 
 def main() -> None:
     """`python3 -m nemo_gym.orchestration.export_step <exporter> +key=value ...`: the settings are Hydra overrides."""
-    from nemo_gym.cli.utils import exit_cleanly_on_config_error
-    from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.config.global_config import GlobalConfigDictParserConfig, get_global_config_dict
 
-    @exit_cleanly_on_config_error
     def run() -> None:
         name = sys.argv[1]
         # The exporter's name is not an override.
@@ -122,7 +121,11 @@ def main() -> None:
 
     if len(sys.argv) < 2:
         raise SystemExit("usage: python3 -m nemo_gym.orchestration.export_step <exporter> [+key=value ...]")
-    run()
+    try:
+        run()
+    except ConfigError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":  # pragma: no cover

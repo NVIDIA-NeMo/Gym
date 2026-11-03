@@ -209,7 +209,7 @@ def _run_main(monkeypatch: MonkeyPatch, argv: list[str], outcome: ExportResult) 
         seen["name"] = name
         return outcome
 
-    monkeypatch.setattr("nemo_gym.global_config.get_global_config_dict", fake_global_config)
+    monkeypatch.setattr("nemo_gym.config.global_config.get_global_config_dict", fake_global_config)
     monkeypatch.setattr(runner, "run_export", fake_run_export)
     monkeypatch.setattr(sys, "argv", ["export_step", *argv])
     return seen

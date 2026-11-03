@@ -540,7 +540,7 @@ def test_export_settings_reach_hydra_with_their_values_and_types() -> None:
 
 
 def test_the_arguments_of_a_submitted_export_validate_against_the_exporters_own_model() -> None:
-    from nemo_gym.exporters import load_run_exporter_config_model
+    from nemo_gym.artifacts.exporters import load_run_exporter_config_model
     from nemo_gym.orchestration.executors.utils import flatten_export_args
 
     for name, settings, field, expected in (
