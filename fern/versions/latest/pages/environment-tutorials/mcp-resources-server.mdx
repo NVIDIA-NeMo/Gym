@@ -141,6 +141,7 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)  # 409 for a seed after close
+            # (the full code also refuses task_data that fails validation with 422 before binding the session)
             identity = self._session_episodes.setdefault(session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is bound to another episode")
@@ -244,7 +245,7 @@ An Environment Server such as `single_agent_turn` owns the episode's sessions, s
 - **Close.** `/close_session` drops the session's weather calls. It succeeds for an unknown or already-closed session and needs no cookie, because the body names the session. `ResourcesSessionFence` remembers the close for `session_close_retry_window_seconds`, so a late seed of that ID is refused with `409` instead of opening the session again.
 - **After the close.** The signed MCP session token stays valid, so `get_weather` refuses a call for a session it no longer holds with `ResourcesSessionLostError` (`404`, `failure_kind: session_lost`) rather than recreating state. `/verify` for such a session returns a masked sample built by `lost_session_verification` instead of a reward of `0`.
 
-`check_resources_session_contract` in `nemo_gym.testing.session_conformance` drives these rules through the app's routes; the weather server's tests run it with MCP exposure on and off.
+`check_resources_session_contract` in `nemo_gym.server_runtime.testing.session_conformance` drives these rules through the app's routes; the weather server's tests run it with MCP exposure on and off.
 
 ---
 

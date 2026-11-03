@@ -76,6 +76,8 @@ print(s.post("http://127.0.0.1:<port>/verify", json={
 An Environment Server's seed and close look like this; the token now comes from `resources_tools`:
 
 ```python
+# A fresh session: the cookie from the seed above names another session, and the typed seed would get 409.
+s = requests.Session()
 episode = {"rollout_id": "weather-1", "attempt": 0}
 seed = s.post("http://127.0.0.1:<port>/seed_session", json={
     "resources_session_id": "weather-1",
