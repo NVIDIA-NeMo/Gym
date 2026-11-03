@@ -373,6 +373,11 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 
     assert isinstance(control_transport, GymAiohttpTransport)
     assert isinstance(envd_transport, GymAiohttpTransport)
+    # E2B 2.62 builds envd health-probe and streaming clients with these keywords.
+    assert isinstance(
+        client_async_module.get_transport(config, for_streaming=True, http_version="1.1", retry_connect=False),
+        GymAiohttpTransport,
+    )
     proxy = httpx.Proxy("http://proxy.example:8080", auth=("user", "password"))
     assert client_async_module.get_transport(types.SimpleNamespace(proxy=proxy)).proxy is proxy
     assert str(client_async_module.get_transport(types.SimpleNamespace(proxy="http://proxy.example")).proxy.url) == (
@@ -413,7 +418,9 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     ).get_async_httpx_client()
     assert str(api_client.base_url) == "http://gw:8080"
     assert (api_client.headers["X-API-KEY"], api_client.headers["Authorization"]) == ("k", "Bearer t")
-    for transport in (client_async.get_transport(connection), envd_client._transport, api_client._transport):
+    # E2B 2.62+ wraps the API client's transport in its response-retry transport.
+    api_transport = getattr(api_client._transport, "transport", api_client._transport)
+    for transport in (client_async.get_transport(connection), envd_client._transport, api_transport):
         assert isinstance(transport, GymAiohttpTransport)
     await envd_client.aclose()
     await api_client.aclose()
