@@ -32,3 +32,14 @@ warmup:
     ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE: 4
     SLURM_COMMENT: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"720","reason":"benchmarking","description":"POR - https://nvaiinfa.aha.io/ideas/ideas/NMP-I-791"}}'
     MOUNTS: ${oc.env:PWD}:${oc.env:PWD},${oc.env:PWD}:/opt/Gym
+
+run:
+  env:
+    _copy: warmup.env
+    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dp4tp1-prims
+    SBATCH_TIMELIMIT: "01:30:00"
+  args: |
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config benchmarks/swebench/verified/opencode.yaml \
+    ++swebench_verified_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=2700 \
+    ++num_samples_in_parallel=1024
