@@ -140,6 +140,10 @@ def parse_events(stdout: str, *, invocation_id: str) -> DroidRun:
         elif kind == "tool_result":
             call_id = str(event.get("id") or "")
             value = event.get("value")
+            error = event.get("error")
+            if value is None and isinstance(error, dict):
+                # A failed tool has no value; the model sees the error message instead.
+                value = error.get("message")
             output = value if isinstance(value, str) else json.dumps(value)
             if call_id in calls:
                 calls[call_id].status = "completed"

@@ -162,11 +162,21 @@ def test_nonzero_exit_and_tool_error_fail_the_tool_without_changing_its_output()
         },
         {"type": "tool_call", "id": "c2", "toolId": "Read", "toolName": "Read", "parameters": {}},
         {"type": "tool_result", "id": "c2", "toolId": "Read", "isError": True, "value": "no such file"},
+        # Droid 1.1.0 reports a failed command with an error object and no value.
+        {"type": "tool_call", "id": "c3", "toolId": "Execute", "toolName": "Execute", "parameters": {}},
+        {
+            "type": "tool_result",
+            "id": "c3",
+            "toolId": "Execute",
+            "isError": True,
+            "error": {"type": "tool_error", "message": "Error: Command terminated by signal: SIGKILL"},
+        },
     ]
     run = parse_events(stdout(events), invocation_id="rollout")
-    assert [tool.status for tool in run.tools] == ["failed", "failed"]
+    assert [tool.status for tool in run.tools] == ["failed", "failed", "failed"]
     assert run.items[1].output == "boom\n[Process exited with code 2]"
-    assert [gap.code for gap in run.gaps] == ["tool_timing_unavailable", "tool_timing_unavailable"]
+    assert run.items[5].output == "Error: Command terminated by signal: SIGKILL"
+    assert [gap.code for gap in run.gaps] == ["tool_timing_unavailable"] * 3
 
 
 def test_unfinished_tool_call_stays_incomplete():
