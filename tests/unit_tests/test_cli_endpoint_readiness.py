@@ -22,7 +22,9 @@ from omegaconf import DictConfig
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli.env
-from nemo_gym.cli.env import (
+import nemo_gym.orchestration.server_supervisor
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.orchestration.server_supervisor import (
     _ENDPOINT_POLL_INTERVAL_SEC,
     RunHelper,
     _collect_model_endpoints,
@@ -30,7 +32,6 @@ from nemo_gym.cli.env import (
     _probe_endpoint,
     _wait_for_model_endpoints,
 )
-from nemo_gym.config.config_types import ConfigError
 
 
 class _FakeClock:
@@ -116,34 +117,40 @@ class TestProbeClassification:
     def test_any_http_answer_is_reachable(self, monkeypatch: MonkeyPatch) -> None:
         for status_code in (200, 401, 404, 500):
             monkeypatch.setattr(
-                nemo_gym.cli.env.requests.Session, "get", MagicMock(return_value=MagicMock(status_code=status_code))
+                nemo_gym.orchestration.server_supervisor.requests.Session,
+                "get",
+                MagicMock(return_value=MagicMock(status_code=status_code)),
             )
-            assert nemo_gym.cli.env._ENDPOINT_ANSWERING == _probe_endpoint("http://x:8000/v1")
+            assert nemo_gym.orchestration.server_supervisor._ENDPOINT_ANSWERING == _probe_endpoint("http://x:8000/v1")
 
     def test_gateway_statuses_are_still_starting(self, monkeypatch: MonkeyPatch) -> None:
         """A load balancer in front of vLLM replicas that are still loading answers 503 (or a proxy
         502/504). Something is listening, but nothing can serve a request yet."""
         for status_code in (502, 503, 504):
             monkeypatch.setattr(
-                nemo_gym.cli.env.requests.Session, "get", MagicMock(return_value=MagicMock(status_code=status_code))
+                nemo_gym.orchestration.server_supervisor.requests.Session,
+                "get",
+                MagicMock(return_value=MagicMock(status_code=status_code)),
             )
-            assert nemo_gym.cli.env._ENDPOINT_STARTING == _probe_endpoint("http://lb:8000/v1")
+            assert nemo_gym.orchestration.server_supervisor._ENDPOINT_STARTING == _probe_endpoint("http://lb:8000/v1")
 
     def test_untrusted_certificate_is_reachable(self, monkeypatch: MonkeyPatch) -> None:
         """A completed TLS handshake proves something is listening. SSLError subclasses
         ConnectionError, so deciding on the parent class would reject it."""
         monkeypatch.setattr(
-            nemo_gym.cli.env.requests.Session, "get", MagicMock(side_effect=requests.exceptions.SSLError("bad cert"))
+            nemo_gym.orchestration.server_supervisor.requests.Session,
+            "get",
+            MagicMock(side_effect=requests.exceptions.SSLError("bad cert")),
         )
-        assert nemo_gym.cli.env._ENDPOINT_ANSWERING == _probe_endpoint("https://x:8000/v1")
+        assert nemo_gym.orchestration.server_supervisor._ENDPOINT_ANSWERING == _probe_endpoint("https://x:8000/v1")
 
     def test_refused_is_worth_waiting_for(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
-            nemo_gym.cli.env.requests.Session,
+            nemo_gym.orchestration.server_supervisor.requests.Session,
             "get",
             MagicMock(side_effect=requests.exceptions.ConnectionError("refused")),
         )
-        assert nemo_gym.cli.env._ENDPOINT_REFUSED == _probe_endpoint("http://x:8000/v1")
+        assert nemo_gym.orchestration.server_supervisor._ENDPOINT_REFUSED == _probe_endpoint("http://x:8000/v1")
 
     def test_an_unresolvable_name_is_not_worth_waiting_for(self, monkeypatch: MonkeyPatch) -> None:
         """Waiting cannot create a DNS record, so a placeholder like unset.local is reported once
@@ -151,8 +158,12 @@ class TestProbeClassification:
         dns_failure = requests.exceptions.ConnectionError(
             requests.packages.urllib3.exceptions.NameResolutionError("unset.local", None, Exception("no such host"))
         )
-        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "get", MagicMock(side_effect=dns_failure))
-        assert nemo_gym.cli.env._ENDPOINT_UNRESOLVABLE == _probe_endpoint("http://unset.local/v1")
+        monkeypatch.setattr(
+            nemo_gym.orchestration.server_supervisor.requests.Session, "get", MagicMock(side_effect=dns_failure)
+        )
+        assert nemo_gym.orchestration.server_supervisor._ENDPOINT_UNRESOLVABLE == _probe_endpoint(
+            "http://unset.local/v1"
+        )
 
     def test_proxy_environment_variables_are_ignored(self, monkeypatch: MonkeyPatch) -> None:
         """Model requests go through Gym's aiohttp client, which ignores proxy variables, so the
@@ -178,7 +189,7 @@ class TestProbeClassification:
         server = HTTPServer(("127.0.0.1", 0), _Handler)
         Thread(target=server.serve_forever, daemon=True).start()
         try:
-            assert nemo_gym.cli.env._ENDPOINT_ANSWERING == _probe_endpoint(
+            assert nemo_gym.orchestration.server_supervisor._ENDPOINT_ANSWERING == _probe_endpoint(
                 f"http://127.0.0.1:{server.server_address[1]}/v1"
             )
         finally:
@@ -189,7 +200,9 @@ class TestProbeClassification:
 class TestCheckStopsStartupCleanly:
     def test_unresolvable_endpoints_do_not_block(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
-            nemo_gym.cli.env, "_probe_endpoint", MagicMock(return_value=nemo_gym.cli.env._ENDPOINT_UNRESOLVABLE)
+            nemo_gym.orchestration.server_supervisor,
+            "_probe_endpoint",
+            MagicMock(return_value=nemo_gym.orchestration.server_supervisor._ENDPOINT_UNRESOLVABLE),
         )
         sleep_mock = MagicMock()
         unreachable = _wait_for_model_endpoints(
@@ -205,7 +218,7 @@ class TestCheckStopsStartupCleanly:
         clock = _FakeClock()
         statuses = iter([503, 503, 200])
         get_mock = MagicMock(side_effect=lambda *args, **kwargs: MagicMock(status_code=next(statuses)))
-        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "get", get_mock)
+        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor.requests.Session, "get", get_mock)
 
         unreachable = _wait_for_model_endpoints(
             [("base_url", "http://lb:8000/v1")], timeout_seconds=600, monotonic=clock, sleep_fn=clock.sleep
@@ -218,7 +231,9 @@ class TestCheckStopsStartupCleanly:
     def test_a_gateway_status_that_never_clears_is_reported(self, monkeypatch: MonkeyPatch) -> None:
         clock = _FakeClock()
         monkeypatch.setattr(
-            nemo_gym.cli.env.requests.Session, "get", MagicMock(return_value=MagicMock(status_code=503))
+            nemo_gym.orchestration.server_supervisor.requests.Session,
+            "get",
+            MagicMock(return_value=MagicMock(status_code=503)),
         )
 
         unreachable = _wait_for_model_endpoints(
@@ -233,7 +248,7 @@ class TestCheckStopsStartupCleanly:
         proves the server is up, so startup must go ahead without waiting rather than block until
         the timeout."""
         get_mock = MagicMock(return_value=MagicMock(status_code=401))
-        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "get", get_mock)
+        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor.requests.Session, "get", get_mock)
         sleep_mock = MagicMock()
 
         unreachable = _wait_for_model_endpoints(
@@ -247,7 +262,9 @@ class TestCheckStopsStartupCleanly:
     def test_failure_is_a_config_error_not_a_system_exit(self, monkeypatch: MonkeyPatch) -> None:
         """NeMo-RL imports RunHelper, so a library method must not exit the process."""
         monkeypatch.setattr(
-            nemo_gym.cli.env, "_wait_for_model_endpoints", MagicMock(return_value=[("openai_base_url", "http://x/v1")])
+            nemo_gym.orchestration.server_supervisor,
+            "_wait_for_model_endpoints",
+            MagicMock(return_value=[("openai_base_url", "http://x/v1")]),
         )
         helper = RunHelper.__new__(RunHelper)
 
@@ -285,10 +302,14 @@ class TestTimeoutFromConfig:
 
         def slow_probe(url: str, timeout_seconds: float = 5.0) -> str:
             clock.sleep(5.0)
-            return nemo_gym.cli.env._ENDPOINT_UNRESOLVABLE if "unset" in url else nemo_gym.cli.env._ENDPOINT_REFUSED
+            return (
+                nemo_gym.orchestration.server_supervisor._ENDPOINT_UNRESOLVABLE
+                if "unset" in url
+                else nemo_gym.orchestration.server_supervisor._ENDPOINT_REFUSED
+            )
 
         with MonkeyPatch.context() as mp:
-            mp.setattr(nemo_gym.cli.env, "_probe_endpoint", slow_probe)
+            mp.setattr(nemo_gym.orchestration.server_supervisor, "_probe_endpoint", slow_probe)
             _wait_for_model_endpoints(
                 [("a", "http://unset-1/v1"), ("b", "http://unset-2/v1"), ("c", "http://down/v1")],
                 timeout_seconds=12,
