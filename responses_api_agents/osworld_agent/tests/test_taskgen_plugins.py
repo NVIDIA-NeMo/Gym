@@ -30,6 +30,7 @@ def fake_desktop_env(monkeypatch):
     ):
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(taskgen_plugins, "_REGISTERED", {})
+    monkeypatch.setattr(taskgen_plugins, "_INSTALLED", [], raising=False)
     return getters, metrics
 
 
@@ -92,3 +93,99 @@ def test_same_name_from_another_plugin_is_refused(fake_desktop_env):
 def test_remote_resources_path_fails_loudly(fake_desktop_env):
     with pytest.raises(TaskPluginError, match="remote"):
         register_task_plugins(_task(), remote=True)
+
+
+def test_cleanup_removes_only_installed_functions_and_is_idempotent(fake_desktop_env):
+    getters, metrics = fake_desktop_env
+    builtin_getter, builtin_metric = getters.get_vm_file, metrics.compare_csv
+    register_task_plugins(_task())
+
+    taskgen_plugins.clear_task_plugins()
+    taskgen_plugins.clear_task_plugins()
+
+    assert not hasattr(getters, "get_rows__ab12")
+    assert not hasattr(metrics, "check_rows__ab12")
+    assert getters.get_vm_file is builtin_getter
+    assert metrics.compare_csv is builtin_metric
+    assert taskgen_plugins._REGISTERED == {}
+    assert taskgen_plugins._INSTALLED == []
+
+
+def test_sequential_tasks_can_reuse_names_with_different_implementations(fake_desktop_env):
+    _, metrics = fake_desktop_env
+    register_task_plugins(_task())
+    taskgen_plugins.clear_task_plugins()
+
+    register_task_plugins(_task(metrics_source=METRICS.replace("1.0 if", "0.5 if")))
+    assert metrics.check_rows__ab12(3, {"value": 3}) == 0.5
+
+
+def test_sequential_tasks_can_share_a_getter_with_different_metrics(fake_desktop_env):
+    getters, metrics = fake_desktop_env
+    register_task_plugins(_task())
+    taskgen_plugins.clear_task_plugins()
+
+    register_task_plugins(_task(metrics_source="def check_other(*args):\n    return 0.25\n", metrics=["check_other"]))
+    assert getters.get_rows__ab12(None, {"value": 3}) == 3
+    assert metrics.check_other() == 0.25
+    assert not hasattr(metrics, "check_rows__ab12")
+
+
+def test_next_task_cannot_resolve_an_undeclared_function(fake_desktop_env):
+    _, metrics = fake_desktop_env
+    register_task_plugins(_task())
+    taskgen_plugins.clear_task_plugins()
+    register_task_plugins(
+        _task(getters=[], metrics_source="def check_other(*args):\n    return 1\n", metrics=["check_other"])
+    )
+    with pytest.raises(AttributeError):
+        getattr(metrics, "check_rows__ab12")
+
+
+def test_cleanup_after_partial_registration_failure(fake_desktop_env):
+    getters, metrics = fake_desktop_env
+    try:
+        with pytest.raises(TaskPluginError, match="does not define"):
+            register_task_plugins(_task(metrics_source="def other(*args):\n    return 0\n"))
+        assert hasattr(getters, "get_rows__ab12")
+    finally:
+        taskgen_plugins.clear_task_plugins()
+
+    assert not hasattr(getters, "get_rows__ab12")
+    assert not hasattr(metrics, "check_rows__ab12")
+    assert taskgen_plugins._REGISTERED == {}
+    register_task_plugins(_task())
+
+
+def test_cleanup_handles_callable_aliases(fake_desktop_env):
+    _, metrics = fake_desktop_env
+    source = "from functools import partial\ncheck_rows__ab12 = partial(lambda *args: 0.75)\n"
+    register_task_plugins(_task(metrics_source=source))
+    assert metrics.check_rows__ab12() == 0.75
+    taskgen_plugins.clear_task_plugins()
+    assert not hasattr(metrics, "check_rows__ab12")
+    register_task_plugins(_task(metrics_source=source))
+
+
+def test_cleanup_does_not_delete_an_object_it_did_not_install(fake_desktop_env):
+    _, metrics = fake_desktop_env
+    register_task_plugins(_task())
+    replacement = lambda *args: 0.25
+    metrics.check_rows__ab12 = replacement
+    taskgen_plugins.clear_task_plugins()
+    assert metrics.check_rows__ab12 is replacement
+
+
+def test_getter_registration_cannot_authorize_replacing_a_metric_builtin(fake_desktop_env):
+    getters, metrics = fake_desktop_env
+    builtin = lambda *args: 0.25
+    metrics.get_rows__ab12 = builtin
+    try:
+        with pytest.raises(TaskPluginError, match="replace OSWorld"):
+            register_task_plugins(
+                _task(metrics_source="def get_rows__ab12(*args):\n    return 1\n", metrics=["get_rows__ab12"])
+            )
+    finally:
+        taskgen_plugins.clear_task_plugins()
+    assert metrics.get_rows__ab12 is builtin
+    assert not hasattr(getters, "get_rows__ab12")

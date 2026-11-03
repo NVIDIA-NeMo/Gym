@@ -51,7 +51,7 @@ from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
     OSWorldModelTimeoutError,
 )
-from responses_api_agents.osworld_agent.taskgen_plugins import register_task_plugins
+from responses_api_agents.osworld_agent.taskgen_plugins import clear_task_plugins, register_task_plugins
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
@@ -2568,32 +2568,35 @@ def run_osworld_task(
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
-        if pointer_io_context_token is not None:
-            _POINTER_MODEL_IO_CONTEXT.reset(pointer_io_context_token)
-        if "pointer_log_handler" in locals() and pointer_log_handler is not None:
-            try:
-                pointer_log_handler.flush()
-                pointer_log_handler.close()
-                pointer_logger = getattr(pointer_log_handler, "_nemo_gym_logger", None)
-                if pointer_logger is not None:
-                    pointer_logger.removeHandler(pointer_log_handler)
-            except Exception:
-                LOG.exception("Pointer log handler close raised")
-        if _recording_started and env is not None:
-            try:
-                os.makedirs(_record_dir, exist_ok=True)
-                _task_id = task_config.get("id", "unknown")
-                _mp4_path = os.path.join(_record_dir, f"{_task_id}.mp4")
-                env.controller.end_recording(_mp4_path)
-                recording_path = _mp4_path
-                task_logger.info("Saved VM recording: %s", _mp4_path)
-            except Exception:  # noqa: BLE001 — best-effort.
-                LOG.exception("end_recording() failed; mp4 may be missing or partial")
-        if env is not None:
-            try:
-                env.close()
-            except Exception:
-                LOG.exception("env.close() raised")
+        try:
+            if pointer_io_context_token is not None:
+                _POINTER_MODEL_IO_CONTEXT.reset(pointer_io_context_token)
+            if "pointer_log_handler" in locals() and pointer_log_handler is not None:
+                try:
+                    pointer_log_handler.flush()
+                    pointer_log_handler.close()
+                    pointer_logger = getattr(pointer_log_handler, "_nemo_gym_logger", None)
+                    if pointer_logger is not None:
+                        pointer_logger.removeHandler(pointer_log_handler)
+                except Exception:
+                    LOG.exception("Pointer log handler close raised")
+            if _recording_started and env is not None:
+                try:
+                    os.makedirs(_record_dir, exist_ok=True)
+                    _task_id = task_config.get("id", "unknown")
+                    _mp4_path = os.path.join(_record_dir, f"{_task_id}.mp4")
+                    env.controller.end_recording(_mp4_path)
+                    recording_path = _mp4_path
+                    task_logger.info("Saved VM recording: %s", _mp4_path)
+                except Exception:  # noqa: BLE001 — best-effort.
+                    LOG.exception("end_recording() failed; mp4 may be missing or partial")
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    LOG.exception("env.close() raised")
+        finally:
+            clear_task_plugins()
 
     reward = reward_from_score(reward_mode, final_score, agent_terminal_action)
 

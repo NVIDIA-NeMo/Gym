@@ -1736,7 +1736,8 @@ def _build_response(
     ``served_call_output`` is set when training-token capture owns the token
     evidence. The model server then withholds token arrays from the agent, so
     exact-trace output is unavailable; the returned history instead carries
-    every captured generation verbatim, one assistant message per model call.
+    accepted generations verbatim. Complete call evidence still includes
+    rejected attempts, independently of training selection.
     """
 
     steps = result.get("steps", [])
@@ -1817,10 +1818,10 @@ def _build_response(
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
     terminal_response_id: Optional[str] = None
-    if served_call_output and not capabilities["exact_model_call_evidence"]:
-        served_output, terminal_response_id = _served_model_call_output(model_calls)
-        if served_output:
-            output = served_output
+    if served_call_output and not capabilities["exact_model_call_evidence"] and model_calls:
+        # An empty accepted history is meaningful; never replace it with
+        # parser-normalized step text that cannot identify captured calls.
+        output, terminal_response_id = _served_model_call_output(model_calls)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1890,27 +1891,36 @@ def _build_response(
 def _served_model_call_output(
     model_calls: List[Dict[str, Any]],
 ) -> tuple[List[Dict[str, Any]], Optional[str]]:
-    """Return each served generation as the client received it, in call order.
+    """Return accepted served generations and the last observed served call ID.
 
     Capture fingerprints the content the model server served, which keeps the
     reasoning inline as ``<think>...</think>``. Step text strips that reasoning
     and omits parser-retry calls, so it cannot identify captured calls.
 
-    A call with no response never reached the model. A call whose served
-    content is empty is a local stand-in (for example the model server's
-    context-overflow reply), which generated nothing and was never captured.
-    Both are skipped. The second value is the served id of the last emitted
-    call, which is the scored generation.
+    Missing responses and empty served content (such as a local context-overflow
+    reply) provide no usable returned-content witness. Both are skipped; the
+    capture ledger independently records what ran. Rejected calls remain in
+    trajectory evidence but not in accepted history. The terminal still names
+    the last observed non-empty served response,
+    even when rejected. A returned-history consumer must reject an absent
+    terminal or missing selected parent, not silently select another call;
+    an explicit all-captured policy may include rejected calls.
     """
 
     output: List[Dict[str, Any]] = []
     terminal_response_id: Optional[str] = None
+    terminal_accepted = True
     for model_call in model_calls:
         response = model_call.get("response")
         if not isinstance(response, Mapping):
             continue
         raw_content = response.get("raw_content")
         if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
+        terminal_accepted = model_call.get("accepted") is True
+        if not terminal_accepted:
             continue
         output.append(
             {
@@ -1921,8 +1931,8 @@ def _served_model_call_output(
                 "content": [{"type": "output_text", "annotations": [], "text": raw_content}],
             }
         )
-        response_id = response.get("response_id")
-        terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
+    if not terminal_accepted and terminal_response_id is None:
+        raise ValueError("Rejected terminal call has no served response_id; cannot attribute the captured reward")
     return output, terminal_response_id
 
 

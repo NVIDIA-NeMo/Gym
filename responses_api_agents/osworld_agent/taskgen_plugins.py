@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Mapping
 
 
 SCHEMA = "taskgen-plugins/1"
-_REGISTERED: Dict[str, str] = {}  # function name -> digest of the plugin that defined it (this process)
+_REGISTERED: Dict[tuple[types.ModuleType, str], str] = {}  # module/name -> plugin digest within this task
+_INSTALLED: List[tuple[types.ModuleType, str, object]] = []
 
 
 class TaskPluginError(ValueError):
@@ -40,7 +41,7 @@ def plugin_digest(modules: Mapping[str, str]) -> str:
 
 
 def register_task_plugins(task_config: Mapping[str, Any], *, remote: bool = False) -> List[str]:
-    """Register the task's plugin functions; returns their names ([] when the task has none)."""
+    """Install one task's functions; the caller must clear them in its task-level finally block."""
 
     block = task_config.get("taskgen_plugins")
     if not block:
@@ -77,12 +78,29 @@ def register_task_plugins(task_config: Mapping[str, Any], *, remote: bool = Fals
             function = getattr(namespace, name, None)
             if not callable(function):
                 raise TaskPluginError(f"taskgen plugin {kind} source does not define {name}")
-            previous = _REGISTERED.get(name)
+            registry_key = (target, name)
+            previous = _REGISTERED.get(registry_key)
             if previous is None and hasattr(target, name):
                 raise TaskPluginError(f"taskgen plugin would replace OSWorld's own {name}")
             if previous is not None and previous != digest:
                 raise TaskPluginError(f"taskgen plugin {name} is already registered from a different plugin")
             setattr(target, name, function)
-            _REGISTERED[name] = digest
+            _REGISTERED[registry_key] = digest
+            _INSTALLED.append((target, name, function))
             registered.append(name)
     return registered
+
+
+def clear_task_plugins() -> None:
+    """Undo this task's registrations before a Ray worker runs another task.
+
+    Compare object identity rather than ``__module__``: declared callables may
+    be aliases or partials. Do not delete built-ins or later replacements.
+    This also clears functions installed before registration raised.
+    """
+
+    for target, name, function in reversed(_INSTALLED):
+        if getattr(target, name, None) is function:
+            delattr(target, name)
+    _INSTALLED.clear()
+    _REGISTERED.clear()

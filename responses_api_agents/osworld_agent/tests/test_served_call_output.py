@@ -3,8 +3,8 @@
 """Returned history under training-token capture.
 
 With capture on, the model server withholds token arrays from the agent, so the
-exact-trace output is unavailable. The returned output must still name every
-captured generation by the content the model server served.
+exact-trace output is unavailable. Accepted returned history uses the content
+the model server served; complete evidence also retains rejected attempts.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import patch
+
+import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.responses_converter import ResponsesConverter
@@ -104,7 +106,7 @@ def _capture_on_result() -> Dict[str, Any]:
                             {"content": "", "raw_content": "", "finish_reason": "length", "response_id": "local-4"},
                             accepted=False,
                         ),
-                        # A transport failure never reached the model.
+                        # No observed response can supply a returned-content witness.
                         _call(2, None, accepted=False),
                         _call(3, _response("chatcmpl-5"), accepted=True),
                     ]
@@ -149,21 +151,25 @@ def _captured_fingerprint(response_id: str) -> str:
     return output_item_fingerprint(item)
 
 
-def test_capture_on_output_returns_every_served_generation_in_call_order() -> None:
+def test_capture_on_output_returns_only_accepted_generations_verbatim() -> None:
     result = _capture_on_result()
     response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
     dumped = response.model_dump()
 
     output = dumped["response"]["output"]
-    assert [item["id"] for item in output] == ["msg-call-1", "msg-call-2", "msg-call-3", "msg-call-6"]
+    assert [item["id"] for item in output] == ["msg-call-1", "msg-call-3", "msg-call-6"]
     assert [item["content"][0]["text"] for item in output] == [
-        _SERVED[rid] for rid in ("chatcmpl-1", "chatcmpl-2", "chatcmpl-3", "chatcmpl-5")
+        _SERVED[rid] for rid in ("chatcmpl-1", "chatcmpl-3", "chatcmpl-5")
     ]
     # Each returned item carries the same content witness capture recorded.
     assert [output_item_fingerprint(item) for item in output] == [
-        _captured_fingerprint(rid) for rid in ("chatcmpl-1", "chatcmpl-2", "chatcmpl-3", "chatcmpl-5")
+        _captured_fingerprint(rid) for rid in ("chatcmpl-1", "chatcmpl-3", "chatcmpl-5")
     ]
     assert dumped["terminal_response_id"] == "chatcmpl-5"
+    calls = dumped["response"]["trajectory_model_calls"]
+    assert len(calls) == 6
+    assert calls[1]["accepted"] is False
+    assert calls[1]["action"]["raw_completion"] == _SERVED["chatcmpl-2"]
     # Semantic per-step evidence is unchanged.
     transitions = dumped["response"]["trajectory_transitions"]
     assert [t["action"]["raw_completion"] for t in transitions] == [
@@ -172,6 +178,50 @@ def test_capture_on_output_returns_every_served_generation_in_call_order() -> No
         "DONE",
     ]
     assert dumped["response"]["trajectory_contract"]["capabilities"]["exact_model_call_evidence"] is False
+
+
+def test_rejected_terminal_is_not_reattributed_to_an_earlier_accepted_call() -> None:
+    result = _capture_on_result()
+    result["steps"][-1]["info"]["agent"]["model_calls"][-1]["accepted"] = False
+    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    assert [item["id"] for item in response["response"]["output"]] == ["msg-call-1", "msg-call-3"]
+    assert response["terminal_response_id"] == "chatcmpl-5"
+    assert response["reward"] == 1.0
+    assert response["mask_sample"] is False
+
+
+@pytest.mark.parametrize("kind", ["rejected", "empty", "missing"])
+def test_capture_with_no_accepted_output_never_falls_back_to_step_text(kind: str) -> None:
+    result = _capture_on_result()
+    result["steps"] = [result["steps"][0]]
+    call = result["steps"][0]["info"]["agent"]["model_calls"][0]
+    call["accepted"] = False
+    if kind == "empty":
+        call["response"]["raw_content"] = ""
+    elif kind == "missing":
+        call["response"] = None
+    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    assert response["response"]["output"] == []
+    if kind == "rejected":
+        assert response["terminal_response_id"] == "chatcmpl-1"
+    else:
+        assert "terminal_response_id" not in response
+
+
+def test_capture_does_not_reuse_an_earlier_terminal_id_when_the_last_id_is_missing() -> None:
+    result = _capture_on_result()
+    result["steps"][-1]["info"]["agent"]["model_calls"][-1]["response"].pop("response_id")
+    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    assert "terminal_response_id" not in response
+
+
+def test_rejected_terminal_without_a_served_id_fails_closed() -> None:
+    result = _capture_on_result()
+    terminal = result["steps"][-1]["info"]["agent"]["model_calls"][-1]
+    terminal["accepted"] = False
+    terminal["response"].pop("response_id")
+    with pytest.raises(ValueError, match="Rejected terminal call has no served response_id"):
+        _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
 
 
 def test_capture_off_output_keeps_step_messages() -> None:
