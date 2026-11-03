@@ -57,8 +57,9 @@ from nemo_gym.artifacts.exporters.metrics import (
 from nemo_gym.artifacts.exporters.metrics import (
     _normalize_key_path as _normalize_key_path,
 )
+from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
-from nemo_gym.config.config_types import MLFlowConfig, UploadRolloutsConfigMixin
+from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
@@ -102,6 +103,7 @@ class MLflowExporter(BaseExporter):
     """
 
     name: ClassVar[str] = "mlflow"
+    config_model: ClassVar[type[RunExportConfig]] = MLflowExportConfig
 
     CONFIG_ARTIFACT_FILE: ClassVar[str] = "global_config.json"
     # Where a reopened run records each later segment's config; the first segment's stays in CONFIG_ARTIFACT_FILE.

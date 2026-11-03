@@ -6,7 +6,7 @@ import json
 import pytest
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_reverification import validate_settle_source_snapshot
+from nemo_gym.eval.rollout_reverification import validate_settle_source_snapshot
 from nemo_gym.rollouts.rollout_recovery import run_lock
 
 
