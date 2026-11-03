@@ -38,7 +38,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import FormData
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 from nemo_gym.server_utils import request
 from responses_api_agents.agentic_mme_agent.search_cache import shared_cache
@@ -255,6 +255,16 @@ def snippets_to_serper(results: list[Any], text_key: str, link_key: str = "url")
     return {"organic": organic}
 
 
+def same_arguments(model: type[BaseModel], recorded: Any, arguments: Any) -> bool:
+    """Equal as sent, or equal once normalized (defaults filled in); invalid arguments must match as sent."""
+    if recorded == arguments:
+        return True
+    try:
+        return model.model_validate(recorded) == model.model_validate(arguments)
+    except ValidationError:
+        return False
+
+
 class Retrieval:
     def __init__(self, config: RetrievalConfig, replay: list[dict[str, Any]] | None = None) -> None:
         self.config = config
@@ -265,6 +275,16 @@ class Retrieval:
         if self.config.mode == "disabled":
             raise ValueError("retrieval is disabled for this configuration")
         model = RETRIEVAL_TOOLS[name][0]
+        if self.config.mode == "replay":
+            # Consume the entry before validation and short-circuits: tool_trace records every
+            # retrieval call, including those rejected before the provider, and replays their output.
+            if self.replay_position >= len(self.replay):
+                raise ValueError("no recorded retrieval result remains")
+            event = self.replay[self.replay_position]
+            if event["tool_name"] != name or not same_arguments(model, event["arguments"], arguments):
+                raise ValueError("retrieval replay mismatch; no live fallback is permitted")
+            self.replay_position += 1
+            return event["output"]
         args = model.model_validate(arguments)
         if isinstance(args, FetchArgs):
             public_url(args.url)
@@ -272,14 +292,6 @@ class Retrieval:
                 return {"ok": True, "tool": name, "url": args.url, "context": CONTAMINATED_MESSAGE, "contaminated": 1}
         if isinstance(args, LensArgs):
             workspace.get(args.image_index)
-        if self.config.mode == "replay":
-            if self.replay_position >= len(self.replay):
-                raise ValueError("no recorded retrieval result remains")
-            event = self.replay[self.replay_position]
-            if event["tool_name"] != name or model.model_validate(event["arguments"]) != args:
-                raise ValueError("retrieval replay mismatch; no live fallback is permitted")
-            self.replay_position += 1
-            return event["output"]
         cache = (
             shared_cache(self.config.cache_root, self.config.cache_fuzzy_threshold, self.config.cache_write)
             if self.config.cache_root

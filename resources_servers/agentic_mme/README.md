@@ -105,8 +105,10 @@ to ImgBB/Serper. Only use it with data approved for those services.
 
 For deterministic offline retrieval, set retrieval.mode=replay and put an ordered
 retrieval_replay list on each input row; entries contain tool_name, arguments and
-output from a previous tool_trace. Replay must match tool and normalized arguments.
-Mismatches fail visibly and never fall back to the network.
+output from a previous tool_trace, one per retrieval call, including calls rejected
+before the provider (their recorded error is replayed). Replay must match tool and
+arguments, as sent or once normalized. Mismatches fail visibly and never fall back to
+the network.
 
 ### Web search providers and shared cache
 

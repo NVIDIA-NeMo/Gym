@@ -73,11 +73,44 @@ async def test_replay_matches_normalized_arguments_and_never_uses_network(worksp
 
 
 @pytest.mark.asyncio
+async def test_replay_stays_in_step_after_calls_rejected_before_the_provider(workspace, monkeypatch) -> None:
+    # tool_trace records calls that never reached a provider (local URL, contaminated URL, bad
+    # image_index, invalid arguments); replay must consume their entries too, or every later call
+    # would raise a mismatch.
+    http = AsyncMock()
+    monkeypatch.setattr(retrieval, "request", http)
+    rejected = [
+        ("fetch_webpage", {"url": "http://localhost/a"}),
+        ("fetch_webpage", {"url": "https://huggingface.co/datasets/agentic-mme"}),
+        ("google_lens_search", {"image_index": 8}),
+        ("google_search", {"query": ""}),
+    ]
+    trace = [
+        {"tool_name": name, "arguments": args, "output": {"ok": False, "error": "recorded rejection"}}
+        for name, args in rejected
+    ]
+    trace.append(
+        {
+            "tool_name": "google_search",
+            "arguments": {"query": "example"},
+            "output": {"ok": True, "context": "evidence"},
+        }
+    )
+    client = Retrieval(RetrievalConfig(mode="replay"), trace)
+    for name, args in rejected:
+        assert (await client.call(name, args, workspace))["error"] == "recorded rejection"
+    assert (await client.call("google_search", {"query": "example"}, workspace))["context"] == "evidence"
+    assert client.replay_position == len(trace)
+    http.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_disabled_and_lens_index(workspace) -> None:
     with pytest.raises(ValueError, match="disabled"):
         await Retrieval(RetrievalConfig()).call("google_search", {"query": "x"}, workspace)
     with pytest.raises(ValueError, match="image_index"):
-        await Retrieval(RetrievalConfig(mode="replay")).call("google_lens_search", {"image_index": 8}, workspace)
+        config = RetrievalConfig(mode="live", serper_api_key="test")
+        await Retrieval(config).call("google_lens_search", {"image_index": 8}, workspace)
 
 
 @pytest.mark.asyncio
