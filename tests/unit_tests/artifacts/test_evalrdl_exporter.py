@@ -27,7 +27,7 @@ from pytest import MonkeyPatch
 import nemo_gym.artifacts.exporters.isolated as isolated
 from nemo_gym.artifacts.exporters import load_run_exporter_class
 from nemo_gym.artifacts.exporters.base import ExportState
-from nemo_gym.artifacts.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter
+from nemo_gym.artifacts.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter, _without_resume_identity
 from nemo_gym.artifacts.exporters.isolated import ensure_exporter_environment
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 
@@ -276,6 +276,22 @@ class TestRunDirectory:
         assert Path(call["path"]).name == tmp_path.name
         # The run directory itself is left as it was.
         assert identity.exists() and not fake_sdk["log"].with_name("model-calls").is_symlink()
+
+    def test_a_run_dir_above_the_rollouts_leaves_out_the_resume_identity_beside_them(self, tmp_path: Path) -> None:
+        # The upload is the benchmark directory; the identity sits beside the rollouts, one level down.
+        run_dir, artifacts_dir = tmp_path / "bench", tmp_path / "bench" / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "gpqa_rollouts.jsonl").write_text("{}\n")
+        identity = artifacts_dir / "gpqa_rollouts_manifest.identity.json"
+        identity.write_text('{"exa_api_key": "CANARY-SECRET-123"}')  # pragma: allowlist secret
+        (run_dir / "eval.exit").write_text("0")
+
+        uploaded = _without_resume_identity(run_dir, tmp_path / "work", artifacts_dir)
+
+        assert uploaded != run_dir and uploaded.name == run_dir.name
+        assert (uploaded / "eval.exit").exists() and (uploaded / "artifacts" / "gpqa_rollouts.jsonl").exists()
+        assert not (uploaded / "artifacts" / identity.name).exists()
+        assert identity.exists()  # the run directory itself is left as it was
 
     @pytest.mark.parametrize("other", ["math_rollouts.jsonl", "rollouts.jsonl"])
     def test_a_directory_holding_another_runs_rollouts_is_refused_before_any_environment_is_built(
