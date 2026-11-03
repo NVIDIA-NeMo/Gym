@@ -44,12 +44,12 @@ step 1 (or a newer one), in a directory that persists (not `/tmp`), with `uv` on
 
 ```bash
 SHA=<the full 40-character commit>
-git clone -q https://github.com/NVIDIA-NeMo/Gym.git ~/gym-${SHA:0:12} && cd ~/gym-${SHA:0:12} && git checkout -q $SHA && uv venv --seed .venv && . .venv/bin/activate && uv pip install -e . && gym --help
+git clone -q https://github.com/NVIDIA-NeMo/Gym.git ~/gym-${SHA:0:12} && cd ~/gym-${SHA:0:12} && git checkout -q $SHA && uv venv --seed .venv && . .venv/bin/activate && uv pip install -e ".[mlflow]" && gym --help
 ```
 
 Without `uv`, install it with `curl -LsSf https://astral.sh/uv/install.sh | sh` and
 `export PATH="$HOME/.local/bin:$PATH"`. The submitted run installs its own extras and `ray`; the launcher
-commands do not need them.
+needs only the `mlflow` extra, which the MLflow delivery check in `--inspect` uses.
 
 1. Pin Gym: `driver.gym_install.ref` is a full commit, not a branch. Recovery reads a run with the Gym
    that wrote it and refuses an unpinned ref.
