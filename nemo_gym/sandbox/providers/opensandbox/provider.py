@@ -2658,6 +2658,23 @@ class OpenSandboxProvider:
         """Terminate the sandbox and close local SDK resources."""
         renewal_error = await self._stop_renewal(handle.sandbox_id)
 
+        def terminal_delete_error(error: BaseException) -> bool:
+            # The SDK wraps transport failures, including PermissionError, in
+            # exceptions whose outer text can misleadingly look transient or missing.
+            seen: set[int] = set()
+            current: BaseException | None = error
+            while current is not None and id(current) not in seen:
+                seen.add(id(current))
+                if isinstance(current, (asyncio.CancelledError, PermissionError)) or _exception_status_code(
+                    current
+                ) in (
+                    401,
+                    403,
+                ):
+                    return True
+                current = current.__cause__
+            return False
+
         async def kill_ignore_missing() -> None:
             # Terminate is idempotent: not-found means the sandbox is already
             # gone (double-termination race, or a previous run's leftover).
@@ -2665,17 +2682,25 @@ class OpenSandboxProvider:
             try:
                 await handle.raw.kill()
             except Exception as e:
-                if not _is_missing_sandbox_delete_error(e):
+                if terminal_delete_error(e) or not _is_missing_sandbox_delete_error(e):
                     raise
                 LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
 
-        # If termination fails, keep the SDK handle usable for the owner's retry.
-        await self._await_sdk_operation(
-            kill_ignore_missing,
-            operation="kill",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=self._operations.close_timeout_s,
-        )
+        def retry_delete(error: BaseException) -> bool:
+            if terminal_delete_error(error):
+                return False
+            return isinstance(error, TimeoutError) or _is_retryable_sdk_operation_error(error)
+
+        # DELETE is idempotent, so a lost reply can be reconciled. Attempts and
+        # backoff share one budget; failure keeps the SDK handle usable for retry.
+        async with asyncio.timeout(self._operations.close_timeout_s):
+            await self._await_sdk_operation(
+                kill_ignore_missing,
+                operation="kill",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._operations.close_timeout_s,
+                is_retryable=retry_delete,
+            )
 
         close_error: Exception | None = None
         try:

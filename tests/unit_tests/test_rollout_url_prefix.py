@@ -28,13 +28,13 @@ from fastapi import FastAPI, Request
 from requests.adapters import HTTPAdapter
 
 from nemo_gym.core.episode import current_rollout_id, rollout_context
-from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-from nemo_gym.server_utils import (
-    RequestContextIsolationMiddleware,
+from nemo_gym.server_runtime.base_server import (
     async_rollout_prefix_hook,
     rollout_prefix_hook,
     with_rollout_prefix,
 )
+from nemo_gym.server_runtime.request_handling.request_context import RequestContextIsolationMiddleware
+from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
 
 def _echo_app() -> RequestContextIsolationMiddleware:
@@ -124,7 +124,7 @@ def test_with_rollout_prefix_rewrites_only_urls_under_a_base(url: str, base_urls
 
 
 def test_without_a_current_rollout_the_url_is_unchanged_and_logged(caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.DEBUG, logger="nemo_gym.server_utils"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.server_runtime.base_server"):
         assert (
             with_rollout_prefix("http://gym:8000/v1/responses", ["http://gym:8000"]) == "http://gym:8000/v1/responses"
         )

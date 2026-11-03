@@ -21,21 +21,39 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.server_runtime.base_server import async_rollout_prefix_hook, rollout_prefix_hook, with_rollout_prefix
     from nemo_gym.server_runtime._checkpoint.agent import (
         Activation,
         ActivationOutOfOrderError,
+        AgentSessionParticipant,
+        AgentSessionRecord,
         LegacyRun,
         RestoredAgentSession,
         require_rollout,
     )
-    from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
-    from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
+    from nemo_gym.server_runtime._checkpoint.control import (
+        CheckpointMode,
+        CheckpointRequest,
+        CommitRequest,
+        ParticipantControlPlane,
+        RestoreRequest,
+        next_attempt,
+    )
+    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError, StaleAttemptError
+    from nemo_gym.server_runtime._checkpoint.generation_cut import (
+        GenerationCutInventory,
+        GenerationCutPrefixAck,
+        GenerationCutReceipt,
+    )
+    from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
         seed_restarts,
         seed_verify_step_type,
     )
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
     from nemo_gym.server_runtime.base_environment_server import (
         BaseEnvironmentServer,
         BaseEnvironmentServerConfig,
@@ -70,15 +88,29 @@ if TYPE_CHECKING:
         SimpleResourcesServer,
         lost_session_verification,
     )
-    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
-    from nemo_gym.server_runtime.mcp_auto_exposure import MCPTool
+    from nemo_gym.server_runtime.base_server import SimpleServer
+    from nemo_gym.server_runtime.episode_types import (
+        BaseEpisodeRequest,
+        BaseEpisodeResponse,
+        EpisodeFailure,
+        MaterializedTask,
+    )
+    from nemo_gym.server_runtime.mcp_auto_exposure import (
+        TOKEN_HEADER,
+        MCPTool,
+        harvest_tools,
+        install_auto_exposure,
+        maybe_auto_expose,
+    )
+    from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-    from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER
+    from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
         SingleAgentTurnResponse,
         SingleAgentTurnResult,
+        SingleAgentTurnTaskInput,
     )
     from nemo_gym.server_runtime.tool_access import (
         DirectHTTPToolAccess,
@@ -92,8 +124,13 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "async_rollout_prefix_hook": "base_server",
+    "rollout_prefix_hook": "base_server",
+    "with_rollout_prefix": "base_server",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
+    "AgentSessionParticipant": "_checkpoint.agent",
+    "AgentSessionRecord": "_checkpoint.agent",
     "BaseEnvironmentServer": "base_environment_server",
     "BaseEnvironmentServerConfig": "base_environment_server",
     "BaseEpisodeRequest": "episode_types",
@@ -107,20 +144,30 @@ _PUBLIC_API = {
     "BaseVerifyResponse": "base_resources_server",
     "CHECKPOINT_CLOSE_FOLLOWS_HEADER": "_checkpoint.steps",
     "CheckpointMode": "_checkpoint.control",
+    "CheckpointRequest": "_checkpoint.control",
     "CleanupContext": "base_environment_server",
     "CleanupHandle": "base_environment_server",
     "ClosedResourcesSessionRecords": "base_resources_server",
+    "CommitRequest": "_checkpoint.control",
     "DirectHTTPToolAccess": "tool_access",
+    "EnvironmentParticipant": "_checkpoint.environment",
     "EpisodeFailure": "episode_types",
+    "EpisodeRecord": "_checkpoint.environment",
+    "GenerationCutInventory": "_checkpoint.generation_cut",
+    "GenerationCutPrefixAck": "_checkpoint.generation_cut",
+    "GenerationCutReceipt": "_checkpoint.generation_cut",
     "HandledEpisodeError": "base_environment_server",
     "LegacyRun": "_checkpoint.agent",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
     "MCPToolAccess": "tool_access",
+    "MaterializedTask": "episode_types",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
+    "ParticipantControlPlane": "_checkpoint.control",
     "ResourcesCloseSessionRequest": "base_resources_server",
     "ResourcesCloseSessionResponse": "base_resources_server",
+    "ResourcesParticipant": "_checkpoint.resources",
     "ResourcesSeedRejectedError": "base_resources_server",
     "ResourcesSeedSessionRequest": "base_resources_server",
     "ResourcesSeedSessionResponse": "base_resources_server",
@@ -128,26 +175,39 @@ _PUBLIC_API = {
     "ResourcesSessionFence": "base_resources_server",
     "ResourcesSessionLostError": "base_resources_server",
     "ResourcesVerifyRequest": "base_resources_server",
+    "RestoreRequest": "_checkpoint.control",
     "RestoredAgentSession": "_checkpoint.agent",
     "ReverifyMode": "base_resources_server",
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SimpleResourcesServer": "base_resources_server",
+    "SimpleServer": "base_server",
     "SingleAgentTurnFailure": "single_agent_turn_types",
     "SingleAgentTurnRequest": "single_agent_turn_types",
     "SingleAgentTurnResponse": "single_agent_turn_types",
     "SingleAgentTurnResult": "single_agent_turn_types",
+    "SingleAgentTurnTaskInput": "single_agent_turn_types",
+    "StaleAttemptError": "_checkpoint.errors",
     "StepType": "_checkpoint.steps",
+    "TOKEN_HEADER": "mcp_auto_exposure",
     "ToolAccess": "tool_access",
     "dependency_failure": "base_environment_server",
+    "entrypoint_ray_enabled": "ray_support",
+    "harvest_tools": "mcp_auto_exposure",
+    "install_auto_exposure": "mcp_auto_exposure",
+    "install_session_routing": "request_handling.session_routing",
     "is_retryable_dependency_error": "base_environment_server",
     "is_retryable_dependency_status": "base_environment_server",
     "lost_session_verification": "base_resources_server",
+    "maybe_auto_expose": "mcp_auto_exposure",
+    "next_attempt": "_checkpoint.control",
     "observe_verifier": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
     "seed_restarts": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
+    "task_digest": "_checkpoint.environment",
+    "write_participant_state": "_checkpoint.store",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

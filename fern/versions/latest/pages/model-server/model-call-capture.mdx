@@ -78,7 +78,7 @@ No content is delivered during generation, so buffered SSE does not reduce time 
 Worker streaming with external capture remains unsupported. Training reconstruction reads
 the external staged tokens, not the SSE text.
 
-The staging ledger's wire models (`nemo_gym/token_id_capture/staging/records.py`) forbid unknown
+The staging ledger's wire models (`nemo_gym/models/token_capture/staging/records.py`) forbid unknown
 fields, so the model server that stages a call and the framework that rebuilds the rollout from
 the staged rows must run the same Gym version. A framework whose Gym predates a column the model
 server writes, such as `source_capture_key` or `finish_reason`, rejects every manifest row as
@@ -302,7 +302,7 @@ the collector clears any existing capture for the exact rollout-attempt id.
 Read raw records programmatically when you need more than the rollout attachment:
 
 ```python
-from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.models import CaptureStore
 from nemo_gym.observability.model_calls import (
     aggregate_model_call_metrics,
     read_model_call_records,
@@ -377,7 +377,7 @@ default.
 ### Clients with a fixed base URL
 
 A long-lived client, such as one a resources server calls during verification, may not be able to change its
-base URL for each rollout. `nemo_gym.server_utils.with_rollout_prefix` rewrites each request URL instead: it
+base URL for each rollout. `nemo_gym.server_runtime.with_rollout_prefix` rewrites each request URL instead: it
 inserts `/ng-rollout/<rollout>` after the matching base URL, using the current rollout, so the call reaches the
 model server exactly like a prefixed one, and every Gym server layer that reads the prefix (capture, policy
 checkpointing, session affinity) sees it.
@@ -399,7 +399,7 @@ import requests
 from openai import OpenAI
 from requests.adapters import HTTPAdapter
 
-from nemo_gym.server_utils import async_rollout_prefix_hook, rollout_prefix_hook, with_rollout_prefix
+from nemo_gym.server_runtime import async_rollout_prefix_hook, rollout_prefix_hook, with_rollout_prefix
 
 model_base_urls = ["http://model-server:8000"]
 
@@ -441,7 +441,7 @@ varies by producer and execution path; the
 
 ## Framework-owned media staging
 
-Training frameworks using `nemo_gym.token_id_capture.staging` can hand a framework's
+Training frameworks using `nemo_gym.models.token_capture.staging` can hand a framework's
 processed media (for example an inference worker's pixel tensors) to
 `RolloutTokenCapture.complete_call` or `complete_call_from_response` through the
 keyword-only `attachments` mapping. Gym forwards the mapping unchanged to
