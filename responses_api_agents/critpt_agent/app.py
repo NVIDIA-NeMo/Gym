@@ -73,6 +73,10 @@ class CritPtSessionState(AgentSessionState):
     """Per-episode evidence retained until the environment closes the session."""
 
     observations: AgentObservationBundle | None = None
+    # The session's single activation: an identical retry joins it, a different request is refused, and close
+    # cancels it. Its model cookies are kept so a joining retry returns the same Set-Cookie values.
+    activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
+    execution: asyncio.Task[tuple[NeMoGymResponse, dict[str, str]]] | None = None
 
 
 class CritPtAgent(SimpleResponsesAPIAgent):
@@ -96,6 +100,16 @@ class CritPtAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, CritPtSessionState):
             raise TypeError("Expected CritPt session state")
+        execution = state.execution
+        if execution is not None:
+            if not execution.done():
+                execution.cancel()
+                done, _ = await asyncio.wait({execution}, timeout=self.config.session_close_timeout_seconds)
+                if not done:
+                    raise TimeoutError(
+                        "CritPt activation did not stop within the session close timeout; close must retry"
+                    )
+            await asyncio.gather(execution, return_exceptions=True)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations,
@@ -110,42 +124,75 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         """Solve, then format using the deferred final user message in prepared input.
 
         Input ends with two user messages: the problem and the prepared formatting prompt.
-        The formatting prompt is withheld from the solve call. Only the formatting output
-        is returned for verification; usage covers both model calls.
+        The formatting prompt is withheld from the solve call. The formatting response is returned
+        for verification, with usage covering both model calls. A failed solve response is returned
+        as is, without formatting, and is verified like any unclassified failed response.
+
+        A session runs one activation. An identical retry joins it; a different request, or one routed
+        under another rollout, is refused with 409.
         """
         messages = body.input
-        if (
-            not isinstance(messages, list)
-            or len(messages) < 2
-            or any(getattr(message, "role", None) != "user" for message in messages[-2:])
-        ):
+        if not _ends_with_two_user_messages(messages):
             raise HTTPException(
                 422,
                 "CritPt input must end with the problem and formatting user messages; "
                 "run gym eval prepare --benchmark critpt to prepare both turns.",
             )
-        session_id = self._agent_session_id_from_request(request)
-        state = self._require_agent_session(session_id) if session_id is not None else None
+        route = self.url_path_for_request("/v1/responses", request)
+        cookies = dict(request.cookies)
         invocation = AgentInvocation(invocation_id="root", conversation=messages[:-1])
-        if state is not None:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            result, model_cookies = await self._solve_then_format(route, cookies, body, messages, invocation)
+        else:
+            state = self._require_agent_session(session_id)
             if not isinstance(state, CritPtSessionState):
                 raise TypeError("Expected CritPt session state")
-            state.observations = AgentObservationBundle(source=self.config.name, records=[invocation])
-        cookies = request.cookies
+            if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+                raise HTTPException(409, "Agent session does not match the rollout route")
+            key = (body.model_copy(deep=True), route)
+            if state.activation_key is not None and state.activation_key != key:
+                raise HTTPException(409, "Session already has another activation")
+            if state.execution is None:
+                state.activation_key = key
+                state.observations = AgentObservationBundle(source=self.config.name, records=[invocation])
+                state.execution = asyncio.create_task(
+                    self._solve_then_format(route, cookies, body, messages, invocation)
+                )
+            try:
+                result, model_cookies = await asyncio.shield(state.execution)
+            except asyncio.CancelledError:
+                request_task = asyncio.current_task()
+                if state.execution.cancelled() and request_task is not None and not request_task.cancelling():
+                    raise HTTPException(409, "Agent session is closing") from None
+                raise
+        for name, value in model_cookies.items():
+            response.set_cookie(name, value)
+        return result
+
+    async def _solve_then_format(
+        self,
+        route: str,
+        cookies: dict[str, str],
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        messages: list[Any],
+        invocation: AgentInvocation,
+    ) -> tuple[NeMoGymResponse, dict[str, str]]:
+        """Run both model calls, returning the final response and the cookies the model server set."""
+        model_cookies: dict[str, str] = {}
+        headers = {"x-session-id": invocation.invocation_id} if self._model_call_capture_enabled() else {}
         started = monotonic()
 
         async def call_model(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-            nonlocal cookies
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
+                url_path=route,
                 json=params,
-                cookies=cookies,
+                cookies=cookies | model_cookies,
+                **({"headers": headers} if headers else {}),
             )
             await raise_for_status(model_response)
-            cookies = cookies | {key: value.value for key, value in model_response.cookies.items()}
-            for key, value in model_response.cookies.items():
-                response.set_cookie(key, value.value)
+            model_cookies.update({key: value.value for key, value in model_response.cookies.items()})
             result = NeMoGymResponse.model_validate(await get_response_json(model_response))
             invocation.model_calls.append(ModelCallRef(model_ref=self.config.model_server, response_id=result.id))
             invocation.conversation = list(params.input) + result.output
@@ -155,7 +202,7 @@ class CritPtAgent(SimpleResponsesAPIAgent):
             turn1 = await call_model(body.model_copy(update={"input": messages[:-1]}))
             if turn1.status == "failed" or turn1.error is not None:
                 invocation.status = "failed"
-                return turn1
+                return turn1, model_cookies
             turn1_text = _strip_thinking_blocks(_extract_output_text(turn1.model_dump()))
             turn2_input = messages[:-1] + [
                 NeMoGymEasyInputMessage(role="assistant", content=turn1_text),
@@ -172,7 +219,7 @@ class CritPtAgent(SimpleResponsesAPIAgent):
             usage = None
             if turn1.usage is not None and turn2.usage is not None:
                 usage = accumulate_response_usage(turn1.usage, turn2.usage)
-            return turn2.model_copy(update={"usage": usage})
+            return turn2.model_copy(update={"usage": usage}), model_cookies
         except asyncio.CancelledError:
             invocation.status = "incomplete"
             raise
@@ -203,7 +250,7 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         messages = params.input
         if isinstance(messages, str):
             messages = [NeMoGymEasyInputMessage(role="user", content=messages)]
-        if len(messages) < 2 or any(getattr(message, "role", None) != "user" for message in messages[-2:]):
+        if not _ends_with_two_user_messages(messages):
             messages = list(messages) + [
                 NeMoGymEasyInputMessage(
                     role="user", content=self._turn2_user_template.format(code_template=body.code_template)
@@ -229,6 +276,15 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verify_response)
         return CritPtAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+
+def _ends_with_two_user_messages(messages: object) -> bool:
+    """Whether input already carries the problem and the prepared formatting prompt as its last two messages."""
+    return (
+        isinstance(messages, list)
+        and len(messages) >= 2
+        and all(getattr(message, "role", None) == "user" for message in messages[-2:])
+    )
 
 
 def _strip_thinking_blocks(text: str) -> str:

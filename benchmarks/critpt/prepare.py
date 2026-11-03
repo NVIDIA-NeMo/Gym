@@ -69,6 +69,25 @@ def prepare_row(row: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     return prepared
 
 
+def is_prepared_data_current(fpath: Path) -> bool:
+    """Whether a cached prepared file has rows and both user messages prepared on every row."""
+    has_rows = False
+    try:
+        with fpath.open() as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                has_rows = True
+                messages = ((json.loads(line).get("responses_create_params") or {}).get("input")) or []
+                if not isinstance(messages, list) or len(messages) < 2:
+                    return False
+                if any(not isinstance(message, dict) or message.get("role") != "user" for message in messages[-2:]):
+                    return False
+    except (json.JSONDecodeError, AttributeError):
+        return False
+    return has_rows
+
+
 def prepare() -> Path:
     from datasets import load_dataset
 

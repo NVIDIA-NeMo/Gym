@@ -213,6 +213,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "claude_code_agent",
         "codex_agent",
+        "critpt_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "kilocode_agent",

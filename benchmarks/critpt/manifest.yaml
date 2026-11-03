@@ -25,4 +25,5 @@ datasets:
   num_repeats: 5
 model_server: policy_model
 canonical_split: benchmark
+prompt_source: prepared
 lifecycle: active

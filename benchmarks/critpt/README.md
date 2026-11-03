@@ -85,7 +85,11 @@ which downloads the dataset and writes the full 70-problem JSONL to
 The agent inserts its solve answer before that final message during the second model call.
 
 Re-run preparation when upgrading from data containing only flat problem fields or a single solve
-prompt. Prepared rows must not be combined with a rollout-time `prompt_config`.
+prompt. With `+use_cached_prepared_benchmarks=true`, `prepare.py` marks such a cached file out of
+date and regenerates it. The one-shot `gym eval run` below instead reuses
+`<output>/preprocessed_datasets/benchmark.jsonl` when `++reuse_existing_data_preparation=true` is
+set, so delete that file (or drop the flag once) after upgrading. Prepared rows must not be combined
+with a rollout-time `prompt_config`.
 
 ## Run servers
 

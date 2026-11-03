@@ -20,7 +20,8 @@ CritPt uses a **custom two-turn agent** — `simple_agent` will not work:
 - `resources_servers/critpt` (this server)
 
 The full wiring lives in `benchmarks/critpt/config.yaml`, which chains all three plus the
-dataset and Turn 1 / Turn 2 prompt configs.
+dataset. Both prompts are rendered into each row by `benchmarks/critpt/prepare.py`
+(`benchmarks/critpt/prompts/turn1.yaml` and `turn2.yaml`).
 
 ## Batched Verification (unique to CritPt)
 
