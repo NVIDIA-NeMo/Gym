@@ -1083,6 +1083,25 @@ class TestExec:
         with pytest.raises(TimeoutError, match=r"deadline exceeded.*wait/stream budget=1s"):
             await provider.exec(handle, "sleep 999", timeout_s=1)
 
+    @pytest.mark.parametrize("background", [False, True])
+    async def test_sandbox_not_running_is_a_sandbox_error_result(
+        self, monkeypatch: pytest.MonkeyPatch, background: bool
+    ) -> None:
+        # E2B 2.62+ raises this TimeoutException subclass once the sandbox reached its lifetime.
+        not_running = type("FakeSandboxNotRunning", (FakeTimeout,), {})
+        sdk = _fake_sdk()
+        sdk.SandboxNotRunningException = not_running
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: sdk)
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        handle.raw.exec_behaviour = not_running("The sandbox was killed or reached its timeout.")
+
+        result = await provider.exec(handle, "sleep 999", timeout_s=60)
+
+        assert result.error_type == "sandbox"
+        assert result.return_code == e2b_provider.SANDBOX_RUNTIME_RETURN_CODE
+        assert result.stderr == "e2b sandbox is not running: The sandbox was killed or reached its timeout."
+
     @pytest.mark.parametrize("timeout_s", [-1, float("nan"), float("inf"), True, "1"])
     async def test_invalid_timeout_is_rejected_before_command_start(self, timeout_s: object) -> None:
         provider = E2BProvider(create={"template": "base"})
