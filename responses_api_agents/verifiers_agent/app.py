@@ -250,8 +250,9 @@ _ROLLOUT_ERROR_MESSAGE_CHARS = 500
 def _rollout_error_fact(error: Any) -> Optional[dict[str, Any]]:
     """The error a verifiers rollout ended on, as a typed fact for the row: ``type`` (the raised class),
     ``chain`` (the class chain, outermost first), ``status_code`` (an HTTP status named in the error, if any),
-    ``kind_candidate`` (``http_5xx``, ``http_429``, ``http_4xx``, then by class: ``overlong_prompt``,
-    ``model_response``, ``tool``, ``infra``, ``timeout``, ``connection``, else ``other``) and ``message_head``.
+    ``kind_candidate`` (``http_5xx``, ``http_429``, ``http_4xx``, then by class, first match in this order:
+    ``overlong_prompt``, ``timeout``, ``connection``, ``infra``, ``tool``, ``model_response``, else ``other``) and
+    ``message_head``.
     None when the rollout ended without one."""
     if not error:
         return None

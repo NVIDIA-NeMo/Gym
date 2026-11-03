@@ -110,6 +110,14 @@ NO_PROGRESS_SEGMENT_REASON = (
 )
 # Where the driver step's DRIVER_FAILURE_ENV points: the next segment's guard ends the chain with the kind in it.
 DRIVER_FAILURE_NAME = ".gym_driver_failure"
+# The driver failure kinds the next segment's prologue turns into its own stop and remedy (its guard). A segment whose
+# driver exits 76 with one of them keeps its follow-up for that stop; the guard handles each (see the prologue's case).
+GUARDED_DRIVER_FAILURE_KINDS = (
+    SERVER_SPINUP_TIMEOUT,
+    DRIVER_INSTALL_FAILED,
+    COLLECTION_RESUME_REFUSED,
+    PROVIDER_CREDENTIALS_REJECTED,
+)
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
     "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
@@ -134,6 +142,14 @@ EXPORT_RECEIPT_MISSING_REASON = (
 # Appended in the job dir by a job whose driver step finished the run: how the chain ended there and the sentinel and
 # follow-up it had queued and then cancelled, each with its job id and whether scancel took it.
 CHAIN_END_JOURNAL_NAME = "chain-end-journal.jsonl"
+# The driver's exit when nothing is eligible for another attempt (gym eval run's stop exit code), and what a job
+# that exits with it writes and journals when it ends its own chain.
+NO_ELIGIBLE_RETRY_EXIT = 76
+NO_ELIGIBLE_RETRY = "no_eligible_retry"
+NO_ELIGIBLE_RETRY_REASON = (
+    "No tasks are eligible for retry: the job ended its chain itself, with nothing queued after it; inspect "
+    "terminal failures, omissions and exhausted budgets, then continue with gym eval resubmit --recover."
+)
 # The files an export receipt binds (`_artifact_version` in the exporters), by receipt key, in the job's artifacts.
 _RECEIPT_ARTIFACTS = (
     ("rollouts_jsonl_fpath", "rollouts.jsonl"),
@@ -162,9 +178,10 @@ _gym_stop_incomplete() {{
     exit 1
 }}
 
+# The marker keeps the reason alone (readers match it); the log line also names the operator's next step.
 _gym_stop_accounting_unknown() {{
     echo "{accounting_unknown_prefix} $1" > "$_incomplete_file"
-    _gym_stop_incomplete "$1"
+    _gym_stop_incomplete "$1 Reconcile the queue and the job chain, then continue with gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT, adding --extend-retries N when the retries are spent."
 }}
 
 # A run that is complete and exported needs no further segment, whatever the scheduler says about the last one: a
@@ -429,7 +446,7 @@ done
 [[ ! -e "$OUTPUT_DIR/{resubmit_lock_name}" ]] || \
     _gym_stop_accounting_unknown "Submission acknowledgement is still unresolved."
 if grep -q '^{accounting_unknown_prefix}' "$_incomplete_file" 2>/dev/null; then
-    _gym_stop_incomplete "Allocation accounting remains unknown; reconcile the complete queue and terminal chain before recovery."
+    _gym_stop_incomplete "Allocation accounting remains unknown; reconcile the complete queue and terminal chain, then continue with gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT, adding --extend-retries N when the retries are spent."
 fi
 # An unresolved earlier claim can name a job whose sbatch reply was lost. Its absence from squeue
 # does not prove that it never ran. The current allocation's own claim is checked below.
@@ -773,12 +790,30 @@ _EPILOGUE_TEMPLATE = """\
 # --- A job that finishes the run ends its own chain ---
 _gym_driver_rc=$?
 _gym_end_own_chain() {{
-    local _rc=$1 _ended=run_complete _role _file _id _result _cancelled=""
-    # A job whose driver failed has its follow-up start, and that prologue decides; an incomplete run continues.
-    [[ $_rc == 0 ]] && _gym_run_complete || return $_rc
+    local _rc=$1 _ended=run_complete _role _file _id _result _cancelled="" _kind=""
+    # A failure kind the follow-up's prologue turns into its own stop and remedy (its guard): that job keeps its
+    # follow-up. Any other kind, or none, gets no stop from the follow-up.
+    _file="$OUTPUT_DIR/{driver_failure_name}.$SLURM_JOB_ID"
+    [[ ! -e "$_file" ]] || _kind=$(head -n 1 "$_file" 2>/dev/null) || _kind=""
+    case "$_kind" in
+        {guarded_failure_kinds})
+            _kind=guarded ;;
+    esac
+    if [[ $_rc == {no_eligible_retry_exit} && "$_kind" != guarded ]]; then
+        # Nothing is eligible for another attempt: the follow-up would start on a full allocation only to write this
+        # stop and exit, so the job writes it and cancels what it queued. A deliberate stop already there stays.
+        _ended={no_eligible_retry}
+        if [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+            echo "{no_eligible_retry_reason}" > "$_incomplete_file"
+            echo "{no_eligible_retry_reason}"
+        fi
+    # A job whose driver failed otherwise has its follow-up start, and that prologue decides; an incomplete run
+    # continues.
+    elif [[ $_rc != 0 ]] || ! _gym_run_complete; then
+        return $_rc
     # This job COMPLETEs: Slurm would cancel its afternotok follow-up, and the follow-up's sentinel would then start on
     # a full allocation only to write the record below and exit. A deliberate stop already in the marker stays.
-    if [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+    elif [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
         if _gym_export_required && ! _gym_receipt_current; then
             _ended={export_receipt_missing}
             echo "{export_receipt_missing_reason}" > "$_incomplete_file"
@@ -923,9 +958,17 @@ def render_resume_epilogue() -> str:
 
     When the driver step succeeded and the run is complete, it writes the record the follow-up or its sentinel would
     have written, cancels the sentinel and then the follow-up it queued, and journals both in
-    ``CHAIN_END_JOURNAL_NAME``, so no allocation starts for a finished run. The job keeps the driver step's status.
+    ``CHAIN_END_JOURNAL_NAME``, so no allocation starts for a finished run. A driver that exits
+    ``NO_ELIGIBLE_RETRY_EXIT`` (nothing is eligible for another attempt) ends its chain the same way, with the
+    ``NO_ELIGIBLE_RETRY_REASON`` stop, unless it left in ``DRIVER_FAILURE_NAME`` a failure kind the follow-up's
+    prologue turns into its own stop (spin-up timeout, install failed, resume refused, credentials rejected). The job keeps the driver step's status.
     """
     return _EPILOGUE_TEMPLATE.format(
+        no_eligible_retry_exit=NO_ELIGIBLE_RETRY_EXIT,
+        no_eligible_retry=NO_ELIGIBLE_RETRY,
+        no_eligible_retry_reason=NO_ELIGIBLE_RETRY_REASON,
+        driver_failure_name=DRIVER_FAILURE_NAME,
+        guarded_failure_kinds="|".join(GUARDED_DRIVER_FAILURE_KINDS),
         provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
         export_receipt_missing=EXPORT_RECEIPT_MISSING,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,

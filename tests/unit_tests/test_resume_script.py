@@ -28,9 +28,14 @@ import pytest
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
     CHAIN_END_JOURNAL_NAME,
+    DRIVER_FAILURE_NAME,
     EXPORT_RECEIPT_MISSING,
     EXPORT_RECEIPT_MISSING_REASON,
+    GUARDED_DRIVER_FAILURE_KINDS,
     INCOMPLETE_MARKER_NAME,
+    NO_ELIGIBLE_RETRY,
+    NO_ELIGIBLE_RETRY_EXIT,
+    NO_ELIGIBLE_RETRY_REASON,
     PROVISIONAL_MARKER_PREFIX,
     ROWS_AT_START_NAME,
     _walltime_to_seconds,
@@ -998,6 +1003,22 @@ def test_a_sentinel_that_cannot_read_its_follow_up_stops_with_unknown_accounting
     )
     assert (tmp_path / ".gym_job_chain").read_text() == "100\n"
     assert _sbatch_calls(tmp_path) == []
+    # The stop names the operator's continuation; the marker keeps only the reason its readers match.
+    assert "gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT" in result.stdout
+    assert "--recover" not in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_chain_whose_accounting_is_already_unknown_names_the_continuation_and_keeps_its_marker(tmp_path):
+    marker = "GYM_ACCOUNTING_UNKNOWN: Cannot record the allocation.\n"
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text(marker)
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT")
+
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert "Allocation accounting remains unknown" in result.stdout
+    assert "gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT" in result.stdout
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == marker
+    assert _sbatch_calls(tmp_path) == []
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -1546,6 +1567,76 @@ def test_a_segment_whose_driver_failed_keeps_its_status_and_its_queued_jobs(tmp_
     assert "REACHED_WORK" in result.stdout and "Run complete" not in result.stdout
     assert _scancel_calls(tmp_path) == []
     assert _chain_end_entries(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_segment_with_nothing_eligible_for_retry_ends_its_own_chain(tmp_path, monkeypatch):
+    # Exit 76: the follow-up would start on a full allocation only to stop. The segment stops the chain itself.
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(
+        tmp_path, ResumeConfig(), "TIMEOUT", driver=f"( exit {NO_ELIGIBLE_RETRY_EXIT} )", sentinel_id="998"
+    )
+
+    assert result.returncode == NO_ELIGIBLE_RETRY_EXIT, result.stdout + result.stderr
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == NO_ELIGIBLE_RETRY_REASON + "\n"
+    assert NO_ELIGIBLE_RETRY_REASON in result.stdout and "Run complete" not in result.stdout
+    assert _scancel_calls(tmp_path) == ["998", "999"]
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["ended"] == NO_ELIGIBLE_RETRY and entry["job_id"] == "200"
+    assert entry["cancelled"] == {
+        "sentinel": {"job_id": "998", "result": "cancelled"},
+        "follow_up": {"job_id": "999", "result": "cancelled"},
+    }
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("kind", GUARDED_DRIVER_FAILURE_KINDS)
+def test_a_driver_that_exits_76_with_a_typed_failure_leaves_the_stop_to_its_follow_up(tmp_path, monkeypatch, kind):
+    # The follow-up's prologue turns the kind into its own stop and remedy, so the segment keeps its queued jobs.
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    failure = tmp_path / f"{DRIVER_FAILURE_NAME}.200"
+    result = _run_prologue(
+        tmp_path,
+        ResumeConfig(),
+        "TIMEOUT",
+        driver=f"echo {kind} > {shlex.quote(str(failure))}; ( exit {NO_ELIGIBLE_RETRY_EXIT} )",
+        sentinel_id="998",
+    )
+
+    assert result.returncode == NO_ELIGIBLE_RETRY_EXIT, result.stdout + result.stderr
+    marker = tmp_path / INCOMPLETE_MARKER_NAME
+    assert not marker.exists() or NO_ELIGIBLE_RETRY_REASON not in marker.read_text()
+    assert NO_ELIGIBLE_RETRY_REASON not in result.stdout
+    assert _scancel_calls(tmp_path) == []
+    assert _chain_end_entries(tmp_path) == []
+
+
+def test_every_kind_whose_follow_up_is_kept_on_exit_76_has_a_stop_in_the_next_prologue():
+    # The epilogue keeps the follow-up for these kinds because its prologue stops on each; a kind without a case
+    # there would start the run again instead.
+    prologue = render_resume_prologue(ResumeConfig())
+    for kind in GUARDED_DRIVER_FAILURE_KINDS:
+        assert f"\n        {kind})\n" in prologue, kind
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_driver_that_exits_76_with_a_kind_no_guard_handles_still_ends_its_own_chain(tmp_path, monkeypatch):
+    # The follow-up's prologue writes no stop for this kind, so it would start the run again: the segment ends it.
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    failure = tmp_path / f"{DRIVER_FAILURE_NAME}.200"
+    result = _run_prologue(
+        tmp_path,
+        ResumeConfig(),
+        "TIMEOUT",
+        driver=f"echo server_start_failed > {shlex.quote(str(failure))}; ( exit {NO_ELIGIBLE_RETRY_EXIT} )",
+        sentinel_id="998",
+    )
+
+    assert result.returncode == NO_ELIGIBLE_RETRY_EXIT, result.stdout + result.stderr
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == NO_ELIGIBLE_RETRY_REASON + "\n"
+    assert _scancel_calls(tmp_path) == ["998", "999"]
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["ended"] == NO_ELIGIBLE_RETRY
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
