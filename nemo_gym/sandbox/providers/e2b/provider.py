@@ -103,6 +103,16 @@ def _is_new_sandbox_error(exc: BaseException, *, include_unreachable: bool) -> b
     return include_unreachable and ("likely due to sandbox timeout" in message or "could not be reached" in message)
 
 
+def _remaining_budget(kwargs: dict[str, Any], deadline: float) -> dict[str, float]:
+    """Cap a command call's wait and stream-open timeouts at the time left before ``deadline``."""
+    remaining = deadline - monotonic()
+    request_timeout = kwargs.get("request_timeout")
+    return {
+        "timeout": remaining,
+        "request_timeout": remaining if request_timeout in (None, 0) else min(float(request_timeout), remaining),
+    }
+
+
 class E2BCreateError(SandboxCreateError):
     """Raised when a sandbox cannot be created."""
 
@@ -460,23 +470,40 @@ class E2BProvider:
         factory: Callable[[], Awaitable[T]],
         *,
         operation: str,
-        include_unreachable: bool,
     ) -> T:
-        """Retry ``factory`` while a sandbox this provider just created is settling in.
-
-        Pass ``include_unreachable=False`` for calls that are unsafe to repeat
-        once delivered: a 502 can come after the sandbox received the request.
-        """
+        """Retry a file call while a sandbox this provider just created is settling in."""
         while True:
             try:
                 return await factory()
             except Exception as exc:
-                if not self._is_new(sandbox_id) or not _is_new_sandbox_error(
-                    exc, include_unreachable=include_unreachable
-                ):
+                if not self._is_new(sandbox_id) or not _is_new_sandbox_error(exc, include_unreachable=True):
                     raise
                 LOGGER.info("e2b %s on new sandbox %s failed (%s); retrying", operation, sandbox_id, exc)
                 await asyncio.sleep(_NEW_SANDBOX_RETRY_INTERVAL_S)
+
+    async def _start_command(self, sandbox: Any, kwargs: dict[str, Any], deadline: float | None, **extra: Any) -> Any:
+        """Start a command, retrying a start the gateway did not route while the sandbox is new.
+
+        Only the unrouted 404 is retried: a 502 can come after the sandbox
+        received the start, so repeating it could run the command twice.
+        Retries stay inside the command's wait budget: each gets only the time
+        left before ``deadline``, and none is sent once it has passed.
+        """
+        attempt_kwargs = kwargs
+        while True:
+            try:
+                return await sandbox.commands.run(**attempt_kwargs, **extra)
+            except Exception as exc:
+                if not self._is_new(sandbox.sandbox_id) or not _is_new_sandbox_error(exc, include_unreachable=False):
+                    raise
+                LOGGER.info("e2b exec on new sandbox %s failed (%s); retrying", sandbox.sandbox_id, exc)
+                if deadline is None:
+                    await asyncio.sleep(_NEW_SANDBOX_RETRY_INTERVAL_S)
+                    continue
+                await asyncio.sleep(max(0.0, min(_NEW_SANDBOX_RETRY_INTERVAL_S, deadline - monotonic())))
+                attempt_kwargs = {**kwargs, **_remaining_budget(kwargs, deadline)}
+                if attempt_kwargs["timeout"] <= 0:
+                    raise TimeoutError(f"e2b command was not started within {kwargs['timeout']}s") from exc
 
     @staticmethod
     def _sandbox(handle: SandboxHandle) -> Any:
@@ -718,7 +745,7 @@ class E2BProvider:
 
     # -------------------------------------------------------------- commands
 
-    async def _run_background(self, sandbox: Any, kwargs: dict[str, Any]) -> Any:
+    async def _run_background(self, sandbox: Any, kwargs: dict[str, Any], deadline: float | None) -> Any:
         """Run a command detached, reattaching by pid if the stream drops.
 
         ``commands.run(background=True)`` returns as soon as the process has
@@ -739,17 +766,7 @@ class E2BProvider:
         """
         e2b = _require_e2b_sdk()
         command_timeout = kwargs.get("timeout")
-        deadline = (
-            monotonic() + float(command_timeout)
-            if command_timeout is not None and float(command_timeout) > 0
-            else None
-        )
-        handle = await self._retry_while_new(
-            sandbox.sandbox_id,
-            lambda: sandbox.commands.run(**kwargs, background=True),
-            operation="exec",
-            include_unreachable=False,
-        )
+        handle = await self._start_command(sandbox, kwargs, deadline, background=True)
         pid = getattr(handle, "pid", None)
         stdout = ""
         stderr = ""
@@ -790,23 +807,13 @@ class E2BProvider:
                     self._exec.reconnect_attempts,
                     exc,
                 )
-                reconnect_timeout = command_timeout
-                reconnect_request_timeout = kwargs.get("request_timeout")
+                budget = {"timeout": command_timeout, "request_timeout": kwargs.get("request_timeout")}
                 if deadline is not None:
-                    remaining = deadline - monotonic()
-                    if remaining <= 0:
+                    budget = _remaining_budget(kwargs, deadline)
+                    if budget["timeout"] <= 0:
                         raise TimeoutError(f"e2b command timed out after {command_timeout}s") from exc
-                    reconnect_timeout = remaining
-                    if reconnect_request_timeout in (None, 0):
-                        reconnect_request_timeout = remaining
-                    else:
-                        reconnect_request_timeout = min(float(reconnect_request_timeout), remaining)
                 try:
-                    handle = await sandbox.commands.connect(
-                        pid,
-                        timeout=reconnect_timeout,
-                        request_timeout=reconnect_request_timeout,
-                    )
+                    handle = await sandbox.commands.connect(pid, **budget)
                 except Exception as reconnect_exc:
                     # Typically not-found: the command finished while we were
                     # disconnected, so its result is gone. Report the original
@@ -841,19 +848,16 @@ class E2BProvider:
         # E2B treats ``timeout`` as "no timeout" when falsy; keep None explicit.
         kwargs["timeout"] = float(effective_timeout) if effective_timeout is not None else None
         kwargs["request_timeout"] = self._exec_request_timeout()
+        # One deadline bounds start retries and stream reattaches alike.
+        deadline = monotonic() + kwargs["timeout"] if kwargs["timeout"] else None
 
         timeout_exc = getattr(e2b, "TimeoutException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
         try:
             if self._exec.background:
-                result = await self._run_background(sandbox, kwargs)
+                result = await self._run_background(sandbox, kwargs, deadline)
             else:
-                result = await self._retry_while_new(
-                    handle.sandbox_id,
-                    lambda: sandbox.commands.run(**kwargs),
-                    operation="exec",
-                    include_unreachable=False,
-                )
+                result = await self._start_command(sandbox, kwargs, deadline)
         except Exception as exc:
             # A non-zero exit is a normal outcome, not a provider failure.
             if isinstance(exit_exc, type) and isinstance(exc, exit_exc):
@@ -889,7 +893,6 @@ class E2BProvider:
                 operation="write_file",
             ),
             operation="write_file",
-            include_unreachable=True,
         )
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
@@ -901,7 +904,6 @@ class E2BProvider:
                 operation="read_file",
             ),
             operation="read_file",
-            include_unreachable=True,
         )
         return data if isinstance(data, bytes) else bytes(data)
 

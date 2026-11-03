@@ -1194,6 +1194,56 @@ class TestNewSandboxGrace:
 
         assert handle.raw.exec_calls == []
 
+    @pytest.mark.parametrize("background", [True, False])
+    async def test_command_start_retries_stop_at_the_exec_deadline(
+        self, monkeypatch: pytest.MonkeyPatch, background: bool
+    ) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(e2b_provider, "monotonic", lambda: clock[0])
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        dispatched: list[float] = []
+
+        async def unrouted(**kwargs):
+            dispatched.append(clock[0])
+            clock[0] += 0.6
+            raise FakeSandboxNotFound(_UNROUTED)
+
+        monkeypatch.setattr(handle.raw.commands, "run", unrouted)
+
+        with pytest.raises(TimeoutError, match=r"not started within 1\.0s"):
+            await provider.exec(handle, "echo hi", timeout_s=1)
+
+        # Still inside the 15 s grace period, but nothing is sent at or after the 1 s deadline.
+        assert dispatched == [0.0, 0.6]
+
+    @pytest.mark.parametrize("background", [True, False])
+    async def test_retried_command_start_gets_only_the_remaining_budget(
+        self, monkeypatch: pytest.MonkeyPatch, background: bool
+    ) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(e2b_provider, "monotonic", lambda: clock[0])
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        run = handle.raw.commands.run
+
+        async def unrouted_for_a_second(**kwargs):
+            monkeypatch.setattr(handle.raw.commands, "run", run)
+            clock[0] += 1.0
+            raise FakeSandboxNotFound(_UNROUTED)
+
+        monkeypatch.setattr(handle.raw.commands, "run", unrouted_for_a_second)
+        handle.raw.wait_outcomes = [ConnectionError("stream lost"), FakeCommandResult(stdout="finished")]
+
+        result = await provider.exec(handle, "make -j8", timeout_s=10)
+
+        assert result.return_code == 0
+        assert handle.raw.exec_calls[0]["timeout"] == 9.0
+        assert handle.raw.exec_calls[0]["request_timeout"] == 9.0
+        # A reattach after the retried start draws on the same deadline.
+        expected_reattaches = [{"pid": 4242, "timeout": 9.0, "request_timeout": 9.0}] if background else []
+        assert handle.raw.connect_calls == expected_reattaches
+
     async def test_close_retries_until_the_sandbox_is_found(self) -> None:
         provider = E2BProvider(create={"template": "base"})
         handle = await provider.create(_spec())

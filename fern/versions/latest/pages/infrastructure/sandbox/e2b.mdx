@@ -185,9 +185,10 @@ For `operations.new_sandbox_grace_s` seconds after create, the provider retries 
 sandbox answers as if it were gone. An AgentEnv gateway can briefly answer 404 "sandbox
 assignment not found" for a running sandbox, and a new VM can briefly refuse connections (502)
 during a create wave. File reads, file writes and close retry both errors. Command starts retry
-only the 404, because a 502 can come after the sandbox received the command. During the grace
-period, `status()` reports a sandbox that does not answer as `UNKNOWN`, not `STOPPED`. Set it to
-`0` to turn this off.
+only the 404, because a 502 can come after the sandbox received the command. Command-start retries
+also stay inside the command's `timeout_s`: a retry gets only the time that is left, and none is
+sent after the deadline. During the grace period, `status()` reports a sandbox that the control
+plane does not find as `UNKNOWN`, not `STOPPED`. Set it to `0` to turn this off.
 
 ## Security and Isolation
 
