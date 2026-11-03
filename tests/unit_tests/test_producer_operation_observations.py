@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from nemo_gym.rollout_health import _observed_upstream_recovery
+from nemo_gym.rollouts.rollout_health import _observed_upstream_recovery
 
 
 def test_terminal_observations_do_not_certify_unobserved_attempts():

@@ -24,11 +24,10 @@ from nemo_gym.agents.utils import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, sandbox_credentials_rejected
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
-    FailureBoundary,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -422,9 +421,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             except (Exception, asyncio.CancelledError) as exc:
                 # A provider that refused the credentials refuses every attempt: the kind ends the run.
                 rejected = (
-                    sandbox_credentials_rejected(
-                        exc, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", stage="seed"
-                    )
+                    sandbox_credentials_rejected(exc, operation="sandbox.setup", stage="seed")
                     if isinstance(exc, Exception)
                     else None
                 )

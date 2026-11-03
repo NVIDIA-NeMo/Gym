@@ -10,15 +10,15 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.cli import eval as eval_cli
-from nemo_gym.rollout_collection import RolloutAggregationHelper
-from nemo_gym.rollout_records import materialized_path_for
 from nemo_gym.rollout_reverification import (
     RolloutReverificationConfig,
     RolloutReverificationHelper,
     due_judge_failures,
     read_settle_receipt,
 )
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
+from nemo_gym.rollouts.rollout_records import materialized_path_for
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_reverify_saved_results import ANSWER, _run, _selected, ungraded, verify_transport_masked
 from tests.unit_tests.test_reverify_saved_results import verifier as verifier  # noqa: F401 - fixture
 
@@ -172,7 +172,7 @@ def test_a_health_check_that_reads_the_store_selection_gets_the_settled_history_
 ):  # noqa: F811
     """A health check that selects the Store's attempts itself (NVIDIA-NeMo/Gym#3881) takes no selected projection:
     the settled run's quality summary is rewritten through it from the run's own history."""
-    from nemo_gym import rollout_health
+    from nemo_gym.rollouts import rollout_health
 
     calls = []
 

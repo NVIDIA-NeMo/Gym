@@ -36,7 +36,7 @@ async def test_unproven_timeout_never_counts_as_zero_or_verifies(damage):
         "operation": "model_request",
         "operation_id": "model-operation",
         "attempt_id": "model-operation-1",
-        "request_upload_complete": True,
+        "details": {"request_upload_complete": True},
     }
     agent_event = {
         "event_id": "agent-timeout",
@@ -56,16 +56,16 @@ async def test_unproven_timeout_never_counts_as_zero_or_verifies(damage):
     elif damage == "wrong_operation":
         agent_event["operation"] = "unrelated"
     elif damage == "missing_upload":
-        model_event.pop("request_upload_complete")
+        model_event.pop("details")
     elif damage == "connect":
-        model_event["request_upload_complete"] = False
+        model_event["details"]["request_upload_complete"] = False
     elif damage == "mixed":
         report["events"]["previous"] = dict(
             model_event,
             event_id="previous",
             attempt_id="model-operation-0",
             failure_reason="connection failed",
-            request_upload_complete=False,
+            details={"request_upload_complete": False},
         )
     elif damage == "duplicate_attempt":
         report["events"]["previous"] = dict(model_event, event_id="previous")
@@ -113,7 +113,7 @@ async def test_only_proven_unconnected_selected_operation_retains_retry(case, re
         "operation": "model_request",
         "operation_id": "operation",
         "attempt_id": "attempt-1",
-        "request_upload_complete": False,
+        "details": {"request_upload_complete": False},
         "foreign_error": {"exception_type": "aiohttp.client_exceptions.ClientConnectorError", "message": ""},
     }
     events = {"selected": event}
@@ -122,11 +122,13 @@ async def test_only_proven_unconnected_selected_operation_retains_retry(case, re
     elif case == "wrong_type":
         event["foreign_error"]["exception_type"] = "TimeoutError"
     elif case == "unknown_upload":
-        event.pop("request_upload_complete")
+        event.pop("details")
     elif case == "after_upload":
-        event["request_upload_complete"] = True
+        event["details"]["request_upload_complete"] = True
     elif case == "earlier_uploaded":
-        events["earlier"] = dict(event, event_id="earlier", attempt_id="attempt-0", request_upload_complete=True)
+        events["earlier"] = dict(
+            event, event_id="earlier", attempt_id="attempt-0", details={"request_upload_complete": True}
+        )
     elif case == "unidentified":
         event.pop("attempt_id")
     response = _agent_response().model_dump(mode="json")
@@ -176,7 +178,7 @@ async def test_only_matching_environment_selector_overrides_agent_timeout_rule(p
         "operation": "model_request",
         "operation_id": "operation",
         "attempt_id": "attempt",
-        "request_upload_complete": True,
+        "details": {"request_upload_complete": True},
     }
     agent = {
         "event_id": "agent",

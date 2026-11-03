@@ -15,9 +15,9 @@ import pytest
 
 from nemo_gym import rollout_reverification
 from nemo_gym.cli import eval as eval_cli
-from nemo_gym.rollout_collection import RolloutCollectionHelper
-from nemo_gym.rollout_recovery import IncompleteEvaluationError
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_rejudge_saved_judge_failures import _run, _settle
 
 

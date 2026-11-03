@@ -21,8 +21,8 @@ import pytest
 
 from nemo_gym.orchestration.executors.slurm import RETRY_EXTENSION_JOURNAL_NAME
 from nemo_gym.orchestration.recovery import decide_from_collected, select_managed_evidence
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_eval_resubmit import _handle, _provider_failures, _resumable_run
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin

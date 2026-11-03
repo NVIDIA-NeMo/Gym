@@ -602,7 +602,7 @@ SAVED_ANSWER_KEY = "_ng_collected_saved_answer"
 def _saved_answer(row: Mapping[str, Any]) -> bool:
     if SAVED_ANSWER_KEY in row:
         return row[SAVED_ANSWER_KEY] is True
-    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
     # Match the saved input used by _rollout_response: diagnostic response bodies are not verifier inputs.
     # A present response takes precedence over the native judge-failure partial response, even if unusable.
@@ -655,7 +655,7 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
 
 def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     """Why replay needs a saved-answer path or model-budget accounting unavailable to recovery; None when it does not."""
-    from nemo_gym.rollout_recovery import (
+    from nemo_gym.rollouts.rollout_recovery import (
         has_recorded_grade,
         has_saved_generation,
         has_unclassified_execution_failure,
@@ -696,7 +696,7 @@ def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
 def _retry_kind(row: Mapping[str, Any]) -> str | None:
     """The kind a retry decision selects on: the policy evidence, else, for a row that selects no event, the one kind
     every saved event names, else the failure record's own kind. Final-zero and judge decisions do not use it."""
-    from nemo_gym.rollout_recovery import holds_response
+    from nemo_gym.rollouts.rollout_recovery import holds_response
 
     kind = _policy_evidence(row)[0]
     if kind is not None or FAILURE_ID in row:
@@ -734,7 +734,7 @@ def _cause_kind(row: Mapping[str, Any]) -> tuple[str | None, bool, str | None]:
     As for a kind (``_retry_kind``), the unselected events of a row that keeps a response are attempts, not its cause,
     and a cause chain that is broken or omitted names no cause.
     """
-    from nemo_gym.rollout_recovery import holds_response
+    from nemo_gym.rollouts.rollout_recovery import holds_response
 
     facts = row.get(COLLECTED_CAUSE)
     facts = facts if isinstance(facts, Mapping) else {}
@@ -799,13 +799,13 @@ def decide_recovery(
     ``ALLOCATION_ENDED_STATES``), and no allocation of the run is live: a reservation with no saved row was in flight
     when it ended and saved nothing, so it is not started for recovery purposes and the Store runs it again.
     """
-    from nemo_gym.rollout_collection import (
+    from nemo_gym.rollouts.rollout_collection import (
         NG_UNROUTED_RUN_ERROR_KEY,
         is_non_superseding_rollout_row,
         is_omitted_rollout_row,
         is_terminal_failure,
     )
-    from nemo_gym.rollout_recovery import (
+    from nemo_gym.rollouts.rollout_recovery import (
         is_answered_agent_deadline,
         is_infrastructure_agent_timeout,
         masked_infrastructure_kind,
@@ -2442,8 +2442,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
         from contextlib import redirect_stdout
         from io import StringIO
 
-        from nemo_gym.rollout_records import logical_rollout_id
-        from nemo_gym.rollout_store import RolloutStore
+        from nemo_gym.rollouts import RolloutStore, logical_rollout_id
 
         artifacts = job_dir / "artifacts"
         names = (
@@ -2996,7 +2995,7 @@ def continuation_admission(
         # A scheduler allocation timeout continues untouched work, but never a failed agent attempt.
         segment = previous_state == "TIMEOUT"
         if previous_state == "FAILED" and exit_code == "75:0" and collected.managed_selection is not None:
-            from nemo_gym.rollout_store import RolloutStore
+            from nemo_gym.rollouts import RolloutStore
 
             report_path = job / "artifacts" / "rollouts_coverage.json"
             if collected.source_digests and collected.source_digests.get(
@@ -4590,7 +4589,7 @@ def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvid
     A Harbor graded zero a run without a Store cannot reopen (``is_infrastructure_agent_timeout``): it stays in the
     results, and the trial gate counts it once, as ``AGENT_TIMEOUT_INFRASTRUCTURE``, an evaluation-side fault.
     """
-    from nemo_gym.rollout_recovery import is_infrastructure_agent_timeout
+    from nemo_gym.rollouts.rollout_recovery import is_infrastructure_agent_timeout
 
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     return {
@@ -6083,7 +6082,7 @@ def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | N
     The denominator is the trial gate's: every expected trial, less the rows an accepted partial stage omitted.
     """
     decision = _health_view(decision)
-    from nemo_gym.rollout_collection import is_non_superseding_rollout_row
+    from nemo_gym.rollouts.rollout_collection import is_non_superseding_rollout_row
 
     declared = collected.benchmark_metric_coverage if collected is not None else None
     if declared is not None:

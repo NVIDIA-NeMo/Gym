@@ -69,7 +69,8 @@ or corrupt, the ground-truth query fails or times out, the executor crashes), th
 row keeps the model's answer and is masked instead of scored: `mask_sample=true`,
 `failure_kind=verifier_error`, with `failure_reason` naming the cause
 (`database_missing`, `gold_execution_error`, `gold_execution_timeout`,
-`unknown_error`).
+`unknown_error`). These are `failure_reason` values, not failure kinds in the
+registry.
 
 ## Input JSONL format
 

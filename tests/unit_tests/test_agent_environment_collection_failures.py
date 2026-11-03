@@ -22,7 +22,7 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig
 from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
 
 MODEL_REPLY = {
@@ -182,7 +182,7 @@ async def test_an_exhausted_model_call_reaches_the_row_through_agent_and_environ
 async def test_a_provider_body_failure_after_200_headers_reaches_the_row_and_blocks_another_agent_run(
     monkeypatch,
 ) -> None:
-    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
 
     row, model_hits, observed = await _collect(monkeypatch, ["truncated"])
 
@@ -200,7 +200,7 @@ async def test_a_provider_body_failure_after_200_headers_reaches_the_row_and_blo
 
 
 async def test_a_recovered_503_then_success_stays_a_success_row_that_resume_keeps(monkeypatch) -> None:
-    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
 
     row, model_hits, _ = await _collect(monkeypatch, [503, 200])
     assert row["reward"] == 1.0 and len(model_hits) == 2

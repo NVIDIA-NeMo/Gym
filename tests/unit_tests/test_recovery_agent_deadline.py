@@ -57,7 +57,7 @@ def deadline(task: int, *, kept: bool = True, kind: str = "agent_timeout") -> di
 
 
 def test_the_shared_predicate_needs_the_kind_and_a_kept_answer() -> None:
-    from nemo_gym.rollout_recovery import is_answered_agent_deadline
+    from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline
 
     assert is_answered_agent_deadline(deadline(0))
     assert not is_answered_agent_deadline(deadline(0, kept=False))
@@ -203,7 +203,7 @@ async def test_collection_keeps_an_answered_agent_deadline_and_a_resume_does_not
 @pytest.mark.parametrize("marked", [False, True])
 def test_an_answered_deadline_is_a_scored_sample_only_when_the_metric_scores_it(marked) -> None:
     from nemo_gym.orchestration.recovery import gate_task_summary
-    from nemo_gym.rollout_collection import _counted_failure_rows
+    from nemo_gym.rollouts.rollout_collection import _counted_failure_rows
 
     timeout = deadline(1) | ({"_ng_failure_counts_as_zero": True} if marked else {})
     collected = CollectedEvidence(materialized=inventory(2), results=[scored(0)], failures=[timeout])

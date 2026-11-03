@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import nemo_gym.rollout_collection as collection
-from nemo_gym.rollout_collection import RolloutCollectionHelper
-from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
-from tests.unit_tests.test_rollout_recovery import runner_config  # noqa: F401
+import nemo_gym.rollouts.rollout_collection as collection
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
+from tests.unit_tests.rollouts.test_rollout_recovery import runner_config  # noqa: F401
 
 
 @pytest.mark.parametrize("retry_failure", [False, True])
@@ -19,8 +19,8 @@ from tests.unit_tests.test_rollout_recovery import runner_config  # noqa: F401
 async def test_resume_preserves_health_and_isolates_failed_attempt(
     runner_config, monkeypatch, retry_failure, workers, alias
 ):
-    from nemo_gym.rollout_health import run_health_checks
-    from tests.unit_tests.test_rollout_health import _record
+    from nemo_gym.rollouts.rollout_health import run_health_checks
+    from tests.unit_tests.rollouts.test_rollout_health import _record
 
     runner_config.disable_aggregation = runner_config.disable_health_check = False
     runner_config.health_check_workers = workers
@@ -91,9 +91,9 @@ async def test_resume_preserves_health_and_isolates_failed_attempt(
 def test_health_rejects_same_inode_rewritten_identity(tmp_path, field):
     import orjson
 
-    from nemo_gym.rollout_health import _index_jsonl, _read_record
-    from nemo_gym.rollout_recovery import RunManifest
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts.rollout_health import _index_jsonl, _read_record
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     output = tmp_path / "out.jsonl"
     source = tmp_path / "source.jsonl"
@@ -118,10 +118,10 @@ def test_health_rejects_same_inode_rewritten_identity(tmp_path, field):
 @pytest.mark.parametrize("workers", [1, 2])
 @pytest.mark.parametrize("mixed", [False, True])
 async def test_review_aggregation_health_uses_the_scored_snapshot(tmp_path, monkeypatch, merge, workers, mixed):
-    from nemo_gym.rollout_health import run_health_checks
-    from nemo_gym.rollout_recovery import RunManifest
-    from nemo_gym.rollout_store import RolloutStore
-    from tests.unit_tests.test_rollout_health import _record
+    from nemo_gym.rollouts.rollout_health import run_health_checks
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
+    from nemo_gym.rollouts.rollout_store import RolloutStore
+    from tests.unit_tests.rollouts.test_rollout_health import _record
 
     output = tmp_path / "source" / "rollouts.jsonl"
     output.parent.mkdir()
@@ -174,7 +174,7 @@ async def test_review_aggregation_health_uses_the_scored_snapshot(tmp_path, monk
 
 
 def test_run_directory_health_reads_the_stacks_settled_judge_answer(tmp_path):
-    from nemo_gym.rollout_health import health_check_run_dir
+    from nemo_gym.rollouts.rollout_health import health_check_run_dir
     from tests.unit_tests.test_rejudge_saved_judge_failures import _run, _settle
 
     output, failures = _run(tmp_path, judge_failures=1)

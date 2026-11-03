@@ -25,6 +25,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.core.failure_kinds import is_namespaced, is_registered
 from nemo_gym.server_runtime.episode_types import FailureReport
 from nemo_gym.typed_exceptions import failure_report_for
 
@@ -73,7 +74,7 @@ class FailureHeader:
             # The same compact size ``encode`` budgets, so a report it emitted intact is not omitted here.
             if len(json.dumps(value, ensure_ascii=True, separators=(",", ":"))) > cls.MAX_BYTES:
                 return FailureReport(omitted=True)
-            return FailureReport.model_validate(value)
+            return _report_keeping_unknown_kinds(value)
         except (ValueError, TypeError, RecursionError):
             LOGGER.warning("Invalid %s stream field; its failure events are omitted", cls.STREAM_FIELD)
             return FailureReport(omitted=True)
@@ -85,10 +86,33 @@ class FailureHeader:
         if value is None:
             return None
         try:
-            return FailureReport.model_validate_json(value)
-        except ValidationError:
+            return _report_keeping_unknown_kinds(json.loads(value))
+        except (ValueError, TypeError, RecursionError):
             LOGGER.warning("Invalid %s header; its failure events are omitted", cls.NAME)
             return FailureReport(omitted=True)
+
+
+UNREGISTERED_KIND_PREFIX = "unregistered:"
+"""The namespace a forwarded event keeps when its kind is not registered here (a peer on another Gym version)."""
+
+
+def _report_keeping_unknown_kinds(value: Any) -> FailureReport:
+    """``value`` as a ``FailureReport``. An event whose kind this Gym does not register (a server pinned to another
+    version) is kept under ``unregistered:<kind>`` instead of invalidating the whole report; any other invalid value
+    still raises."""
+    try:
+        return FailureReport.model_validate(value)
+    except ValidationError:
+        events = value.get("events") if isinstance(value, Mapping) else None
+        if not isinstance(events, Mapping):
+            raise
+        renamed = {}
+        for key, event in events.items():
+            kind = event.get("failure_kind") if isinstance(event, Mapping) else None
+            if isinstance(kind, str) and kind and not (is_registered(kind) or is_namespaced(kind)):
+                event = {**event, "failure_kind": UNREGISTERED_KIND_PREFIX + kind}
+            renamed[key] = event
+        return FailureReport.model_validate({**value, "events": renamed})
 
 
 class ModelOperationObservation(BaseModel):
@@ -162,6 +186,12 @@ class RequestFailureLog:
         new = {key: event for key, event in report.events.items() if key not in kept}
         omitted = report.omitted
         if len(kept) + len(new) > self.MAX_EVENTS:
+            if not self.dropped_events:
+                LOGGER.warning(
+                    "Failure log of this request is full at %d events; later events are dropped and the report is "
+                    "marked omitted",
+                    self.MAX_EVENTS,
+                )
             self.dropped_events += len(new)
             new, omitted = {}, True
         if not new and (self.report.omitted or not omitted):

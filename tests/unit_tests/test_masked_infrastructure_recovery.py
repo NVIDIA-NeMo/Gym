@@ -23,8 +23,8 @@ import pytest
 
 from nemo_gym.agents.agent_outcome import OutcomeAction
 from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_allocation_cut_recovery import _decide
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 

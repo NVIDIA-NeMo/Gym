@@ -16,10 +16,10 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.rollout_recovery import IncompleteEvaluationError
-from nemo_gym.rollout_store import RolloutStore
-from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+from nemo_gym.rollouts.rollout_store import RolloutStore
+from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
 
 
 async def persist_producer_result(job, monkeypatch, result):
@@ -31,7 +31,9 @@ async def persist_producer_result(job, monkeypatch, result):
     output = artifacts / "rollouts.jsonl"
     post = AsyncMock(side_effect=lambda **kwargs: FakeResponse(200, deepcopy(result)))
     client = install_fake_server_client(monkeypatch, post)
-    monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda: client.global_config_dict)
+    monkeypatch.setattr(
+        "nemo_gym.rollouts.rollout_collection.get_global_config_dict", lambda: client.global_config_dict
+    )
     config = RolloutCollectionConfig(
         input_jsonl_fpath=str(source),
         output_jsonl_fpath=str(output),
@@ -80,7 +82,7 @@ def response(output=None):
 
 @pytest.mark.parametrize("slot", ["response", "_ng_failure_response", "_ng_failure_partial_response"])
 def test_retained_generation_is_structural_not_placeholder_presence(slot):
-    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
     assert has_saved_generation({slot: response()})
     for placeholder in (
@@ -165,7 +167,9 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
         client.global_config_dict = OmegaConf.create(
             {"environment": {"environment_servers": {"single_agent_turn": {}}}}
         )
-        monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda: client.global_config_dict)
+        monkeypatch.setattr(
+            "nemo_gym.rollouts.rollout_collection.get_global_config_dict", lambda: client.global_config_dict
+        )
         with pytest.raises(IncompleteEvaluationError):
             await RolloutCollectionHelper().run_from_config(config)
         store = RolloutStore.read(output)
@@ -195,14 +199,14 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
 
 
 def has_actual_generation(row):
-    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
     return has_saved_generation(row)
 
 
 @pytest.mark.parametrize("error_placeholder", [False, True])
 async def test_confirmed_preanswer_provider_failure_keeps_its_budget(tmp_path, monkeypatch, error_placeholder):
-    from tests.unit_tests.test_rollout_recovery import known_pre_answer_provider_failure
+    from tests.unit_tests.rollouts.test_rollout_recovery import known_pre_answer_provider_failure
 
     result = known_pre_answer_provider_failure()
     if error_placeholder:
@@ -220,8 +224,8 @@ async def test_confirmed_preanswer_provider_failure_keeps_its_budget(tmp_path, m
 
 
 async def test_current_unrouted_diagnostic_blocks_projected_older_retryable_outcome(tmp_path, monkeypatch):
-    from nemo_gym.omitted_rollouts import omitted_rollout_record
-    from tests.unit_tests.test_rollout_recovery import known_pre_answer_provider_failure
+    from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
+    from tests.unit_tests.rollouts.test_rollout_recovery import known_pre_answer_provider_failure
 
     before, reader, _ = await persist_producer_result(tmp_path, monkeypatch, known_pre_answer_provider_failure())
     assert before.action.value == "resubmit"
@@ -393,7 +397,7 @@ async def test_actual_judge_route_saved_input_survives_collection_and_reverifica
 
 
 async def test_diagnostic_generation_blocks_replay_without_becoming_verifier_input(tmp_path, monkeypatch):
-    from tests.unit_tests.test_rollout_recovery import known_pre_answer_provider_failure
+    from tests.unit_tests.rollouts.test_rollout_recovery import known_pre_answer_provider_failure
 
     result = known_pre_answer_provider_failure() | {"_ng_failure_response": response()}
     decision, store, projected = await persist_producer_result(tmp_path, monkeypatch, result)
@@ -416,8 +420,8 @@ async def test_unusable_original_response_does_not_fall_back_to_different_partia
 
 def test_persisted_null_original_input_does_not_fall_back_to_partial(tmp_path):
     from nemo_gym.orchestration.recovery import _saved_answer
-    from nemo_gym.rollout_recovery import has_saved_generation
     from nemo_gym.rollout_reverification import _rollout_response
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
     from tests.unit_tests.test_eval_resubmit_decision import _judge_failure, collect, write_job_dir
 
     row = _judge_failure(0, response=None) | {"_ng_failure_partial_response": response()}
@@ -474,7 +478,7 @@ def _agent_stage_503(stage_field: str) -> dict:
 
 @pytest.mark.parametrize("stage_field", ["record", "legacy"])
 def test_an_agent_stage_failed_response_is_diagnostic_in_recovery_as_in_the_store(tmp_path, stage_field):
-    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
     row = _agent_stage_503(stage_field)
     # The Store's predicate: the agent outcome policy rejected this response, so it is no saved answer.
