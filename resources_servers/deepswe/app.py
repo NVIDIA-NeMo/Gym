@@ -121,6 +121,10 @@ class DeepSWESeedSessionResponse(BaseSeedSessionResponse):
 
 class DeepSWEVerifyRequest(DeepSWEInstanceRequest, BaseVerifyRequest):
     sandbox_handle: str | None = None
+    # A re-verification of a saved result whose verifier produced no verdict: the workspace patch that verifier was
+    # given, with its saved sha256. It is verified on a fresh sandbox only when no agent session exists.
+    saved_model_patch: str | None = None
+    saved_model_patch_sha256: str | None = None
 
 
 class DeepSWEVerifyResponse(BaseVerifyResponse):
@@ -151,6 +155,8 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     # produced no verdict (``inconclusive_verification_retries``).
     verification_attempts: int = 0
     inconclusive_attempts: list[str] = Field(default_factory=list)
+    # Whether the verified patch is a saved one, re-verified without its agent session.
+    replayed_saved_patch: bool = False
 
 
 class VerifierResult(BaseModel):
@@ -508,13 +514,24 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         patch_error: str | None = None
         failure_kind = VERIFIER_ERROR
         failure_cause: Exception | None = None
+        replayed = False
 
         if self.config.is_verifying_golden_patch:
             model_patch = task_solution_patch_path(task).read_bytes()
         else:
             model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
-            if agent_session is None:
+            if agent_session is None and body.saved_model_patch is not None:
+                # A re-verification: the saved patch is verified as itself, never collected again.
+                saved = body.saved_model_patch.encode("utf-8")
+                if hashlib.sha256(saved).hexdigest() != body.saved_model_patch_sha256:
+                    patch_error = "The saved DeepSWE model patch does not match its saved sha256"
+                    failure_kind = SESSION_LOST
+                else:
+                    model_patch = saved
+                    replayed = True
+                    session_id = f"replay-{body.saved_model_patch_sha256[:16]}"
+            elif agent_session is None:
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
                 failure_kind = SESSION_LOST
             else:
@@ -636,7 +653,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             observe_failure(failure)
 
         return DeepSWEVerifyResponse.model_validate(
-            body.model_dump()
+            body.model_dump(exclude={"saved_model_patch", "saved_model_patch_sha256"})
             | result.model_dump()
             | {
                 "task_id": current_task_id,
@@ -652,6 +669,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "verification_time_s": verification_time_s,
                 "verification_attempts": verification_attempts,
                 "inconclusive_attempts": inconclusive_attempts,
+                "replayed_saved_patch": replayed,
                 "mask_sample": not result.evaluation_completed,
                 "failure_kind": None if result.evaluation_completed else failure_kind,
                 "failure_reason": None if result.evaluation_completed else result.verifier_error,

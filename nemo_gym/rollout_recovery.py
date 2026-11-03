@@ -310,7 +310,9 @@ def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
     run. When the kind is evaluation-side (``is_evaluation_side``) the rollout is retried like an infrastructure
     failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
     model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
-    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result.
+    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. A saved
+    transcript keeps it too, unless it holds no gradeable artifact (``_no_gradeable_artifact``): such a row has no
+    answer for the contract, so running it again is an infrastructure retry, not a new model answer.
     """
     if (
         row.get("mask_sample") is not True
@@ -327,9 +329,50 @@ def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
         or kind.startswith("transport_")
     ):
         return None
-    if _keeps_saved_answer(row):
+    if _keeps_saved_answer(row) and not _no_gradeable_artifact(row):
         return None
     return kind
+
+
+def _saved_workspace_patch(row: Mapping[str, Any]) -> bool | None:
+    """Whether the row saved the workspace patch its verifier grades, intact (True), holds a patch field without an
+    intact patch: never collected, or not hashing to its saved ``model_patch_sha256`` (False), or has none (None).
+
+    A collector projection carries the fact (``_ng_collected_grading_facts.saved_model_patch``); a full row is read.
+    """
+    facts = row.get("_ng_collected_grading_facts")
+    if isinstance(facts, Mapping) and "saved_model_patch" in facts:
+        return facts["saved_model_patch"]
+    if "model_patch" not in row and "model_patch_sha256" not in row:
+        return None
+    patch, digest = row.get("model_patch"), row.get("model_patch_sha256")
+    return (
+        isinstance(patch, str)
+        and isinstance(digest, str)
+        and hashlib.sha256(patch.encode("utf-8")).hexdigest() == digest
+    )
+
+
+def _verifier_graded_agent_sandbox(row: Mapping[str, Any]) -> bool:
+    """Whether the row's verifier observed the agent's own sandbox: it graded the workspace the agent left there."""
+    observed = row.get("ng_trial_observations")
+    if not isinstance(observed, Mapping):
+        observed = row.get("ng_trajectory")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
+    return isinstance(verifiers, list) and any(
+        isinstance(fact, Mapping) and fact.get("role") == "agent"
+        for verifier in verifiers
+        if isinstance(verifier, Mapping) and isinstance(verifier.get("sandbox_observations"), list)
+        for fact in verifier["sandbox_observations"]
+    )
+
+
+def _no_gradeable_artifact(row: Mapping[str, Any]) -> bool:
+    """Whether a masked row's saved transcript holds nothing its verifier could grade: the verifier grades a workspace
+    the agent left, and that workspace was not saved intact. Either the row has a patch field without an intact patch,
+    or its verifier graded the agent's own sandbox and no patch was saved. The transcript is then no answer."""
+    patch = _saved_workspace_patch(row)
+    return patch is False or (patch is None and _verifier_graded_agent_sandbox(row))
 
 
 def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:

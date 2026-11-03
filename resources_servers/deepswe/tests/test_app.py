@@ -660,3 +660,56 @@ async def test_the_retry_bound_is_configurable_and_zero_keeps_a_single_attempt(
     response, _ = await _verify(server)
     assert server._run_verifier.await_count == 1 and len(created) == 2
     assert response.verification_attempts == 1 and response.failure_reason == NO_VERDICT
+
+
+@pytest.mark.parametrize("intact", [True, False], ids=["intact", "digest-mismatch"])
+async def test_a_saved_patch_is_reverified_on_a_fresh_sandbox_without_its_agent_session(
+    task_assets: Path, monkeypatch: MonkeyPatch, intact: bool
+) -> None:
+    import hashlib
+
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    verifier_sandbox = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=verifier_sandbox))
+    collect_model_patch = AsyncMock()
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    run_verifier = AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1.0))
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {}
+    patch = "saved patch\n"
+    digest = hashlib.sha256(patch.encode("utf-8")).hexdigest() if intact else "0" * 64
+    body = _request() | {"saved_model_patch": patch, "saved_model_patch_sha256": digest}
+
+    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(body))
+
+    collect_model_patch.assert_not_awaited()
+    dumped = response.model_dump()
+    assert "saved_model_patch" not in dumped
+    if intact:
+        assert response.evaluation_completed is True and response.reward == 1.0
+        assert response.replayed_saved_patch is True
+        assert response.model_patch == patch and response.model_patch_sha256 == digest
+        verifier_sandbox.stop.assert_awaited_once()
+    else:
+        assert response.evaluation_completed is False and response.mask_sample is True
+        assert response.failure_kind == "session_lost"
+        assert response.replayed_saved_patch is False
+        run_verifier.assert_not_awaited()
+
+
+async def test_without_a_saved_patch_a_missing_agent_session_is_still_lost(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock())
+    request = MagicMock()
+    request.session = {}
+    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+    assert response.failure_kind == "session_lost" and response.replayed_saved_patch is False
