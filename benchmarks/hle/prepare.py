@@ -28,7 +28,7 @@ baked into ``responses_create_params.input`` and image questions carry an
 
 from pathlib import Path
 
-from nemo_gym.vision_input import build_image_input
+from nemo_gym.data import build_image_input
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -70,7 +70,7 @@ def prepare(include_vision: bool = False) -> Path:
 
     prompt_config = None
     if include_vision:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data import load_prompt_config
 
         prompt_config = load_prompt_config(str(PROMPT_CONFIG_FPATH))
 

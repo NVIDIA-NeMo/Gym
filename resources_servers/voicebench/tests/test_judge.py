@@ -9,7 +9,8 @@ import pytest
 import yaml
 
 from nemo_gym.client import ServerClient
-from nemo_gym.verification import JudgeError
+from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.voicebench.scorers.open_judge import JudgeSettings, OpenJudgeScorer, parse_score, score_outputs
 from resources_servers.voicebench.scorers.reference_qa import ReferenceQAScorer
 
@@ -137,8 +138,9 @@ def test_transport_failure_remains_judge_error_and_releases_slot(tmp_path):
     network = client()
     network.post.side_effect = ConnectionError("judge unreachable")
     scorer = OpenJudgeScorer(judge_settings(tmp_path), network)
-    with pytest.raises(JudgeError):
+    with pytest.raises(NgFailureEvent) as failure:
         asyncio.run(scorer.score("answer", {"prompt": "question"}))
+    assert is_judge_failure(failure.value)
     assert scorer.inflight == 0
 
 

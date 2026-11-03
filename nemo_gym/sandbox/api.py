@@ -426,12 +426,39 @@ class AsyncSandbox:
         # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
         # was counted by the process that started it and must not be subtracted here.
         self._counted_active = False
+        # Client-side monotonic times at which provider.create and provider.close returned in this instance;
+        # a connect()ed handle has no observed create. Cleanup errors are kept in order across retries.
+        self._created_at: float | None = None
+        self._closed_at: float | None = None
+        self._cleanup_errors: list[str] = []
         self.pty = SandboxPty(self)
 
     @property
     def sandbox_id(self) -> str | None:
         """The provider's id for this sandbox, or None before it has started or connected."""
         return _sandbox_id(self._handle)
+
+    @property
+    def observed_client_interval_s(self) -> float | None:
+        """Client-observed seconds from the provider's create return to its close return in this instance.
+
+        Not the remote sandbox lifetime or its CPU time; None unless this instance observed both returns.
+        """
+        if self._created_at is None or self._closed_at is None:
+            return None
+        return self._closed_at - self._created_at
+
+    @property
+    def teardown_confirmed(self) -> bool | None:
+        """True once the provider's close returned, False after only failed closes, None before any stop."""
+        if self._closed_at is not None:
+            return True
+        return False if any(error.startswith("close:") for error in self._cleanup_errors) else None
+
+    @property
+    def cleanup_errors(self) -> tuple[str, ...]:
+        """Every failed provider close or client release, in order, as ``close:<type>`` or ``aclose:<type>``."""
+        return tuple(self._cleanup_errors)
 
     @property
     def uploads_independent_of_execs(self) -> bool:
@@ -483,6 +510,7 @@ class AsyncSandbox:
         else:
             handle = await self._provider.create(requested_spec)
         self._handle = handle
+        self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
         self._stopped = False
         try:
@@ -702,25 +730,35 @@ class AsyncSandbox:
         # A failed remote stop is retryable. Do not close its client or mark the
         # wrapper closed until the provider confirms container teardown.
         if self._handle is not None and not self._stopped:
-            if is_span_group_enabled(GymSpanGroup.SANDBOX):
-                with managed_span(
-                    GymSpanGroup.SANDBOX,
-                    "gym.sandbox.stop",
-                    **{
-                        "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
-                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
-                        **default_span_attributes(),
-                    },
-                ):
+            try:
+                if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                    with managed_span(
+                        GymSpanGroup.SANDBOX,
+                        "gym.sandbox.stop",
+                        **{
+                            "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
+                            "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                            **default_span_attributes(),
+                        },
+                    ):
+                        await self._provider.close(self._handle)
+                else:
                     await self._provider.close(self._handle)
-            else:
-                await self._provider.close(self._handle)
+            except BaseException as exc:
+                self._cleanup_errors.append(f"close:{type(exc).__name__}")
+                raise
+            self._closed_at = time.monotonic()
             self._stopped = True
             if self._counted_active:
                 self._counted_active = False
                 record_sandbox_active(-1, provider=self._telemetry_provider_name())
         if self._owns_provider:
-            await self._provider.aclose()
+            try:
+                await self._provider.aclose()
+            except BaseException as exc:
+                # Teardown, if confirmed above, stays confirmed; the client release failure is its own fact.
+                self._cleanup_errors.append(f"aclose:{type(exc).__name__}")
+                raise
         self._closed = True
 
     async def disconnect(self) -> None:

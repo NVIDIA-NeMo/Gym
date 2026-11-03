@@ -11,8 +11,9 @@ from aiohttp import ClientResponseError, web
 from aiohttp.test_utils import TestServer
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import CaptureStore, read_model_call_records
 from nemo_gym.client import ServerClient, http_client
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import read_model_call_records
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
     SimpleModelServer,

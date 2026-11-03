@@ -16,7 +16,13 @@ statement it was perturbed from, and the model's reply:
 | 2 | Explicitly says the statement is false / unprovable as written, or scopes its proof to a corrected version | 1.0 |
 
 `reward = points / judge_points_max` (2). A judge reply with no parsable
-`<points>` block scores 0 and is counted in `no_judge_score`.
+`<points>` block is an unusable grade, not a zero-scoring model answer.
+Transport errors, invalid judge replies, and missing verdicts use the shared
+`judge_failed` path: the existing model answer is retained in a masked failure
+row and excluded from scientific score aggregation. A valid `<points>0</points>`
+remains a measured zero, including when the judge grades an empty model reply.
+Ordinary resume retains the answer; judge-only recovery requires a supported
+reverification path.
 
 ## Fidelity to MathArena
 
@@ -25,8 +31,8 @@ Ported from [eth-sri/matharena](https://github.com/eth-sri/matharena):
 * judge prompt is byte-identical to `configs/judges/arxiv_judge_post_march.yaml`
   (used for every release from 04/2026 on);
 * the three prompt fields match what `solvers/judges/simple_judge.py` fills in;
-* the verdict regex `<points>\s*([0-9]+)</points>` and the `max(0, min(n, 7))`
-  clamp are copied verbatim;
+* the verdict parser keeps the first integer `<points>` block; the existing
+  clamp is `[0, 2]`, matching this rubric;
 * `points → reward` reproduces the `points_judge_1 → correct` mapping in
   MathArena's published `*_outputs` datasets.
 

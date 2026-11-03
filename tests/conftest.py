@@ -17,6 +17,9 @@ import os
 import pytest
 
 
+pytest_plugins = ["scripts.ci.core_test_shards"]
+
+
 def pytest_addoption(parser):
     """
     Additional command-line arguments passed to pytest.
