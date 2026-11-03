@@ -327,8 +327,8 @@ def test_client_span_sets_attributes(recorded_spans):
 def test_supervisor_is_the_only_writer_of_the_active_servers_gauge():
     """`gym.servers.active` is a gauge; more than one writer makes it meaningless.
 
-    Pins that the call lives in the CLI and nowhere else, so a later change that starts
-    reporting it from a server process has to be deliberate.
+    Pins that the call lives in the server supervisor and nowhere else, so a later change that
+    starts reporting it from a server process has to be deliberate.
     """
     import subprocess
 
@@ -337,7 +337,8 @@ def test_supervisor_is_the_only_writer_of_the_active_servers_gauge():
     package_dir = pkg_file.rsplit("/", 1)[0]
     hits = (
         subprocess.run(
-            ["grep", "-rn", "record_active_servers", package_dir],
+            # The trailing parenthesis matches calls and the definition, not the old-path record in _moved_paths.
+            ["grep", "-rn", "record_active_servers(", package_dir],
             capture_output=True,
             text=True,
         )
@@ -346,8 +347,8 @@ def test_supervisor_is_the_only_writer_of_the_active_servers_gauge():
     )
 
     callers = {line.split(":")[0].rsplit("/", 1)[-1] for line in hits}
-    assert callers == {"env.py", "metrics.py"}, (
-        f"gym.servers.active must only be written by the CLI supervisor, found: {sorted(callers)}"
+    assert callers == {"server_supervisor.py", "metrics.py"}, (
+        f"gym.servers.active must only be written by the server supervisor, found: {sorted(callers)}"
     )
 
 
