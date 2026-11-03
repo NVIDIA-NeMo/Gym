@@ -111,7 +111,7 @@ from nemo_gym.orchestration.recovery import (
     FOLLOWUP_ACCOUNTING_FORMAT,
     INFRA_RETRIES_FILE,
     INFRA_RETRY_EXTENSION_FILE,
-    JUDGE_JOB_FAILURE_BOUND,
+    JUDGE_JOB_ACK_JOURNAL_NAME,
     JUDGE_JOB_JOURNAL_NAME,
     LIVE_JOB_STATES,
     MAX_EXTEND_ATTEMPTS,
@@ -133,6 +133,8 @@ from nemo_gym.orchestration.recovery import (
     chain_accounting,
     decide_from_collected,
     effective_outcome_policy,
+    failed_judge_jobs_blocking,
+    failed_judge_jobs_stop,
     live_chain_job,
     reconcile_requeued_chain,
     requeue_note,
@@ -1645,6 +1647,8 @@ class SlurmExecutor(BaseExecutor):
         judge_qos: str | None = None,
         repin: str | None = None,
         repin_reason: str | None = None,
+        acknowledge_failed_judge_jobs: bool = False,
+        acknowledge_reason: str | None = None,
     ) -> RecoveryOutcome:
         """Queue a judge-only job that grades the run's selected saved answers again, never the policy.
 
@@ -1654,8 +1658,11 @@ class SlurmExecutor(BaseExecutor):
         and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the launcher's
         reader placement, with ``judge_qos`` or a QOS derived for it), or, for a run that serves its judge on a node
         pool of its own, on that saved pool with those services started and the run's QOS, for the run's segment
-        walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``. Either way the job
-        settles through ``gym eval reverify --judge-failed-only --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
+        walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``.
+        ``acknowledge_failed_judge_jobs`` (with ``acknowledge_reason``) lets one more judge-only job queue when the last
+        ones ended without settling a saved answer (see ``_queue_judge_job``). Either way the job settles through
+        ``gym eval reverify --judge-failed-only --settle-into-source``. This never starts a policy service or turns an
+        unavailable judge into a model run.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -1694,6 +1701,8 @@ class SlurmExecutor(BaseExecutor):
                     judge_qos=judge_qos,
                     repin=repin,
                     repin_reason=repin_reason,
+                    acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
+                    acknowledge_reason=acknowledge_reason,
                 )
             install = config.driver.gym_install
             if (
@@ -1873,6 +1882,8 @@ class SlurmExecutor(BaseExecutor):
         judge_qos: str | None = None,
         repin: str | None,
         repin_reason: str | None,
+        acknowledge_failed_judge_jobs: bool = False,
+        acknowledge_reason: str | None = None,
     ) -> RecoveryOutcome:
         """Queue the judge-only job of a run that is not CPU-only, on the judge execution profile derived from its
         saved config (``judge_profile``), and journal it: the served-judge profile when the run serves services beside
@@ -1887,7 +1898,9 @@ class SlurmExecutor(BaseExecutor):
         appended to the job dir's judge-job journal. The job is not a segment of the policy chain: nothing is added
         to ``.gym_job_chain`` and no retry or walltime budget is spent or needed. When the last
         ``JUDGE_JOB_FAILURE_BOUND`` judge-only jobs ended without settling a saved answer, nothing is queued and the
-        stop names them.
+        stop names them and the way on: ``acknowledge_failed_judge_jobs`` with a nonempty ``acknowledge_reason`` appends
+        one line (time, user, reason, those jobs' ids) to the acknowledgement journal once the new job is accepted by the
+        scheduler, so exactly one more job queues; the acknowledgement covers only the jobs it names.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -1902,16 +1915,21 @@ class SlurmExecutor(BaseExecutor):
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
         original = config.driver.benchmarks[benchmark]
-        recent = evidence.judge_jobs[-JUDGE_JOB_FAILURE_BOUND:]
-        if len(recent) == JUDGE_JOB_FAILURE_BOUND and all(
-            entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
-            for entry in recent
-        ):
-            named = ", ".join(str(entry.get("job_id") or "(id unknown)") for entry in recent)
-            return stopped(
-                f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job(s) ({named}) ended without settling a saved "
-                f"answer; read their receipts and logs under {job_dir / 'reverification'} before another is queued"
-            )
+        blocked = failed_judge_jobs_blocking(evidence.judge_jobs, evidence.judge_job_acknowledgements)
+        acknowledgement = None
+        if blocked is not None:
+            if not acknowledge_failed_judge_jobs or None in blocked:
+                return stopped(failed_judge_jobs_stop(blocked, str(job_dir / "reverification")))
+            if not (acknowledge_reason or "").strip():
+                raise ValueError("--acknowledge-failed-judge-jobs needs a nonempty --acknowledge-reason")
+            acknowledgement = {
+                "at": utc_timestamp(utc_now()),
+                "user": getpass.getuser(),
+                "reason": (acknowledge_reason or "").strip(),
+                "job_ids": blocked,
+                "gym_job_id": record.gym_job_id,
+                "benchmark": benchmark,
+            }
         try:
             # A run that serves its judge on a node pool of its own takes that pool; any other, a CPU partition.
             placement = served_judge_placement(config, record.cluster)
@@ -2027,6 +2045,13 @@ class SlurmExecutor(BaseExecutor):
             "actor": getpass.getuser(),
             **({"repin_reason": repin_reason} if repin is not None else {}),
         }
+        # Only once the scheduler has accepted the job: an acknowledgement of a job that was not queued is never written.
+        acknowledge = (
+            f"printf '%s\\n' {shlex.quote(json.dumps(acknowledgement, sort_keys=True))} "
+            f">> {shlex.quote(JUDGE_JOB_ACK_JOURNAL_NAME)} || fail 'cannot journal the acknowledgement'; "
+            if acknowledgement is not None
+            else ""
+        )
         journal = (
             f"python3 -c {shlex.quote(_JOURNAL_JUDGE_JOB)} {shlex.quote(JUDGE_JOB_JOURNAL_NAME)} "
             f"{shlex.quote(json.dumps(entry, sort_keys=True))}"
@@ -2054,7 +2079,7 @@ class SlurmExecutor(BaseExecutor):
             "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
             # The queued job is journaled by id; an acknowledgement without one is journaled as such, so inspect
             # reports it and the next recovery's scheduler check finds the job by its working directory.
-            f'if [[ $jid =~ ^[0-9]+$ ]]; then {journal} "$jid" || fail "cannot journal the judge-only job"; '
+            f'if [[ $jid =~ ^[0-9]+$ ]]; then {acknowledge}{journal} "$jid" || fail "cannot journal the judge-only job"; '
             f'else {journal} "" "acknowledgement unknown: $out"; fail "unknown job identity"; fi',
         ]
         try:

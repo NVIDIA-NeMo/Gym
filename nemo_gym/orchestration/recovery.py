@@ -334,6 +334,49 @@ RERUN_MASKED_REASON = (
 )
 # How many judge-only jobs in a row may end without settling a saved answer before recovery stops and names them.
 JUDGE_JOB_FAILURE_BOUND = 2
+# Appended in the job dir when an operator acknowledges that bound (``--acknowledge-failed-judge-jobs``): the time, user and
+# reason, and the ids of the failed judge-only jobs it covers. It is a sibling of the judge-job journal, whose readers take
+# every line for a job. It lets one more judge-only job queue, and covers only the failed jobs it names.
+JUDGE_JOB_ACK_JOURNAL_NAME = "judge-job-acknowledgement-journal.jsonl"
+ACKNOWLEDGE_JUDGE_JOBS_FLAGS = "--acknowledge-failed-judge-jobs --acknowledge-reason"
+
+
+def _judge_job_unsettled(entry: Mapping[str, Any]) -> bool:
+    return entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
+
+
+def failed_judge_jobs_blocking(
+    judge_jobs: Sequence[Mapping[str, Any]], acknowledgements: Sequence[Mapping[str, Any]] = ()
+) -> list[str | None] | None:
+    """The ids of the last ``JUDGE_JOB_FAILURE_BOUND`` judge-only jobs when all ended without settling a saved answer and no
+    acknowledgement names exactly them; else None. An acknowledgement covers the failed jobs it names, so a later pair of
+    failures (the one more job it let queue, and the one before it) needs an acknowledgement of its own."""
+    recent = list(judge_jobs)[-JUDGE_JOB_FAILURE_BOUND:]
+    if len(recent) < JUDGE_JOB_FAILURE_BOUND or not all(_judge_job_unsettled(entry) for entry in recent):
+        return None
+    ids = [
+        entry.get("job_id") if isinstance(entry.get("job_id"), str) and entry.get("job_id") else None
+        for entry in recent
+    ]
+    if None not in ids and any(
+        isinstance(ack.get("job_ids"), list) and set(ack["job_ids"]) == set(ids) for ack in acknowledgements
+    ):
+        return None
+    return ids
+
+
+def failed_judge_jobs_stop(ids: Sequence[str | None], where: str) -> str:
+    """The stop text of ``failed_judge_jobs_blocking``: the jobs, where to read them, and the explicit way on."""
+    named = ", ".join(str(job_id or "(id unknown)") for job_id in ids)
+    text = (
+        f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job(s) ({named}) ended without settling a saved "
+        f"answer; read their receipts and logs under {where} before another is queued"
+    )
+    if None in ids:
+        return text + "; a job without an id cannot be acknowledged"
+    return (
+        f'{text}; once read, `gym eval resubmit ... --recover {ACKNOWLEDGE_JUDGE_JOBS_FLAGS} "<why>"` allows one more'
+    )
 
 
 class OperatorBudget(BaseModel):
@@ -1471,6 +1514,7 @@ COLLECT_SCRIPT = (
     + f"UNREADABLE_CLAIM_REASON = {UNREADABLE_CLAIM_REASON!r}\n"
     + f"OPERATOR_CONTINUATION_JOURNAL_NAME = {OPERATOR_CONTINUATION_JOURNAL_NAME!r}\n"
     + f"JUDGE_JOB_JOURNAL_NAME = {JUDGE_JOB_JOURNAL_NAME!r}\n"
+    + f"JUDGE_JOB_ACK_JOURNAL_NAME = {JUDGE_JOB_ACK_JOURNAL_NAME!r}\n"
     + r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
@@ -2346,6 +2390,23 @@ def judge_jobs():
         jobs.append(job)
     return jobs
 collected["judge_jobs"] = judge_jobs()
+def judge_job_acknowledgements():
+    # The operator's acknowledgements of failed judge-only jobs (JUDGE_JOB_ACK_JOURNAL_NAME): the ids each covers, bounded.
+    acknowledgements = []
+    try:
+        lines = open(os.path.join(d, JUDGE_JOB_ACK_JOURNAL_NAME)).read().splitlines()
+    except OSError:
+        return acknowledgements
+    for line in lines[-50:]:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        ids = entry.get("job_ids") if isinstance(entry, dict) else None
+        if isinstance(ids, list) and all(isinstance(i, str) and 0 < len(i) <= 64 for i in ids):
+            acknowledgements.append({"job_ids": ids[:20], "at": str(entry.get("at"))[:40]})
+    return acknowledgements
+collected["judge_job_acknowledgements"] = judge_job_acknowledgements()
 print(json.dumps(collected))
 """
 )
@@ -2430,6 +2491,8 @@ class CollectedEvidence(BaseModel):
     # else the receipt's "completed" or "failed" with its counts); the executor adds the scheduler's state of a job
     # without a receipt.
     judge_jobs: list[dict[str, Any]] = Field(default_factory=list)
+    # The acknowledgements of failed judge-only jobs (JUDGE_JOB_ACK_JOURNAL_NAME): the job ids each covers.
+    judge_job_acknowledgements: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # The host sets the reader placement; a reader neither receives it nor replaces it.
@@ -2783,6 +2846,9 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
         update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
     )
     notes = [resume_drift_note(collected.resume_drift_keys)]
+    blocked = failed_judge_jobs_blocking(collected.judge_jobs, collected.judge_job_acknowledgements)
+    if blocked is not None and decision.action == RecoveryAction.REVERIFY:
+        notes.append(failed_judge_jobs_stop(blocked, "the run's reverification directory"))
     if collected.chain_continuation_note:
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
     notes = [note for note in notes if note]

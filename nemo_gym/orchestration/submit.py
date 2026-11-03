@@ -107,6 +107,8 @@ def recover(
     auto_repin: bool = True,
     rerun_masked_without_artifact: bool = False,
     rerun_reason: str | None = None,
+    acknowledge_failed_judge_jobs: bool = False,
+    acknowledge_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
@@ -136,6 +138,9 @@ def recover(
     answer but have neither a gradeable artifact nor a recorded grade, which a resume otherwise keeps and
     re-verification cannot grade: the identities the plan finds qualifying are journaled with the reason in the run's
     artifacts when the job is queued, and each counts one failed attempt within its cap.
+    ``acknowledge_failed_judge_jobs`` (with a nonempty ``acknowledge_reason``) lets one more judge-only job queue when the
+    last two ended without settling a saved answer; the acknowledgement, naming those jobs, is journaled with the reason
+    when the new job is queued, and covers only them.
     The outcome names the ``reader_token`` its login-host Store readers carry.
     """
     outcome = _recover(
@@ -165,6 +170,8 @@ def recover(
         auto_repin=auto_repin,
         rerun_masked_without_artifact=rerun_masked_without_artifact,
         rerun_reason=rerun_reason,
+        acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
+        acknowledge_reason=acknowledge_reason,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -191,6 +198,8 @@ def inspect_recovery(
     auto_repin: bool = True,
     rerun_masked_without_artifact: bool = False,
     rerun_reason: str | None = None,
+    acknowledge_failed_judge_jobs: bool = False,
+    acknowledge_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action.
 
@@ -224,6 +233,8 @@ def inspect_recovery(
         auto_repin=auto_repin,
         rerun_masked_without_artifact=rerun_masked_without_artifact,
         rerun_reason=rerun_reason,
+        acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
+        acknowledge_reason=acknowledge_reason,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -265,6 +276,8 @@ def _recover(
     auto_repin: bool = True,
     rerun_masked_without_artifact: bool = False,
     rerun_reason: str | None = None,
+    acknowledge_failed_judge_jobs: bool = False,
+    acknowledge_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -289,6 +302,10 @@ def _recover(
         raise ValueError("--rerun-masked-without-artifact needs a nonempty --rerun-reason")
     if rerun_reason is not None and not rerun_masked_without_artifact:
         raise ValueError("--rerun-reason goes with --rerun-masked-without-artifact")
+    if acknowledge_failed_judge_jobs and not (acknowledge_reason or "").strip():
+        raise ValueError("--acknowledge-failed-judge-jobs needs a nonempty --acknowledge-reason")
+    if acknowledge_reason is not None and not acknowledge_failed_judge_jobs:
+        raise ValueError("--acknowledge-reason goes with --acknowledge-failed-judge-jobs")
     if max_unhealthy_fraction is not None and (
         isinstance(max_unhealthy_fraction, bool)
         or not isinstance(max_unhealthy_fraction, (int, float))
@@ -521,6 +538,11 @@ def _recover(
             options["judge_qos"] = judge_qos
         if repin is not None:
             options |= {"repin": repin, "repin_reason": repin_reason}
+        if acknowledge_failed_judge_jobs and not inspect_only:
+            options |= {
+                "acknowledge_failed_judge_jobs": True,
+                "acknowledge_reason": (acknowledge_reason or "").strip(),
+            }
         outcome = executor.reverify_judge_failures(record, benchmark, decision, **options)
         if not outcome.ok or outcome.dispatched is None:
             gate_task = {
