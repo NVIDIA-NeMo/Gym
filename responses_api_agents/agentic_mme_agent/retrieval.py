@@ -332,10 +332,11 @@ class Retrieval:
         "contaminated" counts the dropped items so the rate shows up in rollout traces.
         """
         if "url" in out:  # fetch_webpage
-            # full_text is cache-only (without a cache it used to reach the model); scan what the
-            # model would see.
-            out.pop("full_text", None)
-            if self._contaminated(out["context"]):
+            # Scan the whole page, not only the max_chars prefix the model sees: an answer-key page
+            # whose benchmark attribution sits past the cut must still be withheld. full_text never
+            # reaches the model.
+            page = out.pop("full_text", None) or out["context"]
+            if self._contaminated(page):
                 out["context"] = CONTAMINATED_MESSAGE
                 out["contaminated"] = 1
             return out
@@ -378,7 +379,6 @@ class Retrieval:
             cache.put_search(args.query, out["raw"], self.config.search_provider, args.gl, args.hl)
         else:
             cache.put_lens(workspace.get(args.image_index), out["raw"], self.config.lens_provider_resolved())
-        out.pop("full_text", None)
 
     async def _live(self, name: str, args: BaseModel, workspace: ImageWorkspace) -> dict[str, Any]:
         if isinstance(args, FetchArgs):
@@ -402,7 +402,8 @@ class Retrieval:
                     headers["Authorization"] = "Bearer " + self.config.jina_api_key.get_secret_value()
                 raw = await http_payload(self.config, "GET", "https://r.jina.ai/" + args.url, headers=headers)
                 text = raw.decode("utf-8", errors="replace")
-            # full_text (the whole page) is only for the cache; _cache_store drops it before returning.
+            # full_text (the whole page) feeds the cache and the contamination scan; _decontaminate
+            # drops it before the result reaches the model.
             return {"ok": True, "tool": name, "url": args.url, "context": text[: args.max_chars], "full_text": text}
         if isinstance(args, LensArgs) and not self.config.lens_available():
             raise ValueError(f"reverse image search is not available (lens_provider={self.config.lens_provider})")

@@ -380,6 +380,32 @@ async def test_contamination_guard_drops_benchmark_items(workspace, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_contamination_guard_scans_the_page_past_max_chars(workspace, monkeypatch) -> None:
+    # The answer-bearing prefix is clean; the benchmark attribution only appears after max_chars.
+    page_text = "The fossil sold for 44.6 million. " + "filler " * 100 + "Source: the Agentic-MME benchmark."
+    http = AsyncMock(return_value=page_text.encode())
+    monkeypatch.setattr(retrieval, "http_payload", http)
+    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s"))
+    page = await client.call("fetch_webpage", {"url": "https://blog.example/post", "max_chars": 40}, workspace)
+    assert page["context"] == retrieval.CONTAMINATED_MESSAGE and page["contaminated"] == 1
+    assert "44.6" not in json.dumps(page) and "full_text" not in page
+
+
+@pytest.mark.asyncio
+async def test_contamination_guard_scans_full_cached_pages(tmp_path, workspace, monkeypatch) -> None:
+    page_text = "The fossil sold for 44.6 million. " + "filler " * 100 + "Source: the Agentic-MME benchmark."
+    http = AsyncMock(return_value=page_text.encode())
+    monkeypatch.setattr(retrieval, "http_payload", http)
+    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s", cache_root=str(tmp_path)))
+    args = {"url": "https://blog.example/post", "max_chars": 40}
+    miss = await client.call("fetch_webpage", args, workspace)
+    hit = await client.call("fetch_webpage", args, workspace)
+    assert (miss["cache"], hit["cache"]) == ("miss", "exact") and http.call_count == 1
+    for page in (miss, hit):
+        assert page["context"] == retrieval.CONTAMINATED_MESSAGE and "44.6" not in json.dumps(page)
+
+
+@pytest.mark.asyncio
 async def test_contamination_guard_filters_cache_hits_but_cache_keeps_raw(tmp_path, workspace, monkeypatch) -> None:
     organic = [
         {"title": "Clean", "link": "https://clean.example"},
