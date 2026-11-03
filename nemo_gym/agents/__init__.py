@@ -74,8 +74,9 @@ if TYPE_CHECKING:
         SUPERVISOR_FILE,
         SUPERVISOR_SCRIPT,
         CleanupReceipt,
-        HarnessTerminationError,
         exec_timeout,
+        harness_termination_failure,
+        is_harness_termination_failure,
         parse_cleanup_receipt,
     )
     from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
@@ -109,7 +110,6 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_FAILED": "utils.sandbox_session",
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
-    "HarnessTerminationError": "utils.supervisor_client",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OutcomeAction": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
@@ -126,6 +126,8 @@ _PUBLIC_API = {
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "exec_timeout": "utils.supervisor_client",
+    "harness_termination_failure": "utils.supervisor_client",
+    "is_harness_termination_failure": "utils.supervisor_client",
     "parse_cleanup_receipt": "utils.supervisor_client",
     "resolve_agent_timeout": "utils.task_timeout",
     "restricted_network_policy": "agent_tools",

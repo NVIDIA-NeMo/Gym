@@ -15,15 +15,18 @@
 """Starting, watching, and stopping the servers of a Gym run: the supervisor behind `gym env start`."""
 
 import asyncio
+import errno
 import os
+import re
 import shlex
+import sys
 from math import isfinite
 from pathlib import Path
 from signal import SIGINT, SIGKILL
-from subprocess import Popen, TimeoutExpired
-from threading import Thread
+from subprocess import PIPE, Popen, TimeoutExpired
+from threading import Lock, Thread
 from time import monotonic, sleep, time
-from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
+from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 import requests
 import uvicorn
@@ -39,14 +42,19 @@ from nemo_gym.config.global_config import (
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    PORT_RANGE_HIGH_KEY_NAME,
+    PORT_RANGE_LOW_KEY_NAME,
     SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    _find_open_port_using_range,
     get_global_config_dict,
 )
+from nemo_gym.core.failure_kinds import SERVER_START_FAILED
 from nemo_gym.orchestration.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
@@ -462,6 +470,80 @@ class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
 
 
+class ServerStartFailedError(RuntimeError):
+    """A Gym server process (or the head server) exited before it was ready.
+
+    ``failure_kind`` is ``server_start_failed``. ``errno`` is the errno of the bind error the server printed, when it
+    printed one: ``errno.EADDRINUSE`` means another process took its port between the port check and the bind.
+    """
+
+    failure_kind = SERVER_START_FAILED
+
+    def __init__(self, message: str, *, server_name: str, errno: int | None) -> None:
+        super().__init__(message)
+        self.server_name = server_name
+        self.errno = errno
+
+
+# uvicorn's report of a failed bind: "[Errno 98] error while attempting to bind on address (...)".
+_BIND_ERRNO_PATTERN = re.compile(r"\[Errno (\d+)\] error while attempting to bind")
+
+
+def _bind_errno(stderr: str | None) -> int | None:
+    """The errno of the bind error a server printed on stderr, or None when it printed none."""
+    match = _BIND_ERRNO_PATTERN.search(stderr or "")
+    return int(match.group(1)) if match else None
+
+
+# The most of a server's latest output the supervisor keeps, to report why it exited before it was ready.
+_SERVER_OUTPUT_TAIL_BYTES = 64 * 1024
+
+
+class _OutputTail:
+    """Forward a server's output pipe to ``sink`` as it arrives, and keep its last ``max_bytes``.
+
+    The operator still sees every line live, and the supervisor can read the error a server printed before it
+    exited, such as the bind error that names an occupied port.
+    """
+
+    def __init__(self, source: IO[bytes], sink: IO, max_bytes: int = _SERVER_OUTPUT_TAIL_BYTES) -> None:
+        self._source = source
+        self._sink = sink
+        self._max_bytes = max_bytes
+        self._tail = bytearray()
+        self._lock = Lock()
+        self._thread = Thread(target=self._pump, name="gym-server-output", daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        try:
+            while chunk := os.read(self._source.fileno(), 65536):
+                with self._lock:
+                    self._tail += chunk
+                    del self._tail[: -self._max_bytes]
+                self._forward(chunk)
+        finally:
+            self._source.close()
+
+    def _forward(self, chunk: bytes) -> None:
+        try:
+            buffer = getattr(self._sink, "buffer", None)
+            if buffer is not None:
+                buffer.write(chunk)
+                buffer.flush()
+            else:
+                self._sink.write(chunk.decode("utf-8", errors="replace"))
+                self._sink.flush()
+        except (OSError, ValueError):
+            pass  # A closed sink must not stop the pipe from draining, or the server would block on a full pipe.
+
+    def text(self, timeout_s: float = 5.0) -> str:
+        """The kept output, after waiting up to ``timeout_s`` for an exited server's pipe to drain."""
+        self._thread.join(timeout_s)
+        with self._lock:
+            return bytes(self._tail).decode("utf-8", errors="replace")
+
+
 def _startup_outcome(error: BaseException) -> str:
     """How a startup that raised `error` ended, as the startup telemetry reports it."""
     if isinstance(error, ServerSpinupTimeoutError):
@@ -477,6 +559,8 @@ class RunHelper:  # pragma: no cover
     _head_server_instance: HeadServer
 
     _processes: Dict[str, Popen]
+    # The output tail of each server in `_processes`, from the stream its errors go to.
+    _output_tails: Dict[str, _OutputTail]
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
     _memory_profiler: MemoryProfiler | None
@@ -494,19 +578,56 @@ class RunHelper:  # pragma: no cover
         Callers reach their own `shutdown()` only after this returns.
         Managed servers run in their own sessions, so shutdown owns delivery of their interrupt.
         """
-        self._processes = dict()
-        self._head_server = None
-        self._h2_ping_sidecar = None
-        try:
-            self._start(global_config_dict_parser_config)
-        except BaseException as error:
-            # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
-            if self._startup is not None:
-                self._startup.abort(_startup_outcome(error), error)
-            self.shutdown()
-            raise
+        for attempt in (1, 2):
+            self._processes = dict()
+            self._output_tails = dict()
+            self._head_server = None
+            self._h2_ping_sidecar = None
+            # Until every server is ready, a server that exits is a failed start (see poll()).
+            self._servers_ready = False
+            try:
+                self._start(global_config_dict_parser_config)
+                return
+            except BaseException as error:
+                # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
+                if self._startup is not None:
+                    self._startup.abort(_startup_outcome(error), error)
+                # The sidecar rewrote the model URLs in the config; a second start would point them at a stopped one.
+                sidecar_started = self._h2_ping_sidecar is not None
+                self.shutdown()
+                if attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
+                    raise
+
+    def _move_to_a_fresh_port(self, error: BaseException) -> bool:
+        """After a server found its port in use, give it a fresh one in the config every server is started from.
+
+        Each server learns every other server's port from that config when it starts, so the caller starts them all
+        again. Only a bind that failed with EADDRINUSE qualifies; the head server keeps its configured port.
+        """
+        if not isinstance(error, ServerStartFailedError) or error.errno != errno.EADDRINUSE:
+            return False
+        server_config = getattr(self, "_server_configs", {}).get(error.server_name)
+        if server_config is None:
+            return False
+        global_config_dict = get_global_config_dict()
+        taken = [config.get("port") for config in self._server_configs.values()]
+        taken.append(global_config_dict.get(HEAD_SERVER_KEY_NAME, {}).get("port"))
+        port = _find_open_port_using_range(
+            disallowed_ports=[port for port in taken if isinstance(port, int)],
+            port_range_low=global_config_dict[PORT_RANGE_LOW_KEY_NAME],
+            port_range_high=global_config_dict[PORT_RANGE_HIGH_KEY_NAME],
+        )
+        print(
+            f"`{error.server_name}` could not bind port {server_config.get('port')}: address already in use. "
+            f"Starting every server again once, with `{error.server_name}` on port {port}."
+        )
+        # The key exists (config resolution set it), so a struct-mode config accepts the new value.
+        server_config["port"] = port
+        return True
 
     def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        # Each started server's node in the config it is started from, for a retry on a fresh port.
+        self._server_configs: Dict[str, DictConfig] = {}
         self._startup = SupervisorStartup()
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
@@ -568,6 +689,7 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath,
             dir_path,
         ) in configured_servers:
+            self._server_configs[top_level_path] = server_config_dict
             # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
@@ -587,22 +709,21 @@ class RunHelper:  # pragma: no cover
             # resolve from the same checkout instead of an older installed Gym distribution.
             # In a wheel install that root is the parent's site-packages; adding it would
             # shadow each server venv's own dependencies, so skip it there.
-            process = run_command(
+            process = self._spawn_server(
+                top_level_path,
                 command,
                 dir_path,
-                server_name=top_level_path,
                 project_root=dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None,
                 extra_env=extra_env,
                 start_new_session=True,
             )
-            self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv
             # cache size. For Nemotron's set of environments, parallel installation can produce
             # a cache 10-20GB larger than serial installation.
             if global_config_dict[DRY_RUN_KEY_NAME]:
                 print("DRY_RUN enabled: setup commands are run serially")
-                process.communicate()
+                process.wait()
 
             host = server_config_dict.get("host")
             port = server_config_dict.get("port")
@@ -638,18 +759,7 @@ class RunHelper:  # pragma: no cover
             global_config_dict=global_config_dict,
         )
 
-        print("Waiting for head server to spin up")
-        poll_count = 0
-        while True:
-            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            if status == "success":
-                break
-
-            if poll_count % 10 == 0:  # Print every 30s
-                print(f"Head server is not up yet (status `{status}`). Sleeping...")
-
-            poll_count += 1
-            sleep(3)
+        self._wait_for_head_server()
         self._startup.mark("wait_for_head_server")
 
         print("Waiting for servers to spin up")
@@ -657,6 +767,61 @@ class RunHelper:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_server_readiness(global_config_dict)
+
+    def _spawn_server(
+        self,
+        server_name: str,
+        command: str,
+        dir_path: Path,
+        *,
+        project_root: Path | None,
+        extra_env: Dict[str, str],
+        global_config_dict: DictConfig | None = None,
+        start_new_session: bool = False,
+    ) -> Popen:
+        """Start one server, forwarding the stream its errors go to and keeping that stream's tail for poll()."""
+        if global_config_dict is None:
+            global_config_dict = get_global_config_dict()
+        # With a log dir the launch command merges stderr into stdout before `tee`, so the errors are on stdout.
+        merged = bool(global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME))
+        process = run_command(
+            command,
+            dir_path,
+            server_name=server_name,
+            project_root=project_root,
+            global_config_dict=global_config_dict,
+            stdout_target=PIPE if merged else None,
+            stderr_target=None if merged else PIPE,
+            extra_env=extra_env,
+            start_new_session=start_new_session,
+        )
+        self._processes[server_name] = process
+        self._output_tails[server_name] = (
+            _OutputTail(process.stdout, sys.stdout) if merged else _OutputTail(process.stderr, sys.stderr)
+        )
+        return process
+
+    def _wait_for_head_server(self) -> None:
+        """Wait until the head server answers; a head server thread that ended (a failed bind) never will."""
+        print("Waiting for head server to spin up")
+        poll_count = 0
+        while True:
+            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
+            if status == "success":
+                return
+            if not self._head_server_thread.is_alive():
+                raise ServerStartFailedError(
+                    "server_start_failed: the head server exited before it was ready; its error is in the log "
+                    f"above. Is its port already in use? Set it with `++{HEAD_SERVER_KEY_NAME}.port=<port>`.",
+                    server_name=HEAD_SERVER_KEY_NAME,
+                    errno=None,
+                )
+
+            if poll_count % 10 == 0:  # Print every 30s
+                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+
+            poll_count += 1
+            sleep(3)
 
     def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
         """Mark the head ready only after every managed server and model endpoint is reachable."""
@@ -668,6 +833,7 @@ class RunHelper:  # pragma: no cover
         if self._startup is not None:
             self._startup.mark("wait_for_model_endpoints")
         self._head_server_instance.mark_ready()
+        self._servers_ready = True
         if self._startup is not None:
             self._startup.finish()
 
@@ -698,7 +864,9 @@ class RunHelper:  # pragma: no cover
 
         for process_name, process in self._processes.items():
             if process.poll() is not None:
-                proc_out, proc_err = process.communicate()
+                tail = getattr(self, "_output_tails", {}).get(process_name)
+                # The tail already went to the terminal live; it is read here for the error and its errno.
+                proc_out, proc_err = (None, tail.text().encode()) if tail is not None else process.communicate()
                 print_str = f"Process `{process_name}` finished unexpectedly!"
 
                 if isinstance(proc_out, bytes):
@@ -713,6 +881,12 @@ Process `{process_name}` stdout:
 Process `{process_name}` stderr:
 {proc_err}"""
 
+                if not getattr(self, "_servers_ready", True):
+                    raise ServerStartFailedError(
+                        f"server_start_failed: {print_str}",
+                        server_name=process_name,
+                        errno=_bind_errno(proc_err if isinstance(proc_err, str) else None),
+                    )
                 raise RuntimeError(print_str)
 
     def wait_for_dry_run_spinup(self) -> None:

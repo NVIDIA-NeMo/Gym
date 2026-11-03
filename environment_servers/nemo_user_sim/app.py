@@ -17,7 +17,6 @@ from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from environment_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeFailure,
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
@@ -54,7 +53,6 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServerConfig,
     CleanupContext,
     CleanupHandle,
-    HandledEpisodeError,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -62,7 +60,12 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
     is_retryable_dependency_status,
 )
-from nemo_gym.trajectory import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
+from nemo_gym.trajectory import (
+    AgentObservationBundle,
+    ToolCallObservation,
+    TrajectoryRecord,
+)
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,
@@ -610,10 +613,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         error: Exception,
         *,
         terminal: bool | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         return dependency_failure(
             error,
-            failure_model=UserSimEpisodeFailure,
             stage=stage,
             terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
             name_error_type=True,

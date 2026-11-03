@@ -708,8 +708,13 @@ def e2e_rollout_collection():  # pragma: no cover
         # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
-            if health_check_enabled and driver_path:
+            # Health deferred with aggregation is not disabled: `gym eval aggregate` reports it.
+            if driver_path and not rollout_collection_config.disable_aggregation:
                 from nemo_gym.rollouts.rollout_health import capture_dirs_for_health
+
+                if health_check_enabled:
+                    # The driver ran with the check disabled, so a built-in collector in it recorded "disabled".
+                    _remove_health_reports(output_fpath)
 
                 # The built-in collector reports under its run lock, before shutdown.
                 _health_check_collected_rollouts(
@@ -717,6 +722,7 @@ def e2e_rollout_collection():  # pragma: no cover
                     rollout_collection_config,
                     None if driver_path else rch._landed_keys,
                     model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
+                    disabled=not health_check_enabled,
                 )
         finally:
             rh.shutdown()
@@ -772,6 +778,7 @@ def _health_check_collected_rollouts(
     *,
     coverage: dict | None = None,
     model_call_capture_dirs: Sequence[Path] = (),
+    disabled: bool = False,
 ) -> None:
     """Report collected health using the CLI's shutdown state."""
     from nemo_gym.rollouts.rollout_health import _health_check_collected_rollouts as report
@@ -783,6 +790,7 @@ def _health_check_collected_rollouts(
         coverage=coverage,
         model_call_capture_dirs=model_call_capture_dirs,
         terminated=_terminated,
+        disabled=disabled,
     )
 
 
