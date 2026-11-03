@@ -262,8 +262,12 @@ class TestCachedParseHtmlPage:
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm"
         path = tool._doc_path(url)
         assert path is not None
-        # sec_filings/<cik_padded>/<accession>/<filename>.txt
-        assert path.parts[-3:] == ("0000320193", "000032019324000123", "aapl-20240928.htm.txt")
+        assert path.relative_to(tmp_path).parts == (
+            "filings",
+            "0000320193",
+            "000032019324000123",
+            "aapl-20240928.htm.txt",
+        )
 
     def test_non_sec_url_not_cached(self, tmp_path):
         cache = ToolCache(tmp_path)

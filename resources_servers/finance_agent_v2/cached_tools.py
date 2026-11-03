@@ -237,10 +237,10 @@ class CachedParseHtmlPage(ParseHtmlPage):
     every other URL falls through to the untouched upstream fetch+parse. The
     on-disk layout is the corrected nested form (the V1 server used a flat
     ``<accession>.txt`` filename, conflating a filing's multiple documents):
-        sec_filings/<cik_padded>/<accession_nodash>/<primary-doc-filename>.txt
+        filings/<cik_padded>/<accession_nodash>/<primary-doc-filename>.txt
     """
 
-    _NAMESPACE = "sec_filings"
+    _NAMESPACE = "filings"
 
     def __init__(self, cache: ToolCache) -> None:
         super().__init__()
