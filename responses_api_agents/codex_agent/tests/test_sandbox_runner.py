@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT, SandboxSession
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, RAISE_OOM_SCORE_ADJ, CodexSandboxSession
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 

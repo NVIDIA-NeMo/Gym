@@ -24,22 +24,33 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnResult,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionRequest,
+    AgentOutcome,
+    AgentOutcomePolicyConfig,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.config import (
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseServerConfig,
+    ResourcesServerRef,
+)
 from nemo_gym.core import MODEL_TRANSPORT_ERROR, EpisodeId, NeMoGymResponse, TaskId, current_rollout_id
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
+    MaterializedTask,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    SimpleServer,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
+    SingleAgentTurnTaskInput,
     is_retryable_dependency_error,
 )
-from nemo_gym.server_runtime.episode_types import MaterializedTask
-from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
-from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
 
@@ -966,8 +977,7 @@ async def test_an_episode_that_grants_mcp_access_is_a_restart(transports: list[L
 
 
 async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_and_stays_ready() -> None:
-    from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, ParticipantControlPlane
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
 
     environment_server, client = _environment_server()
     participant = EnvironmentParticipant(mode="exported")
@@ -1002,7 +1012,7 @@ async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_an
 
 
 async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_invoking_the_agent() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _environment_server()
     participant = EnvironmentParticipant(mode="exported")
@@ -1031,7 +1041,7 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
 
 
 async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifying() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _skipping_environment_server(
         environment={"skip_verification": True, "skip_verification_reward": 0.5}, agent={}
@@ -1078,14 +1088,16 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
     stage: str, tmp_path: Path
 ) -> None:
     from environment_servers.single_agent_turn.app import SessionHandles
-    from nemo_gym.server_runtime._checkpoint.control import (
+    from nemo_gym.server_runtime import (
         CheckpointRequest,
         CommitRequest,
+        EnvironmentParticipant,
+        EpisodeRecord,
         ParticipantControlPlane,
         RestoreRequest,
+        task_digest,
+        write_participant_state,
     )
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
-    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     environment_server, client = _environment_server(client_type=_HoldingClient)
     participant = EnvironmentParticipant(mode="exported")
@@ -1175,8 +1187,7 @@ class _AgentGateClient(_Client):
 
 
 async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_resume() -> None:
-    from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, ParticipantControlPlane
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
 
     environment_server, client = _environment_server(client_type=_AgentGateClient)
     participant = EnvironmentParticipant(mode="exported")
@@ -1302,8 +1313,12 @@ def _checkpointed_agent(model_calls: list[str]) -> tuple[Any, httpx.AsyncClient]
 
 async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_the_activation() -> None:
     from environment_servers.single_agent_turn.app import SessionHandles
-    from nemo_gym.server_runtime import ResourcesSeedSessionResponse
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import (
+        EnvironmentParticipant,
+        EpisodeRecord,
+        ResourcesSeedSessionResponse,
+        task_digest,
+    )
 
     request = _request()
     first_attempt = request.model_copy(update={"episode_id": request.episode_id.model_copy(update={"attempt": 1})})
@@ -1358,7 +1373,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
 
 
 async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attempt() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import EnvironmentParticipant
 
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     environment_server._checkpoint = EnvironmentParticipant(mode="exported")
@@ -1583,7 +1598,7 @@ def test_invalid_agent_policy_config_rejected(config: dict) -> None:
 async def _assert_classified_agent_failure_policy(
     outcome: dict, verifiable: bool, retryable: bool, *, config: dict | None = None
 ) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 
     environment, client = _environment_server()
     if config is not None:
@@ -1647,7 +1662,7 @@ async def test_nonfailed_outcomes_still_reach_verification(status: str | None) -
 
 @pytest.mark.parametrize("action", ["fail", "retry"])
 async def test_incomplete_context_limit_verifies_partial_work(action: str) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 
     environment, client = _environment_server()
     environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
@@ -1675,7 +1690,7 @@ async def test_incomplete_context_limit_verifies_partial_work(action: str) -> No
 
 @pytest.mark.parametrize("action", ["fail", "retry"])
 async def test_a_stopped_run_is_verified_and_its_result_keeps_the_stop_marker(action: str) -> None:
-    from nemo_gym.base_responses_api_agent import ROLLOUT_STOP_METADATA_KEY
+    from nemo_gym.agents import ROLLOUT_STOP_METADATA_KEY
 
     environment, client = _environment_server()
     environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
@@ -1699,7 +1714,7 @@ async def test_a_stopped_run_is_verified_and_its_result_keeps_the_stop_marker(ac
 
 @pytest.mark.parametrize("raw", ["not valid JSON", '{"failure_kind":"unregistered_error"}'])
 async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 
     environment, client = _environment_server()
     response = _agent_response().model_dump(mode="json")
