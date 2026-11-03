@@ -140,7 +140,10 @@ The agent name is the rows' `agent_ref.name`, the agent entry in
 On a machine that did not submit the run, the inspect fails with `No submission '<id>' in this
 machine's job index`. Add `--record <run dir>/gym-job.json` (inspect only; copy the file where the
 run directory is not mounted): it reads the run's own submission record without writing the local
-index. A resubmit that dispatches needs the index entry, so run it where the run was submitted.
+index. A resubmit that dispatches needs the index entry: where the run directory is mounted but the
+index lost it (a recycled machine), add `--run-dir <run dir>` and the entry is restored from the run's
+`gym-job.json`, checked to be that submission's, and journaled in the index's `index-restores.jsonl`
+(this writes the index, also with `--inspect`).
 
 `--inspect` reads the saved evidence and evaluates the gates without dispatching anything. The
 read runs on the run's host; the first time, it installs the run's pinned Gym for its reader with

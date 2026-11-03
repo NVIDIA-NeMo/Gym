@@ -733,6 +733,9 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--inspect requires --recover")
     if record_path is not None and not inspect_only:
         args._parser.error("--record requires --inspect")
+    run_dir = getattr(args, "run_dir", None)
+    if run_dir is not None and record_path is not None:
+        args._parser.error("--run-dir restores the local index; --record reads a record without it. Pass one.")
     repin, repin_reason = getattr(args, "repin", None), getattr(args, "repin_reason", None)
     if (repin is not None or repin_reason is not None) and (not getattr(args, "recover", False) or inspect_only):
         args._parser.error("--repin and --repin-reason need --recover and cannot be used with --inspect")
@@ -784,6 +787,10 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--judge-qos needs --recover and cannot be used with --inspect")
 
     try:
+        if run_dir is not None:
+            from nemo_gym.orchestration.jobs import restore_index_entry
+
+            restore_index_entry(args.gym_job_id, run_dir)
         score_key = getattr(args, "score_key", None)
         if score_key is not None:
             score_key = json.loads(score_key)
@@ -1899,6 +1906,17 @@ COMMANDS = {
                     type=Path,
                     metavar="PATH",
                     help="With --inspect: read an original submission record without updating the local index.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--run-dir",
+                    type=Path,
+                    metavar="RUN_DIR",
+                    help="The submission's run directory: when this machine's job index lacks the submission, its "
+                    "entry is restored from the run's gym-job.json (checked to be this submission's and this "
+                    "directory's) and the restore is journaled in the index. This writes the index, also with "
+                    "--inspect.",
                 ),
             ),
             Flag(
