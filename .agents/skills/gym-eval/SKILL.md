@@ -308,11 +308,13 @@ identity that is not settled, within the attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTE
 a judge failure saved as a failure (`judge_failed`) is re-judged from its saved answer, never
 regenerated, and is never the model's zero: masked, out of the score, counted on the evaluation
 side. A row whose judge returned no usable verdict and that was saved as a scored 0.0 with no
-failure record (`judge_unparseable` in the health counts) is not that: it keeps its 0.0 until
-re-judged. The recovery decision treats it as scored and answers NOOP when nothing else is
-missing, so `--recover` does not dispatch for it alone; `gym eval reverify --judge-failed-only
---settle-into-source` selects and re-judges it. Once Gym plans a re-judge for such rows, a judge served beside the policy
-still cannot be re-judged by a judge-only job (step 5). Report it with the health count. In the chain: only `PREEMPTED`,
+failure record (`judge_unparseable` in the health counts) is not that either: Gym plans a re-judge for it. A run
+whose only open work is such rows inspects `reverify`, `PLANNED` and exits 1 until the re-judge settles
+it (any status but `SUCCESS` exits 1). Meanwhile evaluation health still counts the row as an
+evaluation-side fault ("judge N of M", the 2% limit is unchanged), `gate_task.scored_samples` leaves it out,
+`errors` lists the judge failure awaiting re-judgment, and the MLflow export waits for the run to complete. Run
+the same command without `--inspect`: the saved answer is judged again and the model is not called. A judge
+served beside the policy still cannot be re-judged by a judge-only job (step 5). Report it with the health count. In the chain: only `PREEMPTED`,
 `NODE_FAIL` and `BOOT_FAIL` spend an infra retry, `TIMEOUT` continues, and `FAILED`,
 `OUT_OF_MEMORY`, `DEADLINE` and `CANCELLED` stop the chain; `--recover` is the way on, and it
 dispatches only the missing and retriable identities.
