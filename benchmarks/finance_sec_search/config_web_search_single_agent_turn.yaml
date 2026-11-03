@@ -1,0 +1,22 @@
+# The finance_sec_search/config_web_search benchmark through the single_agent_turn_legacy Environment Server instead of
+# the legacy_agent relay (see resources_servers/finance_sec_search/configs/finance_sec_search_single_agent_turn.yaml).
+# config_web_search.yaml keeps the relay. Run it with:
+#   gym eval run --config benchmarks/finance_sec_search/config_web_search_single_agent_turn.yaml
+config_paths:
+  - benchmarks/finance_sec_search/config_web_search.yaml
+
+# Keep the benchmark's routing name, replacing the relay it inherits with the Environment Server. The inherited
+# relay goes too: Gym points it at the renamed agent, which would leave two servers in front of one agent.
+finance_agent_environment_server: null
+finance_sec_search_web_search_benchmark_environment_server:
+  _delete_key: _inherit_from
+  environment_servers:
+    _delete_key: legacy_agent
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      # resources_server is unset, so the server binds the one the agent names.
+      agent_server:
+        type: responses_api_agents
+        name: finance_sec_search_web_search_benchmark_agent
+      resources_tool_transports:
+      - direct_http

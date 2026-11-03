@@ -109,6 +109,22 @@ Use `--limit 1` for a quick end-to-end check. For the web-search variant, use
 `finance_sec_search_web_search_benchmark_agent`, and
 `data/finance_sec_search_benchmark_web_search.jsonl`.
 
+To run through the `single_agent_turn_legacy` Environment Server instead of the
+`legacy_agent` relay, load `config_no_web_search_single_agent_turn.yaml` (or
+`config_web_search_single_agent_turn.yaml`) in place of the benchmark name. A
+crash then repeats only the step it interrupted, and a failed model call is
+retried or failed by its cause instead of scored 0, so fewer rollouts may be
+scored (see
+[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)):
+
+```bash
+gym eval run \
+  --config benchmarks/finance_sec_search/config_no_web_search_single_agent_turn.yaml \
+  --split benchmark \
+  --model-type openai_model \
+  --output results/finance_sec_search/rollouts.jsonl
+```
+
 ## Optional: prefetch filing metadata
 
 Eval configs keep `use_cache: false`, so rollouts hit SEC.gov live. To reuse

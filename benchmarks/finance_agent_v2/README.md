@@ -106,6 +106,20 @@ gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \
   --output results/finance_agent_v2_27q.jsonl --concurrency 4
 ```
 
+To run through the `single_agent_turn_legacy` Environment Server instead of the
+`legacy_agent` relay, load `config_single_agent_turn.yaml` in place of the
+benchmark name. A crash then repeats only the step it interrupted, and a failed
+model call is retried or failed by its cause instead of scored 0, so fewer
+rollouts may be scored (see
+[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)):
+
+```bash
+gym eval run --config benchmarks/finance_agent_v2/config_single_agent_turn.yaml \
+  --split benchmark \
+  -c responses_api_models/openai_model/configs/openai_model.yaml \
+  --output results/finance_agent_v2_27q.jsonl --concurrency 4
+```
+
 `reward` is **Partial Credit**: the severity-weighted share of rubric criteria
 passed, forced to 0.0 if any criterion marked `must_pass` failed. `rubric_all_pass`
 is the stricter every-criterion-passed flag, and `judge_error` marks rows the judge

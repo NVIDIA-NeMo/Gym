@@ -30,6 +30,47 @@ in its metadata so a truncated trajectory is distinguishable from a submitted an
 overflow optionally drops the oldest exchange and retries (`truncate_on_overflow`), which is for
 eval only — during training the full trajectory has to be preserved for reward assignment.
 
+# Running behind an Environment Server
+
+The loop also runs behind the `single_agent_turn_legacy` Environment Server, which seeds the resources session and an
+agent session, calls `/v1/responses` once, closes the agent session, verifies, and closes the resources session. A
+crash then repeats only the step it interrupted instead of the whole episode. Each relay config has a counterpart that
+does this; the relay configs are unchanged:
+
+| Relay config | Environment Server config |
+|--------------|---------------------------|
+| `resources_servers/finance_sec_search/configs/finance_sec_search.yaml` | `resources_servers/finance_sec_search/configs/finance_sec_search_single_agent_turn.yaml` |
+| `resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml` | `resources_servers/finance_agent_v2/configs/finance_agent_v2_single_agent_turn.yaml` |
+| `benchmarks/finance_sec_search/config_no_web_search.yaml` | `benchmarks/finance_sec_search/config_no_web_search_single_agent_turn.yaml` |
+| `benchmarks/finance_sec_search/config_web_search.yaml` | `benchmarks/finance_sec_search/config_web_search_single_agent_turn.yaml` |
+| `benchmarks/finance_agent_v2/config.yaml` | `benchmarks/finance_agent_v2/config_single_agent_turn.yaml` |
+
+An agent session takes its tools from the Environment Server's grant, so the Environment Server must set
+`resources_tool_transports: [direct_http]`. The agent refuses, with a final 422, a session with no direct HTTP grant,
+more than one, a required MCP grant, or sandbox access. Every tool call goes to the grant's base URL with its headers
+and the resources cookie jar, and close returns the updated jar. When model calls are captured
+(`observability_enabled`), close also returns the loop's observations: one invocation with its stop reason and model
+calls, and a record per tool call.
+
+Outcomes differ from the legacy `/run`, which verifies every loop it finishes and turns any exception into reward 0.
+Under the Environment Server, a failed model call marks the response `failed` with its cause, and the Environment
+Server's `agent_outcome_policy` decides what happens:
+
+| Event | Legacy `/run` | Environment Server, default policy |
+|-------|---------------|------------------------------------|
+| Model call fails with HTTP 400, 413 or 422, such as a context overflow the model server propagates | verified, usually 0 | `model_request_error`, verified |
+| Model call fails with HTTP 408, 425, 429 or 5xx | verified, usually 0 | `model_request_error`, retryable failure |
+| Model call fails with another HTTP 4xx | verified, usually 0 | `model_request_error`, terminal failure |
+| Model call times out (`model_call_timeout`) or cannot connect | verified, usually 0 | `model_transport_error`, retryable failure |
+| Seed, verify or the agent itself fails | reward 0 | failure classified by the Environment Server |
+| Tool error or timeout, or an error type in `abort_on_tool_error_types` | verified | verified, as before |
+| Context overflow that `vllm_model` answers itself (its default) | verified | verified, as before |
+
+A failure is not scored: rollout collection writes it to the failures sidecar instead of the rollouts file, and
+`--resume` dispatches a retryable one again, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. So an outage no longer counts as a
+wrong answer, and the score covers fewer rollouts when episodes fail. To count failures as 0, as the legacy run did,
+pass `+count_failure_classes_as_zero=[<class>, ...]`.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A

@@ -24,6 +24,14 @@ default that happens to suit the other benchmark.
 The values each benchmark uses are pinned against the upstream package by tests
 in ``resources_servers/finance_agent_v2/tests``, which is where that package is
 installed.
+
+Two callers run the loop. An Agent's legacy ``/run`` seeds the resources
+server, calls the loop and verifies, turning any exception into reward 0. An
+Environment Server (``single_agent_turn``) seeds an agent session that carries a
+direct HTTP grant to the resources server's tools, calls ``/v1/responses`` once,
+closes the session and verifies. In a session, a failed model call marks the
+response ``failed`` with its cause, so the Environment Server decides whether
+to grade, retry or fail the episode instead of scoring it 0.
 """
 
 import asyncio
@@ -31,20 +39,32 @@ import json
 import logging
 import re
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, List, Optional
 
+from aiohttp import ClientError, ClientResponseError
 from fastapi import Request, Response
+from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field
 
 from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import request as http_request
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -53,7 +73,14 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    DirectHTTPToolAccess,
+    MCPToolAccess,
+)
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ModelCallRef, TrajectoryToolCall
 
 
 logger = logging.getLogger(__name__)
@@ -85,6 +112,11 @@ _CONTEXT_OVERFLOW_RE = re.compile(
     r"input exceeded the context window",
     re.IGNORECASE,
 )
+
+
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    """Flatten a plain dict or an aiohttp cookie jar of morsels into name-to-value pairs."""
+    return {str(name): str(getattr(value, "value", value)) for name, value in (cookies or {}).items()}
 
 
 def _decoded_object(raw: str) -> Optional[dict]:
@@ -177,8 +209,62 @@ class FinanceAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+@dataclass
+class FinanceAgentSessionState(AgentSessionState):
+    """An Environment Server's agent session: its grant to the resources server's tools and their cookie jar."""
+
+    tool_access: DirectHTTPToolAccess
+    # Seeded from the grant, updated by every tool call, and returned at close.
+    resources_cookies: dict[str, str]
+    observations: Optional[AgentObservationBundle] = None
+
+
 class FinanceAgent(SimpleResponsesAPIAgent):
     config: FinanceAgentConfig
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> FinanceAgentSessionState:
+        """Take the session's one direct HTTP grant; every tool, submit_final_result included, is behind it."""
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Finance Agent does not support sandbox access")
+        accesses = self.effective_tool_accesses(body)
+        unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
+        if unsupported:
+            raise AgentSeedRejectedError(
+                f"Finance Agent does not support required MCP tool access: {', '.join(unsupported)}"
+            )
+        direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
+        if len(direct_accesses) != 1:
+            raise AgentSeedRejectedError(
+                "Finance Agent needs exactly one direct HTTP tool access to its resources server's tools, "
+                f"got {len(direct_accesses)}; set resources_tool_transports: [direct_http] on the Environment Server"
+            )
+        return FinanceAgentSessionState(
+            request=body,
+            tool_access=direct_accesses[0],
+            resources_cookies=dict(direct_accesses[0].cookies),
+        )
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, FinanceAgentSessionState):
+            raise TypeError("Expected Finance Agent session state")
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=state.observations,
+            resources_cookies=state.resources_cookies,
+        )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Name the cause of the model call failure that ended a session's loop.
+
+        The Environment Server's outcome policy decides from it: by default a 400, 413 or 422 is graded, a
+        retryable status or a transport failure dispatches the episode again, and any other status fails it.
+        """
+        error = native_result.get("error")
+        if isinstance(error, ClientResponseError) and 400 <= error.status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
+        if isinstance(error, (asyncio.TimeoutError, ClientError)):
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return AgentOutcome(failure_kind="unknown")
 
     @staticmethod
     def _is_context_overflow_error(exc: Exception) -> bool:
@@ -267,12 +353,26 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        agent_session_id = self._agent_session_id_from_request(request)
+        state = self._require_agent_session(agent_session_id) if agent_session_id is not None else None
+        if state is not None and not isinstance(state, FinanceAgentSessionState):
+            raise TypeError("Expected Finance Agent session state")
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        # A session returns the loop's evidence at close; it is collected only when model calls are captured too.
+        collect_observations = state is not None and self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        model_calls: List[ModelCallRef] = []
+        tool_records: List[TrajectoryToolCall] = []
+        loop_started_at = time.time()
+        model_failure: Optional[BaseException] = None
+
         new_outputs: List[Any] = []
         usage = None
         step = 0
         last_model_response: Optional[NeMoGymResponse] = None
         model_server_cookies = None
-        resources_server_cookies = request.cookies
+        # A session reaches the resources server only through its grant, starting from the cookie jar it carries.
+        resources_server_cookies = state.resources_cookies if state is not None else request.cookies
 
         done_tools_set = set(self.config.done_tools)
         max_steps = self.config.max_steps
@@ -302,9 +402,11 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             try:
                 coro = self.server_client.post(
                     server_name=self.config.model_server.name,
-                    url_path="/v1/responses",
+                    # Carries an Environment Server's rollout prefix, so captured model calls join the episode.
+                    url_path=self.url_path_for_request("/v1/responses", request),
                     json=new_body,
                     cookies=model_server_cookies,
+                    **({"headers": {"x-session-id": "root"}} if collect_observations else {}),
                 )
                 model_resp_raw = await asyncio.wait_for(coro, timeout=self.config.model_call_timeout)
 
@@ -312,13 +414,14 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 model_response_json = await get_response_json(model_resp_raw)
                 model_server_cookies = model_resp_raw.cookies
                 model_response = NeMoGymResponse.model_validate(model_response_json)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
                 logger.warning(
                     "Model call timed out after %ss on step %d — terminating agent loop",
                     self.config.model_call_timeout,
                     step,
                 )
                 stop_reason = StopReason.ERROR
+                model_failure = e
                 break
             except Exception as e:
                 if self.config.truncate_on_overflow and self._is_context_overflow_error(e):
@@ -334,11 +437,14 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         continue
                 logger.error("Model call failed on step %d: %s: %s", step, type(e).__name__, e)
                 stop_reason = StopReason.ERROR
+                model_failure = e
                 break
 
             output = model_response.output
             last_model_response = model_response
             new_outputs.extend(output)
+            if collect_observations and model_response.id:
+                model_calls.append(ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id))
 
             usage = accumulate_response_usage(usage, model_response.usage)
 
@@ -369,17 +475,39 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             done = False
             aborted = False
             for output_function_call in all_fn_calls:
+                tool_started_at = time.time()
+                tool_status, tool_error_type = "completed", None
                 try:
-                    coro = self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=json.loads(output_function_call.arguments),
-                        cookies=resources_server_cookies,
-                    )
+                    if state is not None:
+                        coro = http_request(
+                            method="POST",
+                            url=f"{str(state.tool_access.base_url).rstrip('/')}/{output_function_call.name}",
+                            json=json.loads(output_function_call.arguments),
+                            cookies=resources_server_cookies,
+                            headers=dict(state.tool_access.headers),
+                            _internal=True,
+                        )
+                    else:
+                        coro = self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path=f"/{output_function_call.name}",
+                            json=json.loads(output_function_call.arguments),
+                            cookies=resources_server_cookies,
+                        )
                     api_response = await asyncio.wait_for(coro, timeout=self.config.tool_call_timeout)
-                    resources_server_cookies = api_response.cookies
+                    if state is not None:
+                        # A reply that sets no cookie leaves the session's jar as it was.
+                        resources_server_cookies = {
+                            **resources_server_cookies,
+                            **_cookie_values(api_response.cookies),
+                        }
+                    else:
+                        resources_server_cookies = api_response.cookies
                     tool_output = (await api_response.content.read()).decode()
+                    if collect_observations and not 200 <= api_response.status < 400:
+                        tool_status, tool_error_type = "failed", f"http_{api_response.status}"
                 except asyncio.TimeoutError:
+                    tool_status, tool_error_type = "timeout", "TimeoutError"
                     logger.warning(
                         "Tool call '%s' timed out after %ss",
                         output_function_call.name,
@@ -392,6 +520,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         }
                     )
                 except Exception as e:
+                    tool_status, tool_error_type = "failed", type(e).__name__
                     logger.error(
                         "Tool call '%s' failed: %s: %s",
                         output_function_call.name,
@@ -411,6 +540,22 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     output=tool_output,
                 )
                 new_outputs.append(tool_response)
+                if collect_observations:
+                    tool_completed_at = max(tool_started_at, time.time())
+                    tool_records.append(
+                        TrajectoryToolCall(
+                            invocation_id="root",
+                            tool_call_id=output_function_call.call_id,
+                            tool_name=output_function_call.name,
+                            started_at=tool_started_at,
+                            completed_at=tool_completed_at,
+                            duration_ms=(tool_completed_at - tool_started_at) * 1000,
+                            timing_source="executor",
+                            status=tool_status,
+                            error_type=tool_error_type,
+                            output=tool_output,
+                        )
+                    )
 
                 if output_function_call.name in done_tools_set:
                     logger.info(
@@ -455,7 +600,13 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 tool_choice="auto",
             )
 
-        cookie_items = list(resources_server_cookies.items())
+        if state is None:
+            # Legacy self-dispatch carries the resources cookies on to its /verify call.
+            cookie_items = list(resources_server_cookies.items())
+        else:
+            # A session returns its resources cookie jar at close, where the Environment Server takes it.
+            state.resources_cookies = dict(resources_server_cookies)
+            cookie_items = []
         if model_server_cookies:
             cookie_items.extend(model_server_cookies.items())
         for k, v in cookie_items:
@@ -473,6 +624,36 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             "stop_reason": stop_reason.value,
             "steps": str(step),
         }
+        if state is not None and model_failure is not None:
+            # A legacy /run verifies whatever the loop returns. In a session the Environment Server decides from the
+            # cause whether to grade the episode, dispatch it again or fail it, instead of scoring an outage as 0.
+            last_model_response.status = "failed"
+            last_model_response.error = ResponseError(
+                code="server_error",
+                message=f"Model call failed on step {step}: {type(model_failure).__name__}: {model_failure}"[:2000],
+            )
+            last_model_response = self.report_outcome(last_model_response, {"error": model_failure})
+        if collect_observations:
+            invocation_status = {
+                StopReason.DONE_TOOL: "completed",
+                StopReason.TEXT_ONLY: "completed",
+                StopReason.ERROR: "failed",
+            }.get(stop_reason, "incomplete")
+            state.observations = AgentObservationBundle(
+                source="finance_agent",
+                records=[
+                    AgentInvocation(
+                        invocation_id="root",
+                        status=invocation_status,
+                        stop_reason=stop_reason.value,
+                        duration_ms=max(0.0, time.time() - loop_started_at) * 1000,
+                        error_type=type(model_failure).__name__ if model_failure is not None else None,
+                        model_calls=model_calls,
+                        conversation=[*body.input, *new_outputs],
+                    ),
+                    *tool_records,
+                ],
+            )
         return last_model_response
 
     async def run(self, request: Request, body: FinanceAgentRunRequest) -> FinanceAgentVerifyResponse:

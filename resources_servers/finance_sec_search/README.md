@@ -361,6 +361,12 @@ gym env start \
   --resources-server finance_sec_search
 ```
 
+To run episodes through the `single_agent_turn_legacy` Environment Server instead of the `legacy_agent` relay, pass
+`--config resources_servers/finance_sec_search/configs/finance_sec_search_single_agent_turn.yaml` in place of
+`--resources-server finance_sec_search`. The agent then gets the tools through a direct HTTP grant, and the
+Environment Server closes the session after `/verify` (see
+[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)).
+
 ### 4. Collect rollouts
 
 ```bash

@@ -1,0 +1,19 @@
+# finance_agent_v2 through the single_agent_turn_legacy Environment Server instead of the legacy_agent relay.
+# The Environment Server seeds the resources and agent sessions, grants the agent direct HTTP access to the tools,
+# runs the agent's loop once, closes the agent, verifies, then closes the resources session. A crash repeats only
+# the step it interrupted, and a failed model call is retried or failed by its cause instead of scored 0.
+# finance_agent_v2.yaml keeps the relay; load this file in its place.
+config_paths:
+  - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
+
+finance_agent_v2_environment_server:
+  environment_servers:
+    _delete_key: legacy_agent
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      # resources_server is unset, so the server binds the one the agent names.
+      agent_server:
+        type: responses_api_agents
+        name: finance_agent_v2
+      resources_tool_transports:
+      - direct_http

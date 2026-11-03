@@ -1,0 +1,21 @@
+# The FABv2 benchmark through the single_agent_turn_legacy Environment Server instead of the legacy_agent relay
+# (see resources_servers/finance_agent_v2/configs/finance_agent_v2_single_agent_turn.yaml). config.yaml keeps the
+# relay. Run it with: gym eval run --config benchmarks/finance_agent_v2/config_single_agent_turn.yaml
+config_paths:
+  - benchmarks/finance_agent_v2/config.yaml
+
+# Keep the benchmark's routing name, replacing the relay it inherits with the Environment Server. The inherited
+# relay goes too: Gym points it at the renamed agent, which would leave two servers in front of one agent.
+finance_agent_v2_environment_server: null
+finance_agent_v2_benchmark_environment_server:
+  _delete_key: _inherit_from
+  environment_servers:
+    _delete_key: legacy_agent
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      # resources_server is unset, so the server binds the one the agent names.
+      agent_server:
+        type: responses_api_agents
+        name: finance_agent_v2_benchmark_agent
+      resources_tool_transports:
+      - direct_http

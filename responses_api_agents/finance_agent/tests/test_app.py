@@ -25,15 +25,23 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest, OutcomeAction, agent_outcome_policy
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    EpisodeId,
     NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    TaskId,
 )
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
     FinanceAgentConfig,
@@ -53,6 +61,23 @@ _SHIPPED_CONFIGS = {
     "finance_agent_v2": _REPO_ROOT / "resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml",
 }
 
+#: Each config that runs the loop behind single_agent_turn_legacy, and the Environment Server it declares.
+_SINGLE_AGENT_TURN_CONFIGS = {
+    "resources_servers/finance_sec_search/configs/finance_sec_search_single_agent_turn.yaml": (
+        "finance_agent_environment_server"
+    ),
+    "resources_servers/finance_agent_v2/configs/finance_agent_v2_single_agent_turn.yaml": (
+        "finance_agent_v2_environment_server"
+    ),
+    "benchmarks/finance_sec_search/config_no_web_search_single_agent_turn.yaml": (
+        "finance_sec_search_benchmark_environment_server"
+    ),
+    "benchmarks/finance_sec_search/config_web_search_single_agent_turn.yaml": (
+        "finance_sec_search_web_search_benchmark_environment_server"
+    ),
+    "benchmarks/finance_agent_v2/config_single_agent_turn.yaml": "finance_agent_v2_benchmark_environment_server",
+}
+
 #: Fields with no default, so each profile has to state its own policy.
 _POLICY_FIELDS = (
     "no_tool_call_nudge",
@@ -66,12 +91,10 @@ _POLICY_FIELDS = (
 # ---------------------------------------------------------------------------
 
 
-def _shipped_block(instance: str) -> dict:
-    """The agent block as the server starts with it. Resolved rather than read straight from the
-    file, because a profile may pull shared fields in through `config_paths`."""
+def _resolved_config(config_path: Path) -> dict:
     initial = OmegaConf.merge(
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"config_paths": [str(_SHIPPED_CONFIGS[instance])]},
+        {"config_paths": [str(config_path)]},
     )
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
@@ -81,7 +104,13 @@ def _shipped_block(instance: str) -> dict:
             offline=True,
         )
     )
-    return OmegaConf.to_container(resolved[instance]["responses_api_agents"]["finance_agent"], resolve=True)
+    return OmegaConf.to_container(resolved, resolve=True)
+
+
+def _shipped_block(instance: str) -> dict:
+    """The agent block as the server starts with it. Resolved rather than read straight from the
+    file, because a profile may pull shared fields in through `config_paths`."""
+    return _resolved_config(_SHIPPED_CONFIGS[instance])[instance]["responses_api_agents"]["finance_agent"]
 
 
 def _shipped_policy(instance: str) -> dict:
@@ -245,6 +274,21 @@ class TestFinanceAgentConfig:
         assert _V1_POLICY["abort_on_tool_error_types"] == []
         assert _V2_POLICY["abort_on_tool_error_types"]
         assert _V1_POLICY["no_tool_call_nudge"] != _V2_POLICY["no_tool_call_nudge"]
+
+    @pytest.mark.parametrize(("config_path", "environment_server"), sorted(_SINGLE_AGENT_TURN_CONFIGS.items()))
+    def test_single_agent_turn_config_grants_the_tools(self, config_path: str, environment_server: str) -> None:
+        """The agent refuses a session without a direct HTTP grant, so each such config must ask for one,
+        and keep the relay config's instances so rows still route to the one server in front of the agent."""
+        resolved = _resolved_config(_REPO_ROOT / config_path)
+        environment_servers = [
+            name for name, block in resolved.items() if isinstance(block, dict) and "environment_servers" in block
+        ]
+        assert environment_servers == [environment_server]
+        server = resolved[environment_server]["environment_servers"]
+        assert list(server) == ["single_agent_turn_legacy"]
+        assert server["single_agent_turn_legacy"]["resources_tool_transports"] == ["direct_http"]
+        agent = server["single_agent_turn_legacy"]["agent_server"]["name"]
+        assert list(resolved[agent]["responses_api_agents"]) == ["finance_agent"]
 
     def test_default_config(self) -> None:
         config = _make_config()
@@ -938,3 +982,253 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.reward == 0.0
         assert result.response.id == "error"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Agent sessions (an Environment Server runs the loop)
+# ---------------------------------------------------------------------------
+
+_GRANT = DirectHTTPToolAccess(
+    name="finance_sec_search.direct_http",
+    required=True,
+    base_url="http://resources:9000",
+    cookies={"session": "seeded"},
+    headers={"x-grant": "token"},
+)
+
+
+def _session_seed(**overrides) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="finance", task_id="0"),
+        **overrides,
+    )
+
+
+def _tool_reply(body: str, *, cookies: dict | None = None, status: int = 200) -> MagicMock:
+    reply = MagicMock()
+    reply.status = status
+    reply.cookies = cookies or {}
+    reply.content.read = AsyncMock(return_value=body.encode())
+    return reply
+
+
+def _session_client(model_mock, *, observability: bool = False, config: FinanceAgentConfig | None = None):
+    agent, client = _make_agent_and_client(config)
+    agent.server_client.global_config_dict = {"observability_enabled": observability}
+    agent.server_client.post = AsyncMock(side_effect=_route(model_mock, AsyncMock()))
+    return agent, client
+
+
+def _close(client: TestClient) -> dict:
+    seed = _session_seed()
+    response = client.post(
+        "/v1/agent_sessions/close",
+        json={"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump(mode="json")},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+class TestAgentSessions:
+    @pytest.mark.parametrize(
+        ("unsupported", "reason"),
+        [
+            ({}, "Finance Agent needs exactly one direct HTTP tool access"),
+            (
+                {
+                    "tool_accesses": [
+                        _GRANT,
+                        DirectHTTPToolAccess(name="second", required=True, base_url="http://second:9000"),
+                    ]
+                },
+                "Finance Agent needs exactly one direct HTTP tool access",
+            ),
+            (
+                {
+                    "tool_accesses": [
+                        _GRANT,
+                        MCPToolAccess(
+                            name="resources",
+                            required=True,
+                            connection=MCPStreamableHTTPConnection(url="http://resources:9000/mcp"),
+                        ),
+                    ]
+                },
+                "Finance Agent does not support required MCP tool access: resources",
+            ),
+            (
+                {
+                    "tool_accesses": [_GRANT],
+                    "sandbox_access": SandboxAccess(
+                        connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                        workdir="/work",
+                    ),
+                },
+                "Finance Agent does not support sandbox access",
+            ),
+        ],
+    )
+    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+        agent, _ = _make_agent_and_client()
+        assert check_agent_seed_rejected(agent.setup_webserver(), _session_seed(**unsupported)).startswith(reason)
+
+    def test_tool_calls_go_through_the_grant_and_close_returns_the_cookie_jar(self, monkeypatch) -> None:
+        model_mock = _dotjson_mock(
+            _tool_call_response("parse_html_page", '{"url": "https://sec.gov/10k", "key": "k"}'),
+            _tool_call_response("submit_final_result", '{"final_result": "42"}', call_id="call_2", resp_id="resp_2"),
+        )
+        agent, client = _session_client(model_mock)
+        tool = AsyncMock(
+            side_effect=[
+                _tool_reply('{"results": "SUCCESS"}', cookies={"session": "after-parse"}),
+                _tool_reply('{"results": "submitted"}'),
+            ]
+        )
+        monkeypatch.setattr("responses_api_agents.finance_agent.app.http_request", tool)
+
+        assert client.post(
+            "/v1/agent_sessions", json=_session_seed(tool_accesses=[_GRANT]).model_dump(mode="json")
+        ).is_success
+        response = client.post("/v1/responses", json=_INPUT)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["metadata"]["stop_reason"] == "done_tool"
+        # The configured resources server has no session for this episode, so only the model is called by name.
+        assert [call.kwargs["server_name"] for call in agent.server_client.post.await_args_list] == [_MODEL_SERVER] * 2
+        assert [call.kwargs["url"] for call in tool.await_args_list] == [
+            "http://resources:9000/parse_html_page",
+            "http://resources:9000/submit_final_result",
+        ]
+        assert all(call.kwargs["headers"] == {"x-grant": "token"} for call in tool.await_args_list)
+        assert [call.kwargs["cookies"] for call in tool.await_args_list] == [
+            {"session": "seeded"},
+            {"session": "after-parse"},
+        ]
+        # The resources cookie travels back through close, not on the activation's reply.
+        assert "session" not in response.cookies
+        closed = _close(client)
+        assert closed["resources_cookies"] == {"session": "after-parse"}
+        assert "agent_observations" not in closed or closed["agent_observations"] is None
+
+    @pytest.mark.parametrize(
+        ("error", "failure_kind", "status_code", "action"),
+        [
+            (
+                ClientResponseError(MagicMock(), (), status=503, message="Service Unavailable"),
+                "model_request_error",
+                503,
+                OutcomeAction.RETRY,
+            ),
+            (
+                ClientResponseError(MagicMock(), (), status=400, message="Bad Request"),
+                "model_request_error",
+                400,
+                OutcomeAction.VERIFY,
+            ),
+            (
+                ClientResponseError(MagicMock(), (), status=401, message="Unauthorized"),
+                "model_request_error",
+                401,
+                OutcomeAction.FAIL,
+            ),
+            (ClientConnectionError("connection refused"), "model_transport_error", None, OutcomeAction.RETRY),
+            (RuntimeError("bad model reply"), "unknown", None, OutcomeAction.RETRY),
+        ],
+    )
+    def test_model_failure_in_a_session_is_classified_not_zeroed(
+        self, error: Exception, failure_kind: str, status_code: int | None, action: OutcomeAction
+    ) -> None:
+        agent, client = _session_client(AsyncMock())
+        agent.server_client.post = AsyncMock(side_effect=error)
+
+        assert client.post(
+            "/v1/agent_sessions", json=_session_seed(tool_accesses=[_GRANT]).model_dump(mode="json")
+        ).is_success
+        reply = client.post("/v1/responses", json=_INPUT)
+
+        assert reply.status_code == 200, reply.text
+        response = NeMoGymResponse.model_validate(reply.json())
+        assert response.status == "failed"
+        assert response.metadata["stop_reason"] == "error"
+        outcome = json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])
+        assert outcome.get("failure_kind") == failure_kind
+        assert outcome.get("status_code") == status_code
+        assert agent_outcome_policy(response) == action
+
+    def test_model_timeout_in_a_session_is_a_transport_failure(self) -> None:
+        agent, client = _session_client(AsyncMock(), config=_make_config(model_call_timeout=0.01))
+
+        async def slow_post(**kwargs):
+            await asyncio.sleep(1)
+
+        agent.server_client.post = AsyncMock(side_effect=slow_post)
+        assert client.post(
+            "/v1/agent_sessions", json=_session_seed(tool_accesses=[_GRANT]).model_dump(mode="json")
+        ).is_success
+        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
+
+    def test_model_failure_without_a_session_is_still_verified(self) -> None:
+        """A legacy /run verifies whatever the loop returns; only a session reports the cause."""
+        agent, client = _make_agent_and_client()
+        agent.server_client.post = AsyncMock(
+            side_effect=ClientResponseError(MagicMock(), (), status=503, message="Service Unavailable")
+        )
+
+        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+
+        assert response.status != "failed"
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+    def test_tool_abort_in_a_session_is_graded_like_the_legacy_run(self, monkeypatch) -> None:
+        """An aborting tool error ends the loop as upstream does; the answer is graded, not retried."""
+        model_mock = _dotjson_mock(_tool_call_response("web_search", '{"query": "revenue"}'))
+        agent, client = _session_client(model_mock, config=_v2_config())
+        abort = json.dumps({"results": json.dumps({"error": "RetryExhaustedError: Tavily failed after 3 attempts"})})
+        monkeypatch.setattr(
+            "responses_api_agents.finance_agent.app.http_request", AsyncMock(return_value=_tool_reply(abort))
+        )
+
+        assert client.post(
+            "/v1/agent_sessions", json=_session_seed(tool_accesses=[_GRANT]).model_dump(mode="json")
+        ).is_success
+        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+
+        assert response.metadata["stop_reason"] == "error"
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+    def test_session_returns_observations_when_model_calls_are_captured(self, monkeypatch) -> None:
+        model_mock = _dotjson_mock(
+            _tool_call_response("sec_filing_search", '{"ticker": "AAPL"}'),
+            _tool_call_response("submit_final_result", '{"final_result": "42"}', call_id="call_2", resp_id="resp_2"),
+        )
+        agent, client = _session_client(model_mock, observability=True)
+        monkeypatch.setattr(
+            "responses_api_agents.finance_agent.app.http_request",
+            AsyncMock(side_effect=[_tool_reply("not found", status=404), _tool_reply('{"results": "submitted"}')]),
+        )
+
+        assert client.post(
+            "/v1/agent_sessions", json=_session_seed(tool_accesses=[_GRANT]).model_dump(mode="json")
+        ).is_success
+        assert client.post("/ng-rollout/rollout/v1/responses", json=_INPUT).status_code == 200
+
+        # Model calls carry the rollout prefix, so captured calls join the episode.
+        assert {call.kwargs["url_path"] for call in agent.server_client.post.await_args_list} == {
+            "/ng-rollout/rollout/v1/responses"
+        }
+        records = _close(client)["agent_observations"]["records"]
+        invocation = next(record for record in records if record["kind"] == "agent_invocation")
+        assert invocation["status"] == "completed"
+        assert invocation["stop_reason"] == "done_tool"
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["resp_1", "resp_2"]
+        tool_calls = [record for record in records if record["kind"] == "tool_call"]
+        assert [(call["tool_name"], call["status"], call["error_type"]) for call in tool_calls] == [
+            ("sec_filing_search", "failed", "http_404"),
+            ("submit_final_result", "completed", None),
+        ]

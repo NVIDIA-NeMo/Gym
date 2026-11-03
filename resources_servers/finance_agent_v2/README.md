@@ -289,6 +289,12 @@ gym eval run --benchmark finance_agent_v2 \
 Add `--limit 3 --concurrency 3` for a smoke run. `gym eval run` writes the scored
 rollouts plus `<output>_aggregate_metrics.json`.
 
+To run episodes through the `single_agent_turn_legacy` Environment Server instead
+of the `legacy_agent` relay, load `configs/finance_agent_v2_single_agent_turn.yaml`
+(example data) or `benchmarks/finance_agent_v2/config_single_agent_turn.yaml` (the
+benchmark, with `--split benchmark`) through `--config`. See
+[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server).
+
 Each prepared sample carries the upstream prompts and tool JSON schemas, read at
 prepare time from `benchmarks/finance_agent_v2/upstream_spec.json` — a generated
 snapshot, because `finance_agent` is installed in this server's venv only while
