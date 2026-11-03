@@ -116,6 +116,7 @@ from nemo_gym.orchestration.recovery import (
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
     READER_PLACEMENT_FIELDS,
+    RERUN_MASKED_JOURNAL_NAME,
     CollectedEvidence,
     IdentityState,
     OperatorBudget,
@@ -1143,6 +1144,8 @@ def _remote_managed_evidence(
             "checkpoint_enabled",
             # The attempt extension the Store applied (--extend-attempts); an older reader leaves it unset.
             "attempt_extension_applied",
+            # True from a reader whose Store applies the rerun-masked approvals; an older one leaves it unset.
+            "rerun_masked_applied",
         }
         # A pinned reader older than a host-collected field drops it on its own model (the reader's projection then
         # lacks the key); the host collection owns such fields, and these named ones, either way.
@@ -1425,6 +1428,7 @@ class SlurmExecutor(BaseExecutor):
         operator_budget: OperatorBudget | None = None,
         server_spinup_timeout_seconds: int | None = None,
         spinup_timeout_reason: str | None = None,
+        rerun_masked_without_artifact: bool = False,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH.
 
@@ -1432,6 +1436,8 @@ class SlurmExecutor(BaseExecutor):
         ``max_walltime`` is a walltime raise the resubmit will render: the plan checks the chain cap it renders.
         ``server_spinup_timeout_seconds`` (with ``spinup_timeout_reason``) is a spin-up limit raise the resubmit
         will render: the decision names it.
+        ``rerun_masked_without_artifact`` plans the masked results that kept a saved answer but have no gradeable
+        artifact and no grade as retries; the resubmit journals them (see ``resubmit``).
         ``operator_budget`` lets a run whose chain accounting is unknown continue (see ``decide_from_collected``); with
         it, a failed scheduler query is a stop that names it instead of an error.
         """
@@ -1519,6 +1525,7 @@ class SlurmExecutor(BaseExecutor):
                             outcome_policy_source=policy_source,
                             extend_retries=extend_retries,
                             extend_attempts=extend_attempts,
+                            rerun_masked_without_artifact=rerun_masked_without_artifact,
                         ), collected
             try:
                 workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
@@ -1596,6 +1603,7 @@ class SlurmExecutor(BaseExecutor):
             allocation_cut=allocation_cut,
             extend_retries=extend_retries,
             extend_attempts=extend_attempts,
+            rerun_masked_without_artifact=rerun_masked_without_artifact,
             live_job_name=live_job_name,
             operator_budget=operator_budget,
         )
@@ -2157,6 +2165,7 @@ class SlurmExecutor(BaseExecutor):
         spinup_timeout_reason: str | None = None,
         fresh_restart: bool = False,
         segment_walltime: str | None = None,
+        rerun_masked: Mapping[str, Any] | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -2179,6 +2188,10 @@ class SlurmExecutor(BaseExecutor):
         it, and a value below the recorded walltime is refused. The run dir's walltime journal records the raise.
         ``segment_walltime`` (from ``walltime_plan``) is what each Slurm segment requests instead, when the partition's
         MaxTime is below the raise: the raise stays the chain cap.
+        ``rerun_masked`` (with ``keep_budget``) is the operator's approval to run again the masked results that kept a
+        saved answer but have no gradeable artifact and no grade: its ``reason`` and ``identities`` (identity, attempt
+        id and attempts counted) are appended as one line to the run's rerun-masked journal in artifacts/, which the
+        Store reads. The line is written just before sbatch and taken back if the job is not queued.
         A job the scheduler refuses raises ``SchedulerRefusedError`` with sbatch's text and the restored job dir.
         ``unsafe_resume_reason`` (with ``keep_budget``) renders the job with ``allow_unsafe_resume`` the same way, so
         its resume proceeds past a refused run identity check; the run dir's unsafe-resume journal records the reason
@@ -2321,8 +2334,9 @@ class SlurmExecutor(BaseExecutor):
                         "> .gym_chain_incomplete || return; fi; "
                         f"rm -f {_RESUBMIT_LOCK}; }}",
                         "_gym_restore_repin() { :; }; _gym_restore_extension() { :; }; _gym_restore_operator() { :; }; "
-                        "_gym_restore_attempts() { :; }",
-                        "trap '_gym_restore_operator; _gym_restore_extension; _gym_restore_attempts; _gym_restore_repin; "
+                        "_gym_restore_attempts() { :; }; _gym_restore_rerun_masked() { :; }",
+                        "trap '_gym_restore_operator; _gym_restore_extension; _gym_restore_attempts; "
+                        "_gym_restore_rerun_masked; _gym_restore_repin; "
                         "_gym_release_resubmit_lock' EXIT",
                         # --all: without it squeue does not list jobs, ours included, in a hidden partition.
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
@@ -2412,6 +2426,11 @@ class SlurmExecutor(BaseExecutor):
                             if extend_attempts
                             else []
                         ),
+                        *(
+                            self._rerun_masked_commands(rerun_masked, record, benchmark, keep_budget=keep_budget)
+                            if rerun_masked is not None
+                            else []
+                        ),
                         *restart_note,
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
@@ -2469,6 +2488,7 @@ class SlurmExecutor(BaseExecutor):
                             *(["job.sh", RESOLVED_CONFIG_NAME] if repin_commands else []),
                             *(["infra-retry extension"] if extend_retries else []),
                             *(["attempt extension"] if extend_attempts else []),
+                            *(["rerun-masked approval"] if rerun_masked is not None else []),
                             *(["operator continuation counters"] if operator_continuation is not None else []),
                             "resubmit lock released",
                         ],
@@ -2584,6 +2604,42 @@ class SlurmExecutor(BaseExecutor):
             f"else rm -f {name}; fi; }}",
             f"printf '%s\\n' $((10#$_gym_old_attempts + {extend_attempts})) > {name}.tmp && mv -f {name}.tmp {name} "
             "|| fail 'cannot record the attempt extension'",
+        ]
+
+    @staticmethod
+    def _rerun_masked_commands(
+        approval: Mapping[str, Any], record: SubmissionRecord, benchmark: str, *, keep_budget: bool
+    ) -> list[str]:
+        """The locked steps that journal the approval to run masked results again, taken back unless the job is queued.
+
+        The line goes to the rerun-masked journal beside the rollouts file, where the Store reads it when the job starts:
+        its time, user, reason and each approved identity with the attempt it covers and the attempts counted for it.
+        """
+        if not keep_budget:
+            raise RuntimeError(
+                "--rerun-masked-without-artifact needs --recover: the run continues with its spent budgets"
+            )
+        reason = approval.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("--rerun-masked-without-artifact needs a nonempty --rerun-reason")
+        identities = approval.get("identities")
+        if not isinstance(identities, list) or not identities:
+            raise ValueError("--rerun-masked-without-artifact approves at least one identity")
+        entry = {
+            "at": utc_timestamp(utc_now()),
+            "user": getpass.getuser(),
+            "reason": reason.strip(),
+            "gym_job_id": record.gym_job_id,
+            "benchmark": benchmark,
+            "identities": identities,
+        }
+        name = "artifacts/" + RERUN_MASKED_JOURNAL_NAME
+        return [
+            f"_gym_rerun_size=$(stat -c %s {name} 2>/dev/null || echo -1)",
+            '_gym_restore_rerun_masked() { [[ "$_gym_submit_confirmed" == 1 ]] && return; '
+            f'if [[ "$_gym_rerun_size" == -1 ]]; then rm -f {name}; else truncate -s "$_gym_rerun_size" {name}; fi; }}',
+            f"printf '%s\\n' {shlex.quote(json.dumps(entry, sort_keys=True))} >> {name} "
+            "|| fail 'cannot journal the rerun-masked approval'",
         ]
 
     def _rerender_commands(

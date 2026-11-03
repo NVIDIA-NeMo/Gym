@@ -50,9 +50,11 @@ from nemo_gym.rollouts.rollout_recovery import (
     is_terminal_failure,
     keeps_partial_response,
     load_attempt_extension,
+    load_rerun_masked_approvals,
     load_resubmit_offset,
     manifest_path_for,
     masked_infrastructure_kind,
+    masked_kept_answer_kind,
     matches_failure_class,
     observed_elapsed,
 )
@@ -206,6 +208,8 @@ class _Outcome:
     unclassified_execution_failure: bool = False
     # A result masked by an infrastructure failure (``masked_infrastructure_kind``): a failed attempt that is retried.
     masked_infrastructure: bool = False
+    # The masked result an operator approved to run again (``masked_kept_answer_kind``): counted as the line above.
+    rerun_approved: bool = False
 
 
 # A read-only selection parses a row above this size without the values of its skipped keys, in chunks.
@@ -561,6 +565,9 @@ class RolloutRecords:
         self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
         # Attempts an explicit recovery added to every rollout's saved cap (`--extend-attempts`).
         self.attempt_extension = 0
+        # The masked attempts an operator approved to run again (`--rerun-masked-without-artifact`), by (task, rollout,
+        # attempt): each only for the attempt it names.
+        self.rerun_masked: frozenset[tuple[int, int, int]] = frozenset()
 
     @property
     def attempt_cap(self) -> int:
@@ -655,7 +662,14 @@ class RolloutRecords:
             and not is_terminal_failure(row, retry_terminal_timeouts=True)
         ):
             self.overridden_terminal_counts[key[0]] += 1
-        masked_infrastructure = masked_infrastructure_kind(row) is not None
+        # A masked result that kept its answer runs again only when its attempt was approved: then it is retried as
+        # any infrastructure-masked result. The approval never widens the rule; the row must still qualify.
+        rerun_approved = (
+            row.get(TASK_INDEX_KEY_NAME),
+            row.get(ROLLOUT_INDEX_KEY_NAME),
+            key[1],
+        ) in self.rerun_masked and masked_kept_answer_kind(row) is not None
+        masked_infrastructure = masked_infrastructure_kind(row) is not None or rerun_approved
         if masked_infrastructure and key not in self.payloads:
             # The results file keeps no resubmit offset, so a masked attempt counts whenever it was saved: a resubmit
             # still gives the process it starts a fresh budget, as for every failure.
@@ -682,6 +696,7 @@ class RolloutRecords:
             and not infrastructure
             and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
             masked_infrastructure=masked_infrastructure,
+            rerun_approved=rerun_approved,
         )
         outcome = self.payloads[key]
         if (
@@ -721,6 +736,7 @@ class RolloutRecords:
         # recorded order, preserving the old failure-count-based numbering.
         legacy_counts: Counter = Counter()
         state.attempt_extension = load_attempt_extension(output)
+        state.rerun_masked = load_rerun_masked_approvals(output)
         resubmit_offset = load_resubmit_offset(output)
         resubmitted = resubmit_offset_path_for(output).exists()
         for path in (failures_path_for(output), output):
@@ -842,6 +858,16 @@ class RolloutRecords:
             # Infrastructure masked this result, so it is retried and a later attempt supersedes it.
             return True
         return self.disposition(identity) not in {"success", "omitted"} and not terminal
+
+    def rerun_approved_identities(self) -> set[str]:
+        """The logical rollouts whose selected result is a masked one an operator approved to run again."""
+        return {
+            identity
+            for identity, index in self.latest.items()
+            if (payload := self.payloads.get((identity, index))) is not None
+            and payload.rerun_approved
+            and self.disposition(identity) == "success"
+        }
 
     def failure_count(self, identity: str) -> int:
         return self.attempt_counts[identity] + (

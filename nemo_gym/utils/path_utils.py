@@ -29,6 +29,16 @@ def attempt_extension_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_name(output_fpath.stem + "_attempt_extension")
 
 
+# Appended beside the rollouts file by `gym eval resubmit --recover --rerun-masked-without-artifact`: the operator's
+# approval to run again masked results that kept a saved answer but have neither a gradeable artifact nor a grade.
+RERUN_MASKED_JOURNAL_NAME = "rerun-masked-journal.jsonl"
+
+
+def rerun_masked_journal_path_for(output_fpath: Path) -> Path:
+    """Where the rerun-masked approvals are journaled: beside the rollouts file, where the Store reads them."""
+    return output_fpath.with_name(RERUN_MASKED_JOURNAL_NAME)
+
+
 def materialized_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_materialized_inputs.jsonl`."""
     return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
