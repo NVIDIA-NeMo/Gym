@@ -2593,9 +2593,16 @@ def gate_task_summary(
         if states.get(state):
             errors.append(f"{states[state]} {label}: {decision.identities[state.value][:5]}")
     if score is None or not math.isfinite(score):
+        # An incomplete run has no score to read yet, whatever score options were passed: say that, not the options.
+        settled = sum(
+            states.get(state, 0) for state in (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+        )
         errors.append(
             "score unavailable: no requested metric was read (pass --score-key, and --score-agent or "
             "--score-environment for a Gym aggregate)"
+            if decision.complete
+            else f"score unavailable: the run is not complete ({settled}/{decision.expected} rollouts settled); "
+            "the score is read once every rollout is settled"
         )
     if decision.duplicate_results:
         errors.append(f"duplicate result rows: {decision.duplicate_results[:5]}")
