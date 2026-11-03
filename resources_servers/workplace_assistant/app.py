@@ -178,10 +178,11 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
                     raise ResourcesSeedRejectedError(
                         f"task_data is not a workplace_assistant task: {error}"
                     ) from error
-                self._typed_sessions[session_id] = (body.episode_id, body.task_id)
-                # A session a checkpoint restored keeps the tables its tool calls changed.
+                # A session a checkpoint restored keeps the tables its tool calls changed. Build the tables before
+                # binding, so a get_tools failure (a 500 the caller retries) leaves no binding without tables.
                 if session_id not in self.session_id_to_tool_env:
                     self.session_id_to_tool_env[session_id] = get_tools(_TOOLKITS)
+                self._typed_sessions[session_id] = (body.episode_id, body.task_id)
             elif identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         # Only on success: a refused seed must not hand the caller a cookie for a session another episode holds.

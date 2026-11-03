@@ -18,12 +18,14 @@ import json
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, ResourcesSeedSessionRequest, maybe_auto_expose
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
+from resources_servers.workplace_assistant import app
 from resources_servers.workplace_assistant.app import WorkbenchResourcesServer, WorkbenchResourcesServerConfig
 
 
@@ -141,7 +143,7 @@ def test_tool_calls_and_verify_for_a_closed_session_are_lost() -> None:
     assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
 
 
-def test_a_seed_whose_task_data_is_not_a_task_is_refused_for_good() -> None:
+def test_a_seed_whose_task_data_is_not_a_task_is_refused_and_records_nothing() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
 
@@ -149,9 +151,31 @@ def test_a_seed_whose_task_data_is_not_a_task_is_refused_for_good() -> None:
 
     assert response.status_code == 422
     assert "task_data is not a workplace_assistant task" in response.json()["detail"]
-    assert server.session_id_to_tool_env == {}
+    assert server.session_id_to_tool_env == {} and server._typed_sessions == {}
     # The refusal records nothing, so a corrected seed for the same ID succeeds.
     assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert "resources-session" in server.session_id_to_tool_env
+
+
+def test_a_seed_whose_tables_fail_to_build_leaves_no_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    real_get_tools = app.get_tools
+    calls = []
+
+    def get_tools_failing_once(toolkits):
+        calls.append(toolkits)
+        if len(calls) == 1:
+            raise OSError("Too many open files")
+        return real_get_tools(toolkits)
+
+    monkeypatch.setattr(app, "get_tools", get_tools_failing_once)
+
+    assert client.post("/seed_session", json=seed_json()).status_code == 500
+    assert server._typed_sessions == {}
+    # The caller's retry builds the tables, so the session's tool calls reach them.
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert client.post("/email_send_email", json=SEND).status_code == 200
 
 
 def test_an_agents_run_seed_still_gets_a_session_that_verify_releases() -> None:
