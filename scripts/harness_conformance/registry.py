@@ -12,4 +12,5 @@ HARNESSES = {
     "kilocode": "KiloCodeAgent",
     "stirrup": "StirrupAgentWrapper",
     "openclaw": "OpenClawAgent",
+    "crewai": "CrewAIAgent",
 }

@@ -2,8 +2,9 @@
 
 This adapter runs a [CrewAI](https://github.com/crewAIInc/crewAI) crew as a Gym harness, one crew turn per agent
 session. CrewAI is a Python framework, so the crew runs in the Agent Server process. Its model is the Gym Model
-Server, and its tools run where the episode puts them: a shell in the task sandbox that the Resources Server lends
-the session, and the tools of the episode's MCP grants. The adapter never starts or stops a sandbox.
+Server, and its tools run where the episode puts them: a shell in the episode's task sandbox, and the tools of the
+episode's MCP grants. The sandbox is the one the Resources Server lends the session, which the adapter never stops,
+or, when it lends none and `sandbox_provider` is set, one the adapter starts and stops itself.
 
 - Harness: `crewai==1.15.34`, pinned in [`requirements.txt`](requirements.txt).
 - Execution: in process, under an Environment Server such as `single_agent_turn`. There is no `/run` route and no
@@ -56,12 +57,13 @@ crewai_agent:
 
 Put `policy_base_url`, `policy_api_key` and `policy_model_name` in `env.yaml`, and export `OPENSANDBOX_DOMAIN` and
 `OPENSANDBOX_API_KEY`. The crew calls the Model Server from the Agent Server, so the task sandbox never needs to
-reach Gym: `use_absolute_ip` is not required. The benchmark's `allowed_agents` does not list `crewai_agent` yet, so
-start the servers with `--allow-unsupported-pairing`:
+reach Gym: `use_absolute_ip` is not required. The benchmark declares `crewai_agent` in its `allowed_agents`.
+Materialized task rows take no request overrides, so put a per-call output cap on the Model Server
+(`sampling_overrides: {max_tokens: 8192}`) rather than on `gym eval run`:
 
 ```bash
-gym env start --config run.yaml --allow-unsupported-pairing
-NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1 gym eval run --no-serve --config run.yaml \
+gym env start --config run.yaml
+gym eval run --no-serve --config run.yaml \
   --input results/tb21-input.jsonl --output results/crewai-tb21/rollouts.jsonl --concurrency 1
 ```
 
@@ -107,9 +109,9 @@ gym eval run --no-serve --config run.yaml --agent crewai_agent \
 
 | Call | What the adapter does |
 | --- | --- |
-| Seed (`/v1/agent_sessions`) | Lists the tools of each MCP grant, then connects to the borrowed sandbox and uploads the shell's runner to `/tmp/nemo-gym-crewai-sessions/<id>`, outside the task directory. |
+| Seed (`/v1/agent_sessions`) | Lists the tools of each MCP grant, then connects to the lent sandbox, or starts its own with `sandbox_config`, and uploads the shell's runner to `/tmp/nemo-gym-crewai-sessions/<id>`, outside the task directory. |
 | Activation (`/ng-rollout/<capture key>/v1/responses`) | Builds one CrewAI agent and one task from the request and runs `Crew.akickoff()` once. Identical retries join the same run; a different request answers 409. |
-| Close (`/v1/agent_sessions/close`) | Cancels the crew's calls in flight and fails its later ones, cancels the activation, kills shell commands still running, removes the session directory and disconnects. Returns the observations and the turns. |
+| Close (`/v1/agent_sessions/close`) | Cancels the crew's calls in flight and fails its later ones, cancels the activation, kills shell commands still running, removes the session directory, then disconnects from a lent sandbox or stops its own. Returns the observations and the turns. |
 
 CrewAI 1.15 runs its agent loop as a Flow whose steps call the model and the tools synchronously from worker threads
 of the event loop's default executor, even under `akickoff()`. Each of those calls is handed back to the event loop,
@@ -133,13 +135,13 @@ the adapter imports CrewAI.
 
 | Tool | Source | Behavior |
 | --- | --- | --- |
-| `shell` | `SandboxAccess` | Each call runs a fresh `bash` in the task directory with the owner's `SandboxAccess.env`, so `cd` and variables do not carry over. The command runs in a process group of its own and is killed with it after `shell_timeout_seconds`. Its combined stdout and stderr go to a file, so a background process it leaves cannot hold the exec open; background processes survive the command as task services. The model sees the output (head and tail beyond `shell_max_output_bytes`) and the exit code. |
+| `shell` | `SandboxAccess`, or the agent's own sandbox | Each call runs a fresh `bash` in the task directory with the owner's `SandboxAccess.env`, so `cd` and variables do not carry over. The command runs in a process group of its own and is killed with it after `shell_timeout_seconds`. Its combined stdout and stderr go to a file, so a background process it leaves cannot hold the exec open; background processes survive the command as task services. The model sees the output (head and tail beyond `shell_max_output_bytes`) and the exit code. |
 | Each tool of an `mcp` grant | `tool_accesses` | Listed at seed with the grant's URL and headers; each call opens a fresh MCP session over Gym's aiohttp client, as CrewAI's own MCP tools open a fresh client per call. Tools keep their own names, which verifiers compare, rather than CrewAI's server-prefixed names. A server error result reaches the model as a CrewAI `ToolFailure`. |
 
 The task image needs `bash`, `head`, `tail`, `wc` and `sleep`; nothing is installed in the sandbox.
 
 Seeds the adapter cannot serve answer 422: a required grant other than `mcp`, a sandbox connection other than
-`direct`, a relative `workdir`, a `SandboxAccess.user` override, and tool names that collide (with `shell` or with
+`direct`, a relative `workdir` (lent or in `sandbox_config`), a `SandboxAccess.user` override, and tool names that collide (with `shell` or with
 each other) after CrewAI sanitizes them. A required MCP grant that does not list its tools fails the seed with 500,
 which the Environment Server retries; an optional one is skipped with an `mcp_server_skipped` gap.
 
@@ -191,12 +193,13 @@ before any activation returns an `observation_capture_failed` gap; a close that 
 | `shell_max_output_bytes` | 30000 | Command output shown to the model. |
 | `mcp_timeout_seconds` | 300 | Deadline for one MCP listing or call. |
 | `concurrency` | 16 | Crews running at once. Each model or tool call in flight holds a default-executor thread. |
+| `sandbox_provider` | `null` | Provider block for the agent's own sandbox, used only when the Environment Server lends none. |
+| `sandbox_config` | `{}` | `SandboxSpec` fields for that sandbox; `workdir` defaults to `/app`, `ttl_s` to `timeout` plus 600. |
 | `session_close_timeout_seconds` | 60 | Budget for each close step. |
 
 ## Limitations
 
-- No agent-owned sandbox: a seed without `SandboxAccess` runs with grant tools only. The harness conformance probes
-  give the agent its own local sandbox, so they cannot drive this adapter yet.
+- A seed without `SandboxAccess` or `sandbox_provider` runs with grant tools only.
 - No host path or `/run` route.
 - `SandboxAccess.user` is refused: the shell's session files are written as the sandbox's default user.
 - Direct HTTP tool grants are not consumed; a required one is refused and an optional one is skipped.

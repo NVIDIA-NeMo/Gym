@@ -3,7 +3,8 @@
 Terminal-Bench 2.1 evaluates agents on tasks in isolated containers. The benchmark
 prepares task data and owns sandbox setup, verification, and cleanup. Pi, Codex,
 OpenCode, and OpenClaw can run their model/tool loops in the task sandbox through
-Gym's Environment Server.
+Gym's Environment Server. CrewAI runs its crew in the Agent Server and its shell
+commands in the task sandbox.
 
 - Integration profile: `custom-gym-verifier`
 - Scorer: `terminal_bench_2_1`
@@ -82,8 +83,9 @@ the harness for this taskset.
 | [Codex](../../responses_api_agents/codex_agent/README.md) | `responses_api_agents/codex_agent/configs/codex_agent.yaml` | `codex_agent` | `model_context_window: 32768`, `model_auto_compact_token_limit: 28672`, `timeout: 600` |
 | [OpenCode](../../responses_api_agents/opencode_agent/README.md) | `responses_api_agents/opencode_agent/configs/opencode_agent.yaml` | `opencode_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 | [OpenClaw](../../responses_api_agents/openclaw_agent/README.md) | `responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml` | `openclaw_agent` | `context_window: 32768`, `model_timeout_seconds: 600`, `timeout: 600` |
+| [CrewAI](../../responses_api_agents/crewai_agent/README.md) | `responses_api_agents/crewai_agent/configs/crewai_agent.yaml` | `crewai_agent` | `context_window_size: 131072`, `shell_timeout_seconds: 300`, `timeout: 900` |
 
-All four pairings are allowed by this benchmark. These are single-task smoke
+All five pairings are allowed by this benchmark. These are single-task smoke
 settings; adjust context windows and budgets for your model and evaluation.
 See each harness's README for runtime prerequisites and model requirements.
 
@@ -114,7 +116,8 @@ Codex/OpenClaw sandbox sessions reject request-level `max_output_tokens`.
 
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in your private
 `env.yaml`. The task container must reach the Gym Model Server; for Docker on a
-reachable host, use `++use_absolute_ip=true` as below.
+reachable host, use `++use_absolute_ip=true` as below. CrewAI calls the Model
+Server from the Agent Server, so its task containers need not reach it.
 
 ## Run a smoke task
 

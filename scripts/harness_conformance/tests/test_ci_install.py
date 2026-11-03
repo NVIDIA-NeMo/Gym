@@ -36,3 +36,18 @@ def test_openclaw_install_leaves_runtime_to_session(monkeypatch):
 
     monkeypatch.setattr(importlib, "import_module", unexpected_setup)
     install_runtime("openclaw")
+
+
+def test_crewai_install_is_its_requirements(monkeypatch):
+    import importlib
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
+
+    def unexpected_setup(name):
+        raise AssertionError(f"CrewAI has no runtime setup module: {name}")
+
+    monkeypatch.setattr(importlib, "import_module", unexpected_setup)
+    install_runtime("crewai")
+
+    assert len(calls) == 1

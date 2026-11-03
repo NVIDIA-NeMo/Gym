@@ -3,15 +3,16 @@
 """CrewAI harness adapter: one crew turn per agent session, run in the Agent Server.
 
 The crew's model is the Gym Model Server, reached through the activation's rollout-prefixed Chat Completions route.
-Its tools are a shell that runs in the task sandbox the Resources Server lends the session, and the tools of the
-episode's MCP grants. The adapter never starts or stops a sandbox.
+Its tools are a shell that runs in the episode's task sandbox, and the tools of the episode's MCP grants. The sandbox
+is the one the Resources Server lends the session, or, when it lends none and ``sandbox_provider`` is set, one the
+agent starts and stops itself. A lent sandbox is never stopped.
 """
 
 import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from time import monotonic, perf_counter, time
 from typing import Any
@@ -36,6 +37,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
 )
+from nemo_gym.agents.utils import lifecycle_observation
 from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
@@ -54,13 +56,21 @@ from nemo_gym.core import (
     NeMoGymSummary,
     TaskId,
 )
-from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.server_runtime import BaseRunRequest, MCPToolAccess, is_retryable_dependency_status
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
+    SandboxObservation,
     TrajectoryRecord,
     TrajectoryToolCall,
     TrajectoryTurn,
@@ -148,6 +158,20 @@ class CrewAIAgentConfig(BaseResponsesAPIAgentConfig):
         default=30000, gt=0, description="Output of one command shown to the model; its head and tail are kept."
     )
     mcp_timeout_seconds: float = Field(default=300, gt=0, description="Deadline for one MCP listing or tool call.")
+    sandbox_provider: str | None = Field(
+        default=None,
+        description=(
+            "Top-level sandbox provider block for a sandbox the agent starts itself, used only when the Environment "
+            "Server lends none. Without it, such a session runs with grant tools only."
+        ),
+    )
+    sandbox_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "SandboxSpec fields for the agent's own sandbox. workdir defaults to /app, and ttl_s to timeout plus ten "
+            "minutes so the provider reclaims a sandbox the agent never stopped."
+        ),
+    )
 
 
 @dataclass
@@ -417,6 +441,8 @@ class _Episode:
 class CrewAISessionState(AgentSessionState):
     shell: SandboxShell | None
     grants: list[_GrantServer]
+    # Whether the agent started the shell's sandbox, and so stops it at close.
+    owns_sandbox: bool = False
     gaps: list[ObservationGap] = field(default_factory=list)
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
@@ -468,7 +494,7 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(
                 f"CrewAI consumes only MCP tool grants; required grants it cannot use: {', '.join(unusable)}"
             )
-        connection = None
+        connection = spec = None
         if body.sandbox_access is not None:
             connection = body.sandbox_access.connection
             if not isinstance(connection, DirectSandboxConnection):
@@ -478,6 +504,10 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             if body.sandbox_access.user is not None:
                 # The shell's session files are written as the sandbox's default user.
                 raise AgentSeedRejectedError("CrewAI does not support a SandboxAccess user override")
+        elif self.config.sandbox_provider is not None:
+            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            if not PurePosixPath(spec.workdir or "").is_absolute():
+                raise AgentSeedRejectedError("CrewAI needs an absolute sandbox_config.workdir")
 
         gaps: list[ObservationGap] = []
         grants = []
@@ -498,13 +528,16 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 continue
             grants.append(_GrantServer(access=access, tools=tools))
         # Grant tools keep their own names, which verifiers compare, rather than CrewAI's server-prefixed MCP names.
-        names = [SHELL_TOOL_NAME] if connection is not None else []
+        names = [SHELL_TOOL_NAME] if connection is not None or spec is not None else []
         names += [tool_name(tool.name) for grant in grants for tool in grant.tools]
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
             raise AgentSeedRejectedError(f"CrewAI tool names collide after sanitizing: {', '.join(duplicates)}")
 
         state = CrewAISessionState(request=body, shell=None, grants=grants, gaps=gaps)
+        if spec is not None:
+            await self._start_sandbox(state, spec)
+            return state
         if connection is None:
             return state
         provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
@@ -531,6 +564,40 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
+    async def _start_sandbox(self, state: CrewAISessionState, spec: SandboxSpec) -> None:
+        """Start the agent's own sandbox for a session the Environment Server lent none."""
+        global_config = get_global_config_dict()
+        provider_ref = self.config.sandbox_provider
+        provider = create_provider(resolve_provider_config(provider_ref, global_config))
+        spec = replace(
+            spec,
+            # The provider reclaims a sandbox this process never stopped.
+            ttl_s=self.config.sandbox_config.get("ttl_s", self.config.timeout + 600),
+            metadata=resolve_provider_metadata(provider_ref, global_config)
+            | dict(spec.metadata)
+            | {"nemo_gym_agent": self.config.name, "agent_session": state.request.agent_session_id[:63]},
+        )
+        sandbox = AsyncSandbox(provider)
+        state.shell = SandboxShell(
+            sandbox,
+            workdir=spec.workdir,
+            env={},
+            timeout_seconds=self.config.shell_timeout_seconds,
+            max_output_bytes=self.config.shell_max_output_bytes,
+        )
+        state.owns_sandbox = True
+        try:
+            # A setup that fails stops the sandbox.
+            await sandbox.start_with_setup(spec, lambda _: state.shell.setup())
+        except BaseException as error:
+            try:
+                # Releases the provider's client when the create itself failed.
+                await asyncio.wait_for(sandbox.stop(), self.config.session_close_timeout_seconds)
+            except BaseException:
+                raise AgentSessionSetupError(state, error=error) from error
+            state.shell = None
+            raise
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, CrewAISessionState):
             raise TypeError("Expected a CrewAI session state")
@@ -542,8 +609,9 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             await asyncio.wait({state.task}, timeout=self.config.session_close_timeout_seconds)
             if not state.task.done():
                 raise RuntimeError("The CrewAI run did not stop; close again to retry")
+        sandbox_record = None
         if state.shell is not None:
-            await self._release_sandbox(state)
+            sandbox_record = await self._release_sandbox(state)
         if state.observations is None:
             if state.episode is not None:
                 # Close cut the activation short: keep what the crew did until then.
@@ -551,6 +619,8 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                     ObservationGap(code="agent_activation_interrupted", invocation_id=state.episode.invocation_id)
                 )
             self._record_observations(state, status="incomplete")
+        if sandbox_record is not None:
+            state.observations.records.append(SandboxObservation.model_validate(sandbox_record))
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations,
@@ -558,15 +628,27 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             cleanup_confirmed=True,
         )
 
-    async def _release_sandbox(self, state: CrewAISessionState) -> None:
-        """Kill shell commands still running, remove the session's files and disconnect; the owner keeps the sandbox."""
+    async def _release_sandbox(self, state: CrewAISessionState) -> dict[str, Any] | None:
+        """Kill shell commands still running and remove the session's files, then stop the agent's own sandbox or
+        disconnect from a lent one. Returns the agent's observation of the sandbox."""
         shell = state.shell
-        await asyncio.wait_for(
-            shell.release(timeout_seconds=self.config.session_close_timeout_seconds),
-            self.config.session_close_timeout_seconds,
-        )
-        await asyncio.wait_for(shell.sandbox.disconnect(), self.config.session_close_timeout_seconds)
+        timeout = self.config.session_close_timeout_seconds
+        try:
+            await asyncio.wait_for(shell.release(timeout_seconds=timeout), timeout)
+        except Exception:
+            if not state.owns_sandbox:
+                raise
+            # Stopping the agent's own sandbox ends its commands too.
+            LOG.warning("Could not release the shell session; stopping the sandbox instead", exc_info=True)
+        if state.owns_sandbox:
+            await asyncio.wait_for(shell.sandbox.stop(), timeout)
+            record = lifecycle_observation(shell.sandbox, role="agent")
+        else:
+            # Before disconnecting, while the connection still names the provider.
+            record = lifecycle_observation(shell.sandbox, role="agent")
+            await asyncio.wait_for(shell.sandbox.disconnect(), timeout)
         state.shell = None
+        return record
 
     def _instruction(self, state: CrewAISessionState, body: NeMoGymResponseCreateParamsNonStreaming) -> _Instruction:
         """Read the activation's request, refusing what a crew run cannot apply."""
