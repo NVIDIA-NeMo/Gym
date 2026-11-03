@@ -13,6 +13,11 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
+from nemo_gym.config.global_config import (
+    ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+)
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
 from nemo_gym.environment.scaffold import (
     ScaffoldConflictError,
@@ -21,13 +26,8 @@ from nemo_gym.environment.scaffold import (
     scaffold_resources_server,
 )
 from nemo_gym.environment.validation import validate_environment
-from nemo_gym.global_config import (
-    ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-)
 from nemo_gym.rollout_collection import _environment_servers_by_agent
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
 
 
 @pytest.mark.parametrize("kind", list(EnvironmentKind))
@@ -58,6 +58,8 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     resources_source = tmp_path.joinpath("resources_servers/sample/app.py").read_text(encoding="utf-8")
     # Generated servers rely on the `ray_enabled = False` default instead of declaring it.
     assert "ray_enabled" not in resources_source
+    # Generated servers keep no state across requests, so they end with the module-level `app` several workers serve.
+    assert "app = SampleResourcesServer.run_webserver()" in resources_source
 
     benchmark_files = [asset / "prepare.py", asset / "prompt.yaml", asset / "data/source.jsonl"]
     assert all(path.is_file() for path in benchmark_files) is (kind == EnvironmentKind.BENCHMARK)
@@ -73,6 +75,7 @@ def test_scaffolds_and_validates_every_kind_and_profile(
         assert all(f"async def {extension}(" in agent_source for extension in extensions)
         assert all(f"super().{extension}(" in agent_source for extension in extensions)
         assert "ray_enabled" not in agent_source
+        assert "app = SampleAgent.run_webserver()" in agent_source
     assert (asset / "rollout_driver.py").is_file() is (profile == IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER)
 
 
@@ -293,7 +296,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 
 
 class Request(BaseModel):

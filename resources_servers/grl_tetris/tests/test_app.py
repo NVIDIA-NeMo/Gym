@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.grl_tetris.app import (
     GrlTetrisResourcesServer,
     GrlTetrisResourcesServerConfig,

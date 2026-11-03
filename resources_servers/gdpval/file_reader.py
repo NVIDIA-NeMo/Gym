@@ -31,7 +31,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from nemo_gym.deliverables import IGNORE_FILES as IGNORE_FILES
 from nemo_gym.deliverables import is_deliverable as is_deliverable
@@ -45,6 +45,7 @@ from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS
 from resources_servers.gdpval.preconvert import (
     AttachmentBudget,
     extract_xlsx_structured_text,
+    libreoffice_pdf_argv,
     resolve_pdf_provenance,
     roundtrip_ooxml_copy,
 )
@@ -478,8 +479,15 @@ def _warn_libreoffice_unavailable(exc: OSError) -> None:
     )
 
 
-def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | None:
+def _convert_office_to_pdf(
+    fpath: Path,
+    out_dir: Path | None = None,
+    *,
+    libreoffice_command: Sequence[str] | None = None,
+) -> Path | None:
     """Convert a .docx/.xlsx/.pptx file to PDF using LibreOffice headless.
+
+    *libreoffice_command* replaces the host ``libreoffice`` executable.
 
     With *out_dir* the PDF is written there instead of beside *fpath*, so a
     judging pass never writes into the directory it is reading. The in-place
@@ -515,26 +523,14 @@ def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | N
         def _invoke(source: Path, output: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
             profile = Path(tempfile.mkdtemp(prefix="lo-profile-"))
             profile_dirs.append(profile)
-            command = [
-                "libreoffice",
-                "--headless",
-                "--nologo",
-                "--nolockcheck",
-                "--nodefault",
-                "--norestore",
-                f"-env:UserInstallation=file://{profile.as_posix()}",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(output),
-                str(source),
-            ]
+            command = libreoffice_pdf_argv(source, output, profile, libreoffice_command)
             completed = subprocess.run(
                 command,
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 timeout=120,
             )
             return completed, output / (source.stem + ".pdf")
@@ -556,13 +552,13 @@ def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | N
                 if retry_pdf.exists():
                     shutil.move(str(retry_pdf), str(out_pdf))
                     return out_pdf
-                retry_detail = f"; round-trip retry rc={retry_result.returncode}: {retry_result.stderr[:200]}"
+                retry_detail = f"; round-trip retry rc={retry_result.returncode}: {retry_result.stderr.strip()[-200:]}"
             except Exception as exc:
                 retry_detail = f"; round-trip retry failed: {exc!r}"
 
         print(
             f"[file_reader] LibreOffice conversion failed for {fpath.name} "
-            f"(rc={first_result.returncode}): {first_result.stderr[:200]}{retry_detail}",
+            f"(rc={first_result.returncode}): {first_result.stderr.strip()[-200:]}{retry_detail}",
             flush=True,
         )
         return None
@@ -737,6 +733,7 @@ def convert_deliverables_to_content_blocks(
     include_text: bool = True,
     audio_capable: bool = False,
     video_capable: bool = False,
+    libreoffice_command: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert deliverable files to OpenAI-compatible content blocks for multimodal judging.
 
@@ -748,6 +745,7 @@ def convert_deliverables_to_content_blocks(
 
     Office documents (.docx/.xlsx/.pptx) are first converted to PDF via
     LibreOffice headless so the judge sees rendered formatting/tables/charts.
+    *libreoffice_command* replaces the host ``libreoffice`` executable for that.
 
     *media_mode* selects how PDFs/Office docs are presented: ``"native_pdf"``
     (default) sends them as ``application/pdf`` data URLs for frontier judges;
@@ -899,7 +897,7 @@ def convert_deliverables_to_content_blocks(
                 if pdf_path is None:
                     scratch = Path(tempfile.mkdtemp(prefix="gdpval-render-"))
                     scratch_dirs.append(scratch)
-                    pdf_path = _convert_office_to_pdf(fpath, out_dir=scratch)
+                    pdf_path = _convert_office_to_pdf(fpath, out_dir=scratch, libreoffice_command=libreoffice_command)
                 if pdf_path and pdf_path.exists():
                     header_kind = "rendered from PDF" if images_and_text else "converted to PDF"
                     blocks.extend(_pdf_blocks(pdf_path, f"\n{fpath.name} ({header_kind}):"))

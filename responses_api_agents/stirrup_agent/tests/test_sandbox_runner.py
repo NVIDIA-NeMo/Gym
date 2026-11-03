@@ -232,6 +232,7 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
 
     assert output["stop_reason"] == "model_error"
     assert str(status) in output["model_error"]
+    assert output["model_error_status"] == status
     observations = output["observations"]
     assert observations["status"] == "failed"
     assert observations["model_response_ids"] == ["chatcmpl-1"]

@@ -30,22 +30,29 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+    sandbox_server_url,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    failure_kinds,
 )
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    SandboxBackendUnreachableError,
+    SandboxCreateError,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 
 
 LOG = logging.getLogger(__name__)
@@ -86,6 +93,61 @@ _WORKDIR_KEYS = {
     "opencode": "repo_dir",
     "terminus_2": "workspace_root",
 }
+
+
+# Markers in a provider failure's own message that name an OOM kill (OpenSandbox's 410 status and its typed backend loss).
+_OOM_MARKERS = ("exited with code 137", "OOMKilled", "Sandbox was OOM-killed")
+
+
+def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
+    """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
+
+    Only a failure the provider reports counts: the OpenSandbox SDK's exceptions (e.g. ``SANDBOX::ENDED`` when the
+    container was OOM-killed or evicted), Gym's ``SandboxCreateError`` and ``SandboxBackendUnreachableError``, and a
+    timeout or dropped connection while the episode runs (to the sandbox or to the resources server). Runner output
+    never decides it, and a runner that exits on a signal stays a runner failure: the agent's own commands can send it.
+    Messages naming an OOM kill are reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
+    """
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    infra = (
+        "SandboxApiException" in names
+        or type(exc).__module__.startswith("opensandbox.")
+        or isinstance(exc, (SandboxCreateError, SandboxBackendUnreachableError, TimeoutError, ConnectionError))
+    )
+    if not infra:
+        return None
+    if any(marker in str(exc) for marker in _OOM_MARKERS):
+        return failure_kinds.PROVIDER_OOM_KILLED
+    return failure_kinds.PROVIDER_UNAVAILABLE
+
+
+def _empty_response(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="harness-agent-sandbox-failure",
+        created_at=0,
+        model=params.model or "unknown",
+        object="response",
+        output=[],
+        parallel_tool_calls=params.parallel_tool_calls,
+        tool_choice=params.tool_choice,
+        tools=[],
+    )
+
+
+def _masked_result(
+    body: "HarnessAgentRunRequest", failure_kind: str | None, reason: str | None
+) -> "HarnessAgentVerifyResponse":
+    return HarnessAgentVerifyResponse.model_validate(
+        body.model_dump()
+        | {
+            "response": _empty_response(body.responses_create_params).model_dump(mode="json"),
+            "reward": 0.0,
+            "mask_sample": True,
+            "evaluation_completed": False,
+            "failure_kind": failure_kind,
+            "failure_reason": (reason or "")[:4000],
+        }
+    )
 
 
 def resolve_agent(name: str) -> tuple[str, str, str]:
@@ -144,6 +206,9 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     setup_commands: list[str] = Field(default_factory=list)
     sandbox_python: str = "python3"
     gym_source: str = "auto"
+    # When the resources server serves its tools over MCP, hand them to the in-box agent. The box reaches the
+    # server at its configured host, so Gym must bind a host the sandbox can reach (use_absolute_ip).
+    forward_mcp_tools: bool = False
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
@@ -200,7 +265,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "--exclude=*.pyc",
                 "--exclude=.*",
                 "--exclude=node_modules",
-                "--exclude=data",
+                # The agent's own datasets; nemo_gym/data is library code and ships.
+                f"--exclude={agent_pkg}/data",
                 "--exclude=tests",
                 "--exclude=outputs",
                 "--exclude=workspaces",
@@ -238,7 +304,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             base_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
             base = base_url
         prefix = _RUN_CONTEXT.get().get("url_prefix") or self.url_path_for_request("", request)
-        return f"{base.rstrip('/')}{prefix}"
+        # The harness inside the sandbox sends no traceparent; the URL names this run's span instead.
+        return f"{base.rstrip('/')}{prefix}{trace_context_path_segment()}"
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
@@ -283,6 +350,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             }
             token = _RUN_CONTEXT.set(run_context)
             try:
+                if self.config.forward_mcp_tools:
+                    run_context["mcp"] = self._mcp_server_entry(seed)
                 agent_resp = await self.responses(request, body.responses_create_params)
                 agent_resp_json = agent_resp.model_dump(mode="json")
                 verify_resp = await self.server_client.post(
@@ -301,11 +370,36 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     ):
                         verify_json["reward"] = 0.0
                 return HarnessAgentVerifyResponse.model_validate(verify_json)
+            except Exception as exc:
+                await self._close_run_sandbox(run_context)
+                failure_kind = sandbox_infra_failure_kind(exc)
+                if failure_kind is None:
+                    raise
+                # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
+                LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
+                return _masked_result(body, failure_kind, f"{type(exc).__name__}: {exc}")
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
             finally:
                 _RUN_CONTEXT.reset(token)
+
+    def _mcp_server_entry(self, seed: dict) -> dict[str, Any]:
+        """This rollout's MCP server for the in-box agent, from the /seed_session response."""
+        metadata = seed.get(NEMO_GYM_MCP_METADATA_KEY)
+        if not isinstance(metadata, dict) or not metadata.get("headers"):
+            raise ValueError(
+                f"forward_mcp_tools needs {self.config.resources_server.name} to serve its tools over MCP"
+            )
+        url = sandbox_server_url(self.config.resources_server.name, require_reachable=True)
+        name = str(metadata.get("server_name") or self.config.resources_server.name)
+        return {
+            name: {
+                "type": metadata.get("transport") or "http",
+                "url": f"{url}/{str(metadata.get('url_path') or '/mcp').lstrip('/')}",
+                "headers": {str(k): str(v) for k, v in metadata["headers"].items()},
+            }
+        }
 
     async def _grade_in_box(self, handle, grade_spec: dict) -> float:
         return await stage_and_run_eval(
@@ -425,15 +519,24 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         if workdir:
             runner_config["cwd"] = workdir
             if workdir_key := _WORKDIR_KEYS.get(self.config.agent):
-                agent_config[workdir_key] = workdir
+                # An explicit agent_kwargs value wins, e.g. a DeepAgents filesystem root of "/".
+                agent_config.setdefault(workdir_key, workdir)
         model_url = self._sandbox_model_url(request)
         files = {
             "/work/model_url.txt": model_url,
             "/work/request.json": agent_body.model_dump_json(),
-            "/work/agent_config.json": json.dumps(agent_config),
-            "/work/runner_config.json": json.dumps(runner_config),
             "/work/runner.py": runner_script,
         }
+        if mcp := _RUN_CONTEXT.get().get("mcp"):
+            # Only Claude Code takes an MCP config file. The session token in it is per rollout.
+            if self.config.agent != "claude_code":
+                raise ValueError(f"forward_mcp_tools supports agent claude_code, not {self.config.agent}")
+            if agent_config.get("mcp_config"):
+                raise ValueError("forward_mcp_tools would replace agent_kwargs.mcp_config; set only one of them")
+            files["/work/mcp.json"] = json.dumps({"mcpServers": mcp})
+            agent_config["mcp_config"] = "__WORK_DIR__/mcp.json"
+        files["/work/agent_config.json"] = json.dumps(agent_config)
+        files["/work/runner_config.json"] = json.dumps(runner_config)
         handle = await self._provision_box(image, files, model_url)
         try:
             work_dir = self._box_path(handle, "/work")
@@ -443,7 +546,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 if workdir:
                     runner_config["cwd"] = workdir
                     if workdir_key := _WORKDIR_KEYS.get(self.config.agent):
-                        agent_config[workdir_key] = workdir
+                        agent_config.setdefault(workdir_key, workdir)
                     await self._upload_files(
                         handle,
                         {

@@ -14,7 +14,7 @@ import pytest
 
 class TestValidationSummary:
     def test_summarizes_rollouts(self, tmp_path):
-        from nemo_gym.tasks.harbor.validation_report import summarize_validation
+        from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 
         # Rows are the verify response as returned plus the collector's `_ng_task_id` stamp.
         rows = [
@@ -62,17 +62,17 @@ class TestValidationSummary:
         report = summarize_validation(rollouts, ["never_ran"])
 
         lines = report.text.splitlines()
-        assert lines[0] == "task_id\tstatus\treward"
-        assert "solved\toracle solved\t1.0" in lines
-        assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
-        assert "skipped\tunvalidated (no solution/)\t-" in lines
-        assert "broken\tfailed: seed exploded\t-" in lines
-        assert "masked\tmasked (provider_unavailable)\t-" in lines
-        assert "never_ran\tunvalidated (no solution/)\t-" in lines
+        assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
+        assert "solved\toracle solved\t1.0\t-\t-" in lines
+        assert "wrong\toracle solved (harbor:missing_reward)\t0.0\t-\t-" in lines
+        assert "skipped\tunvalidated (no solution/)\t-\t-\t-" in lines
+        assert "broken\tfailed: seed exploded\t-\t-\t-" in lines
+        assert "masked\tmasked (provider_unavailable)\t-\t-\t-" in lines
+        assert "never_ran\tunvalidated (no solution/)\t-\t-\t-" in lines
         assert report.ok is False
 
     def test_all_good_is_ok(self, tmp_path):
-        from nemo_gym.tasks.harbor.validation_report import summarize_validation
+        from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 
         rollouts = tmp_path / "rollouts.jsonl"
         row = {
@@ -87,7 +87,7 @@ class TestValidationSummary:
     @pytest.mark.parametrize("row", [{}, {"response": {}}, {"response": {"metadata": {}}}])
     def test_a_result_without_an_oracle_status_never_passes(self, tmp_path, row):
         """A rollouts file a model run wrote holds reward-1.0 rows with no oracle status; none validates a task."""
-        from nemo_gym.tasks.harbor.validation_report import summarize_validation
+        from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 
         rollouts = tmp_path / "rollouts.jsonl"
         rollouts.write_text(
@@ -97,7 +97,7 @@ class TestValidationSummary:
         assert report.ok is False and "a\toracle missing (not an oracle result)\t1.0" in report.text
 
     def test_an_unknown_oracle_status_never_passes(self, tmp_path):
-        from nemo_gym.tasks.harbor.validation_report import summarize_validation
+        from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 
         rollouts = tmp_path / "rollouts.jsonl"
         row = {
@@ -110,14 +110,14 @@ class TestValidationSummary:
         assert report.ok is False and "a\toracle status 'weird' (not an oracle result)\t1.0" in report.text
 
     def test_missing_rollouts_file(self, tmp_path):
-        from nemo_gym.tasks.harbor.validation_report import summarize_validation
+        from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 
         report = summarize_validation(tmp_path / "none.jsonl", [])
         assert report.ok is False and "no rollouts written" in report.text
 
     def test_an_empty_selection_never_passes(self, tmp_path):
         """No selected task had a solution: nothing ran, and `gym dataset validate X && publish` must stop."""
-        from nemo_gym.tasks.harbor.validation_report import summarize_validation
+        from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 
         report = summarize_validation(tmp_path / "rollouts.jsonl", ["a", "b"], expected=[])
         assert report.ok is False
@@ -133,7 +133,7 @@ class TestValidationRows:
         return {"_ng_task_id": {"taskset": "ds", "task_id": task_id}, "reward": 1.0}
 
     def test_an_interrupted_final_append_is_skipped(self, tmp_path):
-        from nemo_gym.tasks.harbor.validation_report import _validation_rows
+        from nemo_gym.data.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"
         path.write_text(json.dumps(self.record("a")) + "\n" + json.dumps(self.record("b"))[:-7])
@@ -141,7 +141,7 @@ class TestValidationRows:
 
     def test_a_cut_inside_a_multibyte_character_is_skipped(self, tmp_path):
         """A kill can land one byte into a UTF-8 sequence: the tail neither decodes nor parses, and is skipped."""
-        from nemo_gym.tasks.harbor.validation_report import _validation_rows
+        from nemo_gym.data.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"
         second = json.dumps({**self.record("b"), "output": "日本語"}, ensure_ascii=False).encode()
@@ -150,8 +150,8 @@ class TestValidationRows:
         assert _validation_rows(path) == [self.record("a")]
 
     def test_bytes_that_are_not_utf8_inside_the_file_are_reported_by_line(self, tmp_path):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.tasks.harbor.validation_report import _validation_rows
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.data.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"
         path.write_bytes(json.dumps(self.record("a")).encode() + b"\n" + "日".encode()[:1] + b"\n")
@@ -159,15 +159,15 @@ class TestValidationRows:
             _validation_rows(path)
 
     def test_a_complete_final_record_without_a_newline_is_read(self, tmp_path):
-        from nemo_gym.tasks.harbor.validation_report import _validation_rows
+        from nemo_gym.data.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"
         path.write_text(json.dumps(self.record("a")) + "\n" + json.dumps(self.record("b")))
         assert _validation_rows(path) == [self.record("a"), self.record("b")]
 
     def test_a_damaged_interior_record_is_reported_by_line(self, tmp_path):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.tasks.harbor.validation_report import _validation_rows
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.data.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"
         path.write_text(json.dumps(self.record("a")) + '\n{"half\n' + json.dumps(self.record("b")) + "\n")
@@ -175,6 +175,6 @@ class TestValidationRows:
             _validation_rows(path)
 
     def test_a_missing_file_has_no_rows(self, tmp_path):
-        from nemo_gym.tasks.harbor.validation_report import _validation_rows
+        from nemo_gym.data.tasks.harbor.validation_report import _validation_rows
 
         assert _validation_rows(tmp_path / "none.jsonl") == []

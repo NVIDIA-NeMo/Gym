@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -49,7 +50,14 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set,
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
+from nemo_gym.client import SESSION_ID_KEY, get_server_url
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
+from nemo_gym.deliverables import is_deliverable
+from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -65,14 +73,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.deliverables import is_deliverable
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -307,6 +307,16 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # read tables/charts. Costs ~5-30s per Office file.
     preconvert_office_to_pdf: bool = True
     preconvert_max_concurrent: int = 4
+    # Command that runs LibreOffice for every Office->PDF conversion (comparison
+    # preconvert and rubric rendering), e.g. a container prefix
+    # [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/libreoffice.sif, libreoffice]
+    # or a wrapper script. It must see persist_deliverables_dir, the reference
+    # deliverables, the temp directory and any other deliverables directory that
+    # /verify gets at the same absolute paths. When set, startup checks it with
+    # --version and probe conversions in the temp directory, persist_deliverables_dir
+    # and the writable reference directories, and fails if the check fails; the host
+    # javaldx check and apt install are skipped. None uses `libreoffice` on PATH.
+    libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
 
     # How deliverable/reference files are presented to the judge:
     # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
@@ -630,7 +640,36 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ValueError(
                     "reward_mode=comparison requires reference_deliverables_dir or reference_models to be set"
                 )
-        if self.config.preconvert_office_to_pdf:
+        if self.config.libreoffice_command is not None:
+            from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
+
+            # Also probe where /verify persists the deliverables it converts: a command that cannot see that
+            # directory fails the first conversion attempt of every Office file.
+            persist_dir = self.config.persist_deliverables_dir
+            probe_dirs = [Path(persist_dir)] if persist_dir else []
+            # /verify also converts reference deliverables in place.
+            for ref_id, ref in self._references.items():
+                ref_dir = Path(ref.deliverables_dir)
+                if not ref_dir.is_dir():
+                    raise RuntimeError(f"Reference {ref_id!r}: deliverables_dir {ref_dir} is not a directory")
+                if os.access(ref_dir, os.W_OK):
+                    probe_dirs.append(ref_dir)
+                else:
+                    LOGGER.info(
+                        "Not probing reference %r: the server cannot write %s, so its Office files need PDFs already",
+                        ref_id,
+                        ref_dir,
+                    )
+            probe_dirs = list(dict.fromkeys(probe_dirs))
+            if not ensure_libreoffice(self.config.libreoffice_command, probe_dirs=probe_dirs):
+                raise RuntimeError(
+                    f"libreoffice_command {self.config.libreoffice_command} failed its startup check "
+                    "(--version and a probe conversion); the warning above gives the cause. The command must see "
+                    "persist_deliverables_dir, the reference deliverables and the temp directory at the same paths, "
+                    'and must not leave files that the server cannot delete. See "Office to PDF conversion" in '
+                    "resources_servers/gdpval/README.md."
+                )
+        elif self.config.preconvert_office_to_pdf:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
             if not ensure_libreoffice() and self.config.reward_mode == "comparison":
@@ -1073,6 +1112,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_text=self.config.judge_pdf_include_text,
                 audio_capable=audio_capable,
                 video_capable=video_capable,
+                libreoffice_command=self.config.libreoffice_command,
             )
             if blocks:
                 deliverable_content_blocks = blocks
@@ -1138,7 +1178,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from resources_servers.gdpval.preconvert import preconvert_dir_async
 
         n_ok, n_fail, errors = await preconvert_dir_async(
-            target_dir, max_concurrent=self.config.preconvert_max_concurrent
+            target_dir,
+            max_concurrent=self.config.preconvert_max_concurrent,
+            libreoffice_command=self.config.libreoffice_command,
         )
         if n_ok or n_fail:
             LOGGER.info("preconvert %s: ok=%d fail=%d", label, n_ok, n_fail)

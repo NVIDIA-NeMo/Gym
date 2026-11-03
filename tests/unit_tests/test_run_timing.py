@@ -75,6 +75,14 @@ def test_timeout_failure_class_counts_as_timed_out(failure_class):
     assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
 
 
+def test_a_timeout_the_run_health_summary_counts_counts_here_too():
+    """The table and run.stats.timeouts classify a rollout alike, so the Codex agent's own deadline counts."""
+    r = _report(1)
+    r.record_start(r._t0)
+    r.record_result({"agent_timed_out": True}, 10)
+    assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
+
+
 async def test_sigterm_hook_installs_and_restores():
     before = signal.getsignal(signal.SIGTERM)
     previous = _print_on_sigterm(lambda: "table")

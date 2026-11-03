@@ -501,7 +501,7 @@ async def test_pipe_mode_splits_streams() -> None:
 
 
 async def test_facade_passes_pipe_mode() -> None:
-    from nemo_gym.sandbox import AsyncSandbox as _AS
+    from nemo_gym.sandbox.api import AsyncSandbox as _AS
     from nemo_gym.sandbox.providers.base import SandboxSpec as _Spec
 
     class Recorder:

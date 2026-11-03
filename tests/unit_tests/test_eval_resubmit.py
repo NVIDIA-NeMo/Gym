@@ -18,12 +18,12 @@ import json
 import os
 import re
 import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from nemo_gym.cli.main import COMMANDS, _eval_resubmit
 from nemo_gym.orchestration.api import SAVED_CONFIG, ResumeConfig, SubmitConfig
@@ -46,7 +46,10 @@ from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
 
 
 # Rendered by this Gym, so it carries the line a resubmitted job uses to resume.
-_JOB_SH = "#!/bin/bash\nGYM_CMD=(\n    gym eval run\n)\nif [ x = 1 ]; then GYM_CMD+=(++resubmit=True); fi\n"
+_JOB_SH = (
+    "#!/bin/bash\nGYM_CMD=(\n    gym eval run\n)\n"
+    "if [ x = 1 ]; then GYM_CMD+=(++resubmit=True ++resume_from_cache=True); fi\n"
+)
 
 
 def _config(tmp_path: Path, *, otel: dict | None = None, forward_env: list[str] | None = None) -> SubmitConfig:
@@ -225,23 +228,31 @@ def test_resubmit_refuses_an_unknown_executor(tmp_path: Path) -> None:
 
 def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
-    # squeue lists what sbatch queued; sbatch is slow, so both resubmits pass an unlocked squeue check first.
+    # Hold sbatch until the competing resubmit returns, so the lock is tested without a timing guess.
     (slurm_bin / "squeue").write_text('#!/bin/bash\ncat "$(dirname "$0")/queued" 2>/dev/null; exit 0\n')
-    (slurm_bin / "sbatch").write_text('#!/bin/bash\nsleep 1\necho "$PWD" >> "$(dirname "$0")/queued"\necho 4242\n')
-    barrier = threading.Barrier(2)
+    (slurm_bin / "sbatch").write_text(
+        '#!/bin/bash\nstub_dir=$(dirname "$0")\n'
+        'while [ ! -f "$stub_dir/release" ]; do sleep 0.01; done\n'
+        'echo "$PWD" >> "$stub_dir/queued"\necho 4242\n'
+    )
 
     def attempt() -> str:
-        barrier.wait()
         try:
             return resubmit(*_handle(job_dir)).job_id
         except RuntimeError as error:
             return str(error)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(lambda _: attempt(), range(2)))
+        attempts = [pool.submit(attempt) for _ in range(2)]
+        try:
+            done, pending = wait(attempts, timeout=10, return_when=FIRST_COMPLETED)
+            assert len(done) == len(pending) == 1, "one resubmit must refuse while the other holds the lock"
+            assert "another resubmit holds" in next(iter(done)).result()
+        finally:
+            (slurm_bin / "release").touch()
+        outcomes = [attempt.result(timeout=10) for attempt in attempts]
 
     assert sorted(outcome == "4242" for outcome in outcomes) == [False, True]
-    assert re.search("another resubmit holds|still pending or running", next(o for o in outcomes if o != "4242"))
     assert (slurm_bin / "queued").read_text() == f"{job_dir}\n"
     assert not (job_dir / ".gym_resubmit.lock").exists()
 
@@ -336,9 +347,25 @@ def _run_args(script: str, job_dir: Path, env: dict[str, str]) -> list[str]:
     ).stdout.split()
 
 
+def _recorded_tracking_ids(args: list[str]) -> dict[str, str | None]:
+    from nemo_gym.artifacts.exporters.mlflow import MLflowExporter
+    from nemo_gym.artifacts.exporters.wandb import WandbExporter
+
+    config = OmegaConf.from_dotlist([arg.lstrip("+") for arg in args if "=" in arg])
+    output = Path(config.output_jsonl_fpath)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result = {}
+    for exporter_class in (MLflowExporter, WandbExporter):
+        marker = output.with_name(f"{output.stem}_{exporter_class.name}_run_id")
+        if not marker.exists():
+            marker.write_text("existing-run")
+        result[exporter_class.name] = exporter_class(config)._recorded_run_id()
+    return result
+
+
 @pytest.mark.parametrize("run", [{}, {"resume_from_cache": False}])
 @pytest.mark.parametrize("env", [{"GYM_RESUBMIT": "1"}, {"_gym_resubmit": "1"}])
-def test_a_resubmitted_job_sh_tells_rollout_collection(tmp_path: Path, run: dict, env: dict) -> None:
+def test_a_resubmitted_job_normalizes_resume_before_exporters_open(tmp_path: Path, run: dict, env: dict) -> None:
     config = _config(tmp_path)
     config.driver.benchmarks["gsm8k"].run = run
     job_dir = tmp_path / "gsm8k"
@@ -347,9 +374,45 @@ def test_a_resubmitted_job_sh_tells_rollout_collection(tmp_path: Path, run: dict
         config, "gsm8k", config.driver.benchmarks["gsm8k"], next(iter(config.compute.values())), job_dir
     )
 
-    assert "++resubmit=True" not in _run_args(script, job_dir, {})
+    fresh_args = _run_args(script, job_dir, {})
+    assert "++resubmit=True" not in fresh_args
+    assert _recorded_tracking_ids(fresh_args) == {"mlflow": None, "wandb": None}
     # Set directly (no prologue), or moved into `_gym_resubmit` by the auto-resume prologue.
-    assert _run_args(script, job_dir, env)[-1] == "++resubmit=True"
+    resumed_args = _run_args(script, job_dir, env)
+    assert resumed_args[-2:] == ["++resubmit=True", "++resume_from_cache=True"]
+    assert _recorded_tracking_ids(resumed_args) == {"mlflow": "existing-run", "wandb": "existing-run"}
+
+
+@pytest.mark.parametrize("run", [{}, {"resume_from_cache": False}])
+def test_resubmit_normalizes_an_older_saved_job_script(tmp_path: Path, slurm_bin: Path, run: dict) -> None:
+    config = _config(tmp_path)
+    config.driver.benchmarks["gsm8k"].run = run
+    job_dir = _staged_run(tmp_path, config=config)
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], next(iter(config.compute.values())), job_dir
+    )
+    # Older submitted jobs carry only the attempt-budget flag and are reused rather than rendered again.
+    script = script.replace("++resubmit=True ++resume_from_cache=True", "++resubmit=True")
+    job_sh = job_dir / "job.sh"
+    job_sh.write_text(script)
+    artifacts = job_dir / "artifacts"
+    artifacts.mkdir()
+    rollouts = artifacts / "rollouts.jsonl"
+    rollouts.write_text('{"reward": 1.0}\n')
+    markers = [artifacts / f"rollouts_{name}_run_id" for name in ("mlflow", "wandb")]
+    for marker in markers:
+        marker.write_text("existing-run")
+
+    resubmit(*_handle(job_dir))
+
+    assert [marker.read_text() for marker in markers] == ["existing-run", "existing-run"]
+    updated = job_sh.read_text()
+    args = _run_args(updated, job_dir, {"GYM_RESUBMIT": "1"})
+    assert args[-2:] == ["++resubmit=True", "++resume_from_cache=True"]
+    assert _recorded_tracking_ids(args) == {"mlflow": "existing-run", "wandb": "existing-run"}
+    assert rollouts.read_text() == '{"reward": 1.0}\n'
+    resubmit(*_handle(job_dir))
+    assert job_sh.read_text() == updated
 
 
 def test_resubmit_refuses_a_populated_run_whose_job_sh_predates_resubmit(tmp_path: Path, slurm_bin: Path) -> None:

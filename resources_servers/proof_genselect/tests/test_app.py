@@ -3,7 +3,7 @@
 
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.proof_genselect.app import (
     ProofGenSelectResourcesServer,
     ProofGenSelectResourcesServerConfig,

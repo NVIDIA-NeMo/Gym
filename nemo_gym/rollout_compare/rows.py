@@ -29,7 +29,7 @@ import statistics
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.rollout_compare.join import _lookup, task_id_of
 from nemo_gym.rollout_compare.schema import (
     FAILURES_SUFFIX,
@@ -108,13 +108,20 @@ def current_failures(failures: list[dict[str, Any]], scored: list[dict[str, Any]
 
 def load_rollouts(path: str | Path) -> list[dict[str, Any]]:
     """Read a rollouts JSONL plus, when present, its sibling `<name>_failures.jsonl` of masked failures. A failure
-    superseded by a later attempt (another sidecar record or a scored row) is left out."""
+    superseded by a later attempt (another sidecar record or a scored row) is left out. A `record_omitted_rollouts`
+    record (`_ng_omitted_rollout`) is never a failure: an interrupted attempt still supersedes older ones and leaves
+    the rollout missing, and a row never started is skipped."""
     path = Path(path)
     rows = _read_jsonl(path)
     if path.suffix == ".jsonl":
         failures_path = path.with_name(path.stem + FAILURES_SUFFIX)
         if failures_path.is_file():
-            failures = current_failures(_read_jsonl(failures_path), rows)
+            attempts = [
+                record
+                for record in _read_jsonl(failures_path)
+                if not (record.get("_ng_omitted_rollout") and record.get("_ng_dispatch_drained"))
+            ]
+            failures = [record for record in current_failures(attempts, rows) if not record.get("_ng_omitted_rollout")]
             rows.extend(_failure_as_masked_row(f) for f in failures)
     return rows
 

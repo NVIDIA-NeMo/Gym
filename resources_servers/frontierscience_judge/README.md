@@ -23,13 +23,23 @@ verification pipeline:
   page 13). The path is configurable via `judge_prompt_path` so other
   free-form-grading benchmarks can reuse this server with their own prompt.
 - Research mode uses `prompts/research_judge.yaml`, which asks the judge for
-  `Score: X/10` and `Judgement: YES/NO`.
+  the paper's numeric `VERDICT: <total_points>` (Appendix B, page 14).
+  Correctness is computed from the numeric score at the configured threshold.
+  Research accepts only a final numeric `VERDICT` line. Judges with incomplete
+  responses or invalid scores raise `JudgeError` and are routed to the failure
+  sidecar, preserving the policy answer for judge-only recovery.
+- Research configuration sets high reasoning effort and no explicit token cap;
+  provider limits still apply. Chat Completions forwards the reasoning effort
+  and omits token-limit fields when `max_output_tokens` is null.
 
 The judge is invoked once per attempt (no two-order A/B comparison). Output
 fields: `reward` (1.0 if `YES`, else 0.0), `verdict` (`YES`/`NO`/`null`),
 `extracted_answer` (the model's post-thinking text), `judge_output` (the
 judge's full text), and in research mode `rubric_score` plus
-`rubric_score_normalized`.
+`rubric_score_normalized`. `mean/rubric_score` reports the mean raw points
+(0–10 for the Research benchmark), while `pass@1[avg-of-k]/accuracy` reports
+solved rate across repeats and `pass@1[avg-of-k]/rubric_score` retains the
+normalized percentage metric.
 
 ## Example usage
 

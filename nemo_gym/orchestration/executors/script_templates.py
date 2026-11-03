@@ -213,11 +213,13 @@ def render_driver_entrypoint(
 
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
-    is where `telemetry` has to be installed for any server to have it.
+    is where `telemetry` has to be installed for any server to have it. `ray` is
+    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
+    and an extra the checkout does not define only makes uv warn.
     """
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
-    install_target = f'".[{",".join(extras)}]"' if extras else "."
+    install_target = f'".[{",".join((*extras, "ray"))}]"'
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv

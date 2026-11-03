@@ -28,7 +28,8 @@ sandbox:
       request_timeout_s: 300
       use_server_proxy: true
       # Uses Gym's global aiohttp client. Pool limits come from
-      # global_aiohttp_connector_limit and global_aiohttp_connector_limit_per_host.
+      # global_aiohttp_connector_limit and global_aiohttp_connector_limit_per_host;
+      # a process without the Gym config, such as a Ray task worker, uses their defaults.
       # Provider-local pool settings apply only to the legacy httpx backend.
       transport_backend: aiohttp
       # Certificate verification for every connection the provider opens (SDK

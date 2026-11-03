@@ -17,6 +17,6 @@ physics_physics_judge_simple_agent:
 physics_physics_judge_environment_server:
   _inherit_from: physics_judge_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: physics_physics_judge_simple_agent

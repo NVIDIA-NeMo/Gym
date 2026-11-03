@@ -9,30 +9,31 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.base_responses_api_model import _CaptureMiddleware
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture import (
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.models import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    UNCOMMITTED_CALL_REASON,
+    AnthropicConverter,
+    CaptureAdmission,
     CaptureContext,
     FileLineageStore,
     InMemoryLineageStore,
     LineageResolver,
     ParentResolutionStatus,
+    RolloutTokenCapture,
+    StageResult,
     TokenCaptureSnapshot,
     TokenCaptureStore,
     TokenEntry,
     TokenSink,
     TokenSource,
+    VLLMWorkerCaptureHandler,
     reset_token_sink,
     set_token_sink,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission, StageResult
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -83,7 +84,7 @@ def test_external_staging_resolves_served_reasoning_history(
     class Sink:
         def stage(self, record, *, attachments=None):
             assert attachments is None
-            key = f"{record.rollout_id}/{record.model_call_id}"
+            key = f"{record.capture_key}/{record.model_call_id}"
             records[key] = record
             return StageResult(ok=True, staging_key=key)
 
@@ -251,7 +252,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         def stage(self, record, *, attachments=None):
             assert attachments is None
             staged.append(record)
-            return StageResult(ok=True, staging_key=f"{record.rollout_id}/{record.model_call_id}")
+            return StageResult(ok=True, staging_key=f"{record.capture_key}/{record.model_call_id}")
 
     capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
 
@@ -276,7 +277,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         raise ValueError("injected final conversion failure")
 
     if failure == "serialization":
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._orjson_dispatch_response", fail_conversion)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._orjson_dispatch_response", fail_conversion)
     elif endpoint == "responses":
         monkeypatch.setattr(type(model._converter), "chat_completion_to_response", fail_conversion)
     else:

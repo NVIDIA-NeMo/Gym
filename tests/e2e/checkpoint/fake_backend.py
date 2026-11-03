@@ -33,9 +33,13 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Request
 
-from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
-from nemo_gym.token_id_capture.staging import CaptureAdmission, StagedCallRecord, StageResult
-from nemo_gym.token_id_capture.staging.capture import ActiveCall, RolloutTokenCapture
+from nemo_gym.models.token_capture.staging import CaptureAdmission, StagedCallRecord, StageResult
+from nemo_gym.models.token_capture.staging.capture import ActiveCall, RolloutTokenCapture
+from nemo_gym.server_runtime._checkpoint.generation_cut import (
+    GenerationCutInventory,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
 
 
 DEFAULT_SCRIPT = [{"name": "get_weather", "arguments": {"city": "SF"}}]
@@ -49,7 +53,7 @@ class FakeTransferQueue:
         self.cuts: dict[str, StagedCallRecord] = {}
 
     def stage(self, record: Any, *, attachments: Any = None) -> StageResult:
-        key = f"{record.rollout_id}/{record.model_call_id}"
+        key = f"{record.capture_key}/{record.model_call_id}"
         self.rows[key] = record
         return StageResult(ok=True, staging_key=key)
 
@@ -203,7 +207,7 @@ async def chat(request: Request) -> dict:
     admission_payload = body.get("ng_capture")
     call = {"index": index, "n_messages": len(messages), "admission": admission_payload, "t": time.time()}
     STATE["calls"].append(call)
-    rollout_id = (admission_payload or {}).get("rollout_id")
+    rollout_id = (admission_payload or {}).get("capture_key")
     rollout_index = STATE["rollout_calls"][rollout_id]
     STATE["rollout_calls"][rollout_id] += 1
 
