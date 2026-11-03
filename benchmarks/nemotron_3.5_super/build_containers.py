@@ -12,7 +12,6 @@ from signal import SIGKILL
 from textwrap import dedent
 from typing import Any, Dict, List, Optional
 
-import aiofiles
 from pydantic import BaseModel, Field, PrivateAttr
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
@@ -58,8 +57,8 @@ class CommandOutput(BaseModel):
 
 
 async def _run_command(command: str, log_fpath: Path) -> CommandOutput:
-    async with aiofiles.open(log_fpath, "a") as log_file:
-        await log_file.write(f"Command:\n{command}\n")
+    with log_fpath.open("a") as log_file:
+        log_file.write(f"Command:\n{command}\n")
 
         process = await create_subprocess_shell(command, stdout=PIPE, stderr=STDOUT, start_new_session=True)
         output_lines = []
@@ -72,7 +71,7 @@ async def _run_command(command: str, log_fpath: Path) -> CommandOutput:
 
                 print(line, flush=True)
                 output_lines.append(line)
-                await log_file.write(line + "\n")
+                log_file.write(line + "\n")
 
             returncode = await process.wait()
         except:
