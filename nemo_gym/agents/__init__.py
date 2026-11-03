@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         assert_model_url_reachable_from_sandbox,
     )
     from nemo_gym.agents.skills import stage_skills
+    from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -83,6 +84,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "ActivationConflictError": "utils.ordered_operations",
     "AGENT_ACTIVATION_HEADER": "base_responses_api_agent",
     "AGENT_OUTCOME_METADATA_KEY": "agent_outcome",
     "AGENT_SESSION_COOKIE_KEY": "base_responses_api_agent",
@@ -111,6 +113,7 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
     "HarnessTerminationError": "utils.supervisor_client",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
+    "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RUNNER_FILE": "utils.sandbox_session",

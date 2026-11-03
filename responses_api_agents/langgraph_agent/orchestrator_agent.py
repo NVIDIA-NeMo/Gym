@@ -12,23 +12,221 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Host adapter for the orchestrator workflow executed inside its task sandbox."""
+"""
+Orchestrator agent: decompose > dispatch sub-agents > synthesize.
 
-from typing import ClassVar
+Asks the model to decompose a problem into sub-tasks, solves each
+sub-task with an independent LLM call, then synthesizes a final answer.
 
-from pydantic import Field
+Graph: decompose -> dispatch (loop per subtask) -> synthesize -> END
+"""
 
-from responses_api_agents.langgraph_agent.app import LangGraphAgentAdapter, LangGraphAgentConfig
+import re
+from typing import Annotated, List, TypedDict
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from pydantic import ConfigDict
+
+from nemo_gym.client import raise_for_status
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from responses_api_agents.langgraph_agent.app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
+
+
+DECOMPOSE_PROMPT = """Break the following problem into independent sub-tasks that can each be solved separately. \
+For each sub-task, write it as a self-contained question that can be answered without context from the others.
+You may use up to 5 subtasks.
+
+Format your response like so:
+SUBTASK 1: <question>
+SUBTASK 2: <question>
+SUBTASK 3: <question>
+
+If the problem is simple enough to solve directly, just write:
+SUBTASK 1: <the original problem>
+
+Problem: {task}"""
+
+SYNTHESIZE_PROMPT = """You decomposed a problem into sub-tasks and solved each one. \
+Now combine the sub-task results into a final answer to the original problem.
+
+Original problem: {task}
+
+{subtask_results}
+
+Synthesize these results into a single final answer. Show your reasoning, then wrap your final answer \
+in <answer></answer> tags."""
+
+SUBTASK_REGEX = r"SUBTASK\s+\d+:\s*(.+)"
 
 
 class OrchestratorAgentConfig(LangGraphAgentConfig):
-    max_subtasks: int = Field(default=5, ge=1)
+    max_subtasks: int = 5
 
 
+class OrchestratorRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class OrchestratorVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class OrchestratorVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+
+class OrchestratorState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    policy_outputs: list
+    policy_usages: list
+    cookies: dict
+    model_url_path: str
+    request_body: NeMoGymResponseCreateParamsNonStreaming
+    last_policy_response: NeMoGymResponse
+    task: str
+    subtasks: List[str]
+    subtask_results: dict
+    current_subtask: int
+
+
+def _extract_text(outputs):
+    return "".join(c.text for o in outputs if o.type == "message" for c in o.content if c.type == "output_text")
+
+
+# TODO: Use LangGraph's Send() API for the parallel worker dispatch, see langgraphs workflows.md Orchestrator-Worker pattern.
 class OrchestratorAgent(LangGraphAgentAdapter):
     config: OrchestratorAgentConfig
-    workflow: ClassVar[str] = "orchestrator"
-    calls_model_from_sandbox: ClassVar[bool] = True
+
+    async def _call_model(self, state, prompt):
+        input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        request_body = state["request_body"].model_copy(update={"input": input_messages})
+        resp = await self.server_client.post(
+            server_name=self.config.model_server.name,
+            url_path=state["model_url_path"],
+            json=request_body,
+            cookies=state["cookies"],
+        )
+        await raise_for_status(resp)
+        return NeMoGymResponse.model_validate(await resp.json()), resp.cookies
+
+    def build_graph(self):
+        graph = StateGraph(OrchestratorState)
+
+        async def decompose(state):
+            task = state["task"]
+            prompt = DECOMPOSE_PROMPT.format(task=task)
+            prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
+
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
+
+            matches = re.findall(SUBTASK_REGEX, text)
+            subtasks = [m.strip() for m in matches[: self.config.max_subtasks]]
+
+            # If no subtasks parsed, use the original task
+            if not subtasks:
+                subtasks = [task]
+
+            return {
+                "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
+                "cookies": cookies,
+                "last_policy_response": policy_response,
+                "request_body": state["request_body"],
+                "subtasks": subtasks,
+                "subtask_results": {},
+                "current_subtask": 0,
+            }
+
+        async def dispatch(state):
+            idx = state["current_subtask"]
+            subtask = state["subtasks"][idx]
+            prompt = f"Solve the following sub-task completely. Show your work.\n\nSub-task: {subtask}"
+            prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
+
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
+
+            new_results = {**state["subtask_results"], f"subtask_{idx + 1}": text}
+
+            return {
+                "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
+                "cookies": cookies,
+                "last_policy_response": policy_response,
+                "request_body": state["request_body"],
+                "subtask_results": new_results,
+                "current_subtask": idx + 1,
+            }
+
+        async def synthesize(state):
+            task = state["task"]
+            results_text = "\n\n".join(
+                f"--- Sub-task {i + 1}: {state['subtasks'][i]} ---\nResult: {state['subtask_results'].get(f'subtask_{i + 1}', 'N/A')}"
+                for i in range(len(state["subtasks"]))
+            )
+            prompt = SYNTHESIZE_PROMPT.format(task=task, subtask_results=results_text)
+            prompt_msg = NeMoGymEasyInputMessage(role="user", content=prompt)
+
+            policy_response, cookies = await self._call_model(state, prompt)
+            text = _extract_text(policy_response.output)
+
+            return {
+                "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
+                "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
+                "cookies": cookies,
+                "last_policy_response": policy_response,
+                "request_body": state["request_body"],
+            }
+
+        def route_dispatch(state):
+            if state["current_subtask"] >= len(state["subtasks"]):
+                return "synthesize"
+            return "dispatch"
+
+        graph.add_node("decompose", decompose)
+        graph.add_node("dispatch", dispatch)
+        graph.add_node("synthesize", synthesize)
+        graph.set_entry_point("decompose")
+        graph.add_conditional_edges("decompose", route_dispatch, {"dispatch": "dispatch", "synthesize": "synthesize"})
+        graph.add_conditional_edges("dispatch", route_dispatch, {"dispatch": "dispatch", "synthesize": "synthesize"})
+        graph.add_edge("synthesize", END)
+
+        return graph.compile()
+
+    async def get_initial_state(self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict) -> dict:
+        if isinstance(body.input, str):
+            task = body.input
+        else:
+            task = ""
+            for msg in body.input:
+                content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else "")
+                role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else "user")
+                if role in ["user", "human"] and isinstance(content, str):
+                    task = content
+
+        return {
+            "messages": [HumanMessage(content=task)],
+            "policy_outputs": [],
+            "policy_usages": [],
+            "cookies": cookies,
+            "model_url_path": "/v1/responses",
+            "request_body": body,
+            "last_policy_response": None,
+            "task": task,
+            "subtasks": [],
+            "subtask_results": {},
+            "current_subtask": 0,
+        }
+
+    def extract_outputs(self, final_state: dict) -> list:
+        return response_output_items(final_state["policy_outputs"])
 
 
 if __name__ == "__main__":

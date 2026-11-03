@@ -12,14 +12,10 @@ python environments/langgraph_parallel_thinking_math/prepare.py
 
 ## Start
 
-The graph runs inside a task sandbox, so load a sandbox provider config (Docker below) and give the sandbox a model endpoint it can reach. `++use_absolute_ip=true` advertises the Model Server on a non-loopback address. See the [LangGraph agent README](../../responses_api_agents/langgraph_agent/README.md).
-
 ```bash
 gym env start \
   --config environments/langgraph_parallel_thinking_math/config.yaml \
-  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
-  --model-type openai_model \
-  ++use_absolute_ip=true
+  --model-type openai_model
 ```
 
 ## Run

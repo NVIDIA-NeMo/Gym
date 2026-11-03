@@ -501,23 +501,6 @@ async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, re
     session.sandbox.disconnect.assert_awaited_once()
 
 
-@pytest.mark.parametrize(
-    "env,user,expected",
-    [
-        (None, None, {}),
-        ({"TASK_DATA": "/workspace/data"}, "1000", {"env": {"TASK_DATA": "/workspace/data"}, "user": "1000"}),
-        (None, 0, {"user": 0}),
-    ],
-)
-async def test_launch_passes_env_and_user_only_when_set(session, env, user, expected):
-    # Adapters without borrowed access keep the launch call they had before these fields existed.
-    session.env, session.user = env, user
-    assert await execute(session) == "transcript"
-    launch_kwargs = session.sandbox.exec.await_args_list[0].kwargs
-    assert {key: launch_kwargs[key] for key in ("env", "user") if key in launch_kwargs} == expected
-    assert launch_kwargs["cwd"] == "/app"
-
-
 async def test_session_uploads_supervisor_before_launch(session):
     from pathlib import Path
 

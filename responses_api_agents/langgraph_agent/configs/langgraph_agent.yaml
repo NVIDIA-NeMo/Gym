@@ -11,10 +11,6 @@ langgraph_agent:
       # or from an environments/langgraph_* pairing. `--agent-type` does not swap these onto a benchmark;
       # see the README.
       entrypoint: ???
-      sandbox_provider: sandbox
-      sandbox_config:
-        image: ubuntu:24.04
-        workdir: /workspace
       resources_server: null
       model_server:
         type: responses_api_models

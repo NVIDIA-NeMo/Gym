@@ -1,5 +1,3 @@
 -e nemo-gym[dev] @ ../../
-# The graphs run in the sandbox from runtime-requirements.txt; the Agent Server never imports them. The same pins
-# here let this server's test environment run the workflow and runner tests.
 langgraph==1.2.18
 langchain-core==1.7.3

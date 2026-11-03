@@ -6,14 +6,10 @@ Source benchmark: https://github.com/open-thought/reasoning-gym
 The instructions below assume you have a vLLM server running and `policy_base_url`, `policy_model_name`, and `policy_api_key` configured in your `env.yaml` file. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 ## Start
 
-The graph runs inside a task sandbox, so load a sandbox provider config (Docker below) and give the sandbox a model endpoint it can reach. `++use_absolute_ip=true` advertises the Model Server on a non-loopback address. See the [LangGraph agent README](../../responses_api_agents/langgraph_agent/README.md).
-
 ```bash
 gym env start \
   --config environments/langgraph_orchestrator_reasoning_gym/config.yaml \
-  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
-  --model-type openai_model \
-  ++use_absolute_ip=true
+  --model-type openai_model
 ```
 
 ## Run

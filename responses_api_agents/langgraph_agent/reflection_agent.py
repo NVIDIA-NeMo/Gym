@@ -12,23 +12,217 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Host adapter for the reflection workflow executed inside its task sandbox."""
+"""
+See: https://github.com/langchain-ai/langgraph/blob/23961cff61a42b52525f3b20b4094d8d2fba1744/docs/docs/tutorials/reflection/reflection.ipynb
+Reflection agent: generate, critique, revise loop.
 
-from typing import ClassVar
+Generates an initial answer, critiques it, then revises. Repeats until
+<answer> tag found or max_reflections reached.
 
-from pydantic import Field
+Graph: generate -> should_continue? -> reflect -> generate (revised) -> ...
 
-from responses_api_agents.langgraph_agent.app import LangGraphAgentAdapter, LangGraphAgentConfig
+Retained notice for the original tutorial material:
+MIT License
+
+Copyright (c) 2024 LangChain, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from pydantic import ConfigDict
+
+from nemo_gym.client import raise_for_status
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from responses_api_agents.langgraph_agent.app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 
 
 class ReflectionAgentConfig(LangGraphAgentConfig):
-    max_reflections: int = Field(default=2, ge=0)
+    max_reflections: int = 2
+
+
+class ReflectionAgentRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class ReflectionAgentVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class ReflectionAgentVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+
+
+class ReflectionState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    policy_outputs: list
+    policy_usages: list
+    cookies: dict
+    model_url_path: str
+    reflections: int
+    request_body: NeMoGymResponseCreateParamsNonStreaming
+    last_policy_response: NeMoGymResponse
 
 
 class ReflectionAgent(LangGraphAgentAdapter):
     config: ReflectionAgentConfig
-    workflow: ClassVar[str] = "reflection"
-    calls_model_from_sandbox: ClassVar[bool] = True
+
+    def build_graph(self):
+        graph = StateGraph(ReflectionState)
+
+        async def generate(state):
+            role_map = {"human": "user", "ai": "assistant", "system": "system"}
+            input_messages = [
+                NeMoGymEasyInputMessage(role=role_map.get(m.type, m.type), content=m.content)
+                for m in state["messages"]
+            ]
+
+            request_body = state["request_body"].model_copy(update={"input": input_messages})
+
+            resp = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path=state["model_url_path"],
+                json=request_body,
+                cookies=state["cookies"],
+            )
+
+            await raise_for_status(resp)
+            policy_response = NeMoGymResponse.model_validate(await resp.json())
+
+            new_outputs = policy_response.output
+            all_outputs = state["policy_outputs"] + new_outputs
+
+            text = "".join(
+                c.text for o in new_outputs if o.type == "message" for c in o.content if c.type == "output_text"
+            )
+
+            return {
+                "messages": [AIMessage(content=text)],
+                "policy_outputs": all_outputs,
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
+                "cookies": resp.cookies,
+                "reflections": state["reflections"],
+                "last_policy_response": policy_response,
+                "request_body": state["request_body"],
+            }
+
+        async def reflect(state):
+            reflection_prompt = NeMoGymEasyInputMessage(
+                role="user", content="Critique your solution. What could be wrong?"
+            )
+
+            role_map = {"human": "user", "ai": "assistant", "system": "system"}
+            input_messages = [
+                NeMoGymEasyInputMessage(role=role_map.get(m.type, m.type), content=m.content)
+                for m in state["messages"]
+            ] + [reflection_prompt]
+
+            request_body = state["request_body"].model_copy(update={"input": input_messages})
+
+            resp = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path=state["model_url_path"],
+                json=request_body,
+                cookies=state["cookies"],
+            )
+
+            await raise_for_status(resp)
+            policy_response = NeMoGymResponse.model_validate(await resp.json())
+
+            text = "".join(
+                c.text
+                for o in policy_response.output
+                if o.type == "message"
+                for c in o.content
+                if c.type == "output_text"
+            )
+
+            return {
+                "messages": [HumanMessage(content=text)],
+                "policy_outputs": state["policy_outputs"] + [reflection_prompt] + policy_response.output,
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
+                "cookies": resp.cookies,
+                "reflections": state["reflections"] + 1,
+                "last_policy_response": policy_response,
+                "request_body": state["request_body"],
+            }
+
+        def should_continue(state):
+            if state["reflections"] >= self.config.max_reflections:
+                return END
+            last = state["messages"][-1].content if state["messages"] else ""
+            return END if "<answer>" in last else "reflect"
+
+        graph.add_node("generate", generate)
+        graph.add_node("reflect", reflect)
+        graph.set_entry_point("generate")
+        graph.add_conditional_edges("generate", should_continue, {END: END, "reflect": "reflect"})
+        graph.add_edge("reflect", "generate")
+
+        return graph.compile()
+
+    async def get_initial_state(self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict) -> dict:
+        if isinstance(body.input, str):
+            initial_messages = [HumanMessage(content=body.input)]
+            policy_outputs = []
+        else:
+            initial_messages = []
+            policy_outputs = []
+            for msg in body.input:
+                is_output = (
+                    hasattr(msg, "type")
+                    and msg.type == "message"
+                    and hasattr(msg, "role")
+                    and msg.role == "assistant"
+                    and hasattr(msg, "content")
+                    and isinstance(msg.content, list)
+                )
+                is_function_call = hasattr(msg, "type") and msg.type == "function_call"
+
+                if is_output or is_function_call:
+                    policy_outputs.append(msg)
+                else:
+                    role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else "user")
+                    content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else "")
+                    if role in ["user", "human"]:
+                        initial_messages.append(HumanMessage(content=content))
+                    elif role in ["assistant", "ai"]:
+                        initial_messages.append(AIMessage(content=content))
+
+        return {
+            "messages": initial_messages,
+            "policy_outputs": policy_outputs,
+            "policy_usages": [],
+            "cookies": cookies,
+            "model_url_path": "/v1/responses",
+            "reflections": 0,
+            "request_body": body,
+            "last_policy_response": None,
+        }
+
+    def extract_outputs(self, final_state: dict) -> list:
+        return response_output_items(final_state["policy_outputs"])
 
 
 if __name__ == "__main__":
