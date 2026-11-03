@@ -6,8 +6,8 @@ capture and evaluation with configurable turn limits. A Gym resources server
 scores each task.
 
 The implementation extends `opencode_agent` and uses OpenCode **1.17.11**.
-Each episode stages its input images in a private workspace. The supplied
-configurations run OpenCode inside a Bubblewrap sandbox. Session artifacts are parsed into Gym responses
+Each episode stages its input images in a private workspace. Session configurations use Gym sandbox providers. Compatibility configurations
+use Bubblewrap. Session artifacts are parsed into Gym responses
 and trajectory records before the workspace is cleaned up.
 
 ## Requirements
@@ -69,9 +69,39 @@ in each task's `responses_create_params`; the agent requires both. Configure the
 serving model's context capacity and sampling options to agree with the task and
 agent settings.
 
-The agent exposes `/v1/responses` for generation and `/run` for generation plus
-verification. It manages image staging and sandbox lifetime for the whole episode;
-separate agent-session setup and close operations are not supported.
+## Agent sessions
+
+For session-based evaluation, compose a benchmark catalog configuration with
+[`opencode_sessions.yaml`](../../benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml)
+and a Gym sandbox-provider configuration. Supply a Linux task image with Python,
+Pillow, numpy, scipy and OpenCV, and a model endpoint reachable from that image.
+The example uses the pinned OpenCode runtime's default system prompt, 131072 tokens,
+and a 55-turn budget with ten grace turns. The agent and model gateway share the
+budget; configure both when changing it.
+
+The Environment Server seeds Resources, seeds the agent session, activates the
+agent, closes it, verifies the answer and closes Resources. A supplied sandbox is
+borrowed; Resources owns destruction. Otherwise `sandbox_provider` selects an
+agent-owned sandbox that is stopped on close. OpenCode is installed in the sandbox
+at session seed, not on the agent-server host. A verified preinstalled binary can
+be supplied with `sandbox_executable_path` and `sandbox_executable_sha256`.
+
+The adapter reuses `opencode_agent`'s supervised execution and cleanup. Input images,
+plugins and session state are staged outside the task repository; the prompt names
+the staged image paths. Tool-produced images are embedded in returned tool results
+before teardown. Session retries reuse the activation rather than launch it again.
+One activation is supported per session; continuation inputs are rejected.
+
+The session path supports evaluation, observations and MCP task grants. Set
+`tool_rewards: null` and disable token-ID capture for these sessions; unsupported
+training requests are rejected. Training capture and auxiliary rewards remain
+available on the compatibility path. Qualification requires the conformance
+report and real pairing evidence for the revision being used.
+
+The compatibility `/v1/responses` and `/run` paths remain available for existing
+local Bubblewrap configurations. A configuration selecting `sandbox_provider`
+must use agent sessions; it cannot fall back to running on the host. Session
+configuration must not also specify the local `sandbox` field.
 
 ## Prompts
 

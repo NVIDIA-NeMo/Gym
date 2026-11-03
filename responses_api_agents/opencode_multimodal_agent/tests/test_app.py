@@ -147,7 +147,6 @@ def test_default_prompt_customization():
         {"final_answer_reserve": 49152},
         {"extra_args": ["--continue"]},
         {"repo_dir": "/shared"},
-        {"sandbox_provider": "another-provider"},
         {"opencode_config": {"agent": {"build": {"prompt": "replacement"}}}},
     ],
 )
@@ -527,10 +526,21 @@ def test_training_image_policy_and_override(monkeypatch):
     assert obj._build_opencode_config()["attachment"]["image"]["auto_resize"] is False
 
 
-@pytest.mark.asyncio
-async def test_multimodal_rejects_parent_text_only_session_path(monkeypatch):
+def test_sessions_accept_provider_configuration():
+    assert config(sandbox_provider="task_provider").sandbox_provider == "task_provider"
+
+
+def test_missing_session_provider_is_a_final_http_refusal(monkeypatch):
+    from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+    from nemo_gym.core import EpisodeId, TaskId
+    from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
+
     obj = agent(monkeypatch)
-    with pytest.raises(NotImplementedError, match="does not implement episode sessions"):
-        await obj._seed_agent_session_state(MagicMock())
-    with pytest.raises(NotImplementedError, match="does not implement episode sessions"):
-        await obj._close_agent_session_state(MagicMock())
+    assert obj._agent_continuation_capabilities() is None
+    seed = AgentSeedSessionRequest(
+        agent_session_id="unsupported",
+        episode_id=EpisodeId(rollout_id="smoke"),
+        task_id=TaskId(taskset="visual", task_id="one"),
+    )
+    detail = check_agent_seed_rejected(obj.setup_webserver(), seed)
+    assert "sandbox_provider" in detail

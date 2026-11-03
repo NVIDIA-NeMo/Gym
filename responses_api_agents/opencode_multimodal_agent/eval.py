@@ -15,8 +15,8 @@ from fastapi import HTTPException, Request
 from pydantic import Field, model_validator
 
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import _parse_opencode_session, parse_opencode_session
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_multimodal_agent.app import (
@@ -43,7 +43,7 @@ class OpenCodeMultimodalEvalConfig(OpenCodeMultimodalAgentConfig):
     # Reserve room for a final answer after the stock soft step threshold.
     # Zero places the advisory threshold at the full trajectory limit.
     final_answer_turn_headroom: int = Field(default=2, ge=0)
-    sandbox: EvalSandboxConfig
+    sandbox: EvalSandboxConfig | None = None
     preserve_image_format: bool = True
     # Optional image naming convention for checkpoints trained with image_0.png.
     input_image_prefix: Literal["input-", "image_"] = "input-"
@@ -66,6 +66,13 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
     """Reuse native execution, artifact parsing and verification in a private filesystem."""
 
     config: OpenCodeMultimodalEvalConfig
+
+    async def _create_episode(self, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any) -> AgentEpisode:
+        if self.config.sandbox is None:
+            raise HTTPException(
+                409, "Local evaluation requires sandbox; session evaluation uses the Environment Server"
+            )
+        return await super()._create_episode(body, **kwargs)
 
     async def _run_opencode(
         self,

@@ -703,6 +703,26 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
 
+    session_state_type: ClassVar[type[OpenCodeSandboxSession]] = OpenCodeSandboxSession
+
+    def _validate_sandbox_options(self) -> None:
+        """Reject settings the session launcher cannot honor before allocating a sandbox."""
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        if unsupported:
+            raise HTTPException(
+                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+            )
+        if self.config.env or self.config.extra_args or self.config.command != "opencode":
+            raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+
+    async def _prepare_session_launch(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        payload: dict[str, Any],
+    ) -> None:
+        """Stage adapter-specific inputs before the shared supervised launch."""
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
@@ -759,13 +779,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
-        if unsupported:
-            raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
-            )
-        if self.config.env or self.config.extra_args or self.config.command != "opencode":
-            raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+        self._validate_sandbox_options()
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -778,7 +792,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
         directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
-        state = OpenCodeSandboxSession(
+        state = self.session_state_type(
             request=body,
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
@@ -1293,6 +1307,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             async with asyncio.timeout_at(deadline):
                 await self.sem.acquire()
             try:
+                async with asyncio.timeout_at(deadline):
+                    await self._prepare_session_launch(state, body, payload)
                 await state.execute(
                     payload,
                     timeout=timeout,

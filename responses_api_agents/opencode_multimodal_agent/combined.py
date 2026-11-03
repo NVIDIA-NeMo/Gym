@@ -20,7 +20,7 @@ class OpenCodeCombinedPromptConfig(OpenCodeMultimodalAgentConfig):
         default=(Path(__file__).parent / "prompts/combined.txt").read_text(), min_length=1
     )
     system_prompt: None = None
-    sandbox: EvalSandboxConfig
+    sandbox: EvalSandboxConfig | None = None
 
 
 class OpenCodeCombinedPromptAgent(OpenCodeMultimodalAgent):

@@ -112,7 +112,17 @@ def _config(
         if not runtime_path:
             raise RuntimeError("Set GYM_MULTIMODAL_SANDBOX_CONFIG to JSON with command and sandbox fields")
         runtime = json.loads(Path(runtime_path).read_text())
-        profile_agent.update(command=runtime["command"], sandbox=runtime["sandbox"])
+        if use_agent_sessions:
+            profile_agent.update(
+                command="opencode",
+                sandbox=None,
+                env={},
+                sandbox_executable_path=runtime["command"],
+                sandbox_executable_sha256=digest_file(Path(runtime["command"])),
+                sandbox_path_prefix=[str(Path(runtime["sandbox"]["python_env"]) / "bin")],
+            )
+        else:
+            profile_agent.update(command=runtime["command"], sandbox=runtime["sandbox"])
         profile_agent.update(agent)
         agent = profile_agent
         agent.update(entrypoint="eval.py", workspace_root=str(directory / "workspace"), timeout=timeout)
@@ -204,7 +214,9 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     probe = Probe(
         scenario,
         directory,
-        sandbox_workspace_root=directory / "workspace" if harness == "opencode_multimodal" else None,
+        sandbox_workspace_root=directory / "workspace"
+        if harness == "opencode_multimodal" and not use_agent_sessions
+        else None,
     )
     probe.save()
     tasks = []

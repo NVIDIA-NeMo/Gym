@@ -11,18 +11,20 @@ from nemo_gym.openai_utils import NeMoGymChatCompletion
 from nemo_gym.server_utils import request
 from resources_servers.opencode_multimodal_benchmarks.agentx_rubric import (
     OFFICIAL_GOAL_SYSTEM_PROMPT,
-    final_response,
     judge_prompt,
     parse_judge_score,
 )
 from resources_servers.opencode_multimodal_benchmarks.app import (
     VisualBenchmarksConfig,
     VisualBenchmarksServer,
-    VisualVerifyRequest,
-    VisualVerifyResponse,
 )
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats
-from responses_api_agents.opencode_multimodal_agent.media import final_answer
+from resources_servers.opencode_multimodal_benchmarks.verifier import AgentXVerifier
+from resources_servers.opencode_multimodal_benchmarks.verifier import AgentXVerifyResponse as AgentXVerifyResponse
+from resources_servers.opencode_multimodal_benchmarks.verifier_fixtures import agentx_fixture
+
+
+VERIFIER_FIXTURE = agentx_fixture()
 
 
 class AgentXConfig(VisualBenchmarksConfig):
@@ -31,11 +33,7 @@ class AgentXConfig(VisualBenchmarksConfig):
     judge_attempts: int = 10
 
 
-class AgentXVerifyResponse(VisualVerifyResponse):
-    judge_raw: str
-
-
-class AgentXServer(VisualBenchmarksServer):
+class AgentXServer(AgentXVerifier, VisualBenchmarksServer):
     config: AgentXConfig
 
     async def _judge_answer(self, task: dict, prediction: str) -> tuple[float, str]:
@@ -93,24 +91,6 @@ class AgentXServer(VisualBenchmarksServer):
                         raise JudgeError(str(error) or type(error).__name__) from error
                     await asyncio.sleep(min(30, 2 ** (attempt + 1)))
         raise AssertionError("Judge attempts exhausted")
-
-    async def verify(self, body: VisualVerifyRequest) -> AgentXVerifyResponse:
-        task = body.verifier_metadata
-        if task["benchmark"] != "AgentX_GoalAcc":
-            raise ValueError(f"Not an Agent-X task: {task['benchmark']}")
-        prediction = final_response(final_answer(body.response.model_dump()["output"]))
-        if prediction:
-            score, raw = await self._judge_answer(task, prediction)
-        else:
-            score, raw = 0.0, "Score: 0; no final answer."
-        return AgentXVerifyResponse(
-            **body.model_dump(),
-            reward=score,
-            extracted=prediction,
-            scorer="agentx-goal-full-response-v1",
-            judge_model=self.config.judge_model,
-            judge_raw=raw,
-        )
 
     def compute_metrics(self, tasks: list) -> dict:
         rows, balanced = average_repeats(tasks)

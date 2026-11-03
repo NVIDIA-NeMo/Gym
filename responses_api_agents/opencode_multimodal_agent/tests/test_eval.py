@@ -211,10 +211,9 @@ def test_training_still_rejects_prompt_override():
     assert not config().preserve_image_format
 
 
-def test_eval_requires_prompt_and_rejects_duplicate_prefix():
+def test_eval_accepts_native_prompt_and_rejects_duplicate_prefix():
     native = config().model_dump()
-    with pytest.raises(ValidationError):
-        OpenCodeMultimodalEvalConfig.model_validate(native | {"system_prompt": None})
+    assert OpenCodeMultimodalEvalConfig.model_validate(native | {"system_prompt": None}).build_system_prompt is None
     with pytest.raises(ValidationError):
         OpenCodeMultimodalEvalConfig.model_validate(native | {"build_system_prompt": "override"})
 

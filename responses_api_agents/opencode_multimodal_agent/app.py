@@ -12,10 +12,10 @@ from time import time
 from typing import Any
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.base_responses_api_agent import Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import Body
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -37,6 +37,7 @@ from responses_api_agents.opencode_agent.app import (
 )
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig, sandbox_command
 from responses_api_agents.opencode_multimodal_agent.media import final_answer, parse_visual_session, stage_inputs
 from responses_api_agents.opencode_multimodal_agent.rewards import (
@@ -44,6 +45,7 @@ from responses_api_agents.opencode_multimodal_agent.rewards import (
     OpenCodeToolRewardConfig,
     score_opencode_tools,
 )
+from responses_api_agents.opencode_multimodal_agent.sessions import MultimodalSandboxSession, MultimodalSessionMixin
 
 
 ROOT = Path(__file__).parent
@@ -95,8 +97,8 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
 
     @model_validator(mode="after")
     def validate_episode_config(self) -> "OpenCodeMultimodalAgentConfig":
-        if self.sandbox_provider is not None:
-            raise ValueError("Use sandbox to configure multimodal episode isolation")
+        if self.sandbox_provider is not None and self.sandbox is not None:
+            raise ValueError("Choose session sandbox_provider or local sandbox, not both")
         if self.final_answer_reserve is not None:
             if self.final_answer_reserve >= self.context_window:
                 raise ValueError("final_answer_reserve must be smaller than context_window")
@@ -132,7 +134,7 @@ class OpenCodeMultimodalVerifyResponse(OpenCodeAgentVerifyResponse):
     opencode_tool_reward: OpenCodeToolReward | None = None
 
 
-class OpenCodeMultimodalAgent(OpenCodeAgent):
+class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
     """Inherit the stock installer, provider, environment and subprocess runner.
 
     Production recipes configure a per-episode filesystem sandbox. Token capture
@@ -141,10 +143,34 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
 
     config: OpenCodeMultimodalAgentConfig
 
-    # /run and /v1/responses own image staging and the per-episode sandbox.
-    # Separate agent-session setup would bypass that lifecycle.
-    _seed_agent_session_state = SimpleResponsesAPIAgent._seed_agent_session_state
-    _close_agent_session_state = SimpleResponsesAPIAgent._close_agent_session_state
+    def _make_session_response(
+        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> OpenCodeMultimodalResponse:
+        response = super()._make_session_response(state, body, **kwargs)
+        assert isinstance(state, MultimodalSandboxSession)
+        export = json.loads(state.session.artifacts) if state.session.artifacts else {}
+        messages = export.get("messages", [])
+        turns = sum(message.get("info", {}).get("role") == "assistant" for message in messages)
+        if response.status == "completed":
+            images = sum(
+                part.get("type") == "file" and part.get("mime", "").startswith("image/")
+                for message in messages
+                if message.get("info", {}).get("role") == "user"
+                for part in message.get("parts", [])
+            )
+            if images != state.expected_images:
+                raise HTTPException(502, "OpenCode dropped initial images")
+        return OpenCodeMultimodalResponse.model_validate(
+            response.model_dump()
+            | {
+                "opencode_evidence": EpisodeEvidence(
+                    turns_used=turns,
+                    finished_naturally=response.status == "completed"
+                    and bool(final_answer([item.model_dump() for item in response.output])),
+                    tool_reward=None,
+                )
+            }
+        )
 
     def _build_opencode_config(self, rollout_id: str | None = None) -> dict[str, Any]:
         config = super()._build_opencode_config(rollout_id)
@@ -256,6 +282,8 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
         rollout_id: str | None = None,
         collect_observations: bool = True,
     ) -> AgentEpisode:
+        if self.config.sandbox_provider is not None:
+            raise HTTPException(409, "Configured session sandbox requires an Environment Server and agent session")
         if body.temperature is None or body.top_p is None:
             raise ValueError("Explicit temperature and top_p are required for on-policy generation")
         with TemporaryDirectory(prefix="gym-opencode-multimodal-") as temporary:
@@ -367,6 +395,8 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
         return OpenCodeMultimodalResponse.model_validate(await super().responses(request, body))
 
     async def run(self, request: Request, body: OpenCodeMultimodalRunRequest) -> OpenCodeMultimodalVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Agent sessions must run through the Environment Server")
         async with self.sem:
             resource = self.config.resources_server.name
             if body.image_tools_base_agent_ref is not None:
