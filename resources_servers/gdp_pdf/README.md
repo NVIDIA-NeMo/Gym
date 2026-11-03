@@ -261,6 +261,13 @@ call**, and two hours per OpenCode run. This is not a 16K-token episode budget.
 Use OpenCode's normal tools; there is no GDP.pdf-specific Python kernel or tool loop.
 Gym owns session cleanup and propagates infrastructure failures for retry.
 
+Web tools and subagents are disabled through OpenCode permissions. These permissions
+do not isolate shell networking: Python or `curl` can still access external sites
+when the sandbox provider permits it. A strictly offline evaluation needs an
+enforced provider network policy that allows the model endpoint and blocks other
+egress. Record the provider policy with results; a PDF-only instruction is not an
+egress restriction.
+
 ## Training configuration
 
 Use `configs/opencode_training.yaml` instead of the benchmark config. Set
