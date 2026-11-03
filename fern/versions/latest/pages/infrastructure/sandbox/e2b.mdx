@@ -202,8 +202,9 @@ E2B's default memory-preserving snapshot. Resume connects to the same sandbox ID
 and refreshes the SDK handle so subsequent commands and file operations use the
 resumed connection. Resume restarts the sandbox lifetime at `create.timeout_s`, the
 provider default; a per-sandbox `SandboxSpec.ttl_s` is not reapplied. Pause raises on a
-409 Conflict. E2B cloud sends one for an already-paused sandbox, and AgentENV during a
-snapshot or fork, which status reports as paused although the sandbox then runs again.
+409 Conflict. E2B cloud sends one for an already-paused sandbox or one in a transitional
+state, and AgentENV during a snapshot or fork, which status reports as paused although the
+sandbox then runs again.
 
 Status reads the control plane without waking the guest. The provider does not
 retry failed pause/resume calls; a timeout or transport failure can leave the

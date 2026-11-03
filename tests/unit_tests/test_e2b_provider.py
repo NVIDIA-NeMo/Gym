@@ -503,7 +503,7 @@ async def test_real_sdk_pause_resume_and_status_use_only_the_control_plane(monke
     requests.clear()
     assert await provider.status(handle) is SandboxStatus.RUNNING
     await provider.pause(handle)
-    with pytest.raises(RuntimeError, match="was not paused"):  # A 409 is never confirmed as paused.
+    with pytest.raises(RuntimeError, match="refused pause with 409"):  # A 409 is never confirmed as paused.
         await provider.pause(handle)
     assert await provider.status(handle) is SandboxStatus.PAUSED
     await provider.resume(handle)
@@ -1373,7 +1373,7 @@ async def test_pause_raises_when_the_sandbox_did_not_pause(monkeypatch: pytest.M
     # AgentENV answers 409 during a snapshot or fork, while status reports the sandbox as paused.
     handle.raw.paused = True
     monkeypatch.setattr(handle.raw, "pause", AsyncMock(return_value=False))
-    with pytest.raises(RuntimeError, match="was not paused"):
+    with pytest.raises(RuntimeError, match="refused pause with 409"):
         await provider.pause(handle)
 
 
@@ -1385,6 +1385,29 @@ async def test_resume_keeps_the_create_lifetime_and_request_timeout(monkeypatch:
     await provider.resume(handle)
     # The provider lifetime applies: the handle does not keep the spec's ttl_s.
     connect.assert_awaited_once_with(handle.sandbox_id, timeout=1800, request_timeout=90.0)
+
+
+async def test_resume_prefers_the_configured_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = E2BProvider(connection={"request_timeout_s": 12}, create={"template": "base"})
+    handle = await provider.create(_spec(ready_timeout_s=90))
+    connect = AsyncMock(return_value=FakeSandbox(sandbox_id=handle.sandbox_id))
+    monkeypatch.setattr(FakeSandbox, "connect", connect)
+    await provider.resume(handle)
+    # connection.request_timeout_s wins over the ready_timeout_s the create handle kept.
+    connect.assert_awaited_once_with(handle.sandbox_id, timeout=3600, request_timeout=12)
+
+
+@pytest.mark.parametrize(("timeout_s", "sent"), [(90.4, 91), (0.2, 1)])
+async def test_resume_sends_whole_second_lifetime(
+    monkeypatch: pytest.MonkeyPatch, timeout_s: float, sent: int
+) -> None:
+    provider = E2BProvider(create={"template": "base", "timeout_s": timeout_s})
+    handle = await provider.create(_spec())
+    connect = AsyncMock(return_value=FakeSandbox(sandbox_id=handle.sandbox_id))
+    monkeypatch.setattr(FakeSandbox, "connect", connect)
+    await provider.resume(handle)
+    assert connect.await_args.kwargs["timeout"] == sent
+    assert type(connect.await_args.kwargs["timeout"]) is int
 
 
 async def test_create_kills_at_timeout_by_default() -> None:
