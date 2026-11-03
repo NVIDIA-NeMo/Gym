@@ -40,6 +40,7 @@ NO_FACTS = {
     "test_run": None,
     "substep_tests": None,
     "unit_tests": None,
+    "node_f1": None,
 }
 
 

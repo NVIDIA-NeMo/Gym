@@ -389,3 +389,70 @@ def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish
     # The unknown outcome alone counts the trial (a known lower bound over the limit), whatever joins its calls.
     grade["dependencies"] = []
     assert trial_health(d, c)[0] is False
+
+
+def _transport_retried_judge(*, transport=1, event=True):
+    """A judge request whose first connection failed without an HTTP status and was retried inside the same
+    operation, which then completed: one HTTP attempt, one transport failure, one recorded event."""
+    collected = copy.deepcopy(fixture("healthy"))
+    observed = collected.results[0]["ng_trial_observations"]
+    grade = observed["verifier_invocations"][0]["grading_operations"][0]
+    grade["kind"] = "llm_judge"
+    call = _judge_call(observed)
+    _own(observed, call)
+    grade["dependencies"] = [_dep(call)]
+    meta = call["response_metadata"]
+    meta["model_operations"][0].update(transport_failures=transport, retry_wait_s=0, request_elapsed_ms=2)
+    if event:
+        failure = dict(
+            event_id="judge-transport",
+            boundary="model",
+            operation="model_request",
+            operation_id="judge-op",
+            attempt_id="judge-op-transport-1",
+            cause_id=None,
+            failure_kind="model_request_error",
+            http_status=None,
+        )
+        meta["failure_report"]["events"] = {"judge-transport": failure}
+        collected.results[0]["_ng_failure_events"] = {"judge-transport": dict(failure)}
+    return collected
+
+
+def test_a_judge_request_retried_after_a_transport_failure_is_recovered():
+    from nemo_gym.orchestration.recovery import trial_health
+
+    c = _transport_retried_judge()
+    d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    counters = {}
+    assert _observed_trial_operations(d, c, judge_recovery=counters) is True
+    assert counters["observed_grading_attempt_errors"] == 1 and counters["judge_recovered_attempts"] == 1
+    assert trial_health(d, c)[0] is True
+
+
+@pytest.mark.parametrize(("transport", "event"), [(0, True), (1, False)], ids=["uncounted-event", "missing-event"])
+def test_a_transport_failure_must_be_counted_and_recorded(transport, event):
+    c = _transport_retried_judge(transport=transport, event=event)
+    d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert _observed_trial_operations(d, c) is False
+
+
+@pytest.mark.parametrize(
+    "dialect,status,finish",
+    [("responses", "incomplete", None), ("chat", None, "length"), ("chat", None, "content_filter")],
+)
+def test_a_completed_grade_on_a_cut_judge_reply_is_a_grading_without_a_valid_verdict(dialect, status, finish):
+    collected = copy.deepcopy(fixture("healthy"))
+    observed = collected.results[0]["ng_trial_observations"]
+    grade = observed["verifier_invocations"][0]["grading_operations"][0]
+    grade["kind"] = "llm_judge"
+    call = _judge_call(observed)
+    _own(observed, call)
+    grade["dependencies"] = [_dep(call)]
+    call["response_metadata"].update(dialect=dialect, response_status=status, finish_reason=finish)
+    d = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    faults = []
+    assert _observed_trial_operations(d, collected, grading_failures=faults) is True
+    assert len(faults) == 1
+    # A caller that does not count gradings without a valid verdict still cannot accept the trial.
+    assert _observed_trial_operations(d, collected) is False
