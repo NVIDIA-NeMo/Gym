@@ -258,6 +258,12 @@ alternatively, `sandbox_executable_path` names a binary already **inside the
 sandbox**. These two options are mutually exclusive and require
 `sandbox_executable_sha256`.
 
+`network_access: model_only` limits an agent-owned sandbox's egress to the model
+endpoint's host, which the uploaded runtime allows. The OpenSandbox policy is set
+when the sandbox is created, so a session that borrows a task sandbox rejects any
+value other than `inherit` (the default, the provider's network). Claude uses no
+tool grants, so `model_and_tools` is rejected.
+
 Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
 the endpoint must be reachable from the sandbox. With `model_server`, only
 placeholder Anthropic credentials enter the sandbox; the configured direct

@@ -74,6 +74,46 @@ async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch,
         assert not any(command.startswith("mkdir -p -- /app") for command in commands)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network_access", ["inherit", "model_only"])
+async def test_owned_sandbox_egress_allows_only_the_model_endpoint(monkeypatch, network_access):
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+    instance = agent(
+        sandbox_provider="sandbox",
+        sandbox_config={"workdir": "/app"},
+        anthropic_base_url="http://model.example:9000",
+        network_access=network_access,
+    )
+    await instance._seed_agent_session_state(seed(borrowed=False))
+    policy = remote.start.await_args.args[0].provider_options.get("network_policy")
+    if network_access == "inherit":
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": "model.example"}]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("borrowed", "network_access", "message"),
+    [(True, "model_only", "not a borrowed one"), (False, "model_and_tools", "no tool grants")],
+)
+async def test_unusable_network_access_is_rejected_before_connecting(monkeypatch, borrowed, network_access, message):
+    constructor = MagicMock()
+    constructor.connect = AsyncMock()
+    monkeypatch.setattr(app, "AsyncSandbox", constructor)
+    create_provider = MagicMock()
+    monkeypatch.setattr(app, "create_provider", create_provider)
+    instance = agent(sandbox_provider="sandbox", sandbox_config={"workdir": "/app"}, network_access=network_access)
+    with pytest.raises(HTTPException, match=message):
+        await instance._seed_agent_session_state(seed(borrowed=borrowed))
+    create_provider.assert_not_called()
+    constructor.assert_not_called()
+    constructor.connect.assert_not_awaited()
+
+
 def test_setup_without_bash_names_it(tmp_path):
     # A non-root image without bash must fail at setup with a message, not with a bare 127 later.
     bindir = tmp_path / "bin"
