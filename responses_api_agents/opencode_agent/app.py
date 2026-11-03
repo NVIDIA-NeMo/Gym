@@ -51,6 +51,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     Stopped,
+    exec_idempotent,
     resolve_agent_timeout,
     run_until_parked,
 )
@@ -899,7 +900,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if present.return_code != 0 or present.error_type:
             LOG.warning("Restored OpenCode session %s lacks its runtime or files; installing them again", root)
             command = _sandbox_prepare_command(access.workdir, root, state.runtime)
-            result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
+            result = await exec_idempotent(
+                sandbox,
+                command,
+                what="OpenCode sandbox preparation",
+                timeout_s=self.config.sandbox_install_timeout_seconds,
+            )
             self._check_sandbox_setup(command, result)
             await self._install_session_files(sandbox, root, access.workdir, state.runtime, checkpointed=True)
         state.session = session
@@ -1005,14 +1011,26 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if owns_sandbox:
                 await sandbox.start(spec)
                 # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
-                workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+                workspace = await exec_idempotent(
+                    sandbox,
+                    f"mkdir -p -- {shlex.quote(workdir)}",
+                    what="OpenCode workdir creation",
+                    cwd="/",
+                    timeout_s=30,
+                )
                 if workspace.return_code != 0 or workspace.error_type:
                     raise RuntimeError(
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
             command = _sandbox_prepare_command(workdir, directory, runtime)
-            result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
+            # Checks before it installs, so running it again is safe.
+            result = await exec_idempotent(
+                sandbox,
+                command,
+                what="OpenCode sandbox preparation",
+                timeout_s=self.config.sandbox_install_timeout_seconds,
+            )
             self._check_sandbox_setup(command, result)
             prepared_directory = True
             await self._install_session_files(sandbox, directory, workdir, runtime, checkpointed=checkpointed)
@@ -1111,7 +1129,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 ":".join(self.config.sandbox_path_prefix),
             )
         )
-        result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
+        # The installer serializes concurrent runs and skips a runtime already in place, so running it again is safe.
+        result = await exec_idempotent(
+            sandbox,
+            command,
+            what="OpenCode runtime installation",
+            cwd=workdir,
+            timeout_s=self.config.sandbox_install_timeout_seconds,
+        )
         self._check_sandbox_setup(command, result)
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")

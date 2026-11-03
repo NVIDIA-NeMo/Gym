@@ -16,8 +16,10 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     AgentSessionState,
+    NothingCapturedError,
     SandboxCommand,
     SandboxSession,
+    exec_idempotent,
     shell_assignments,
 )
 from nemo_gym.config import ModelServerRef
@@ -26,7 +28,7 @@ from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
-from responses_api_agents.opencode_agent.snapshot import snapshot
+from responses_api_agents.opencode_agent.snapshot import NoRootSessionError, snapshot
 
 
 LOG = logging.getLogger(__name__)
@@ -199,6 +201,9 @@ class OpenCodeSandboxSession(AgentSessionState):
                     previous_message_ids=(),
                 )
                 return json.loads((Path(directory) / "export.json").read_text())
+            except NoRootSessionError:
+                LOG.info("OpenCode had saved no conversation yet in %s", self.persistent_directory)
+                return None
             except Exception:
                 LOG.warning("The saved OpenCode conversation cannot be read", exc_info=True)
                 return None
@@ -206,8 +211,11 @@ class OpenCodeSandboxSession(AgentSessionState):
     async def discard_conversation(self, *, timeout: float) -> None:
         """Set the saved conversation aside, so the next launch starts afresh in an empty data directory."""
         data = f"{self.persistent_directory}/data"
-        result = await self.session.sandbox.exec(
+        # Moving it only if present, so running it again is safe.
+        result = await exec_idempotent(
+            self.session.sandbox,
             f"if [ -e {quote(data)} ]; then mv -- {quote(data)} {quote(data)}.discarded-{self.launch_count}; fi",
+            what="Setting the saved OpenCode conversation aside",
             cwd="/",
             timeout_s=timeout,
         )
@@ -380,10 +388,19 @@ class OpenCodeSandboxSession(AgentSessionState):
             LOG.warning("OpenCode stderr log unavailable", exc_info=True)
         try:
             await self.snapshot(directory, timeout)
+        except NoRootSessionError as error:
+            if self._launch_failed():
+                raise await self._nothing_captured(str(error)) from None
+            error = RuntimeError(f"OpenCode transcript capture failed: {error}")
+            if self.stderr:
+                raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
+            raise error
         except Exception as error:
             if self.stderr:
                 raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
             raise
+        if self._launch_failed() and not (directory / "export.json").exists():
+            raise await self._nothing_captured("OpenCode sandbox runner returned no valid result: no session database")
         if self.is_continuation or self.checkpointed:
             export_text = await self._read_export(directory)
             export = json.loads(export_text)
@@ -523,8 +540,26 @@ class OpenCodeSandboxSession(AgentSessionState):
                 harness_session_id=self.harness_session_id,
                 previous_message_ids=self.message_ids,
             )
+        except NoRootSessionError:
+            raise
         except Exception as error:
             raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+
+    def _launch_failed(self) -> bool:
+        """Whether the launch ended without OpenCode finishing: a failure, a stop, or no receipt at all."""
+        cleanup = self.session.cleanup
+        return cleanup is None or cleanup["return_code"] != 0 or bool(cleanup.get("stopped"))
+
+    async def _nothing_captured(self, detail: str) -> NothingCapturedError:
+        """The capture error of a launch that ended before OpenCode saved anything, with the runner's log for why."""
+        cleanup = self.session.cleanup or {}
+        message = (
+            f"OpenCode left nothing to capture after its launch ended without finishing "
+            f"(exit {cleanup.get('return_code')}, stopped {bool(cleanup.get('stopped'))}): {detail}"
+        )
+        return NothingCapturedError(
+            format_error_message(message, output=await self.session.read_output_log(), stderr=self.stderr)
+        )
 
     async def _download_database(self, directory: Path, timeout: float) -> bool:
         """Copy OpenCode's database, with its write-ahead log, into ``directory``; ``False`` when there is none."""
