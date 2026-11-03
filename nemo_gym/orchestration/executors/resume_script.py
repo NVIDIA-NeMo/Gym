@@ -110,6 +110,14 @@ NO_PROGRESS_SEGMENT_REASON = (
 )
 # Where the driver step's DRIVER_FAILURE_ENV points: the next segment's guard ends the chain with the kind in it.
 DRIVER_FAILURE_NAME = ".gym_driver_failure"
+# The driver failure kinds the next segment's prologue turns into its own stop and remedy (its guard). A segment whose
+# driver exits 76 with one of them keeps its follow-up for that stop; the guard handles each (see the prologue's case).
+GUARDED_DRIVER_FAILURE_KINDS = (
+    SERVER_SPINUP_TIMEOUT,
+    DRIVER_INSTALL_FAILED,
+    COLLECTION_RESUME_REFUSED,
+    PROVIDER_CREDENTIALS_REJECTED,
+)
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
     "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
@@ -787,7 +795,7 @@ _gym_end_own_chain() {{
     _file="$OUTPUT_DIR/{driver_failure_name}.$SLURM_JOB_ID"
     [[ ! -e "$_file" ]] || _kind=$(head -n 1 "$_file" 2>/dev/null) || _kind=""
     case "$_kind" in
-        {server_spinup_timeout}|{driver_install_failed}|{collection_resume_refused}|{provider_credentials_rejected})
+        {guarded_failure_kinds})
             _kind=guarded ;;
     esac
     if [[ $_rc == {no_eligible_retry_exit} && "$_kind" != guarded ]]; then
@@ -959,10 +967,7 @@ def render_resume_epilogue() -> str:
         no_eligible_retry=NO_ELIGIBLE_RETRY,
         no_eligible_retry_reason=NO_ELIGIBLE_RETRY_REASON,
         driver_failure_name=DRIVER_FAILURE_NAME,
-        server_spinup_timeout=SERVER_SPINUP_TIMEOUT,
-        driver_install_failed=DRIVER_INSTALL_FAILED,
-        collection_resume_refused=COLLECTION_RESUME_REFUSED,
-        provider_credentials_rejected=PROVIDER_CREDENTIALS_REJECTED,
+        guarded_failure_kinds="|".join(GUARDED_DRIVER_FAILURE_KINDS),
         provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
         export_receipt_missing=EXPORT_RECEIPT_MISSING,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
