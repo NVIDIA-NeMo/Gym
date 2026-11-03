@@ -23,6 +23,6 @@ xstest_benchmark_simple_agent:
 xstest_benchmark_environment_server:
   _inherit_from: xstest_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: xstest_benchmark_simple_agent

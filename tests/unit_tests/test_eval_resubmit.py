@@ -348,8 +348,8 @@ def _run_args(script: str, job_dir: Path, env: dict[str, str]) -> list[str]:
 
 
 def _recorded_tracking_ids(args: list[str]) -> dict[str, str | None]:
-    from nemo_gym.exporters.mlflow import MLflowExporter
-    from nemo_gym.exporters.wandb import WandbExporter
+    from nemo_gym.artifacts.exporters.mlflow import MLflowExporter
+    from nemo_gym.artifacts.exporters.wandb import WandbExporter
 
     config = OmegaConf.from_dotlist([arg.lstrip("+") for arg in args if "=" in arg])
     output = Path(config.output_jsonl_fpath)
