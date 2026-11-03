@@ -21,13 +21,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nemo_gym.agents import AgentSeedSessionRequest, NotResumable, RestoredLaunch, SandboxSession
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_runtime import LocalExecProvider
 from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent.sandbox import RELAY_ENDPOINT_FILE, OpenCodeSandboxSession
@@ -427,3 +427,65 @@ async def test_pointing_the_relay_raises_its_endpoint_generation(
     assert state.relay_gen == 2
     endpoint = json.loads((tmp_path / "s" / RELAY_ENDPOINT_FILE).read_text())
     assert endpoint == {"gen": 2, "upstream": "http://gym-b/ng-rollout/r-a1/v1"}
+
+
+# -- launches that cannot resume in place by design ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("found", [True, False])
+async def test_a_seed_records_whether_the_image_has_a_python_for_the_relay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, found: bool
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    sandbox = MagicMock()
+    sandbox.sandbox_id = "sbx-1"
+    sandbox.exec = AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0 if found else 1))
+    caplog.set_level(logging.INFO)
+
+    await agent._check_relay_python(sandbox, state)
+
+    assert state.relay_python is found
+    warnings = [r for r in caplog.records if "no Python 3.6+ for the model relay" in r.getMessage()]
+    assert len(warnings) == (0 if found else 1)
+    if not found:
+        assert "task 0" in warnings[0].getMessage() and "sbx-1" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    "verdict, level, detail",
+    [
+        (NotResumable("relay_unavailable"), "INFO", "no Python in the image"),
+        (NotResumable("relay_gone"), "INFO", "None"),
+        (NotResumable("pause_mismatch", "a continue was written"), "WARNING", "a continue was written"),
+    ],
+    ids=["relay_unavailable", "relay_gone", "pause_mismatch"],
+)
+async def test_expected_restore_fallbacks_are_logged_at_info(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    verdict: Any,
+    level: str,
+    detail: str,
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    state.relay_python = False
+
+    async def check(sandbox: Any, session_dir: str, **kwargs: Any) -> Any:
+        return verdict
+
+    async def abandon(sandbox: Any, session_dir: str, *, identity: str, **kwargs: Any) -> dict:
+        return {"stopped": True, "abandoned": True, "cleanup_confirmed": True, "return_code": None}
+
+    monkeypatch.setattr(opencode_app, "check_restored", check)
+    monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
+    caplog.set_level(logging.INFO)
+
+    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+
+    [cannot] = [r for r in caplog.records if "cannot resume in place" in r.getMessage()]
+    [abandoned] = [r for r in caplog.records if "abandoned a restored launch" in r.getMessage()]
+    assert cannot.levelname == abandoned.levelname == level
+    assert f"detail {detail};" in cannot.getMessage()

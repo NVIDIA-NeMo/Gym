@@ -232,6 +232,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     restored: dict[str, JsonValue] | None = None
     keeps_processes: bool = False
     relay_gen: int = 0
+    # Whether the image has a Python the model relay can run on (False: launches run without it); None: not checked.
+    relay_python: bool | None = None
     adoption: RestoredLaunch | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
