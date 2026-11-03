@@ -27,6 +27,7 @@ import tempfile
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -92,6 +93,7 @@ class KubernetesExecutor(BaseExecutor):
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
         fresh_restart: bool = False,
+        rerun_masked: Mapping[str, Any] | None = None,
     ) -> BenchmarkJob:
         raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 

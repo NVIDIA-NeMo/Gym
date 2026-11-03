@@ -409,8 +409,9 @@ class BaseExporter(Exporter):
     def export(self, artifacts: RunArtifacts) -> ExportResult:
         """Send a finished run to the backend: its saved config, aggregate metrics and (optionally) rollouts.
 
-        Skipped, without contacting the backend, when the run was already exported. Failures come back in the
-        result rather than being swallowed the way live `export_*` calls are.
+        Skipped, without contacting the backend, when the run's export receipt matches its current artifacts; a
+        receipt that does not match them, or a marker that is not a version-1 receipt, is a failure and nothing is
+        sent. Failures come back in the result rather than being swallowed the way live `export_*` calls are.
         """
         marker = artifacts.export_done_fpath(self.name)
         try:
