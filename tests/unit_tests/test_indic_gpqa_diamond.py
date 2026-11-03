@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from benchmarks.gpqa import prepare as english_module
 from benchmarks.indic.gpqa_diamond import prepare as module
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
 
 def record(index=0, language="en", **extra):
@@ -198,7 +198,10 @@ def test_config_matches_english_pipeline():
     assert dataset["prompt_config"] == english_dataset["prompt_config"]
     environment = config["indic_gpqa_diamond_environment_server"]
     assert environment["_inherit_from"] == english["gpqa_mcqa_environment_server"]["_inherit_from"]
-    assert environment["environment_servers"]["legacy_agent"]["agent_server"]["name"] == "indic_gpqa_diamond_agent"
+    assert (
+        environment["environment_servers"]["single_agent_turn_legacy"]["agent_server"]["name"]
+        == "indic_gpqa_diamond_agent"
+    )
     assert set(config) == {
         "config_paths",
         "indic_gpqa_diamond_resources_server",
@@ -233,7 +236,7 @@ def test_environment_routing_alone_and_with_english_gpqa(
     if "gpqa" in benchmarks:
         expected["gpqa_mcqa_environment_server"] = "gpqa_mcqa_simple_agent"
     environments = {
-        name: block["environment_servers"]["legacy_agent"]
+        name: block["environment_servers"]["single_agent_turn_legacy"]
         for name, block in resolved.items()
         if OmegaConf.is_dict(block) and "environment_servers" in block
     }

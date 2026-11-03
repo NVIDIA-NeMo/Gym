@@ -15,14 +15,14 @@ from typing import ClassVar
 
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.core import NeMoGymResponse
 from resources_servers.mimo_music.scorer.pipeline import extract_abc
 from resources_servers.mimo_music.setup_abc2midi import ensure_abc2midi
 

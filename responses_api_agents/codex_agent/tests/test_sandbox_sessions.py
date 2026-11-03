@@ -21,13 +21,16 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    RolloutStopRequest,
+    parse_cleanup_receipt,
+)
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxStatus
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig, _model_endpoint_error
 
 
@@ -85,6 +88,9 @@ def events(*, stop_reason="stop") -> str:
 
 
 class Sandbox:
+    # Like OpenSandbox in background mode: a stop's upload never waits behind the running worker.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.files = {}
         self.result = {
@@ -96,6 +102,8 @@ class Sandbox:
             "pid": 123,
         }
         self.events = events()
+        # False: the worker ends before it opens its transcript, so it leaves no events.jsonl.
+        self.writes_events = True
         self.blocked = False
         self.started = asyncio.Event()
         self.exited = asyncio.Event()
@@ -110,6 +118,10 @@ class Sandbox:
 
     async def upload(self, source, destination):
         self.files[destination] = Path(source).read_text()
+        if destination.endswith("/expire.request"):
+            # The supervisor ends the harness as at its deadline; before launch, it never starts it.
+            self.result.update(timed_out=True, return_code=-signal.SIGTERM if hasattr(self, "directory") else None)
+            self.exited.set()
 
     async def download(self, source, destination):
         Path(destination).write_text(self.files[source])
@@ -121,11 +133,18 @@ class Sandbox:
         self.files[f"{self.directory}/runtime.json"] = json.dumps(
             {key: self.result[key] for key in ("hostname", "pid")}
         )
-        self.files[f"{self.directory}/events.jsonl"] = self.events
+        if self.writes_events:
+            self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def execute(self, command, **kwargs):
         if "exec bash " in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
+        if "echo absent" in command:
+            # The adapter checks whether a stopped worker left a transcript.
+            present = any(path.endswith("/events.jsonl") for path in self.files)
+            return SimpleNamespace(
+                error_type=None, return_code=0, stdout="present\n" if present else "absent\n", stderr=""
+            )
         if "touch " in command and "stop.request" in command:
             self.signals.append("SIGTERM")
             if hasattr(self, "directory"):
@@ -140,6 +159,12 @@ class Sandbox:
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
         assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
+        if self.result["timed_out"] and self.result["return_code"] is None:
+            self.files[f"{payload['directory']}/cleanup.json"] = json.dumps(
+                {key: value for key, value in self.result.items() if key not in ("hostname", "pid")}
+            )
+            self.started.set()
+            return self.exec.return_value
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -1285,6 +1310,106 @@ async def activate(agent, sandbox):
     return request, seeded.agent_session_id, task
 
 
+async def test_rollout_stop_ends_codex_as_a_timeout(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
+    request, session_id, task = await activate(agent, sandbox)
+    rollout_id = seed().episode_id.capture_key
+    assert (await agent.stop_rollout(rollout_id, RolloutStopRequest(reason="budget"))).stopped is True
+    assert (await agent.stop_rollout(rollout_id)).stopped is False
+    response = await task
+    # The same response as at the run's own deadline, verified as a timeout, plus the stop's marker and no failure kind.
+    assert response.status == "incomplete" and response.error is None
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert "ng_agent_outcome" not in response.metadata
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert sandbox.signals == []
+    assert (await agent.stop_rollout(rollout_id)).stopped is False
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations.records[0].status == "incomplete"
+    with pytest.raises(HTTPException) as unknown:
+        await agent.stop_rollout(rollout_id)
+    assert unknown.value.status_code == 404
+
+
+async def test_rollout_stop_before_activation_never_starts_codex(setup):
+    agent, sandbox = setup
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    assert (await agent.stop_rollout(seed().episode_id.capture_key)).stopped is True
+    response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.status == "incomplete" and response.error is None and response.output == []
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": None}
+    assert "ng_agent_outcome" not in response.metadata
+    launch = next(call.kwargs["command"] for call in sandbox.launch.await_args_list)
+    assert "--expire-file" in launch
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+async def test_rollout_stop_before_the_worker_writes_events_is_an_empty_timeout(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.writes_events = False
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    response = await task
+    # The launch ran and the supervisor ended it at the stop, with no transcript: graded like the timeout it is.
+    assert response.status == "incomplete" and response.error is None and response.output == []
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert "ng_agent_outcome" not in response.metadata
+    state = agent._session_records[session_id].state
+    assert state.session.expired and not state.session.expired_before_launch
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_rollout_stop_keeps_a_failed_transcript_download_an_error(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    download = sandbox.download
+
+    async def lose_events(source, destination):
+        if source.endswith("/events.jsonl"):
+            raise ConnectionError("connection reset")
+        if source.endswith("/output.log"):
+            Path(destination).write_text("diagnostic from shared supervisor")
+            return
+        await download(source, destination)
+
+    sandbox.download = AsyncMock(side_effect=lose_events)
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    # The worker wrote events, so the stop is no evidence that there are none: the failed transfer stays an error.
+    with pytest.raises(RuntimeError, match="Codex sandbox runner returned no valid result") as failure:
+        await task
+    assert "diagnostic from shared supervisor" in str(failure.value)
+    assert isinstance(failure.value.__cause__, ConnectionError)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_rollout_stop_without_a_transcript_check_reports_the_missing_events(setup):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.writes_events = False
+    execute = sandbox.exec.side_effect
+
+    async def unreachable_probe(command, **kwargs):
+        if "echo absent" in command:
+            raise ConnectionError("sandbox unreachable")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = unreachable_probe
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    # Without confirmation that the transcript is absent, the missing events are reported as before.
+    with pytest.raises(RuntimeError, match="Codex sandbox runner returned no valid result"):
+        await task
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    sandbox.disconnect.assert_awaited_once()
+
+
 async def test_close_cancels_active_codex_before_detaching(setup):
     agent, sandbox = setup
     sandbox.blocked = True
@@ -1513,7 +1638,7 @@ def test_close_retry_and_stale_activation_do_not_run_host_codex(setup):
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: 100.0)
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: 100.0)
     with TestClient(agent.setup_webserver()) as client:
 
         def seed_and_close(index):
@@ -1543,7 +1668,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
 async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1569,7 +1694,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
 async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1610,7 +1735,7 @@ async def test_concurrent_closes_share_receipt(setup):
 async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -1901,7 +2026,7 @@ async def _local_exec(command, **kwargs):
 
 async def test_session_rollouts_are_copied_to_the_logs_dir(tmp_path):
     """Codex's session rollouts (per-call token counts) survive the session directory, as Harbor keeps them."""
-    from nemo_gym.agent_utils.sandbox_session import SandboxSession
+    from nemo_gym.agents import SandboxSession
     from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 
     def state(directory, logs_dir):
@@ -2078,7 +2203,7 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
 async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     body = seed()
     close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
@@ -2136,7 +2261,7 @@ async def test_caller_identifier_is_not_a_filesystem_path(setup):
 
 
 async def test_session_lifecycle_uses_shared_bookkeeping(setup):
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     agent, sandbox = setup
     assert type(agent).close_agent_session is SimpleResponsesAPIAgent.close_agent_session
@@ -2152,11 +2277,12 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     """Exercise the checked-in recipe through collector, real environment, and real Codex lifecycle.
 
     A failed Codex run bypasses verification unless verify_after_agent_error grades it."""
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-    from nemo_gym.config import GlobalConfigDictParser
+    from environment_servers.single_agent_turn_legacy.app import (
+        SingleAgentTurnLegacyEnvironmentServer,
+        SingleAgentTurnLegacyEnvironmentServerConfig,
+    )
+    from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-    from nemo_gym.server_utils import BaseServerConfig
 
     agent, sandbox = setup
     provider_failure = outcome == "provider-failure"
@@ -2194,7 +2320,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent.server_client = transport
     environment = SingleAgentTurnLegacyEnvironmentServer(
-        config=SingleAgentTurnEnvironmentServerConfig(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
             name=environment_name,
             host="localhost",
             port=8002,
@@ -3301,7 +3427,7 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
 
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
@@ -3373,7 +3499,7 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     ],
 )
 def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup

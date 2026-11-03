@@ -9,7 +9,7 @@ support, such as a sandbox or a required grant it cannot use.
 
 from fastapi import FastAPI
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+from nemo_gym.agents.base_responses_api_agent import AgentSeedSessionRequest
 
 
 def check_agent_seed_rejected(app: FastAPI, seed: AgentSeedSessionRequest) -> str:

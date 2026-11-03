@@ -6,7 +6,7 @@ import json
 import pytest
 
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import NOOARunResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason

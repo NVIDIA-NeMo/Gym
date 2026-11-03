@@ -19,9 +19,9 @@ import pytest
 import ray
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.osworld_agent.app import (
     OSWorldAgent,
     OSWorldAgentConfig,

@@ -18,6 +18,7 @@ import orjson
 import pytest
 from pytest import approx, fixture
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -30,7 +31,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.imo_proofbench_judge.app import (
     PASS_THRESHOLD,
     ImoProofBenchJudgeConfig,

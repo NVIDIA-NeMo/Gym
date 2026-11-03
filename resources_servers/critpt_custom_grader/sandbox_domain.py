@@ -259,7 +259,7 @@ class SandboxDomain:
             return self.cleanup
 
     def observation(self, outcome: str) -> dict[str, Any]:
-        """Category-only sandbox facts for the verify response (rollout_observability.SandboxObservation fields)."""
+        """Category-only sandbox facts for the verify response (nemo_gym.trajectory.SandboxObservation fields)."""
         return {
             "kind": "sandbox",
             "role": "verifier",

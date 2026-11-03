@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 
 
 class SessionRequest(BaseModel):
@@ -15,7 +15,7 @@ class SessionRequest(BaseModel):
 
 
 class AgentTermination(BaseModel):
-    reason: Literal["completed", "timeout", "nonzero_exit", "cancelled", "infrastructure_error"]
+    reason: Literal["completed", "timeout", "nonzero_exit", "killed", "cancelled", "infrastructure_error"]
     exit_code: int | None = None
     detail: str | None = None
     artifacts: list[str] = Field(default_factory=list)

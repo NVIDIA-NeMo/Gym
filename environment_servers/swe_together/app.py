@@ -39,25 +39,18 @@ from environment_servers.swe_together.schemas import (
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.submission import replicate_submission
 from environment_servers.swe_together.task import SOURCE_REVISION, TaskData, load_task
-from nemo_gym.agent_activation_types import (
-    AgentContinuationRequirements,
-)
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    HandledEpisodeError,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentContinuationRequirements,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
+    TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
-    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -70,8 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     verifier_invocation_context,
 )
-from nemo_gym.episode_types import EpisodeFailure
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -80,7 +72,13 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    EpisodeFailure,
+    HandledEpisodeError,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -408,7 +406,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         return super().failure_response(request, failure)
 
     def _activation_path(self, request: SWETRequest) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
         capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_id_capture"))
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""

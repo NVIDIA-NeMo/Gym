@@ -20,19 +20,19 @@ from typing import Literal
 from openai.types.responses import FunctionToolParam
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
+)
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
 )
 
 
