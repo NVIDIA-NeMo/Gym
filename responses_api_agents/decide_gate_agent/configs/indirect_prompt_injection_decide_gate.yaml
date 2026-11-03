@@ -1,0 +1,41 @@
+# The indirect_prompt_injection environment with the Nemotron Decide gate in front of every tool call.
+# Use together with resources_servers/indirect_prompt_injection/configs/indirect_prompt_injection.yaml and a
+# policy model config. Read-only lookups are gated too, so the decision log covers every call; add them to
+# skip_tools to save one decision read per lookup.
+indirect_prompt_injection_decide_gate_agent:
+  responses_api_agents:
+    decide_gate_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: indirect_prompt_injection_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 6
+      decide_gate:
+        decide:
+          base_url: ${oc.env:DECIDE_BASE_URL,http://localhost:8770}
+          api: ${oc.env:DECIDE_API,systemone}
+          model: nemotron-decide
+          api_key_env: DECIDE_API_KEY
+        mode: ${oc.env:DECIDE_GATE_MODE,enforce}
+        block_threshold: 0.5
+        ask_threshold: 0.5
+        on_ask: block
+        on_error: block
+        check_tool_outputs: true
+        on_injection: annotate
+      datasets:
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: responses_api_agents/decide_gate_agent/data/ipi_gate_demo.jsonl
+
+indirect_prompt_injection_decide_gate_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: indirect_prompt_injection_decide_gate_agent

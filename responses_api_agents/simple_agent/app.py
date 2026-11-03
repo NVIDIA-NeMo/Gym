@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from time import perf_counter, time
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
@@ -309,6 +309,35 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=state.resources_cookies,
         )
 
+    # Key under which tool-hook records are attached to the response metrics.
+    TOOL_HOOK_METRICS_KEY: ClassVar[str] = "tool_hooks"
+
+    async def _before_tool_call(
+        self,
+        function_call: NeMoGymResponseFunctionToolCall,
+        arguments: Any,
+        conversation: list[Any],
+        records: list[dict[str, Any]],
+    ) -> str | None:
+        """Hook before a model-requested tool call executes.
+
+        Return None to execute the call, or a string to skip it and use that string as the model-visible tool output.
+        `conversation` is the request input followed by this episode's outputs so far. Append JSON-serializable
+        entries to `records` to attach them to the response metrics.
+        """
+        return None
+
+    async def _after_tool_call(
+        self,
+        function_call: NeMoGymResponseFunctionToolCall,
+        arguments: Any,
+        tool_output: str,
+        conversation: list[Any],
+        records: list[dict[str, Any]],
+    ) -> str:
+        """Hook after a tool call executed; returns the model-visible tool output (unchanged by default)."""
+        return tool_output
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -330,6 +359,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         turns: list[TrajectoryTurn] = []
         question_outputs: list[int] = []
         trajectory_gaps: list[ObservationGap] = []
+        # Records of the tool-call hooks for this episode, attached to the response metrics when non-empty.
+        tool_hook_records: list[dict[str, Any]] = []
         body = body.model_copy(deep=True)
         body = self._strip_resource_only_metadata(body)
 
@@ -575,42 +606,56 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         error_type = type(e).__name__
                         tool_status = "failed"
                 else:
-                    # Resource-server errors are valid model-visible tool outputs.
-                    if tool_access is not None:
-                        api_response = await http_request(
-                            method="POST",
-                            url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
-                            _internal=True,
-                        )
+                    conversation = [*body.input, *new_outputs]
+                    blocked_output = await self._before_tool_call(
+                        output_function_call, parsed_arguments, conversation, tool_hook_records
+                    )
+                    if blocked_output is not None:
+                        # A hook refused the call: it is not executed and the refusal is the model-visible output.
+                        tool_output = blocked_output
+                        if collect_trajectory:
+                            tool_status = "cancelled"
+                            error_type = "blocked_by_tool_hook"
                     else:
-                        if in_session:
-                            # An Environment Server episode reaches Resources only through its grants; the
-                            # configured resources_server has no session for this episode.
-                            raise RuntimeError(
-                                f"Model called tool {output_function_call.name!r}, but this agent session has no "
-                                "direct HTTP tool access"
+                        # Resource-server errors are valid model-visible tool outputs.
+                        if tool_access is not None:
+                            api_response = await http_request(
+                                method="POST",
+                                url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
+                                json=parsed_arguments,
+                                cookies=resources_server_cookies,
+                                headers=dict(tool_access.headers),
+                                _internal=True,
                             )
-                        if self.config.resources_server is None:
-                            raise RuntimeError(
-                                "Simple Agent received a tool call without direct HTTP tool access "
-                                "or a legacy resources_server configuration"
+                        else:
+                            if in_session:
+                                # An Environment Server episode reaches Resources only through its grants; the
+                                # configured resources_server has no session for this episode.
+                                raise RuntimeError(
+                                    f"Model called tool {output_function_call.name!r}, but this agent session has no "
+                                    "direct HTTP tool access"
+                                )
+                            if self.config.resources_server is None:
+                                raise RuntimeError(
+                                    "Simple Agent received a tool call without direct HTTP tool access "
+                                    "or a legacy resources_server configuration"
+                                )
+                            api_response = await self.server_client.post(
+                                server_name=self.config.resources_server.name,
+                                url_path=f"{resources_prefix}/{output_function_call.name}",
+                                json=parsed_arguments,
+                                cookies=resources_server_cookies,
                             )
-                        api_response = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path=f"{resources_prefix}/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
+                        tool_output = (await api_response.content.read()).decode()
+                        resources_server_cookies = dict(resources_server_cookies or {})
+                        resources_server_cookies.update(_cookies(api_response))
+                        if collect_trajectory:
+                            completed = 200 <= api_response.status < 400
+                            tool_status = "completed" if completed else "failed"
+                            error_type = None if completed else f"http_{api_response.status}"
+                        tool_output = await self._after_tool_call(
+                            output_function_call, parsed_arguments, tool_output, conversation, tool_hook_records
                         )
-                    tool_output = (await api_response.content.read()).decode()
-                    resources_server_cookies = dict(resources_server_cookies or {})
-                    resources_server_cookies.update(_cookies(api_response))
-                    if collect_trajectory:
-                        completed = 200 <= api_response.status < 400
-                        tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
 
                 if collect_trajectory:
                     tool_records.append(
@@ -648,6 +693,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         model_response.output = new_outputs
         model_response.usage = usage
+        if tool_hook_records:
+            model_response.metrics = {**(model_response.metrics or {}), self.TOOL_HOOK_METRICS_KEY: tool_hook_records}
         trajectory = None
         if collect_trajectory:
             invocation = AgentInvocation(

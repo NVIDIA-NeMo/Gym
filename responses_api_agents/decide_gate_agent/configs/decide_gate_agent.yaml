@@ -1,0 +1,31 @@
+# Simple Agent + Nemotron Decide safety gate. Set resources_server.name to the tool environment to wrap.
+# The API key is read from the environment variable named by decide.api_key_env; it is never stored in config.
+decide_gate_agent:
+  responses_api_agents:
+    decide_gate_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      decide_gate:
+        decide:
+          base_url: ${oc.env:DECIDE_BASE_URL,http://localhost:8770}
+          api: ${oc.env:DECIDE_API,systemone}
+          model: nemotron-decide
+          api_key_env: DECIDE_API_KEY
+          timeout_s: 30
+          max_retries: 3
+          max_concurrency: 32
+        mode: enforce            # audit: log decisions, never block
+        block_threshold: 0.5     # block when p(block) >= 0.5
+        ask_threshold: 0.5       # else ask when p(ask) + p(block) >= 0.5
+        on_ask: block            # no human in a rollout: treat "ask" as a needs-confirmation refusal
+        on_error: block          # fail closed when the endpoint is unavailable
+        skip_tools: []
+        recent_steps: 8
+        check_tool_outputs: false
+        injection_threshold: 0.5
+        on_injection: annotate   # annotate | withhold | log
