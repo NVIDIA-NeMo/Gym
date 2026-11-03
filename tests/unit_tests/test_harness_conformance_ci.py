@@ -23,7 +23,7 @@ def test_adapter_changes_select_only_that_harness(harness):
     [
         "nemo_gym/rollout_collection.py",
         "nemo_gym/telemetry/gym_metrics.py",
-        "nemo_gym/agent_utils/sandbox_session.py",
+        "nemo_gym/agents/utils/sandbox_session.py",
         "nemo_gym/sandbox/local.py",
         "nemo_gym/cli/__init__.py",
         "nemo_gym/utils/compat.py",
@@ -65,7 +65,7 @@ def test_shared_or_unknown_dependencies_run_all(path):
         [
             ".gitignore",
             "nemo_gym/cli/main.py",
-            "nemo_gym/tasks/harbor/hub.py",
+            "nemo_gym/data/tasks/harbor/hub.py",
             "tests/unit_tests/test_harbor_tasks.py",
         ],
         ["responses_api_agents/opencode_sandboxed_agent/app.py"],
