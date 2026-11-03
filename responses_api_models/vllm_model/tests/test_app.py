@@ -7167,6 +7167,22 @@ class TestSamplingOverrides:
         assert out["max_tokens"] == 1024
         assert "max_completion_tokens" not in out
 
+    def test_completions_path_keeps_an_extra_body_max_tokens_over_its_chat_spelled_limit(self) -> None:
+        """With both names in ``extra_body``, its completions-native ``max_tokens`` wins over the renamed one."""
+        server = self._server(
+            None, use_completions_api=True, extra_body={"max_tokens": 512, "max_completion_tokens": 1024}
+        )
+        out = server._build_completion_body_from_chat_body({"messages": []}, "hi")
+        assert out["max_tokens"] == 512
+        assert "max_completion_tokens" not in out
+
+    @mark.parametrize("limit_name", ["max_tokens", "max_completion_tokens"])
+    def test_completions_path_null_request_limit_keeps_the_extra_body_default(self, limit_name: str) -> None:
+        """A null request limit is unset, so the operator default still applies instead of vLLM's 16 tokens."""
+        server = self._server(None, use_completions_api=True, extra_body={"max_completion_tokens": 1024})
+        out = server._build_completion_body_from_chat_body({"messages": [], limit_name: None}, "hi")
+        assert out["max_tokens"] == 1024
+
     def test_completions_path_request_limit_wins_over_the_extra_body_limit(self) -> None:
         """Renaming the default must not overwrite an explicit request cap."""
         server = self._server(None, use_completions_api=True, extra_body={"max_completion_tokens": 1024})
