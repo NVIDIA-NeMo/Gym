@@ -54,7 +54,10 @@ needs only the `mlflow` extra, which the MLflow delivery check in `--inspect` us
 1. Pin Gym: `driver.gym_install.ref` is a full commit, not a branch. Recovery reads a run with the Gym
    that wrote it and refuses an unpinned ref.
 2. Make every long benchmark resumable under `driver.benchmarks.<name>`: `resumable: true`, or
-   `resumable: {max_retries: N, max_walltime: "D-HH:MM:SS"}`.
+   `resumable: {max_retries: N, max_walltime: "D-HH:MM:SS"}`. `max_walltime` is the whole chain's budget, not
+   one job's: set it to the total the run may use (for example 3 x `compute.cluster.walltime`). Equal to the
+   job walltime, the first job that times out spends it all, and the next one stops at once with a
+   walltime-cap stop until you run `--recover --max-walltime` (step 4). Gym never adds time on its own.
 3. Check without submitting:
 
    ```bash
