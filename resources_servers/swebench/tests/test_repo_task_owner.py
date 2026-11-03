@@ -493,3 +493,66 @@ async def test_a_required_scrub_that_fails_fails_the_seed_and_stops_the_sandbox(
             )
 
     assert provider.live() == []
+
+
+def _no_retry_delay(monkeypatch: MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock()))
+
+
+async def test_a_seed_retries_setup_reads_a_new_sandbox_could_not_run(
+    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A new sandbox can refuse its first commands (a gateway 502); the read-only setup reads are run again."""
+    _no_retry_delay(monkeypatch)
+    raised: list[str] = []
+
+    def flaky(command: str) -> Optional[SandboxExecResult]:
+        for read in ("rev-parse HEAD", "ls-files --others"):
+            if read in command and read not in raised:
+                raised.append(read)
+                raise ConnectionError("502: The sandbox could not be reached")
+        return git_results(command)
+
+    server = make_server(case, FakeSnapshotProvider(flaky), checkpointing_config(tmp_path))
+    async with http(server) as client:
+        reply = await seed(client, typed_seed(case))
+
+    assert reply.status_code == 200, reply.text
+    assert raised == ["rev-parse HEAD", "ls-files --others"]
+    assert server.session_data("rs-1") == {"base_commit": case.base_commit, "pristine_untracked": ["notes.txt"]}
+
+
+async def test_a_seed_whose_untracked_files_cannot_be_listed_fails_rather_than_list_none(
+    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # An empty list would make the patch capture count the image's own untracked files as the agent's.
+    _no_retry_delay(monkeypatch)
+
+    def unreachable(command: str) -> Optional[SandboxExecResult]:
+        if "ls-files --others" in command:
+            raise ConnectionError("502: The sandbox could not be reached")
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(unreachable)
+    server = make_server(case, provider, checkpointing_config(tmp_path))
+    async with http(server) as client:
+        with pytest.raises(ConnectionError, match="could not be reached"):
+            await seed(client, typed_seed(case))
+
+    assert sum("ls-files --others" in c for box in provider.boxes.values() for c in box["commands"]) == 3
+
+
+async def test_a_listing_that_runs_and_fails_still_gives_no_untracked_files(case: Case, tmp_path: Path) -> None:
+    def not_a_repository(command: str) -> Optional[SandboxExecResult]:
+        if "ls-files --others" in command:
+            return SandboxExecResult(stdout="", stderr="fatal: not a git repository", return_code=128)
+        return git_results(command)
+
+    server = make_server(case, FakeSnapshotProvider(not_a_repository), checkpointing_config(tmp_path))
+    async with http(server) as client:
+        reply = await seed(client, typed_seed(case))
+
+    assert reply.status_code == 200, reply.text
+    assert server.session_data("rs-1")["pristine_untracked"] == []
