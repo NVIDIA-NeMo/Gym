@@ -13424,7 +13424,10 @@ class TestRunExamplesMaterializedTasks:
         [
             ({"episode_id": {"rollout_id": "0-0", "attempt": 1}}, StaleRolloutResult),
             ({"task_id": {"taskset": "my_taskset", "task_id": "task-2"}}, InvalidRolloutResult),
+            # A reply cannot claim Gym built it.
+            ({"episode_id": {"rollout_id": "0-0", "attempt": 1}, NG_DISPATCH_DRAINED_KEY: True}, StaleRolloutResult),
         ],
+        ids=["another attempt", "another task", "another attempt marked drained"],
     )
     async def test_episode_records_reject_a_reply_for_another_episode(
         self, monkeypatch: pytest.MonkeyPatch, mismatch: dict, error: type[Exception]
@@ -13445,6 +13448,11 @@ class TestRunExamplesMaterializedTasks:
             (True, {}),
             (True, {"result": {"reward": "1.0"}}),
             (True, {"result": {"reward": None}}),
+            (False, {"reward": 1.0, NG_DISPATCH_DRAINED_KEY: True}),
+            (
+                False,
+                {"reward": 1.0, NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS, "_ng_failure_type": "x"},
+            ),
         ],
         ids=[
             "not an episode response",
@@ -13453,6 +13461,8 @@ class TestRunExamplesMaterializedTasks:
             "neither result nor failure",
             "string reward",
             "null reward",
+            "claims to be a drained row",
+            "claims to be a routed failure",
         ],
     )
     async def test_episode_records_reject_a_reply_gym_eval_run_rejects(
@@ -13554,7 +13564,18 @@ class TestRunExamplesMaterializedTasks:
             await completions.aclose()
             await asyncio.gather(waiter, return_exceptions=True)
 
-    async def test_episode_records_keep_every_drained_outcome_when_one_reply_cannot_be_converted(self) -> None:
+    @pytest.mark.parametrize(
+        ("unconvertible_reply", "match"),
+        [
+            ({"result": {"reward": 1.0, "_ng_no_persist": True}}, "reserved for rollout collection"),
+            # Only a result Gym built itself skips the episode check; a reply's own markers cannot claim it.
+            ({NG_DISPATCH_DRAINED_KEY: True, "reward": 1.0}, "episode result or failure"),
+        ],
+        ids=["reserved key", "claims to be a drained row"],
+    )
+    async def test_episode_records_keep_every_drained_outcome_when_one_reply_cannot_be_converted(
+        self, unconvertible_reply: dict, match: str
+    ) -> None:
         loop = asyncio.get_running_loop()
 
         def settled(reply: dict) -> asyncio.Future:
@@ -13562,15 +13583,15 @@ class TestRunExamplesMaterializedTasks:
             future.set_result(_CompletedRollout(row=self._materialized_row(), result=reply, rollout_latency_ms=None))
             return future
 
-        reserved = self._reply(result={"reward": 1.0, "_ng_no_persist": True})
+        unconvertible = self._reply(**unconvertible_reply) if "result" in unconvertible_reply else unconvertible_reply
         handled = self._reply(failure={"failure_reason": "sandbox lost", "terminal": False})
         internal = MagicMock()
-        internal.aclose_and_drain = AsyncMock(return_value=[settled(reserved), settled(handled)])
+        internal.aclose_and_drain = AsyncMock(return_value=[settled(unconvertible), settled(handled)])
         completions = nemo_gym.rollout_collection._RowResultIterator(internal, episode_records=True)
 
         unconvertible, converted = await completions.aclose_and_drain()
 
-        with pytest.raises(ValueError, match="reserved for rollout collection"):
+        with pytest.raises(InvalidRolloutResult, match=match):
             await unconvertible
         _, record = await converted
         assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS

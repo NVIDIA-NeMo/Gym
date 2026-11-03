@@ -679,22 +679,16 @@ def _native_episode_record(row: Dict, response: Any) -> Dict:
         raise InvalidRolloutResult(str(error)) from error
 
 
-def _is_gym_built_result(result: Mapping[str, Any]) -> bool:
-    """Whether Gym wrote ``result`` because ``/run`` gave no reply: a drained row or a routed ``/run`` failure."""
-    return bool(result.get(NG_DISPATCH_DRAINED_KEY)) or (
-        result.get(NG_FAILURE_CLASS_KEY) in (AGENT_RUN_ERROR_FAILURE_CLASS, AGENT_REQUEST_FAILED_FAILURE_CLASS)
-        and "_ng_failure_type" in result
-    )
-
-
-def _caller_episode_record(row: Mapping[str, Any], result: Any) -> Any:
+def _caller_episode_record(row: Mapping[str, Any], result: Any, *, collector_built: bool = False) -> Any:
     """The result ``run_examples(..., episode_records=True)`` hands back for one row.
 
     A flat row's result is returned unchanged. For a materialized row, an Environment Server reply must be a
     ``BaseEpisodeResponse`` for the dispatched episode and task, with a finite ``reward`` when it has one, as
     ``gym eval run`` requires; otherwise this raises ``InvalidRolloutResult`` (``StaleRolloutResult`` for another
-    attempt). The reply becomes its flat ``_episode_record``. A result Gym built itself is kept. Either way, the
-    row's ``task_data`` provenance stamps (task and dataset digests) are added where the record does not set them.
+    attempt). The reply becomes its flat ``_episode_record``. A result Gym built itself (``collector_built``: a
+    drained row or a routed ``/run`` failure, known from where it was built, never from its content) is kept.
+    Either way, the row's ``task_data`` provenance stamps (task and dataset digests) are added where the record
+    does not set them.
 
     A reply that carries a failure class gets ``reward`` 0.0 and ``mask_sample`` True, the fields of a masked
     verify response (see ``lost_session_verification``), so a trainer that reads them drops the episode instead
@@ -703,7 +697,7 @@ def _caller_episode_record(row: Mapping[str, Any], result: Any) -> Any:
     """
     if _materialized_taskset(row) is None or isinstance(result, RolloutFailureRecord):
         return result
-    from_environment_server = not (isinstance(result, dict) and _is_gym_built_result(result))
+    from_environment_server = not collector_built
     if from_environment_server:
         result = _native_episode_record(row, result)
         reward = result.get("reward")
@@ -732,6 +726,9 @@ class _CompletedRollout:
     # The `/run` wall clock in seconds, success or failure; None for a row that never started.
     elapsed_s: Optional[float] = None
     dispatch_span_context: Optional["SpanContext"] = None
+    # True when Gym built ``result`` because `/run` gave no reply (a drained row, a routed `/run` failure).
+    # Set where the result is built, so a reply's own fields can never claim it.
+    collector_built: bool = False
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -3010,7 +3007,9 @@ class _RowResultIterator:
 
     def _caller_result(self, completed: _CompletedRollout) -> Tuple[Dict, Dict | RolloutFailureRecord]:
         if self._episode_records:
-            return completed.row, _caller_episode_record(completed.row, completed.result)
+            return completed.row, _caller_episode_record(
+                completed.row, completed.result, collector_built=completed.collector_built
+            )
         return completed.row, completed.result
 
     async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
@@ -5140,6 +5139,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             rollout_latency_ms=None,
                             environment_server=server_name,
                             environment_server_type=server_type,
+                            collector_built=True,
                         )
 
                 if is_global_aiohttp_client_request_debug_enabled():
@@ -5249,6 +5249,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
+                        collector_built=True,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
