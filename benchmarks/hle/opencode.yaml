@@ -18,8 +18,14 @@ hle_opencode_agent:
 equivalence_llm_judge_simple_agent: null
 hle_equivalence_llm_judge_simple_agent: null
 
+# Keep the benchmark's routing name, replacing its inherited server with this harness's /run relay.
+equivalence_llm_judge_environment_server: null
 hle_equivalence_llm_judge_environment_server:
+  _delete_key: _inherit_from
   environment_servers:
+    _delete_key: single_agent_turn_legacy
     legacy_agent:
+      entrypoint: app.py
       agent_server:
+        type: responses_api_agents
         name: hle_opencode_agent

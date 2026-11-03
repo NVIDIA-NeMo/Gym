@@ -25,8 +25,8 @@ from uuid import uuid4
 
 import pytest
 
-from nemo_gym.sandbox import (
-    AsyncSandbox,
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,

@@ -24,3 +24,15 @@ def test_install_uses_adapter_dir_and_overrides(monkeypatch, harness):
     ships_overrides = (adapter / "overrides.txt").is_file()
     assert ("--override" in command) is ships_overrides
     assert not ships_overrides or command[command.index("--override") + 1] == "overrides.txt"
+
+
+def test_openclaw_install_leaves_runtime_to_session(monkeypatch):
+    import importlib
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
+
+    def unexpected_setup(name):
+        raise AssertionError(f"Host runtime setup must not be imported: {name}")
+
+    monkeypatch.setattr(importlib, "import_module", unexpected_setup)
+    install_runtime("openclaw")

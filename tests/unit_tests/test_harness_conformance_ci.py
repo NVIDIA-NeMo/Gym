@@ -21,12 +21,12 @@ def test_adapter_changes_select_only_that_harness(harness):
 @pytest.mark.parametrize(
     "path",
     [
-        "nemo_gym/rollout_collection.py",
+        "nemo_gym/rollouts/rollout_collection.py",
         "nemo_gym/telemetry/gym_metrics.py",
-        "nemo_gym/agent_utils/sandbox_session.py",
+        "nemo_gym/agents/utils/sandbox_session.py",
         "nemo_gym/sandbox/local.py",
         "nemo_gym/cli/__init__.py",
-        "nemo_gym/cli/_compat.py",
+        "nemo_gym/utils/compat.py",
         "nemo_gym/cli/utils.py",
         "nemo_gym/prompts/system.md",
         "responses_api_agents/shared/prompts.md",
@@ -41,7 +41,7 @@ def test_adapter_changes_select_only_that_harness(harness):
         "tests/conftest.py",
         "tests/unit_tests/__init__.py",
         "tests/unit_tests/conftest.py",
-        "tests/unit_tests/harness_capabilities/test_checker.py",
+        "tests/unit_tests/rollouts/harness_capabilities/test_checker.py",
         "tests/unit_tests/test_harness_conformance_checks.py",
         "pyproject.toml",
         "uv.lock",
@@ -59,13 +59,13 @@ def test_shared_or_unknown_dependencies_run_all(path):
 @pytest.mark.parametrize(
     "paths",
     [
-        ["resources_servers/ether0/.gitignore", "tests/unit_tests/test_global_config.py"],
+        ["resources_servers/ether0/.gitignore", "tests/unit_tests/config/test_global_config.py"],
         ["resources_servers/sav_tracks/app.py", "resources_servers/sav_tracks/README.md"],
         ["resources_servers/aviary/hypotest_app.py", "responses_api_agents/aviary_agent/app.py"],
         [
             ".gitignore",
             "nemo_gym/cli/main.py",
-            "nemo_gym/tasks/harbor/hub.py",
+            "nemo_gym/data/tasks/harbor/hub.py",
             "tests/unit_tests/test_harbor_tasks.py",
         ],
         ["responses_api_agents/opencode_sandboxed_agent/app.py"],

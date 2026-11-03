@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import orjson
 from pydantic import BaseModel
 
-from nemo_gym.server_utils import get_response_json, request
+from nemo_gym.client import get_response_json, request
 
 
 _JUDGE_SYSTEM_PROMPT = (
