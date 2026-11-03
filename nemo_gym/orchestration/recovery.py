@@ -4199,10 +4199,12 @@ def _observed_trial_operations(
             # grading; the verifier's captured calls (a judge's) are then its own, never the policy's.
             artifact = None
             recorded = single is not None and _verifier_recorded(single, row, owner)
-            if resource is None and not recorded:
-                return False
             if not graded and not recorded:
                 artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
+            # An agent without a resources server is observed through its own grading record, or, when no verifier
+            # ran, through the environment's own reward record.
+            if resource is None and not recorded and not (artifact == "environment_reward" and verifiers == []):
+                return False
             if artifact is not None and single is not None and isinstance(calls, list):
                 owned = single.get("model_calls")
                 if not isinstance(owned, list):
