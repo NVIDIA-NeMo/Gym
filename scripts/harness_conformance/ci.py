@@ -24,7 +24,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
-        elif path.startswith(("nemo_gym/cli/", "nemo_gym/tasks/")) and path not in (
+        elif path.startswith(("nemo_gym/cli/", "nemo_gym/data/tasks/")) and path not in (
             "nemo_gym/cli/__init__.py",
             "nemo_gym/cli/utils.py",
         ):
@@ -39,7 +39,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
                 "scripts/harness_conformance/",
-                "tests/unit_tests/harness_capabilities/",
+                "tests/unit_tests/rollouts/harness_capabilities/",
                 "tests/unit_tests/test_harness_conformance",
             )
         ):
@@ -99,8 +99,8 @@ def install_runtime(harness: str) -> None:
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
     override_flag = ["--override", "overrides.txt"] if (adapter / "overrides.txt").exists() else []
     subprocess.run(["uv", "pip", "install", *override_flag, "-r", "requirements.txt"], cwd=adapter, check=True)
-    if harness in ("hermes", "stirrup", "simple"):
-        # Simple Agent is built in; Hermes ships via requirements; Stirrup installs in its task sandbox.
+    if harness in ("hermes", "stirrup", "simple", "openclaw"):
+        # Simple is built in; Hermes ships via requirements; Stirrup and OpenClaw install in the sandbox.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
