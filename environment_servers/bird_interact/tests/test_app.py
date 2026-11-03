@@ -867,7 +867,7 @@ class TestPostgreSQL:
     """Lite and Full: each task's database is in the sandbox image, and the runner uses the image's server."""
 
     def test_postgresql_needs_its_image(self) -> None:
-        with pytest.raises(ValidationError, match="postgres/Dockerfile"):
+        with pytest.raises(ValidationError, match="benchmarks/bird_interact/Dockerfile"):
             _server(database_engine="postgresql")
 
     async def test_the_episode_runs_on_the_task_database_in_the_image(
@@ -1044,6 +1044,10 @@ class TestDatabaseSandbox:
         [
             ({"sol_sql": []}, "has no sol_sql"),
             ({"test_cases": ["def test_case(): pass"]}, "custom test cases"),
+            (
+                {"follow_up": {"query": "And now?", "sol_sql": ["SELECT 1"], "test_cases": ["def test_case(): pass"]}},
+                "custom test cases",
+            ),
             ({"selected_database": "missing"}, "Missing database file"),
         ],
     )
