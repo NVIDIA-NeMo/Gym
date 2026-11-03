@@ -346,22 +346,69 @@ async def test_a_turn_mixing_a_rewritten_call_and_an_own_invalid_call_resolves(s
     assert result.reason == "tool_call_turn"
 
 
-def test_many_placeholder_shaped_calls_fall_back_to_reading_none_or_all() -> None:
-    turn = [{"role": "assistant", "content": "many"}] + [
-        {
-            "type": "function_call",
-            "call_id": f"call_{index}",
-            "name": "invalid",
-            "arguments": json.dumps({"tool": "Read", "error": "unavailable"}),
-        }
-        for index in range(7)
-    ]
-    keys = echoed_tool_call_turn_fingerprints(turn)
-    assert keys == [
-        tool_call_turn_fingerprint(turn),
-        tool_call_turn_fingerprint(turn, read_placeholders=frozenset(f"call_{index}" for index in range(7))),
-    ]
-    assert len(echoed_tool_call_turn_fingerprints(turn[:7])) == 2**6
+def _read_call(call_id: str) -> dict:
+    return {"type": "function_call", "call_id": call_id, "name": "Read", "arguments": "{}"}
+
+
+def _invalid_call(call_id: str, error: str) -> dict:
+    """A call with the placeholder's shape: OpenCode's rewrite of `Read`, or the model's own `invalid` call."""
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "name": "invalid",
+        "arguments": json.dumps({"tool": "Read", "error": error}),
+    }
+
+
+def _calls_request(calls: list[dict]) -> list[dict]:
+    return (
+        deepcopy(CONTEXT)
+        + [{"role": "assistant", "content": "Read them all."}, *calls]
+        + [{"type": "function_call_output", "call_id": call["call_id"], "output": "ok"} for call in calls]
+        + [{"role": "user", "content": "continue"}]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("published", ["a", "b", "both"])
+async def test_every_placeholder_reading_competes_before_a_parent_is_chosen(stores, published) -> None:
+    # Echoed as six placeholders, the turn matches `a` (six Read calls) when all are read, and `b` (one Read call,
+    # then five calls the model made to `invalid` itself) when only the first is read. Both must compete.
+    ids = [f"c{index}" for index in range(6)]
+    turns = {
+        "a": [_read_call(call_id) for call_id in ids],
+        "b": [_read_call(ids[0])] + [_invalid_call(call_id, "bad") for call_id in ids[1:]],
+    }
+    for name, tokens in (("a", [11, 12, 101]), ("b", [11, 12, 102])):
+        if published in (name, "both"):
+            await _publish(
+                stores, name, output=[{"role": "assistant", "content": "Read them all."}, *turns[name]], tokens=tokens
+            )
+    result = await stores[2].resolve("r", _calls_request([_invalid_call(call_id, "rewritten") for call_id in ids]))
+    if published == "both":
+        assert result.status == ParentResolutionStatus.UNRESOLVED
+        assert result.reason == "ambiguous"
+    else:
+        assert result.status == ParentResolutionStatus.RESOLVED
+        assert result.match.model_call_id == published
+        assert result.reason == "tool_call_turn"
+
+
+@pytest.mark.asyncio
+async def test_more_placeholder_shaped_calls_than_the_cap_leave_only_the_strict_match(stores) -> None:
+    # Reading 7 placeholder-shaped calls every way is too many keys, so the fallback abstains rather than decide
+    # uniqueness from some of the readings. An exact echo still resolves through the strict fingerprint.
+    served = [_read_call(f"c{index}") for index in range(7)]
+    await _publish(stores, output=[{"role": "assistant", "content": "Read them all."}, *served])
+    rewritten = await stores[2].resolve(
+        "r", _calls_request([_invalid_call(call["call_id"], "rewritten") for call in served])
+    )
+    assert rewritten.status == ParentResolutionStatus.UNRESOLVED
+    assert rewritten.match is None
+    exact = await stores[2].resolve("r", _calls_request(served))
+    assert exact.status == ParentResolutionStatus.RESOLVED
+    assert exact.match.model_call_id == "a"
+    assert echoed_tool_call_turn_fingerprints(_calls_request(served)[1:])
 
 
 @pytest.mark.asyncio

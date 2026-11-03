@@ -491,6 +491,55 @@ def test_tool_id_reading_reads_each_placeholder_in_a_mixed_turn_on_its_own(disti
         assert (verdict.model_call_id, verdict.method) == ("b", "content_tool_ids")
 
 
+def _calls_entry(call_id: str, gen: list[int], calls: list[dict]) -> TokenEntry:
+    entry = TokenEntry(
+        rollout_id="r",
+        model_call_id=call_id,
+        prompt_token_ids=[1, 2, 3, 4],
+        generation_token_ids=gen,
+        generation_log_probs=[-0.1] * len(gen),
+        output_items=calls,
+        token_item_index=0,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    return entry
+
+
+def _placeholder_call(call_id: str, error: str) -> dict:
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "name": "invalid",
+        "arguments": json.dumps({"tool": "read", "error": error}),
+    }
+
+
+@pytest.mark.parametrize("calls", [6, 7])
+def test_tool_id_reading_abstains_unless_every_placeholder_reading_was_compared(calls):
+    # Six placeholders: the turn matches `b` (all read) and `c` (only the first read), so the reading abstains.
+    # Seven: the readings are not all tried, so the reading abstains rather than pick from some of them.
+    ids = [f"t{index}" for index in range(calls)]
+    read = {"type": "function_call", "name": "read", "arguments": "{}"}
+    entries = [
+        _entry("a", [1, 2], [3], text="plan"),
+        _calls_entry("b", [5], [read | {"call_id": call_id} for call_id in ids]),
+    ]
+    if calls == 6:
+        entries.append(
+            _calls_entry("c", [6], [read | {"call_id": ids[0]}] + [_placeholder_call(i, "bad") for i in ids[1:]])
+        )
+    echoed = [_placeholder_call(call_id, "rewritten") | {"status": "completed"} for call_id in ids]
+    response = {
+        "output": [_assistant_item("plan"), {"type": "function_call_output", "call_id": "earlier", "output": "ok"}]
+        + echoed
+    }
+    verdict = resolve_terminal(entries, response)
+    assert not verdict.attributed
+    # The same six-call turn with only `b` captured is attributed to it.
+    if calls == 6:
+        assert resolve_terminal(entries[:2], response).model_call_id == "b"
+
+
 def test_no_response_object_abstains():
     att = resolve_terminal(_chain_entries(), None)
     assert not att.attributed and "no_response_object" in att.reason
