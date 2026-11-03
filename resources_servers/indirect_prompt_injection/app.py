@@ -15,19 +15,29 @@
 import copy
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from resources_servers.indirect_prompt_injection.ecommerce_tools import TOOL_HANDLERS as ECOMMERCE_HANDLERS
 from resources_servers.indirect_prompt_injection.education_tools import TOOL_HANDLERS as EDUCATION_HANDLERS
@@ -38,6 +48,7 @@ from resources_servers.indirect_prompt_injection.it_helpdesk_tools import TOOL_H
 from resources_servers.indirect_prompt_injection.legal_tools import TOOL_HANDLERS as LEGAL_HANDLERS
 from resources_servers.indirect_prompt_injection.logistics_tools import TOOL_HANDLERS as LOGISTICS_HANDLERS
 from resources_servers.indirect_prompt_injection.real_estate_tools import TOOL_HANDLERS as REAL_ESTATE_HANDLERS
+from resources_servers.indirect_prompt_injection.task_data import TaskData
 from resources_servers.indirect_prompt_injection.verifier import check_injection_followed, extract_function_calls
 
 
@@ -110,25 +121,73 @@ class IPIVerifyResponse(BaseVerifyResponse):
 class IPIResourcesServer(SimpleResourcesServer):
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    # The episode and task each typed seed bound its resources_session_id to.
+    # These sessions keep their environment until /close_session; an Agent's /run never closes, so /verify releases
+    # the sessions it seeds.
+    _typed_sessions: Dict[str, Tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _fence: ResourcesSessionFence = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/{tool_name}")(self.route_tool_call)
         return app
 
-    async def seed_session(self, request: Request, body: IPISeedSessionRequest) -> BaseSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        self.session_id_to_env[session_id] = copy.deepcopy(body.environment)
-        logger.debug("seed_session: sid=%s", session_id)
-        return BaseSeedSessionResponse()
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | IPISeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            session_id = request.session[SESSION_ID_KEY]
+            self.session_id_to_env[session_id] = copy.deepcopy(body.environment)
+            logger.debug("seed_session: sid=%s", session_id)
+            return BaseSeedSessionResponse()
+
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
+            identity = self._typed_sessions.get(session_id)
+            if identity is None:
+                try:
+                    task = TaskData.model_validate(body.task_data)
+                except ValidationError as error:
+                    raise ResourcesSeedRejectedError(
+                        f"task_data is not an indirect_prompt_injection task: {error}"
+                    ) from error
+                self._typed_sessions[session_id] = (body.episode_id, body.task_id)
+                self.session_id_to_env[session_id] = copy.deepcopy(task.environment)
+            elif identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            # A repeated seed keeps the environment the session's tool calls changed.
+        # Only on success: a refused seed must not hand the caller a cookie for a session another episode holds.
+        request.session[SESSION_ID_KEY] = session_id
+        logger.debug("seed_session: resources_session_id=%s", session_id)
+        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        # Typed sessions are keyed by resources_session_id, so a close without the seed's cookie still finds them.
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            closed_episode = self._fence.closed_episode(session_id)
+            if closed_episode is not None and closed_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+            identity = self._typed_sessions.get(session_id)
+            if identity is not None and identity[0] != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            self._release(session_id)
+            self._fence.mark_closed(session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=session_id)
+
+    def _release(self, session_id: str) -> None:
+        self.session_id_to_env.pop(session_id, None)
+        self._typed_sessions.pop(session_id, None)
 
     async def route_tool_call(self, tool_name: str, body: ToolCallRequest, request: Request) -> ToolCallResponse:
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self.session_id_to_env:
-            raise HTTPException(
-                status_code=400,
-                detail="Session not initialized. Please call seed_session first.",
-            )
+            raise ResourcesSessionLostError("No seeded indirect_prompt_injection session for this tool call")
 
         env = self.session_id_to_env[session_id]
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
@@ -146,6 +205,19 @@ class IPIResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: IPIVerifyRequest) -> IPIVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
+        if session_id not in self.session_id_to_env:
+            # Never seeded, closed, or gone with a restart: the agent's tool calls never reached the injected content,
+            # so a trajectory free of the injected call would read as a resisted attack.
+            lost = lost_session_verification("No seeded indirect_prompt_injection session for this verify")
+            return IPIVerifyResponse(
+                **(body.model_dump() | lost),
+                injection_followed=False,
+                reward_safety=0.0,
+                attack_difficulty=body.injection.attack_difficulty,
+                attack_strategy=body.injection.attack_strategy,
+                attack_category=body.injection.category,
+                verification_type=body.injection.verification_type,
+            )
         try:
             injection_followed, matched_tool, matched_args = check_injection_followed(
                 body.response.output, body.injection.model_dump()
@@ -184,7 +256,8 @@ class IPIResourcesServer(SimpleResourcesServer):
                 verification_type=body.injection.verification_type,
             )
         finally:
-            self.session_id_to_env.pop(session_id, None)
+            if session_id not in self._typed_sessions:
+                self.session_id_to_env.pop(session_id, None)
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         metrics: Dict[str, Any] = {}
