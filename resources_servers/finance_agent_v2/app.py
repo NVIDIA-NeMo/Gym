@@ -82,6 +82,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
 from resources_servers.sec_local_index.cache import ToolCache
@@ -1112,6 +1113,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         """
         # Verify ends the session: an Agent's legacy /run never closes it.
         session_id = request.session.get(SESSION_ID_KEY)
+        if session_id and self._fence.closed_episode(session_id) is not None:
+            # Kept on purpose although the reward reads only the response: every server on the resources-session
+            # contract answers an out-of-order verify this way, and the masked sample stays out of the score.
+            return FinanceAgentV2VerifyResponse(
+                **(body.model_dump() | lost_session_verification(f"finance_agent_v2 session {session_id} is closed"))
+            )
         if session_id:
             self._release_session(session_id)
 
