@@ -740,6 +740,9 @@ markers = [
 ]
 
 [tool.coverage.run]
+# Shard artifacts must combine across ARC and GitHub-hosted checkout paths.
+relative_files = true
+source = ["."]
 command_line = "-m pytest --durations=10"
 omit = [
     "tests/*",
