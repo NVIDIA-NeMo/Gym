@@ -166,7 +166,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
-        self._expired_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        # A client idle long enough to be swept can stay away about as long again, often longer than a close retry.
+        self._expired_sessions = ClosedResourcesSessionRecords(
+            max(self.config.session_close_retry_window_seconds, self.config.session_ttl)
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

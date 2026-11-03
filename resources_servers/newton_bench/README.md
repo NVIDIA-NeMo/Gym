@@ -125,11 +125,13 @@ gym eval run --no-serve \
 The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
 `task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
 ID for another episode, or arrives after the session closed, is refused with 409. Typed sessions keep their metadata
-and Python worker through `/verify` so a lost verify reply can be retried; `/close_session` releases them and succeeds
+and Python worker through `/verify` so a lost verify reply can be retried (the retry scores the law again, so a
+judged score can differ); `/close_session` releases them and succeeds
 for a session that is already gone. Legacy `/run` sessions still release at verify. The idle sweep (`session_ttl`)
 and `/end_session` also release state; a later seed retry for that session fails with 404 instead of confirming a
 session that no longer exists. A tool call for a session the server no longer holds fails with 404, and `/verify`
-for it returns a masked sample (`failure_kind` `session_lost`, or `session_expired` after the idle sweep).
+for it returns a masked sample (`failure_kind` `session_lost`, or `session_expired` for the longer of `session_ttl`
+and `session_close_retry_window_seconds` after the idle sweep).
 
 ## Running Tests
 ```bash

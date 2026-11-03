@@ -28,7 +28,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSessionLostError,
 )
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.newton_bench.app import (
     BaseSeedSessionResponse,
     ExecutePythonRequest,
@@ -1433,3 +1433,21 @@ class TestResourcesSessions:
         assert verify.json()["mask_sample"] is True
         assert verify.json()["failure_kind"] == "session_expired"
         assert close.status_code == 200
+
+    def test_a_swept_session_still_reports_expired_after_the_close_retry_window(self) -> None:
+        server = _session_server()
+        now = [1000.0]
+
+        with (
+            patch("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: now[0]),
+            TestClient(server.setup_webserver()) as client,
+        ):
+            client.post("/seed_session", json=_typed_seed())
+            server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
+            server._cleanup_sessions()
+            # The agent's model stalled: its verify arrives well after a close retry would have.
+            now[0] += server.config.session_close_retry_window_seconds + 60
+            verify = client.post("/verify", json=VERIFY_BODY)
+
+        assert verify.json()["mask_sample"] is True
+        assert verify.json()["failure_kind"] == "session_expired"
