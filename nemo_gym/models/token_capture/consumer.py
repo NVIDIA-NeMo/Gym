@@ -64,7 +64,7 @@ def token_capture_dirs_from_config(global_config_dict) -> list[Path]:
     config = TokenCaptureConfig.model_validate(global_config_dict)
     directory = config.resolved_dir()
     # A configured sink replaces the readable file store.
-    if not config.enabled or config.token_id_capture.sink is not None:
+    if not config.enabled or config.token_capture.sink is not None:
         return []
     return [directory] if directory is not None else []
 
@@ -243,14 +243,14 @@ def _copy_engine_refusals(built: dict, snapshot: TokenCaptureSnapshot) -> None:
 
 
 def mask_incomplete_when_attributed_from_config(global_config_dict) -> bool:
-    """Return the ``token_id_capture.mask_incomplete_when_attributed`` setting.
+    """Return the ``token_capture.mask_incomplete_when_attributed`` setting.
 
     A caller that holds the Gym global config reads the setting here and passes
     it to the build functions below, which default to the strict behavior.
     """
     from nemo_gym.models.token_capture.config import TokenCaptureConfig
 
-    return TokenCaptureConfig.model_validate(global_config_dict).token_id_capture.mask_incomplete_when_attributed
+    return TokenCaptureConfig.model_validate(global_config_dict).token_capture.mask_incomplete_when_attributed
 
 
 def trajectories_for_rollout(

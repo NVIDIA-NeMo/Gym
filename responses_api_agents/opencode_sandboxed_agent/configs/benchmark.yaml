@@ -21,7 +21,7 @@ opencode_benchmark_agent:
       sandbox_timeout: 14400
       sandbox_provider: sandbox
       network_access: model_only
-      token_id_capture: false
+      token_capture: false
       artifacts_dir: ${oc.env:OPENCODE_ARTIFACTS_DIR,results/opencode}
       opencode_config:
         instructions:

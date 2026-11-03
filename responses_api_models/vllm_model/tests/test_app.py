@@ -865,7 +865,7 @@ class TestApp:
         global_config = {}
         if external_staging_backend is not None:
             global_config = {
-                "token_id_capture": {
+                "token_capture": {
                     "enabled": True,
                     "external_staging": True,
                     "external_staging_backend": external_staging_backend,

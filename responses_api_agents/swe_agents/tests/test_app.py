@@ -2842,7 +2842,7 @@ class TestSWEBenchWrapperSetupParams:
                 },
             )
 
-            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            monkeypatch.setattr(type(wrapper), "_token_capture_enabled", lambda self: True)
             with rollout_context("rollout-1"):
                 params, _ = wrapper._setup_params(body)
 
@@ -2873,7 +2873,7 @@ class TestSWEBenchWrapperSetupParams:
                 },
             )
 
-            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            monkeypatch.setattr(type(wrapper), "_token_capture_enabled", lambda self: True)
             # No rollout_context: the request carries no rollout id.
             with pytest.raises(RuntimeError, match="no rollout id"):
                 wrapper._setup_params(body)

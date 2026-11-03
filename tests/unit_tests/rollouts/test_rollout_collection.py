@@ -6708,8 +6708,8 @@ class TestRolloutCollection:
             nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
-                "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
-                "agent": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+                "token_capture": {"enabled": True, "dir": str(capture_dir)},
+                "agent": {"responses_api_agents": {"implementation": {"token_capture": False}}},
             },
         )
         input_fpath = tmp_path / "input.jsonl"
@@ -6757,9 +6757,9 @@ class TestRolloutCollection:
         """
         capture_dir = tmp_path / "tokens"
         global_config = {
-            "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
-            "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
-            "ordinary": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+            "token_capture": {"enabled": True, "dir": str(capture_dir)},
+            "captured": {"responses_api_agents": {"implementation": {"token_capture": True}}},
+            "ordinary": {"responses_api_agents": {"implementation": {"token_capture": False}}},
         }
         monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: global_config)
         server_client = MagicMock()
@@ -6834,7 +6834,7 @@ class TestRolloutCollection:
             nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
-                "token_id_capture": {
+                "token_capture": {
                     "enabled": True,
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
@@ -6887,7 +6887,7 @@ class TestRolloutCollection:
             nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
-                "token_id_capture": {
+                "token_capture": {
                     "enabled": True,
                     "all_agents": True,
                     "dir": str(tmp_path / "captures"),
@@ -6960,7 +6960,7 @@ class TestRolloutCollection:
             nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
-                "token_id_capture": {
+                "token_capture": {
                     "enabled": True,
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
@@ -7015,7 +7015,7 @@ class TestRolloutCollection:
         expected: bool,
         empty_global_config: MagicMock,
     ) -> None:
-        """``run_from_config`` hands ``token_id_capture.mask_incomplete_when_attributed`` to the finalizer.
+        """``run_from_config`` hands ``token_capture.mask_incomplete_when_attributed`` to the finalizer.
 
         The collection loop reads the setting once from the global config and passes it to
         ``finalize_rollout_token_capture`` as a keyword argument for every finalized rollout. The
@@ -7028,7 +7028,7 @@ class TestRolloutCollection:
             nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
-                "token_id_capture": {
+                "token_capture": {
                     "enabled": True,
                     "all_agents": True,
                     "dir": str(tmp_path / "captures"),
@@ -8689,7 +8689,7 @@ class TestDispatchBudget:
             nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
-                "token_id_capture": {
+                "token_capture": {
                     "enabled": True,
                     "all_agents": True,
                     "sink": "framework.capture:Sink",

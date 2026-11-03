@@ -3805,7 +3805,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # persistent_dir is mounted here in each container
         base_mounted_dir = Path("/trajectories_mount")
         rollout_id = current_rollout_id()
-        token_capture_enabled = self._token_id_capture_enabled()
+        token_capture_enabled = self._token_capture_enabled()
         if token_capture_enabled and not rollout_id:
             raise RuntimeError(
                 "token capture is enabled but the /run request carries no rollout id; "

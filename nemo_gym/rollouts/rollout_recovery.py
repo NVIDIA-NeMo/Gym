@@ -42,6 +42,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import TOKEN_CAPTURE_BLOCK
+from nemo_gym.config.renamed_keys import RENAMED_TOKEN_CAPTURE_AGENT_KEYS, RENAMED_TOKEN_CAPTURE_MODEL_KEYS
 from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
@@ -668,6 +670,15 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+# The identity spells renamed keys as they were before the rename, so a run saved before it still resumes.
+_IDENTITY_KEY_SPELLING = {
+    new: old
+    for renamed in (RENAMED_TOKEN_CAPTURE_AGENT_KEYS, RENAMED_TOKEN_CAPTURE_MODEL_KEYS)
+    for old, new in renamed.items()
+}
+_CAPTURE_IDENTITY_KEY = "token_id_capture"
+
+
 def _without_runtime_options(value: Any) -> Any:
     # Exclude only known configuration boundaries. Recursively dropping names such
     # as "port" would also erase meaningful tool schemas or environment parameters.
@@ -676,7 +687,9 @@ def _without_runtime_options(value: Any) -> Any:
     def settings_identity(settings):
         if not isinstance(settings, dict):
             return settings
-        settings = {k: v for k, v in settings.items() if k not in _SERVER_RUNTIME_OPTIONS}
+        settings = {
+            _IDENTITY_KEY_SPELLING.get(k, k): v for k, v in settings.items() if k not in _SERVER_RUNTIME_OPTIONS
+        }
         # Only authentication headers at known HTTP settings boundaries are
         # operational. Other headers may change task data or model behavior.
         for name in ("headers", "default_headers", "openai_default_headers", "artifact_request_headers"):
@@ -686,8 +699,8 @@ def _without_runtime_options(value: Any) -> Any:
                     for key, value in settings[name].items()
                     if key.lower() not in {"authorization", "proxy-authorization", "x-api-key", "api-key"}
                 }
-        if isinstance(settings.get("token_id_capture"), dict):
-            settings["token_id_capture"] = {k: v for k, v in settings["token_id_capture"].items() if k != "dir"}
+        if isinstance(settings.get(_CAPTURE_IDENTITY_KEY), dict):
+            settings[_CAPTURE_IDENTITY_KEY] = {k: v for k, v in settings[_CAPTURE_IDENTITY_KEY].items() if k != "dir"}
         return settings
 
     for name, block in list(result.items()):
@@ -865,14 +878,15 @@ def _configuration_identity(
     # Collection overrides may themselves contain DictConfig/ListConfig values.
     collection = {key: _plain(value) for key, value in config.items() if key not in _COLLECTION_OPTIONS}
     context["_collection_identity"] = safe(_normalize_runtime_references(collection))
-    capture = raw.get("token_id_capture", {})
+    # A config that bypassed the parser may still name the block by its old key.
+    capture = raw.get(TOKEN_CAPTURE_BLOCK, raw.get(_CAPTURE_IDENTITY_KEY, {}))
     context["_capture_identity"] = {key: value for key, value in capture.items() if key != "dir"}
     # Again after resolution: a resolved value can carry a credential its reference did not name (a URL password).
     return safe(
         {
             "collection": OmegaConf.to_container(context._collection_identity, resolve=True),
             "servers": selected,
-            "token_id_capture": OmegaConf.to_container(context._capture_identity, resolve=True),
+            _CAPTURE_IDENTITY_KEY: OmegaConf.to_container(context._capture_identity, resolve=True),
         }
     )
 

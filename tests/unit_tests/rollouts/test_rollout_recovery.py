@@ -763,15 +763,36 @@ def test_identity_resolves_reachable_servers_but_ignores_operational_fields(save
 
 def test_capture_directory_changes_preserve_identity_but_behavior_changes_do_not(saved_manifest):
     source, rows, _, config, servers, _, _ = saved_manifest
-    servers["token_id_capture"] = {"dir": "/old", "rebuild_response": True}
+    servers["token_capture"] = {"dir": "/old", "rebuild_response": True}
     model = servers["policy"]["responses_api_models"]["vllm_model"]
-    model["token_id_capture"] = {"dir": "/old", "rebuild_response": True}
+    model["token_capture"] = {"dir": "/old", "rebuild_response": True}
     before = RunManifest.create(source, rows, config, servers).config_digest
-    for settings in (servers["token_id_capture"], model["token_id_capture"]):
+    for settings in (servers["token_capture"], model["token_capture"]):
         settings["dir"] = "/new"
     assert RunManifest.create(source, rows, config, servers).config_digest == before
-    servers["token_id_capture"]["rebuild_response"] = False
+    servers["token_capture"]["rebuild_response"] = False
     assert RunManifest.create(source, rows, config, servers).config_digest != before
+
+
+# The digest the code before the token capture rename computed for this configuration under the old key names.
+DIGEST_SAVED_BEFORE_THE_TOKEN_CAPTURE_RENAME = "c742218c4f9d586d53ce01c01b87832a318d482965971b004349d51e88333fb2"
+
+
+@pytest.mark.parametrize(
+    "block,non_generating_requests",
+    [
+        ("token_capture", "token_capture_non_generating_requests"),
+        ("token_id_capture", "token_id_capture_non_generating_requests"),
+    ],
+)
+def test_renamed_token_capture_keys_keep_a_saved_run_identity(saved_manifest, block, non_generating_requests):
+    source, rows, _, config, servers, _, _ = saved_manifest
+    servers[block] = {"enabled": True, "dir": "/old"}
+    model = servers["policy"]["responses_api_models"]["vllm_model"]
+    model[non_generating_requests] = [{"method": "GET", "path": "/custom/metadata"}]
+    assert RunManifest.create(source, rows, config, servers).config_digest == (
+        DIGEST_SAVED_BEFORE_THE_TOKEN_CAPTURE_RENAME
+    )
 
 
 @pytest.mark.parametrize(
@@ -1209,7 +1230,7 @@ async def test_judge_failure_saves_token_evidence_without_retiring_capture(
     from tests.unit_tests.rollouts.test_rollout_collection import TestFinalizeRolloutTokenCapture
 
     captures = TokenCaptureStore(tmp_path / "tokens")
-    settings = {"token_id_capture": {"enabled": True, "all_agents": True, "dir": str(tmp_path / "tokens")}}
+    settings = {"token_capture": {"enabled": True, "all_agents": True, "dir": str(tmp_path / "tokens")}}
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: settings)
     monkeypatch.setattr(collection, "installed_token_source", lambda: captures)
     response = {"model": "m", "output": []}
@@ -1589,7 +1610,7 @@ async def test_incomplete_capture_policy_preserves_recovery_accounting(
         # Even a masked saved answer from a judge failure must not enter the
         # completed-capture denominator or trip the training quality guard.
         settings.update(max_mask_fraction=0.0, mask_fraction_min_samples=1)
-    monkeypatch.setattr(collection, "get_global_config_dict", lambda: {"token_id_capture": settings})
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: {"token_capture": settings})
     monkeypatch.setattr(collection, "installed_token_source", lambda: captures)
     output_items = [
         {

@@ -294,7 +294,7 @@ def test_consumer_reads_store_and_builds(tmp_path):
     store = TokenCaptureStore(tmp_path)
     for e in APPEND_ONLY:
         store.append(e.model_copy(update={"capture_key": "t0-r0"}))
-    dirs = token_capture_dirs_from_config({"token_id_capture": {"enabled": True, "dir": str(tmp_path)}})
+    dirs = token_capture_dirs_from_config({"token_capture": {"enabled": True, "dir": str(tmp_path)}})
     assert dirs == [tmp_path]
     merged = trajectories_for_rollout("t0-r0", dirs, builder="prefix_merging")
     assert merged is not None
@@ -450,7 +450,7 @@ def test_consumer_noop_when_disabled_or_absent(tmp_path):
     assert token_capture_dirs_from_config({}) == []
     assert trajectories_for_rollout("t0-r0", []) is None
     # Missing records are unsafe after capture is configured.
-    dirs = token_capture_dirs_from_config({"token_id_capture": {"enabled": True, "dir": str(tmp_path)}})
+    dirs = token_capture_dirs_from_config({"token_capture": {"enabled": True, "dir": str(tmp_path)}})
     missing = trajectories_for_rollout("missing", dirs)
     assert missing["mask_sample"] is True
     assert missing["rebuilt_response"] is None
@@ -772,7 +772,7 @@ def test_an_incomplete_capture_without_attribution_masks(mask_incomplete_when_at
 def test_mask_incomplete_when_attributed_from_config_reads_the_capture_block():
     assert mask_incomplete_when_attributed_from_config({}) is True
     assert (
-        mask_incomplete_when_attributed_from_config({"token_id_capture": {"mask_incomplete_when_attributed": False}})
+        mask_incomplete_when_attributed_from_config({"token_capture": {"mask_incomplete_when_attributed": False}})
         is False
     )
 

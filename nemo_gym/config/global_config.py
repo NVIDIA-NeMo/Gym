@@ -150,7 +150,7 @@ OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/models/token_capture/config.py``.
-TOKEN_CAPTURE_BLOCK = "token_id_capture"
+TOKEN_CAPTURE_BLOCK = "token_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"

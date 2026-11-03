@@ -88,7 +88,7 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 | `cline_max_consecutive_mistakes` | `3` | Cline rows: replies in a row without a tool call before the turn ends. |
 | `simulate_max_attempts` | `3` | `/simulate_tool_call` attempts per tool call before its result becomes a simulator failure (masked). |
 
-Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
+Inherited: `skip_verification`, `skip_verification_reward`, `token_capture` (set `true` for training).
 
 Run it through this environment's config (`gym env start --resources-server agentic_turn_simulation`), not alone:
 every episode needs the session `/seed_session` opens on the resources server. Gym agent sessions are not supported:

@@ -772,7 +772,7 @@ class TestRolloutCorrelationCheck:
         assert "no session id will reach Switchyard" not in caplog.text
 
     def test_token_capture_enables_correlation_silently(self, caplog) -> None:
-        server = self._server({"token_id_capture": {"enabled": True}}, forward_session_id=True)
+        server = self._server({"token_capture": {"enabled": True}}, forward_session_id=True)
 
         server.check_rollout_correlation()
 

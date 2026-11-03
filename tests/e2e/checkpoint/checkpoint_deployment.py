@@ -227,7 +227,7 @@ class Deployment:
             "uvicorn_logging_show_200_ok": True,
         }
         if token_capture:
-            config["token_id_capture"] = {
+            config["token_capture"] = {
                 "enabled": True,
                 "all_agents": True,
                 "dir": str(self.work_dir / "capture"),

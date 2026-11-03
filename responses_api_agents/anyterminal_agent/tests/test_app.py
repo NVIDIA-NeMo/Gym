@@ -345,7 +345,7 @@ class TestSetupParams:
             _config(global_agent_timeout=0)
 
     def test_model_server_url_carries_the_training_capture_prefix(self, tmp_path: Path) -> None:
-        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000", token_id_capture=True)
+        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000", token_capture=True)
         agent.server_client.global_config_dict = {TOKEN_CAPTURE_BLOCK: {"enabled": True}}
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
 

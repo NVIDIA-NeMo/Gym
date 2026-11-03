@@ -42,7 +42,7 @@ widesearch_claude_code_benchmark:
         ttl_s: 1800
       sandbox_model_base_url: null
       exa_api_key: null
-      token_id_capture: false
+      token_capture: false
       datasets:
         - name: widesearch
           type: benchmark

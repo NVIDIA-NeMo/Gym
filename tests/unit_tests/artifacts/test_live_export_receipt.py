@@ -565,7 +565,7 @@ def test_postrun_mlflow_export_keeps_canonical_evidence_and_projection_receipt(l
 @pytest.mark.parametrize("enabled", [False, True])
 def test_live_receipt_config_projection_preserves_capture_controls(live, enabled):
     artifacts, exporter, client = live
-    exporter.global_config_dict.token_id_capture = {
+    exporter.global_config_dict.token_capture = {
         "enabled": enabled,
         "dir": "/tmp/token-capture-fixture",
         "sink": None,
@@ -591,7 +591,7 @@ def test_live_receipt_config_projection_preserves_capture_controls(live, enabled
     assert artifacts.export_done_fpath("mlflow").exists()
     saved = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
     assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved
-    assert saved["token_id_capture"] == before["token_id_capture"]
+    assert saved["token_capture"] == before["token_capture"]
     assert OmegaConf.to_container(exporter.global_config_dict, resolve=False) == before
     assert _collected_mlflow(artifacts)["receipt"]["current"] is True
 
@@ -600,14 +600,14 @@ def test_live_receipt_config_projection_preserves_capture_controls(live, enabled
 def test_live_receipt_rejects_changed_capture_controls(live, monkeypatch, field, value):
     artifacts, exporter, client = live
     _post_run_client(monkeypatch)
-    exporter.global_config_dict.token_id_capture = {
+    exporter.global_config_dict.token_capture = {
         "enabled": False,
         "sink": "example:Sink",
         "rebuild_response": False,
     }
     write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
     exporter.export_config()
-    exporter.global_config_dict.token_id_capture[field] = value
+    exporter.global_config_dict.token_capture[field] = value
     write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
     run_health_checks(
         artifacts.rollouts_jsonl_fpath,
@@ -621,7 +621,7 @@ def test_live_receipt_rejects_changed_capture_controls(live, monkeypatch, field,
 
 def test_live_config_projection_masks_secret_ancestry_without_mutating_config(live):
     artifacts, exporter, client = live
-    exporter.global_config_dict.token_id_capture = {"enabled": True, "sink": "example:Sink"}
+    exporter.global_config_dict.token_capture = {"enabled": True, "sink": "example:Sink"}
     exporter.global_config_dict.environment_servers = {
         "harbor": {
             "secrets": {
@@ -630,7 +630,7 @@ def test_live_config_projection_masks_secret_ancestry_without_mutating_config(li
                 "enabled": True,
                 "missing": None,
                 "many": ["private-list-canary"],
-                "token_id_capture": {"enabled": True, "sink": "private-sink-canary"},
+                "token_capture": {"enabled": True, "sink": "private-sink-canary"},
             }
         }
     }
@@ -657,10 +657,10 @@ def test_live_config_projection_masks_secret_ancestry_without_mutating_config(li
         "enabled": "****",
         "missing": "****",
         "many": ["****"],
-        "token_id_capture": {"enabled": "****", "sink": "****"},
+        "token_capture": {"enabled": "****", "sink": "****"},
     }
     assert saved["openai_default_headers"] == {"X-Auth": "****", "arbitrary": "****"}
-    assert saved["token_id_capture"]["enabled"] is True
+    assert saved["token_capture"]["enabled"] is True
     assert OmegaConf.to_container(exporter.global_config_dict, resolve=False) == before
 
 
@@ -695,7 +695,7 @@ def test_live_config_projection_never_resolves_environment_references(live, monk
 @pytest.mark.parametrize("key", ["sink_kwargs", "lineage_store_kwargs"])
 def test_live_capture_custom_backend_options_do_not_expose_credentials(live, key):
     artifacts, exporter, client = live
-    exporter.global_config_dict.token_id_capture = {
+    exporter.global_config_dict.token_capture = {
         "enabled": True,
         "sink": "example:Sink",
         key: {
@@ -713,7 +713,7 @@ def test_live_capture_custom_backend_options_do_not_expose_credentials(live, key
     exporter.export_config()
     saved = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
     assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved
-    assert saved["token_id_capture"] == {
+    assert saved["token_capture"] == {
         "enabled": True,
         "sink": "example:Sink",
         key: {

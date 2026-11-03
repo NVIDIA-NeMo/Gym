@@ -39,6 +39,7 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 from nemo_gym.agents.agent_activation_types import (
@@ -55,6 +56,7 @@ from nemo_gym.config.global_config import (
     TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.config.renamed_keys import RENAMED_TOKEN_CAPTURE_AGENT_KEYS, renamed_attribute, with_renamed_keys
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
@@ -310,10 +312,15 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.
-    # The run-level ``token_id_capture.enabled`` setting gates the capture infrastructure.
-    # The run-level ``token_id_capture.all_agents`` setting overrides this agent-level choice.
-    token_id_capture: bool = False
+    # The run-level ``token_capture.enabled`` setting gates the capture infrastructure.
+    # The run-level ``token_capture.all_agents`` setting overrides this agent-level choice.
+    token_capture: bool = False
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
+
+    _accept_renamed_keys = model_validator(mode="before")(
+        classmethod(lambda cls, data: with_renamed_keys(data, RENAMED_TOKEN_CAPTURE_AGENT_KEYS))
+    )
+    token_id_capture = renamed_attribute("token_id_capture", "token_capture", owner="BaseResponsesAPIAgentConfig")
 
     @field_validator("tool_accesses")
     @classmethod
@@ -1143,14 +1150,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         Evaluation uses ``/ng-rollout/<id>/...`` for every agent.
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
-        Training capture requires ``token_id_capture.enabled``.
+        Training capture requires ``token_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
         Partial-rollout checkpointing also needs it for this agent.
         Missing global configuration disables correlation.
         """
         return (
             self._model_call_capture_enabled()
-            or self._token_id_capture_enabled()
+            or self._token_capture_enabled()
             # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
             or self._restart_only is not None
@@ -1163,7 +1170,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
 
-    def _token_id_capture_enabled(self) -> bool:
+    def _token_capture_enabled(self) -> bool:
         """Whether this agent explicitly opted into training-token capture."""
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
@@ -1172,7 +1179,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if not isinstance(block, Mapping) or not block.get("enabled", False):
             return False
         return bool(block.get("all_agents", False)) or bool(
-            getattr(getattr(self, "config", None), "token_id_capture", False)
+            getattr(getattr(self, "config", None), "token_capture", False)
         )
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
@@ -1193,7 +1200,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Calls without a rollout id remain unchanged.
         """
         return (
-            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
+            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_capture_enabled())}"
             f"{url_path}"
         )
 
@@ -1207,7 +1214,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return apply_rollout_prefix(
             base_url,
             self.rollout_id_from_run(body),
-            token_capture=self._token_id_capture_enabled(),
+            token_capture=self._token_capture_enabled(),
         )
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
@@ -1233,7 +1240,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
         prefixed = apply_rollout_prefix(
-            base_url, rollout_id, token_capture=self._token_id_capture_enabled(), trace_context=trace_context
+            base_url, rollout_id, token_capture=self._token_capture_enabled(), trace_context=trace_context
         )
         return f"{prefixed}/v1"
 

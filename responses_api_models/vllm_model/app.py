@@ -866,7 +866,7 @@ class VLLMModel(SimpleResponsesAPIModel):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         config = token_capture_config(self.server_client.global_config_dict)
-        if config.token_id_capture.parent_resolution == "source_history":
+        if config.token_capture.parent_resolution == "source_history":
             app.post("/context/measure")(self.measure_context)
         return app
 
@@ -978,25 +978,25 @@ class VLLMModel(SimpleResponsesAPIModel):
         global_config = getattr(self.server_client, "global_config_dict", None)
         capture_config = token_capture_config(global_config) if global_config is not None else None
         self._external_capture_handler = None
-        if capture_config is not None and capture_config.token_id_capture.external_staging:
+        if capture_config is not None and capture_config.token_capture.external_staging:
             overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
-            if capture_config.token_id_capture.parent_resolution == "source_history":
+            if capture_config.token_capture.parent_resolution == "source_history":
                 if self.config.continue_final_assistant_message:
                     raise ValueError("Framework context requires continue_final_assistant_message=false")
                 validate_framework_context_options(overrides)
             if overrides.get("stream"):
                 raise ValueError("external staging requires non-streaming backend requests")
             if self.config.use_completions_api:
-                raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
+                raise ValueError("token_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:
-                raise ValueError("token_id_capture.external_staging requires the chat-backed Responses API path")
+                raise ValueError("token_capture.external_staging requires the chat-backed Responses API path")
             if self.config.return_token_id_information:
                 raise ValueError(
-                    "token_id_capture.external_staging requires return_token_id_information=false; "
+                    "token_capture.external_staging requires return_token_id_information=false; "
                     "worker custody replaces the token echo"
                 )
             self._external_capture_handler = make_external_capture_handler(
-                capture_config.token_id_capture.external_staging_backend
+                capture_config.token_capture.external_staging_backend
             )
 
         self._chat_template_tokenizer = None
