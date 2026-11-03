@@ -23,6 +23,12 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.trajectory.atif_export import AtifExportError, encode_atif_trajectory, transcript_to_atif
     from nemo_gym.trajectory.model_call_record import ModelCallRecord, build_model_call_record
+    from nemo_gym.trajectory.tool_events import (
+        ToolCaptureEvent,
+        read_tool_events,
+        replay_tool_events,
+        tool_event_json_schema,
+    )
     from nemo_gym.trajectory.tool_timing import normalize_operation_timing, normalize_tool_calls, tool_attempt_id
     from nemo_gym.trajectory.trajectory_format import project_bundle_v1, project_trajectory_v1
     from nemo_gym.trajectory.trajectory_record import (
@@ -57,6 +63,10 @@ _PUBLIC_API = {
     "tool_attempt_id": "tool_timing",
     "project_bundle_v1": "trajectory_format",
     "project_trajectory_v1": "trajectory_format",
+    "ToolCaptureEvent": "tool_events",
+    "read_tool_events": "tool_events",
+    "replay_tool_events": "tool_events",
+    "tool_event_json_schema": "tool_events",
     "AgentEpisode": "trajectory_record",
     "AgentInvocation": "trajectory_record",
     "AgentObservationBundle": "trajectory_record",

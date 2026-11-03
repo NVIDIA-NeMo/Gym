@@ -216,3 +216,93 @@ example even though semantic turns are unavailable. Token totals include only ob
 Collection adds measured wall-clock latency when available. `ng_perf` is absent when observability
 is disabled or no valid trajectory invocation exists. Aggregate metrics include `perf_summary`
 when rollouts contain `ng_perf`.
+
+## Recording tool attempts in a harness
+
+Use `ToolCallRecorder` at an existing start/completion hook when the harness does not
+already persist suitable tool timings. Enable it under the adapter's existing
+`observability_enabled` setting. `tool_recording_files(runner_directory)` returns the
+two standard-library-only sources to add to `SandboxSpec.files` or session setup;
+the sandbox runner imports `ClockContext` and `ToolCallRecorder` from `tool_recording`.
+Host-owned operations import those names from `nemo_gym.utils`.
+
+```python
+recorder = ToolCallRecorder(
+    path=session_directory / "tool_events.jsonl",
+    producer_id=producer_id,
+    invocation_id=invocation_id,
+    agent_instance=agent_instance,
+    clock=ClockContext(location="sandbox", owner=sandbox_id),
+    boundary="executor",
+    timing_source="my_harness.execute_tool",
+)
+with recorder.call(
+    native_call_id=call_id,
+    tool_name="bash",
+    model_call_ref={"model_call_id": requesting_model_call_id},
+) as observed:
+    result = await execute_tool()
+    observed.set_outcome("completed" if result.exit_code == 0 else "failed")
+```
+
+A start is flushed before execution so it survives a harness process exit while the
+sandbox files remain available. Tool capture does not fsync each event and does not
+guarantee recovery after host or storage loss. Normal return without `set_outcome` remains
+`unknown`; an exception is recorded as failed and re-raised. Explicit cancellation
+closes the observed boundary and does not assert remote process termination.
+Separate callbacks use `start(...)` and `finish(handle, status=...)`; passing
+`parent=parent_handle` preserves an explicit parent relationship. `SystemExit` and
+other process-control exceptions leave an unfinished start rather than fabricating
+a normal completion.
+
+Choose a producer ID unique to the recording process/epoch and retain it with the
+artifact. A recorder serializes its own sequences; distinct processes use separate
+producer IDs, even if they append to the same file. Share a `ClockContext` only when
+the clocks are known to be the same. Each context gets a fresh epoch; a detected wall
+clock step changes its domain while retaining monotonic elapsed durations.
+
+Collect the JSONL file through the adapter's existing stop/capture/release lifecycle.
+On the host, `nemo_gym.trajectory.read_tool_events(path)` returns tool observations
+and gaps. Add them to a v2 `AgentObservationBundle` for the common trajectory
+normalizer to resolve model-call and instance ownership. Keep the file under the
+existing artifact retention policy. Add a `tool_capture_unavailable` gap for every
+entry in `recorder.failed_spans` when collecting an in-process recorder; an I/O
+failure cannot guarantee that its own diagnostic was written to the failed storage.
+
+Replay tolerates interrupted final lines and deduplicates `(producer_id, sequence)`.
+Conflicting copies produce gaps. Missing starts or finishes retain the available
+endpoint and elapsed duration. `tool_event_json_schema()` generates the same wire
+contract for hooks implemented in another runtime. This stream is adapter capture
+input; `ng_trajectory.tool_calls` remains the normalized consumer contract.
+
+Timing conformance checks accept an explicit `ToolTimingScope` in `EvidenceScope`,
+including the tested runtime version, mode, tool paths and authoritative sources.
+Lifecycle and executor checks run independently; transcript measurements cannot
+satisfy either. Process attribution is never established from timing alone. The
+nine targets in `P0_TOOL_TIMING_HARNESSES` identify the migration scope; only existing
+executable probes in `HARNESSES` are dispatched until an adapter's runtime setup is
+verified.
+
+The local probe runner accepts `--tool-timing-scopes scopes.json`. This JSON object
+maps selected harness names to `ToolTimingScope` fields, for example:
+
+```json
+{
+  "opencode": {
+    "runtime_version": "1.2.3",
+    "mode": "local",
+    "tool_paths": ["bash"],
+    "lifecycle_sources": ["opencode.part.state.time"]
+  }
+}
+```
+
+Use the version and source exercised by your probe. These declarations express
+expectations; inspect the separately captured `runtime.json` to verify the actual
+runtime. Tool scenarios apply the declared boundary checks to both their results
+and artifact reports. `--list-timing-targets` reports all nine migration targets
+and whether a runtime probe is available. Suite reports retain this inventory and
+the declared timing scopes; an unverified target is not a conformance result.
+For adapters without a runnable local probe, use `inspect_record` or
+`inspect_bundle` with `EvidenceScope(tool_timing=...)` on collected artifacts until
+the runtime-specific setup is verified.

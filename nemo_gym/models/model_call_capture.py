@@ -23,10 +23,8 @@ A call is correlated by a /ng-rollout/<rollout_id>/v1/... base_url prefix, which
 """
 
 import asyncio
-import fcntl
 import json
 import logging
-import os
 import re
 import time
 from contextlib import asynccontextmanager
@@ -67,6 +65,7 @@ from nemo_gym.models.token_capture.protocols import (
 from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.utils.jsonl_capture import append_jsonl, jsonl_lines
 
 
 logger = logging.getLogger(__name__)
@@ -189,61 +188,25 @@ class CaptureStore:
         so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
         """
         line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
-        path = self.path_for(rollout_id)
-        with path.open("ab") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        append_jsonl(self.path_for(rollout_id), line)
 
     def read(self, rollout_id: str) -> list[dict[str, Any]]:
-        path = self.path_for(rollout_id)
-        if not path.exists():
-            return []
-        exchanges: list[dict[str, Any]] = []
-        # Stream line-by-line; a capture can be large (token-ids / logprobs).
-        with path.open("rb") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                for line in handle:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    exchanges.append(orjson.loads(stripped))
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return exchanges
+        return [orjson.loads(line) for line in jsonl_lines(self.path_for(rollout_id))]
 
     def read_available(self, rollout_id: str) -> tuple[list[tuple[int, dict[str, Any]]], int]:
         """Read valid exchanges without letting one damaged line hide the rest."""
-        path = self.path_for(rollout_id)
-        if not path.exists():
-            return [], 0
         exchanges: list[tuple[int, dict[str, Any]]] = []
         invalid_count = 0
-        capture_index = 0
-        with path.open("rb") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        for capture_index, line in enumerate(jsonl_lines(self.path_for(rollout_id))):
             try:
-                for line in handle:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        exchange = orjson.loads(stripped)
-                    except orjson.JSONDecodeError:
-                        invalid_count += 1
-                    else:
-                        if isinstance(exchange, dict):
-                            exchanges.append((capture_index, exchange))
-                        else:
-                            invalid_count += 1
-                    capture_index += 1
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                exchange = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                invalid_count += 1
+            else:
+                if isinstance(exchange, dict):
+                    exchanges.append((capture_index, exchange))
+                else:
+                    invalid_count += 1
         return exchanges, invalid_count
 
 
