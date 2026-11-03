@@ -80,6 +80,8 @@ async def main(args):
             "responses_api_agents/miniswe_sandboxed_agent/harness.py",
             "responses_api_agents/miniswe_sandboxed_agent/bootstrap.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
+            "responses_api_agents/miniswe_sandboxed_agent/runtime/view_image.py",
+            "responses_api_agents/miniswe_sandboxed_agent/runtime/vision_model.py",
         ]
     ]
     (args.output / "run.json").write_text(
@@ -89,6 +91,7 @@ async def main(args):
                 "harness": args.harness,
                 "model": args.model,
                 "steps": args.steps,
+                "enable_view_image": getattr(args, "enable_view_image", False),
                 "agent_timeout_sec": args.agent_timeout,
                 "category": args.category,
                 "tasks": args.tasks,
@@ -111,6 +114,7 @@ async def main(args):
     config.tb4_jobs_dir = str(args.output / "resources")
     config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
+    config.tb4_enable_view_image = getattr(args, "enable_view_image", False)
     agent_name = "terminal_bench_4_" + args.harness
     profile = OmegaConf.load(root / f"{args.harness}.yaml")
     del profile["config_paths"]
@@ -267,6 +271,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="gpt-5.4-mini-2026-03-17")
     parser.add_argument("--model-url", default="https://api.openai.com/v1")
     parser.add_argument("--steps", type=int, default=3)
+    parser.add_argument("--enable-view-image", action="store_true", help="Enable the experimental bash image command")
     parser.add_argument("--agent-timeout", type=int, default=900)
     parser.add_argument("--concurrency", type=int, default=3)
     raise SystemExit(0 if asyncio.run(main(parser.parse_args())) else 1)

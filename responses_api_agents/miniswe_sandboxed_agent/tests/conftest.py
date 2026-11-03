@@ -90,6 +90,7 @@ async def runner_factory(tmp_path, monkeypatch, native_python):
         python = remote / "venv/bin/python"
         python.write_text(f'#!/bin/sh\nexec {shlex.quote(str(native_python))} "$@"\n')
         python.chmod(0o755)
+        (remote / "venv/bin/python3").symlink_to(python)
 
     monkeypatch.setattr(module.MiniSWEHarness, "_install_miniswe", install)
 
