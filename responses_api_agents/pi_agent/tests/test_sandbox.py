@@ -25,13 +25,17 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
-from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure, parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    is_harness_termination_failure,
+    parse_cleanup_receipt,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
@@ -2623,7 +2627,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     [("Request timed out.", "model_transport_error"), ("Unrecognized failure", "unknown")],
 )
 def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup

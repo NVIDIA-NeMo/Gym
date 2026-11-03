@@ -159,7 +159,7 @@ def test_capture_namespace_cannot_escape_a_secret_ancestor():
 
 def test_public_capture_projection_fields_match_the_supported_schema():
     from nemo_gym.config.secret_utils import _CAPTURE_PUBLIC_FIELDS
-    from nemo_gym.token_id_capture.config import TokenIdCaptureSettings
+    from nemo_gym.models.token_capture.config import TokenCaptureSettings as TokenIdCaptureSettings
 
     assert _CAPTURE_PUBLIC_FIELDS | {"sink_kwargs", "lineage_store_kwargs", "control_auth_token_env"} == set(
         TokenIdCaptureSettings.model_fields

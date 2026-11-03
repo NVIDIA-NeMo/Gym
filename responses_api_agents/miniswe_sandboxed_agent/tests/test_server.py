@@ -1195,11 +1195,11 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     from omegaconf import OmegaConf
 
     from nemo_gym.client import server_client
+    from nemo_gym.config import BaseServerConfig
     from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
     from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
     from nemo_gym.failure_transport import FailureReportRow
     from nemo_gym.orchestration.recovery import _policy_evidence, _policy_replay_is_unsupported
-    from nemo_gym.server_utils import BaseServerConfig
     from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
     f = fixture

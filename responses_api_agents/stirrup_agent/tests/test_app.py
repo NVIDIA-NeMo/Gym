@@ -19,7 +19,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef

@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-from nemo_gym.agent_outcome import OutcomeAction
+from nemo_gym.agents.agent_outcome import OutcomeAction
 from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
 from nemo_gym.rollout_recovery import RunManifest
 from nemo_gym.rollout_store import RolloutStore

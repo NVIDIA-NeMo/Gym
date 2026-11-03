@@ -3720,9 +3720,9 @@ def test_raw_responses_stream_capture_preserves_response_population(
     from fastapi.responses import StreamingResponse
     from fastapi.testclient import TestClient
 
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models.model_call_capture import CaptureStore
     from nemo_gym.observability.model_calls import read_model_call_records
-    from tests.unit_tests.test_base_responses_api_model import _install_capture
+    from tests.unit_tests.models.test_base_responses_api_model import _install_capture
 
     app = FastAPI()
     response = {
