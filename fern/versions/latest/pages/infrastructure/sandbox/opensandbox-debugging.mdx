@@ -88,6 +88,8 @@ diagnostic budget. An explicit terminal `OOMKilled` reason, or the opt-in inspec
 user-container state, confirms OOM. Gym then raises
 `NgFailureEvent(boundary="sandbox", failure_kind="provider_oom_killed")` with the evidence source.
 Without that evidence, the event describes the observed request or command-outcome failure; it does not claim OOM.
+The diagnostic reason identifies whether evidence came from lifecycle status or inspect. Typed `details` retain
+the provider, known sandbox/execution IDs and any reported lifecycle reason or command exit code.
 
 ```python
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
@@ -97,7 +99,7 @@ try:
     result = await sandbox.exec(cmd, timeout_s=120)
 except NgFailureEvent as error:
     if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
-        print(error.sandbox.sandbox_id, error.sandbox.evidence_source)
+        print(error.details.sandbox_id, error.failure_reason)
     raise  # Preserve the event and cause for the caller's policy.
 ```
 

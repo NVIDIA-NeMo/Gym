@@ -96,7 +96,7 @@ logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSa
 class _SandboxDeathNotice:
     message: str
     outcome: Literal["oom", "other_terminal"]
-    source: Literal["lifecycle_status", "inspect_current_container"] = "lifecycle_status"
+    provider_status_reason: str | None = None
 
 
 # The runtime's refusal when the exec daemon runs as the image's user and cannot switch identity (the markers
@@ -1015,6 +1015,7 @@ class OpenSandboxProvider:
             if result.return_code != 0:
                 raise opensandbox_failure(
                     operation="configure_runtime",
+                    exit_code=result.return_code if result.error_type is None else None,
                     failure_kind=PROVIDER_SETUP_FAILED,
                     sandbox_id=handle.sandbox_id,
                     reason=f"Sandbox {handle.sandbox_id!r} cannot satisfy {requirement}: "
@@ -1042,6 +1043,7 @@ class OpenSandboxProvider:
             if setup.return_code != 0:
                 raise opensandbox_failure(
                     operation="forward_ports",
+                    exit_code=setup.return_code if setup.error_type is None else None,
                     failure_kind=PROVIDER_SETUP_FAILED,
                     sandbox_id=handle.sandbox_id,
                     reason=f"Sandbox {handle.sandbox_id!r} port forwarding setup failed: "
@@ -1061,6 +1063,7 @@ class OpenSandboxProvider:
         result = await self.exec(handle, command, user="root", timeout_s=None)
         raise opensandbox_failure(
             operation="forward_ports",
+            exit_code=result.return_code if result.error_type is None else None,
             failure_kind=PROVIDER_SETUP_FAILED,
             sandbox_id=handle.sandbox_id,
             reason=f"Sandbox {handle.sandbox_id!r} port forwarding exited ({result.return_code}): "
@@ -1118,6 +1121,7 @@ class OpenSandboxProvider:
             if result.return_code != 0:
                 raise opensandbox_failure(
                     operation="set_hosts",
+                    exit_code=result.return_code if result.error_type is None else None,
                     failure_kind=PROVIDER_SETUP_FAILED,
                     sandbox_id=handle.sandbox_id,
                     reason=f"Could not configure sandbox hosts for {handle.sandbox_id!r}: "
@@ -1578,6 +1582,7 @@ class OpenSandboxProvider:
             if result.return_code != 0:
                 raise opensandbox_failure(
                     operation="setup",
+                    exit_code=result.return_code if result.error_type is None else None,
                     sandbox_id=handle.sandbox_id,
                     failure_kind=PROVIDER_SETUP_FAILED,
                     reason=f"Sandbox {handle.sandbox_id!r} setup command failed (exit {result.return_code}): "
@@ -1674,6 +1679,7 @@ class OpenSandboxProvider:
                 last_exception = opensandbox_failure(
                     operation="create_probe",
                     sandbox_id=handle.sandbox_id,
+                    exit_code=result.return_code if result.error_type is None else None,
                     failure_kind=PROVIDER_NOT_READY,
                     reason="OpenSandbox sandbox create probe command returned an "
                     f"unexpected result; sandbox_id={handle.sandbox_id!r}, "
@@ -2273,7 +2279,7 @@ class OpenSandboxProvider:
                     cause=error,
                     failure_kind=PROVIDER_OOM_KILLED,
                     reason=evidence.message,
-                    evidence_source=evidence.source,
+                    provider_status_reason=evidence.provider_status_reason,
                 ) from error
             if isinstance(error, NgFailureEvent):
                 raise
@@ -2306,9 +2312,10 @@ class OpenSandboxProvider:
                     if _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
                         oom = reason == "OOMKilled"
                         terminal_notice = _SandboxDeathNotice(
-                            f"Sandbox {'was OOM-killed' if oom else 'is unavailable'}; "
+                            f"Sandbox {'was OOM-killed' if oom else 'is unavailable'}; lifecycle status: "
                             f"state={state!r}, reason={str(reason)[:256]!r}",
                             outcome="oom" if oom else "other_terminal",
+                            provider_status_reason=reason if isinstance(reason, str) else None,
                         )
                         if oom:
                             return terminal_notice
@@ -2325,7 +2332,6 @@ class OpenSandboxProvider:
                     return _SandboxDeathNotice(
                         f"Sandbox was OOM-killed: inspect confirms {evidence}",
                         outcome="oom",
-                        source="inspect_current_container",
                     )
             if terminal_notice is not None or get_info is None or not poll:
                 return terminal_notice
@@ -2378,7 +2384,7 @@ class OpenSandboxProvider:
             if evidence is not None and evidence.outcome == "oom"
             else PROVIDER_COMMAND_OUTCOME_UNKNOWN,
             reason=evidence.message if evidence is not None else "PTY connection lost; command outcome is unknown",
-            evidence_source=evidence.source if evidence is not None else None,
+            provider_status_reason=evidence.provider_status_reason if evidence is not None else None,
         )
 
     async def _exec_background(
@@ -2488,7 +2494,7 @@ class OpenSandboxProvider:
                         failure_kind=PROVIDER_OOM_KILLED,
                         cause=failure,
                         reason=evidence.message,
-                        evidence_source=evidence.source,
+                        provider_status_reason=evidence.provider_status_reason,
                     ) from failure
                 if failure_outcome_policy(failure, config=self._operations.outcome_policy) != OutcomeAction.RETRY:
                     if failure is error:

@@ -15,7 +15,9 @@ def sandbox_failure(
     cause: BaseException | None = None,
     reason: str | None = None,
     execution_id: str | None = None,
-    evidence_source: str | None = None,
+    provider: str | None = None,
+    provider_status_reason: str | None = None,
+    exit_code: int | None = None,
     http_status: int | None = None,
 ) -> NgFailureEvent:
     """Construct an event from provider-selected facts; callers raise it ``from cause``.
@@ -23,13 +25,13 @@ def sandbox_failure(
     SDK classification belongs to the provider. HTTP status must describe this
     operation, not a child failure; causes retain their own evidence.
     """
-    details = None
+    foreign_error = None
     if cause is not None and not isinstance(cause, NgFailureEvent):
         try:
             message = str(cause)
         except Exception:
             message = None  # A broken SDK formatter must not replace the observed failure.
-        details = sdk_error_details(cause, message=message)
+        foreign_error = sdk_error_details(cause, message=message)
     failure = NgFailureEvent(
         boundary=FailureBoundary.SANDBOX,
         operation=operation,
@@ -37,11 +39,17 @@ def sandbox_failure(
         failure_reason=bounded_text(reason or f"Sandbox {operation} failed; remote outcome is unknown", 2000),
         # When wrapping an already typed failure, the child retains its HTTP facts.
         http_status=http_status,
-        foreign_error=details,
-        sandbox=SandboxFailureDetails(
-            sandbox_id=sandbox_id, execution_id=execution_id, evidence_source=evidence_source
+        foreign_error=foreign_error,
+        details=SandboxFailureDetails(
+            sandbox_id=sandbox_id,
+            execution_id=execution_id,
+            provider=provider,
+            provider_status_reason=bounded_text(provider_status_reason, 2000)
+            if provider_status_reason is not None
+            else None,
+            exit_code=exit_code,
         )
-        if sandbox_id is not None
+        if any(value is not None for value in (sandbox_id, execution_id, provider, provider_status_reason, exit_code))
         else None,
     )
     failure.__cause__ = cause
