@@ -7,6 +7,7 @@ slurm:
   qos: interactive
   gpus-per-node: "4"
   mem: "0"
+  container-mounts: ${oc.env:PWD}:${oc.env:PWD}
 
 vllm:
   repo: https://github.com/bxyu-nvidia/vllm.git
