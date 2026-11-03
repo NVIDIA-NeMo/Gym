@@ -144,37 +144,18 @@ after the ground truth is merged into the rows. Lite and Full use PostgreSQL.
 ## PostgreSQL (Lite and Full)
 
 With `database_engine: postgresql`, a task's database is `<db>_template` in the PostgreSQL server of the sandbox
-image, and each episode starts its own sandbox from that image. The image build restores every database of the
-release once (`postgres/Dockerfile`), so an episode starts PostgreSQL instead of restoring dumps, and a write in one
-episode never reaches another. `setup` starts the server and applies `preprocess_sql`; after that, each query runs in
-a transaction that is rolled back.
+image, and each episode starts its own sandbox from that image. `setup` starts the server and applies
+`preprocess_sql`; after that, each query runs in a transaction that is rolled back, so a write in one query or episode
+never reaches another. The image holds the release's databases already restored, so an episode starts PostgreSQL
+instead of restoring dumps.
 
-1. Build the image for Lite or Full and push it where the sandbox provider pulls from. The build commands are at the
-   top of `postgres/Dockerfile`.
-2. Download the release's schema, column meanings and knowledge base, which are the `database_dir` files, with its
-   rows:
-
-   ```bash
-   huggingface-cli download birdsql/bird-interact-lite --repo-type dataset --local-dir data/bird_interact_lite
-   ```
-
-3. Merge the ground truth from the authors into `bird_interact_data.jsonl` (the BIRD-Interact repository's
-   `combine_public_with_gt.py` does this), and write the rows as tasks, as in [Running](#running).
-4. Point both servers at them:
-
-   ```yaml
-   database_engine: postgresql
-   database_dir: data/bird_interact_lite
-   sandbox_config:
-     image: <registry>/bird-interact-postgres:lite
-   ```
-
-Only query tasks run: management tasks have custom `test_cases`. Lite has 195 query tasks of 300 and Full 410 of
-600, and every task has a follow-up phase.
+[`benchmarks/bird_interact`](../../benchmarks/bird_interact/README.md) builds the image, prepares the Lite or Full
+data with the ground truth, and runs the benchmark.
 
 ## Not supported yet
 
-- Rows with custom `test_cases` (BIRD-Interact's management tasks). The episode fails at seed, for good.
+- Rows with custom `test_cases`, for the task or its follow-up (BIRD-Interact's management tasks). The episode fails
+  at seed, for good.
 - PostgreSQL dollar-quoted bodies (`$$ ... $$`) in the agent's SQL: a semicolon inside one splits the statement.
 - Database changes that carry over from phase 1 to phase 2. Each submission runs on a scratch copy.
 - The data and catalog checks that `gym env test` runs for a Resources Server (GYMINT-643).
