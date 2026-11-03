@@ -15,11 +15,12 @@
 import asyncio
 import io
 import json
+import logging
 import multiprocessing
 import signal
 import time
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -28,13 +29,27 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class PythonExecutorResourcesServerConfig(BaseResourcesServerConfig):
@@ -137,11 +152,21 @@ class _SessionHandle:
         raise RuntimeError(reply["error"])
 
     def close(self):
+        """Stop the worker, escalating to terminate and then kill; raise if it is still alive."""
         try:
             self._conn.send({"cmd": "close"})
-        except (BrokenPipeError, EOFError):
+        except (BrokenPipeError, EOFError, OSError):
             pass
         self._proc.join(timeout=1)
+        if self._proc.is_alive():
+            # Still running user code, which the alarm stops only after max_execution_time.
+            self._proc.terminate()
+            self._proc.join(timeout=5)
+        if self._proc.is_alive():
+            self._proc.kill()
+            self._proc.join(timeout=5)
+        if self._proc.is_alive():
+            raise RuntimeError(f"Python worker process {self._proc.pid} is still alive after SIGKILL")
 
 
 # ------------------------------
@@ -167,6 +192,13 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
     config: PythonExecutorResourcesServerConfig
 
     _sessions: Dict[str, _SessionHandle] = PrivateAttr(default_factory=dict)
+    # The episode and task each Environment Server seed bound to its resources_session_id.
+    _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _fence: ResourcesSessionFence = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -179,9 +211,11 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         # _sessions dict already initialised by default_factory
 
     async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
+        sid = request.session[SESSION_ID_KEY]
+        if self._fence.closed_episode(sid) is not None:
+            raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
         loop = asyncio.get_running_loop()
         try:
-            sid = request.session[SESSION_ID_KEY]
             if sid not in self._sessions:
                 self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
             handle = self._sessions[sid]
@@ -191,27 +225,82 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 handle.exec,
                 body.code,
             )
-            return ExecutePythonResponse(
+            response = ExecutePythonResponse(
                 success=True,
                 stdout=stdout,
                 stderr=stderr,
                 result=result,
             )
         except Exception as e:
-            return ExecutePythonResponse(
+            response = ExecutePythonResponse(
                 success=False,
                 stdout="",
                 stderr="",
                 error_message=str(e),
             )
+        if self._fence.closed_episode(sid) is not None:
+            # The session closed while this call ran, so stop the worker the call may have started.
+            await asyncio.to_thread(self._cleanup_session, sid)
+            raise ResourcesSessionLostError(f"math_with_code session {sid} closed during the call")
+        return response
 
     async def end_session(self, request: Request) -> ExecutePythonResponse:
         session_id = request.session[SESSION_ID_KEY]
-        self._cleanup_session(session_id)
+        await asyncio.to_thread(self._cleanup_session, session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Bind an Environment Server's resources session to the request's cookie.
+
+        The worker process starts lazily on the first execute_python call. An Agent's ``/run`` seeds with its
+        legacy body, which keeps no state here; verify stops that rollout's worker.
+        """
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            return BaseSeedSessionResponse()
+
+        resources_session_id = body.resources_session_id
+        async with self._fence.locked(resources_session_id):
+            self._fence.raise_if_closed(resources_session_id)
+            identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
+            if identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+        # execute_python and verify find the worker by the cookie, so it must name this resources session.
+        request.session[SESSION_ID_KEY] = resources_session_id
+        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Stop the session's worker process, even when verify never ran.
+
+        Releases by ``resources_session_id``, since a close whose seed reply was lost carries no cookie. A worker
+        that outlives SIGKILL raises, so the session is not recorded as closed and the caller can retry.
+        """
+        resources_session_id = body.resources_session_id
+        async with self._fence.locked(resources_session_id):
+            closed_episode = self._fence.closed_episode(resources_session_id)
+            if closed_episode is not None:
+                if closed_episode != body.episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+                return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
+            identity = self._session_episodes.get(resources_session_id)
+            if identity is not None and identity[0] != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            # Verify has already stopped a verified episode's worker, so this finds none.
+            await asyncio.to_thread(self._cleanup_session, resources_session_id)
+            self._session_episodes.pop(resources_session_id, None)
+            self._fence.mark_closed(resources_session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def verify(self, request: Request, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
+        if self._fence.closed_episode(session_id) is not None:
+            # An Environment Server verifies before it closes, so this verify is out of order; mask it.
+            return PythonMathVerifyResponse(
+                **(body.model_dump() | lost_session_verification(f"math_with_code session {session_id} is closed"))
+            )
 
         try:
             expected = body.expected_result
@@ -253,13 +342,20 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 accuracy=accuracy,
             )
         finally:
-            self._cleanup_session(session_id)
+            try:
+                await asyncio.to_thread(self._cleanup_session, session_id)
+            except RuntimeError:
+                # The score stands; the worker stays registered, so /close_session retries and reports it.
+                logger.exception("Could not stop the Python worker of session %s", session_id)
 
     def _cleanup_session(self, session_id: str) -> None:
-        """Clean up subprocess for the given session."""
-        if session_id in self._sessions:
-            self._sessions[session_id].close()
-            del self._sessions[session_id]
+        """Stop the session's worker process; one that survives stays registered, so a later cleanup retries it."""
+        handle = self._sessions.get(session_id)
+        if handle is not None:
+            handle.close()
+            # A concurrent cleanup may already have dropped it, and a later call may have started another.
+            if self._sessions.get(session_id) is handle:
+                del self._sessions[session_id]
 
 
 def _normalize_answer(s: str) -> str:

@@ -124,6 +124,21 @@ gym eval run --no-serve \
 
 
 
+### Sessions
+
+Each rollout gets its own Python worker process, which keeps variables between `execute_python` calls. The rollout's
+session cookie keys it, and the first `execute_python` call starts it.
+
+- Under an Environment Server, such as `math_with_code_environment_server` (`single_agent_turn_legacy`),
+  `/seed_session` binds the cookie to the `resources_session_id`. `/close_session` stops the worker, even when
+  `/verify` never ran, escalating to SIGTERM and then SIGKILL for a worker still running code. A worker that survives
+  SIGKILL makes the close fail, so the caller retries it. Closing an unknown or already closed session succeeds, and a
+  seed that arrives after its session closed is refused with 409 for `session_close_retry_window_seconds`. An
+  `execute_python` call for a closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one
+  returns a masked sample with reward 0.
+- Under an Agent's own `/run`, the seed takes the row itself and keeps no state, and `/verify` (or `/end_session`)
+  stops the worker.
+
 ### Additional Details
 
 Currently the system prompt looks like this. In the future this can be changed
