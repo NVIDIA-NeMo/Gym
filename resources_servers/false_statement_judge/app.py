@@ -45,8 +45,8 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,

@@ -28,7 +28,7 @@ from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.telemetry import connection_pool
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
@@ -873,12 +873,12 @@ class TestCollectorRoundTrip:
     async def test_success_and_failure_routing(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         from fastapi.testclient import TestClient
 
-        import nemo_gym.rollout_collection
-        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        import nemo_gym.rollouts.rollout_collection
+        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
         # The collector reads the global config for model-call capture dirs; neutralize the
         # Hydra CLI parse it would otherwise attempt under pytest (same as the core tests).
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", MagicMock(return_value={}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", MagicMock(return_value={}))
 
         async def remote_service(method, url, data=None, headers=None, cookies=None, **kwargs):
             params = orjson.loads(data)

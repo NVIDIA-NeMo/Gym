@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 from benchmarks.long_transduction import prepare as generator
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 
 
 def test_prepare_returns_cached_path_without_dependencies(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

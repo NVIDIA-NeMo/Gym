@@ -88,13 +88,14 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.telemetry.profiling import Profiler
-    from nemo_gym.telemetry.resources_operations import resources_operation
+    from nemo_gym.telemetry.resources_operations import ResourcesOperation, resources_operation
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "Profiler": "profiling",
+    "ResourcesOperation": "resources_operations",
     "resources_operation": "resources_operations",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
