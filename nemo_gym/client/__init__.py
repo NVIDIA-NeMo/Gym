@@ -22,6 +22,7 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.client.http_client import (
+        MAX_NUM_TRIES,
         GlobalAIOHTTPAsyncClientConfig,
         format_exception_with_response_body,
         get_global_aiohttp_client,
@@ -32,6 +33,12 @@ if TYPE_CHECKING:
         raise_for_status,
         request,
         set_global_aiohttp_client,
+    )
+    from nemo_gym.client.openai_client import (
+        RATE_LIMIT_ERROR_CODES,
+        RETRY_ERROR_CODES,
+        NeMoGymAsyncOpenAI,
+        PermanentEndpointError,
     )
     from nemo_gym.client.server_client import (
         SESSION_ID_KEY,
@@ -48,6 +55,11 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "GlobalAIOHTTPAsyncClientConfig": "http_client",
+    "MAX_NUM_TRIES": "http_client",
+    "NeMoGymAsyncOpenAI": "openai_client",
+    "PermanentEndpointError": "openai_client",
+    "RATE_LIMIT_ERROR_CODES": "openai_client",
+    "RETRY_ERROR_CODES": "openai_client",
     "SESSION_ID_KEY": "server_client",
     "ServerClient": "server_client",
     "apply_rollout_prefix": "server_client",

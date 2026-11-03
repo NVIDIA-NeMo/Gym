@@ -570,7 +570,7 @@ def test_live_receipt_config_projection_preserves_capture_controls(live, enabled
         "sink": None,
         "rebuild_response": False,
     }
-    from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+    from nemo_gym.models.token_capture.config import TokenCaptureConfig as TokenIdCaptureConfig
 
     TokenIdCaptureConfig.model_validate(OmegaConf.to_container(exporter.global_config_dict, resolve=False))
     before = OmegaConf.to_container(exporter.global_config_dict, resolve=False)

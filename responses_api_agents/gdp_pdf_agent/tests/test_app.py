@@ -27,7 +27,7 @@ import pytest
 from aiohttp import ClientPayloadError, ClientResponseError
 from PIL import Image
 
-from nemo_gym.agent_utils import verify_call
+from nemo_gym.agents.utils import verify_call
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import AGENT_ROUTE_FAILED, NeMoGymResponse

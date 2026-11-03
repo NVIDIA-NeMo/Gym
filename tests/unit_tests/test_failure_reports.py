@@ -11,7 +11,7 @@ import pytest
 from aiohttp import web
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
+from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.failure_transport import (
     FailureHeader,

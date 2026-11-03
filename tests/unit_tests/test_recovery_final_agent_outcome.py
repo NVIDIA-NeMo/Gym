@@ -8,7 +8,7 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.recovery import (

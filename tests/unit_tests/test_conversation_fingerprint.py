@@ -22,7 +22,7 @@ fingerprint erases the dialect.
 
 import pytest
 
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
 
 
 def test_the_three_dialect_shapes_hash_identically():

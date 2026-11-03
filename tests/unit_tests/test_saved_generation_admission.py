@@ -127,7 +127,7 @@ async def test_failed_agent_partial_output_keeps_the_selected_policy(tmp_path, m
     import httpx
     from omegaconf import OmegaConf
 
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
+    from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
     from tests.single_agent_turn_helpers import _environment_server, _request, _Response
 
     environment, dependencies = _environment_server()

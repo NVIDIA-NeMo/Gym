@@ -19,13 +19,16 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure, parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    is_harness_termination_failure,
+    parse_cleanup_receipt,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage, TaskId
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
 from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
@@ -779,7 +782,7 @@ def test_close_retry_and_stale_activation_do_not_run_host_openclaw(setup):
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: 100.0)
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: 100.0)
     with TestClient(agent.setup_webserver()) as client:
 
         def seed_and_close(index):
@@ -808,7 +811,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
 async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -831,7 +834,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
 async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -873,7 +876,7 @@ async def test_concurrent_closes_share_receipt(setup):
 async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -1781,7 +1784,7 @@ async def test_seed_rejects_malformed_sandbox_cookie_before_connecting(setup, ma
 async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_retention(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 5
     request = Request({"type": "http", "session": {}})
     body = seed()
@@ -2174,7 +2177,7 @@ def test_terminal_model_error_retains_response_and_cause(setup, partial, message
 def test_model_transport_and_context_errors_reach_environment(
     setup, stop_reason, message, envelope_error, expected, partial
 ):
-    from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, agent_outcome_policy
+    from nemo_gym.agents import AgentOutcomePolicyConfig, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup

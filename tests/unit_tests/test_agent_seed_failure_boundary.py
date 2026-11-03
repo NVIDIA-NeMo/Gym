@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from nemo_gym.base_responses_api_agent import AgentSessionSetupError, AgentSessionState
+from nemo_gym.agents.base_responses_api_agent import AgentSessionSetupError, AgentSessionState
 from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
