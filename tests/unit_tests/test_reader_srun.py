@@ -503,3 +503,25 @@ def test_an_srun_failure_that_is_not_a_refusal_is_not_submitted_again(
 
     assert slurm.reader_placement(output)[0] == "login"
     assert len((log / "srun").read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, "1800"), ("3600", "3600"), ("0", "1800"), ("x", "1800")])
+@pytest.mark.parametrize("in_step", [False, True], ids=["login", "step"])
+def test_a_remote_reader_takes_the_callers_uv_lock_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str | None, expected: str, in_step: bool
+) -> None:
+    if raw is None:
+        monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("UV_LOCK_TIMEOUT", raw)
+    if in_step:
+        monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN", "-p cpu")
+    else:
+        monkeypatch.delenv("NEMO_GYM_REMOTE_READER_SRUN", raising=False)
+    command = slurm._reader_command(
+        "true", tmp_path, "{}", bound_s=300, factor=1, token="tok", step=slurm.reader_step()
+    )
+    exports = [line for line in command if line.startswith("export UV_LOCK_TIMEOUT=")]
+    assert exports == [f"export UV_LOCK_TIMEOUT={expected}"]
+    # Exported after the cleared variables and before the reader runs (in its step or on the login host).
+    assert command.index(exports[0]) > command.index("unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME")
