@@ -3,6 +3,7 @@
 
 import asyncio
 import re
+import shutil
 from asyncio import create_subprocess_shell
 from asyncio.subprocess import PIPE, STDOUT
 from os import killpg
@@ -309,13 +310,8 @@ class BuildContainerHelper(BaseModel):
         self.config.log_file.unlink(missing_ok=True)
         self.config.output_container_fpath.parent.mkdir(parents=True, exist_ok=True)
 
-        command_output = await _run_command(
-            command=join(
-                ["cp", "-f", "--", str(self.config.input_container_fpath), str(self.config.output_container_fpath)]
-            ),
-            log_fpath=self.config.log_file,
-        )
-        assert command_output.returncode == 0
+        shutil.copy(self.config.input_container_fpath, self.config.output_container_fpath)
+        print("Copied input container fpath to output (not finished, just starting)")
 
         if self.config.flashinfer:
             fib = FlashInferBuilder(config=self.config.flashinfer, log_file=self.config.log_file)
