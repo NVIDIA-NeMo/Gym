@@ -51,6 +51,8 @@ Flow (the MCP endpoint and /verify share one session_id)
      - reward = 1.0 iff the tool was called in this session AND the answer contains the sentence
 ```
 
+Under an Environment Server such as `single_agent_turn`, the Environment Server makes these calls instead of the agent: it seeds with a typed `ResourcesSeedSessionRequest` (`resources_session_id`, `episode_id`, `task_id`, and `task_data` holding the row's own fields), grants the agent the token from the reply's `resources_tools` field, verifies, and then calls `/close_session` to release the session. See [Sessions under an Environment Server](#sessions-under-an-environment-server).
+
 ---
 
 ## Implementation
@@ -64,15 +66,23 @@ The server is a plain `SimpleResourcesServer` — no MCP imports, no decorators,
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -107,32 +117,62 @@ class ExampleMCPWeatherGetWeatherResponse(BaseModel):
 
 class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
     config: ExampleMCPWeatherResourcesServerConfig
+    # Each live session's weather calls, keyed by the session cookie's SESSION_ID_KEY.
     session_id_to_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    _session_episodes: dict = PrivateAttr(default_factory=dict)  # resources_session_id -> (episode_id, task_id)
+    _fence: ResourcesSessionFence = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/get_weather")(self.get_weather)
         return app
 
-    async def seed_session(self, request: Request, body: ExampleMCPWeatherSeedSessionRequest):
-        session_id = request.session[SESSION_ID_KEY]
-        expected_city = (body.verifier_metadata or {}).get("expected_city", "Paris")
-        self.session_id_to_state[session_id] = {"expected_city": expected_city, "weather_calls": []}
-        return BaseSeedSessionResponse()
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | ExampleMCPWeatherSeedSessionRequest
+    ):
+        if not isinstance(body, ResourcesSeedSessionRequest):  # an Agent's /run seeds with the row's fields
+            self.session_id_to_state[request.session[SESSION_ID_KEY]] = {"weather_calls": []}
+            return BaseSeedSessionResponse()
+        # An Environment Server names the session; a repeated seed for the same episode keeps its state.
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)  # 409 for a seed after close
+            identity = self._session_episodes.setdefault(session_id, (body.episode_id, body.task_id))
+            if identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is bound to another episode")
+            self.session_id_to_state.setdefault(session_id, {"weather_calls": []})
+            # The MCP session token minted for this reply signs the same ID.
+            request.session[SESSION_ID_KEY] = session_id
+        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        session_id = body.resources_session_id  # the body names the session, so no cookie is needed
+        async with self._fence.locked(session_id):
+            # (the full code also refuses a close that names another episode with 409)
+            self.session_id_to_state.pop(session_id, None)
+            self._session_episodes.pop(session_id, None)
+            self._fence.mark_closed(session_id, body.episode_id)  # idempotent; fences a late seed
+        return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def get_weather(
         self, request: Request, body: ExampleMCPWeatherGetWeatherRequest
     ) -> ExampleMCPWeatherGetWeatherResponse:
         """Get a deterministic weather report for a city."""
-        session_id = request.session[SESSION_ID_KEY]
-        state = self.session_id_to_state.setdefault(session_id, {"weather_calls": []})
+        state = self.session_id_to_state.get(request.session[SESSION_ID_KEY])
+        if state is None:  # never seeded or already closed: the MCP token outlives the close
+            raise ResourcesSessionLostError("No open example_mcp_weather session for this request")
         weather = _weather_sentence(body.city)
         state["weather_calls"].append({"city": body.city, "weather": weather})
         return ExampleMCPWeatherGetWeatherResponse(weather=weather)
 
     async def verify(self, request: Request, body: ExampleMCPWeatherVerifyRequest) -> BaseVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        state = self.session_id_to_state.get(session_id, {"weather_calls": []})
+        state = self.session_id_to_state.get(request.session[SESSION_ID_KEY])
+        if state is None:  # nothing left to score: mask the sample instead of a reward of 0
+            return BaseVerifyResponse(**(body.model_dump() | lost_session_verification("No open session")))
         expected_city = (body.verifier_metadata or {}).get("expected_city", "Paris").casefold()
         # reward iff the tool was called for this city in this session AND the final answer repeats it
         tool_called = any(str(c.get("city", "")).casefold() == expected_city for c in state["weather_calls"])
@@ -193,6 +233,18 @@ Where direct dispatch cannot be proven equivalent to a real HTTP request, exposu
 The pattern behind the two query-parameter rows: anything FastAPI would read from the **query string** — a bare scalar like `my_string: str`, with or without a default — refuses, because MCP calls carry no query string. Move such knobs into the body model, where field defaults work normally (absent fields take their Pydantic defaults). Other non-body parameter shapes — `Header(...)` / `Cookie(...)` markers, `*args`/`**kwargs`, non-`str` path parameters — also refuse at startup, each with its own named reason.
 
 Beyond signatures, startup also refuses: **non-Gym middleware** installed on the app (direct dispatch would silently skip it); **multiple parameterized catch-all routes**; a tool name outside `[A-Za-z0-9_-]+`; and a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one).
+
+---
+
+## Sessions under an Environment Server
+
+An Environment Server such as `single_agent_turn` owns the episode's sessions, so the Resources Server serves the typed resources sessions API next to the legacy seed body an Agent's `/run` sends:
+
+- **Seed.** `/seed_session` accepts a `ResourcesSeedSessionRequest`. The server keys the session by its `resources_session_id` and binds the session cookie to that ID. MCP auto-exposure signs the same ID into the session token, which it returns in the reply's `resources_tools` field, so tool calls over HTTP and over MCP reach the same state. Seeding the same ID again for the same episode returns the open session unchanged; a seed that binds it to another episode is refused with `409`, and `task_data` that fails validation with `422`.
+- **Close.** `/close_session` drops the session's weather calls. It succeeds for an unknown or already-closed session and needs no cookie, because the body names the session. `ResourcesSessionFence` remembers the close for `session_close_retry_window_seconds`, so a late seed of that ID is refused with `409` instead of opening the session again.
+- **After the close.** The signed MCP session token stays valid, so `get_weather` refuses a call for a session it no longer holds with `ResourcesSessionLostError` (`404`, `failure_kind: session_lost`) rather than recreating state. `/verify` for such a session returns a masked sample built by `lost_session_verification` instead of a reward of `0`.
+
+`check_resources_session_contract` in `nemo_gym.testing.session_conformance` drives these rules through the app's routes; the weather server's tests run it with MCP exposure on and off.
 
 ---
 

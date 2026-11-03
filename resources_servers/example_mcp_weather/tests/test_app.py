@@ -21,12 +21,16 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import (
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    TaskId,
 )
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherGetWeatherRequest,
     ExampleMCPWeatherResourcesServer,
@@ -245,3 +249,123 @@ def test_mcp_tool_call_requires_session_token() -> None:
             rid=2,
         )["result"]
         assert result.get("isError") is True
+
+
+def _typed_seed(resources_session_id: str = "resources-session", task_data: dict | None = None) -> dict:
+    # The body single_agent_turn sends: task_data holds the row's own fields.
+    return ResourcesSeedSessionRequest(
+        resources_session_id=resources_session_id,
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="example", task_id="0"),
+        task_data={"verifier_metadata": {"expected_city": "Paris"}} if task_data is None else task_data,
+    ).model_dump(mode="json")
+
+
+def _typed_close(resources_session_id: str = "resources-session") -> dict:
+    return ResourcesCloseSessionRequest(
+        resources_session_id=resources_session_id, episode_id=EpisodeId(rollout_id="rollout", attempt=0)
+    ).model_dump(mode="json")
+
+
+@pytest.mark.parametrize("over_mcp", [False, True], ids=["http", "mcp"])
+def test_resources_session_contract(over_mcp: bool) -> None:
+    if over_mcp:
+        pytest.importorskip("mcp")
+    server = _server()
+    app = server.setup_webserver()
+    if over_mcp:
+        # The shipped config sets expose_tools_over_mcp, which wraps /seed_session and /verify.
+        from nemo_gym.server_runtime import maybe_auto_expose
+
+        maybe_auto_expose(server, app)
+
+    check_resources_session_contract(
+        app,
+        ResourcesSeedSessionRequest.model_validate(_typed_seed("contract-session")),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: resources_session_id in server.session_id_to_state,
+        verify_body=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+    )
+
+
+def test_typed_seed_rejects_malformed_task_data() -> None:
+    server = _server()
+
+    with TestClient(server.setup_webserver()) as client:
+        response = client.post("/seed_session", json=_typed_seed(task_data={"verifier_metadata": "Paris"}))
+
+    assert response.status_code == 422
+    assert "task_data is not an example_mcp_weather task" in response.text
+    assert server.session_id_to_state == {}
+
+
+def test_repeated_typed_seed_keeps_recorded_weather_calls() -> None:
+    server = _server()
+
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
+        # A seed retried after its reply was lost arrives without the cookie.
+        client.cookies.clear()
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+
+        assert server.session_id_to_state["resources-session"]["weather_calls"] == [
+            {"city": "Paris", "weather": "The weather in Paris is sunny and 72 F."}
+        ]
+        verify_response = client.post(
+            "/verify",
+            json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+        )
+
+    assert verify_response.json()["reward"] == 1.0
+
+
+def test_tool_call_without_open_session_is_lost() -> None:
+    server = _server()
+
+    with TestClient(server.setup_webserver()) as client:
+        response = client.post("/get_weather", json={"city": "Paris"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["failure_kind"] == "session_lost"
+    assert server.session_id_to_state == {}
+
+
+def test_typed_seed_grants_mcp_tools_until_close() -> None:
+    # An Environment Server reads the MCP grant from resources_tools and hands its token to the agent; the token's
+    # tool calls land in the session /verify scores, and fail once the session is closed.
+    pytest.importorskip("mcp")
+    server = _server()
+
+    with _mcp_client(server) as client:
+        seed_response = client.post("/seed_session", json=_typed_seed())
+        assert seed_response.status_code == 200
+        seed = seed_response.json()
+        assert seed["resources_session_id"] == "resources-session"
+        assert "mcp" not in seed
+        assert seed["resources_tools"]["server_name"] == "example_mcp_weather"
+        token = seed["resources_tools"]["headers"][TOKEN_HEADER]
+
+        _handshake(client)
+        result = _rpc(client, "tools/call", {"name": "get_weather", "arguments": {"city": "Paris"}}, token=token)
+        assert result["result"].get("isError") is not True, result
+        assert server.session_id_to_state["resources-session"]["weather_calls"][0]["city"] == "Paris"
+
+        verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
+        verify_response = client.post("/verify", json=verify_body)
+        assert verify_response.json()["reward"] == 1.0
+        assert verify_response.json()["tool_call_seen"] is True
+
+        assert client.post("/close_session", json=_typed_close()).status_code == 200
+        assert server.session_id_to_state == {}
+
+        result = _rpc(
+            client, "tools/call", {"name": "get_weather", "arguments": {"city": "Paris"}}, token=token, rid=3
+        )
+        assert result["result"].get("isError") is True
+        assert "HTTP 404" in result["result"]["content"][0]["text"]
+        assert server.session_id_to_state == {}
+
+        verify_response = client.post("/verify", json=verify_body)
+        assert verify_response.json()["mask_sample"] is True
+        assert verify_response.json()["failure_kind"] == "session_lost"

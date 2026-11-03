@@ -24,6 +24,21 @@ Then collect rollouts against `data/example.jsonl` and reward-profile as in the
 [quickstart](https://github.com/NVIDIA-NeMo/Gym/tree/main/fern/versions/latest/pages/get-started/quickstart.mdx).
 A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
 
+## Sessions under an Environment Server
+
+An Environment Server such as `single_agent_turn` seeds the server with a typed `ResourcesSeedSessionRequest`. It names
+the session (`resources_session_id`), and `task_data` carries the row's own fields, here `verifier_metadata`. The reply
+is a `ResourcesSeedSessionResponse` whose `resources_tools` holds the same MCP metadata (the `/mcp` path and the
+per-rollout session token) that a legacy seed returns under `mcp`; the Environment Server grants it to the agent.
+After `/verify`, the Environment Server calls `/close_session`, which drops the session's weather calls. From then on:
+
+- a `/get_weather` call for the session, over HTTP or with its MCP token, fails with 404 (`failure_kind: session_lost`);
+- `/verify` returns a masked sample (`mask_sample: true`, `failure_kind: session_lost`) instead of a reward of 0;
+- a seed that reuses the closed `resources_session_id` is refused with 409.
+
+Running the example under `single_agent_turn` with the `mcp` tool transport needs an agent that serves agent sessions
+and accepts MCP tool grants; `claude_code_agent` does not serve agent sessions yet.
+
 ## Inspect the MCP round-trip without an LLM
 
 Start the server and drive the endpoint directly — a `requests.Session` preserves the session cookie so
@@ -56,6 +71,22 @@ print(s.post("http://127.0.0.1:<port>/verify", json={
          "content": [{"type": "output_text", "text": "The weather in Paris is sunny and 72 F.", "annotations": []}]}],
         "parallel_tool_calls": False, "tool_choice": "none", "tools": []},
 }).json()["reward"])
+```
+
+An Environment Server's seed and close look like this; the token now comes from `resources_tools`:
+
+```python
+episode = {"rollout_id": "weather-1", "attempt": 0}
+seed = s.post("http://127.0.0.1:<port>/seed_session", json={
+    "resources_session_id": "weather-1",
+    "episode_id": episode,
+    "task_id": {"taskset": "example", "task_id": "0"},
+    "task_data": {"verifier_metadata": {"expected_city": "Paris"}},
+}).json()
+token = seed["resources_tools"]["headers"]["X-NeMo-Gym-Session-Token"]
+
+# ... call get_weather and /verify as above, then release the session
+s.post("http://127.0.0.1:<port>/close_session", json={"resources_session_id": "weather-1", "episode_id": episode})
 ```
 
 ## Tests
