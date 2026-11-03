@@ -1791,11 +1791,33 @@ class TestListEnvironments:
         out = capsys.readouterr().out
         assert "resources servers: math_with_judge" in out and "agent: simple_agent" in out
 
-    def test_list_and_inspect_survive_configs_that_fail_manifest_rules_or_parsing(
+    def test_list_and_inspect_survive_configs_gym_cannot_resolve(
         self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
     ) -> None:
         # A benchmark whose data already exists may omit prepare_script: Gym runs it, though a manifest would not
-        # accept it. A malformed config is still discovered by its location.
+        # accept it. A malformed config is still discovered by its location, whether its syntax is broken or a
+        # field has the wrong type.
+        for name, config_paths, datasets in (
+            ("paths_not_a_list", "config_paths: 1\n", "[]"),
+            ("datasets_not_a_list", "", "1"),
+        ):
+            config = tmp_path / "environments" / name / "config.yaml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                f"{config_paths}"
+                f"{name}_resources:\n"
+                "  resources_servers:\n"
+                f"    {name}:\n"
+                "      entrypoint: app.py\n"
+                f"{name}_agent:\n"
+                "  responses_api_agents:\n"
+                "    simple_agent:\n"
+                "      entrypoint: app.py\n"
+                f"      resources_server: {{type: resources_servers, name: {name}_resources}}\n"
+                "      model_server: {type: responses_api_models, name: policy_model}\n"
+                f"      datasets: {datasets}\n",
+                encoding="utf-8",
+            )
         benchmark = tmp_path / "benchmarks" / "no_prepare" / "config.yaml"
         benchmark.parent.mkdir(parents=True)
         benchmark.write_text(
@@ -1821,14 +1843,19 @@ class TestListEnvironments:
 
         monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", lambda: OmegaConf.create({"json": True}))
         list_environments()
-        payloads = {payload["name"]: payload for payload in json.loads(capsys.readouterr().out)}
-        assert (payloads["no_prepare"]["resources_server"], payloads["no_prepare"]["agent_server"]) == (
-            "no_prepare",
-            "simple_agent",
-        )
-        assert (payloads["malformed"]["resources_server"], payloads["malformed"]["agent_server"]) == (None, None)
+        servers = {
+            payload["name"]: (payload["resources_server"], payload["agent_server"])
+            for payload in json.loads(capsys.readouterr().out)
+        }
+        assert servers == {
+            "no_prepare": ("no_prepare", "simple_agent"),
+            "malformed": (None, None),
+            # Gym cannot resolve these, so the names the file states are shown.
+            "paths_not_a_list": ("paths_not_a_list", "simple_agent"),
+            "datasets_not_a_list": ("datasets_not_a_list", "simple_agent"),
+        }
 
-        for name in ("no_prepare", "malformed"):
+        for name in servers:
             monkeypatch.setattr(
                 nemo_gym.cli.env, "_command_overrides", lambda name=name: OmegaConf.create({"component_name": name})
             )
@@ -1836,6 +1863,8 @@ class TestListEnvironments:
         out = capsys.readouterr().out
         assert "The no_prepare benchmark" in out and "resources servers: no_prepare" in out
         assert "The malformed environment" in out
+        assert "resources servers: paths_not_a_list" in out
+        assert "resources servers: datasets_not_a_list" in out
 
     def test_json_output_without_manifest_has_null_manifest_path(
         self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path

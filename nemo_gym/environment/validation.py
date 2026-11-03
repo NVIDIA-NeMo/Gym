@@ -359,8 +359,18 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
 
 
 # What a config file can raise while its wiring is resolved: unreadable or malformed YAML, OmegaConf syntax and key
-# errors, server blocks Gym's models reject, and wiring that needs values only a run supplies.
-_CONFIG_LOOKUP_ERRORS = (ConfigError, OmegaConfBaseException, ValidationError, YAMLError, UnicodeError, OSError)
+# errors, server blocks Gym's models reject, wiring that needs values only a run supplies, and fields of the wrong
+# type, such as `config_paths: 1` or a server block that is a string, which the config parser uses as written.
+_CONFIG_LOOKUP_ERRORS = (
+    ConfigError,
+    OmegaConfBaseException,
+    ValidationError,
+    YAMLError,
+    UnicodeError,
+    OSError,
+    TypeError,
+    AttributeError,
+)
 
 
 def resolve_config_servers(config_path: Path) -> tuple[str | None, str | None] | None:

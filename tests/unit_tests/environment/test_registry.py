@@ -508,3 +508,14 @@ class TestReadEnvironmentDetails:
         assert details["resources_servers"] == ["my_rs"]
         assert details["agents"] == ["simple_agent"]
         assert details["datasets"] == ["train", "example"]
+
+    def test_skips_datasets_that_are_not_a_list(self, tmp_path: Path) -> None:
+        from nemo_gym.registry import read_environment_details
+
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("env_agent:\n  responses_api_agents:\n    simple_agent:\n      datasets: 1\n")
+
+        details = read_environment_details(cfg)
+
+        assert details["agents"] == ["simple_agent"]
+        assert details["datasets"] == []

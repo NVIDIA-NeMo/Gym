@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Literal, Optional
 
 import yaml
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config.config_types import ConfigError
@@ -383,7 +383,8 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
                 value = str(server_config["value"])
         elif group_key == "responses_api_agents":
             agents.append(server_name)
-            for dataset in server_config.get("datasets") or []:
+            agent_datasets = server_config.get("datasets")
+            for dataset in agent_datasets if isinstance(agent_datasets, (list, ListConfig)) else []:
                 if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
                     datasets.append(str(dataset["name"]))
 

@@ -172,6 +172,29 @@ def test_resolve_config_servers_is_unknown_for_a_malformed_config(tmp_path: Path
     assert resolve_config_servers(config_path) is None
 
 
+@pytest.mark.parametrize(
+    ("field_path", "value"),
+    [
+        (("config_paths",), 1),
+        (("demo_agent", "responses_api_agents", "simple_agent", "_inherit_from"), 1),
+        (("demo_resources", "resources_servers", "demo"), "not a mapping"),
+    ],
+    ids=["config-paths-not-a-list", "inherit-from-not-a-path", "server-block-not-a-mapping"],
+)
+def test_resolve_config_servers_is_unknown_for_a_field_of_the_wrong_type(
+    tmp_path: Path, field_path: tuple[str, ...], value: object
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    parent = config
+    for key in field_path[:-1]:
+        parent = parent[key]
+    parent[field_path[-1]] = value
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    assert resolve_config_servers(config_path) is None
+
+
 def test_resolve_config_servers_prints_nothing_for_a_server_block_that_fails_validation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
