@@ -1008,9 +1008,9 @@ class ParticipantControlPlane:
                         Path(request.checkpoint_dir),
                         kind=self.participant.kind,
                         instance=self.instance_name,
-                        select=lambda record: _validate_record(model, record)
-                        if _record_key(record) in scope
-                        else None,
+                        select=lambda record: (
+                            _validate_record(model, record) if _record_key(record) in scope else None
+                        ),
                     ),
                 )
                 span.set(records=len(records), bytes=size)

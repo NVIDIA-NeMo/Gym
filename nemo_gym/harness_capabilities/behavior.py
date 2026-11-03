@@ -251,9 +251,9 @@ def inspect_behavior(
             location="witness.json",
             reason="the EnvironmentServer must receive a failed response retaining the model error and "
             "ng_agent_outcome with model_request_error and the witnessed HTTP status",
-            predicate=lambda: _terminal_error_reported(attempts, agent_responses, http_errors[-1])
-            if terminal_error
-            else True,
+            predicate=lambda: (
+                _terminal_error_reported(attempts, agent_responses, http_errors[-1]) if terminal_error else True
+            ),
             available=available,
             applies=terminal_error,
         )
@@ -277,8 +277,9 @@ def inspect_behavior(
             evidence=("TE-4", "TE-5"),
             location="witness.json",
             reason="prescribed tool executions and their returned results were not all witnessed",
-            predicate=lambda: len(tools) == tool_steps
-            and all((t.get("executed") and t.get("result_seen") for t in tools)),
+            predicate=lambda: (
+                len(tools) == tool_steps and all((t.get("executed") and t.get("result_seen") for t in tools))
+            ),
             available=available,
             applies=tool_steps > 0,
         )
@@ -352,11 +353,13 @@ def inspect_behavior(
             evidence=("TE-6", "TE-8"),
             location="$.judgement_id",
             reason="the grade must reference the witnessed judge response with explicit verifier ownership",
-            predicate=lambda: judge_id is not None
-            and len(judge_calls) == 1
-            and (record or {}).get("judgement_id") == judge_id
-            and judge_calls[0].get("model_call_id") in verifier_refs
-            and "CONFORMANCE_DONE" in json.dumps(judges[0].get("request")),
+            predicate=lambda: (
+                judge_id is not None
+                and len(judge_calls) == 1
+                and (record or {}).get("judgement_id") == judge_id
+                and judge_calls[0].get("model_call_id") in verifier_refs
+                and "CONFORMANCE_DONE" in json.dumps(judges[0].get("request"))
+            ),
             available=available and record is not None,
             applies=judge_verifier,
         )

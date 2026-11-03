@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,6 +11,8 @@ from pytest import MonkeyPatch
 import resources_servers.deepswe.app as app_module
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
+from nemo_gym.core import ENVIRONMENT_SERVER_FAILED, SESSION_LOST, VERIFIER_ERROR
+from nemo_gym.failure_transport import RequestFailureLog
 from nemo_gym.sandbox import SandboxResources
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
@@ -211,6 +214,9 @@ async def test_golden_verify_passes_structured_result(
     body = response.model_dump()
     assert body["evaluation_completed"] is True
     assert body["reward"] == 1.0
+    assert body["mask_sample"] is False
+    assert body["failure_kind"] is None
+    assert body["failure_reason"] is None
     assert body["f2p_passed"] == body["f2p_total"] == 2
     assert body["model_patch"] == "golden patch\n"
     assert task_image(create_sandbox.await_args.args[0]) == UPSTREAM_IMAGE
@@ -305,7 +311,11 @@ async def test_rollout_collect_failure_is_structured_and_cleans_up(
 
     assert response.reward == 0.0
     assert response.evaluation_completed is False
+    assert response.mask_sample is True
+    assert response.failure_kind == ENVIRONMENT_SERVER_FAILED
     assert response.verifier_error == "RuntimeError: broken git repo"
+    assert response.failure_reason == "RuntimeError: broken git repo"
+    assert response.model_patch is None
     assert response.model_patch_bytes == 0
     assert create_sandbox.await_count == 1
     agent_sandbox.stop.assert_awaited_once()
@@ -327,8 +337,134 @@ async def test_rollout_without_seed_returns_incomplete_result(
 
     assert response.reward == 0.0
     assert response.evaluation_completed is False
+    assert response.mask_sample is True
+    assert response.failure_kind == SESSION_LOST
     assert "No DeepSWE agent sandbox" in (response.verifier_error or "")
+    assert response.model_patch is None
     create_sandbox.assert_not_awaited()
+
+
+async def test_incomplete_verification_is_a_typed_masked_failure_that_keeps_the_patch(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=AsyncMock()))
+    monkeypatch.setattr(
+        server,
+        "_run_verifier",
+        AsyncMock(
+            return_value=VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=0,
+                verifier_error="Verifier reward.json is missing its reward field",
+            )
+        ),
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    with RequestFailureLog.capture() as log:
+        response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 0.0
+    assert response.evaluation_completed is False
+    assert response.mask_sample is True
+    assert response.failure_kind == VERIFIER_ERROR
+    assert response.failure_reason == "Verifier reward.json is missing its reward field"
+    assert response.model_patch == "golden patch\n"
+    [event] = log.report.events.values()
+    assert (event.boundary, event.failure_kind, event.operation, event.stage) == (
+        "resources_server",
+        VERIFIER_ERROR,
+        "verify",
+        "verification",
+    )
+    assert event.failure_reason == "Verifier reward.json is missing its reward field"
+
+
+async def test_long_verifier_diagnostic_is_bounded_and_keeps_the_patch(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A diagnostic longer than the failure event allows is truncated there; the result and patch survive."""
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=AsyncMock()))
+    long_error = "provider said: " + "x" * 5000
+    monkeypatch.setattr(server, "_run_verifier", AsyncMock(side_effect=RuntimeError(long_error)))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    with RequestFailureLog.capture() as log:
+        response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+
+    assert response.evaluation_completed is False
+    assert response.mask_sample is True
+    assert response.model_patch == "golden patch\n"
+    assert response.verifier_error == f"RuntimeError: {long_error}"
+    [event] = log.report.events.values()
+    assert len(event.failure_reason) <= 2000
+    assert event.failure_reason.startswith("RuntimeError: provider said: xxx")
+    assert event.failure_reason.endswith("[truncated]")
+
+
+@pytest.mark.parametrize(
+    ("reward_json", "expected_reward", "expected_error"),
+    [
+        ('{"reward": 0}', 0.0, None),
+        ('{"reward": 1}', 1.0, None),
+        ('{"reward": 1.0}', 1.0, None),
+        ('{"reward": 0.0, "f2p_total": 3, "f2p_passed": 1}', 0.0, None),
+        ("{}", 0.0, "missing its reward field"),
+        ("[1]", 0.0, "missing its reward field"),
+        ('{"reward": "1"}', 0.0, "non-binary reward"),
+        ('{"reward": true}', 0.0, "non-binary reward"),
+        ('{"reward": 2}', 0.0, "non-binary reward"),
+        ('{"reward": 0.5}', 0.0, "non-binary reward"),
+        ('{"reward": null}', 0.0, "non-binary reward"),
+        ("{", 0.0, "Invalid verifier reward.json"),
+        (None, 0.0, "did not produce /logs/verifier/reward.json"),
+    ],
+)
+async def test_verifier_reward_json_must_hold_a_binary_reward(
+    task_assets: Path,
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    reward_json: str | None,
+    expected_reward: float,
+    expected_error: str | None,
+) -> None:
+    """Only an object with a real 0 or 1 reward is a verdict; anything else leaves the evaluation incomplete."""
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    sandbox = AsyncMock()
+    artifacts = {"ctrf.json": "{}", "run.log": "log"}
+    if reward_json is not None:
+        artifacts["reward.json"] = reward_json
+
+    async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
+        if command == "bash /tests/test.sh":
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+        assert command.startswith("test -f /logs/verifier/")
+        return SimpleNamespace(return_code=0 if command.rsplit("/", 1)[1] in artifacts else 1)
+
+    async def download(remote_path: str, local_path: Path) -> None:
+        local_path.write_text(artifacts[Path(remote_path).name], encoding="utf-8")
+
+    sandbox.exec.side_effect = execute
+    sandbox.download.side_effect = download
+
+    result = await server._run_verifier(sandbox, server._task_store.get("example-task"), b"patch", tmp_path)
+
+    assert result.evaluation_completed is (expected_error is None)
+    assert result.reward == expected_reward
+    assert result.verifier_exit_code == 0
+    if expected_error is None:
+        assert result.verifier_error is None
+    else:
+        assert expected_error in (result.verifier_error or "")
+    assert sandbox.download.await_count == len(artifacts)
 
 
 def test_conflicting_task_ids_fail() -> None:

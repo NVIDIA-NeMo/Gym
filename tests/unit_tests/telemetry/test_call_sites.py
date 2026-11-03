@@ -654,7 +654,18 @@ def _install_recording_post(monkeypatch):
 
     sent = []
 
-    async def post(server_name, url_path, json):
+    async def post(
+        server_name,
+        url_path,
+        json,
+        *,
+        _resend_after_disconnect=True,
+        _max_num_tries,
+        _retry_other_errors,
+        _on_transport_failure,
+    ):
+        # One bounded resend of a connection lost before any reply; every other failure is raised at once.
+        assert (_resend_after_disconnect, _max_num_tries, _retry_other_errors) == (True, 2, False)
         headers: dict = {}
         inject_trace_context(headers)
         sent.append(

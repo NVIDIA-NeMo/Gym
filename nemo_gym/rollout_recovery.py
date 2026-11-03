@@ -38,8 +38,161 @@ from omegaconf import OmegaConf
 from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
+
+
+def has_saved_generation(row: Mapping[str, Any]) -> bool:
+    """Recognize retained response data, including a completed response with empty output.
+
+    A diagnostic error object or an empty mapping is not generation. A typed response counts when it has at least
+    one output item or a status: a producer finished it, even with no assistant text. A response object with no
+    output and no status is a placeholder, for example from an agent that never ran. So is a response an agent
+    marked with ``NG_NO_GENERATION_METADATA``: its empty assistant message was built without any generation.
+    """
+    record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    stage = failure.get("stage") if isinstance(failure, Mapping) else row.get("_ng_failure_stage")
+    for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
+        answer = row.get(key)
+        if not isinstance(answer, Mapping):
+            continue
+        # The agent outcome policy already rejected this failed response as an answer. Retain its
+        # diagnostic output without vetoing RETRY; cleanup/verification responses keep their protection.
+        if stage == "agent" and answer.get("status") == "failed":
+            continue
+        if is_no_generation_placeholder(answer):
+            continue
+        output = answer.get("output")
+        if not isinstance(output, list):
+            continue
+        if (
+            answer.get("object") == "response"
+            and isinstance(answer.get("id"), str)
+            and answer["id"]
+            and (output or (answer.get("error") is None and answer.get("status") not in (None, "failed")))
+        ):
+            return True
+        if answer.get("status") == "completed" and any(
+            isinstance(item, Mapping) and item.get("type") == "message" and item.get("role") == "assistant"
+            for item in output
+        ):
+            return True
+    return False
+
+
+def keeps_partial_response(row: Mapping[str, Any]) -> bool:
+    """Whether the row keeps the agent's partial response from a native cleanup, even one without output.
+
+    The agent ran, so its partial response stays a kept answer and is never regenerated. An agent-stage response
+    the outcome policy rejected as failed is diagnostic only, as in ``has_saved_generation``.
+    """
+    answer = row.get("_ng_failure_partial_response")
+    if not isinstance(answer, Mapping):
+        return False
+    record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    stage = failure.get("stage") if isinstance(failure, Mapping) else row.get("_ng_failure_stage")
+    return not (stage == "agent" and answer.get("status") == "failed")
+
+
+def has_recorded_grade(row: Mapping[str, Any]) -> bool:
+    """Whether the verifier finished grading this failed attempt, so it is a graded result and a rerun would replace it.
+
+    Collection keeps no reward on a failure row (a placeholder score is never a result), so the completed
+    evaluation is the grade's durable record. Only a row with neither a kept answer nor a recorded grade may run fresh.
+    """
+    return row.get("evaluation_completed") is True
+
+
+def holds_response(row: Mapping[str, Any]) -> bool:
+    """Whether the row keeps a full or partial response object, usable as an answer or not."""
+    return any(
+        isinstance(row.get(key), Mapping)
+        for key in ("response", "_ng_failure_response", "_ng_failure_partial_response")
+    )
+
+
+def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
+    """A selected route failure names no owned cause that permits running the agent again.
+
+    A request that was possibly delivered permits a fresh run only while the row keeps no full or partial
+    response: then no saved answer can be duplicated or replaced.
+    """
+    if matches_failure_class(row, {"judge_failed", "judge_invalid"}):
+        return True  # Verification recovery may reuse an answer; it never reruns the agent.
+    record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    not_sent = isinstance(record, Mapping) and (
+        record.get("delivery") == "not_sent" or isinstance(failure, Mapping) and failure.get("stage") == "admission"
+    )
+    possibly_delivered = (
+        isinstance(record, Mapping)
+        and record.get("source") == "collector"
+        and record.get("delivery") == "possibly_delivered"
+        and not not_sent
+    )
+    if (
+        row.get("_ng_unrouted_run_error") is True
+        and not not_sent
+        and not (possibly_delivered and not holds_response(row))
+    ):
+        # An aborted collection retains this attempt as diagnostic history, not a replacement outcome.
+        return True
+    if possibly_delivered and holds_response(row):
+        return True
+    if row.get("_ng_failure_events_omitted"):
+        # Missing causal evidence cannot authorize another agent execution.
+        return True
+    events = row.get("_ng_failure_events")
+    selected = row.get("_ng_failure_id")
+    if "_ng_failure_id" not in row:
+        return False  # Legacy producer fields remain usable without a selected event report.
+    if not isinstance(events, Mapping) or not isinstance(selected, str) or not selected:
+        return True
+    seen = set()
+    while selected is not None:
+        if not isinstance(selected, str):
+            return True
+        event = events.get(selected)
+        if not isinstance(event, Mapping) or selected in seen:
+            # Store resume and legacy collection also use this gate, before the recovery reader runs.
+            return True
+        seen.add(selected)
+        status = event.get("http_status")
+        if (
+            event.get("boundary") == "model"
+            and event.get("failure_kind") == "model_request_error"
+            and event.get("operation") == "model_request"
+            and type(status) is int
+            and 200 <= status < 300
+        ):
+            # The provider sent successful headers, but the model operation failed
+            # before its body was usable. Running the agent again could regenerate.
+            return True
+        if (
+            event.get("boundary") == "environment"
+            and event.get("failure_kind") == "environment_server_failed"
+            and event.get("operation") == "episode.deadline"
+        ):
+            # The relay stopped waiting; the agent may already have generated an answer.
+            return True
+        cause = event.get("cause_id")
+        if cause is None:
+            # A route failure with no deeper cause: the agent run returned no answer. It runs again fresh, within
+            # the attempt cap, unless the row kept an answer; a legacy /run error other than 5xx stays refused.
+            if event.get("failure_kind") == "agent_route_failed":
+                return has_saved_generation(row)
+            if (
+                event.get("failure_kind") == "collection_dispatch_failed"
+                and row.get("_ng_failure_class") == "agent_run_error"
+            ):
+                status = row.get("_ng_failure_http_status")
+                return not (type(status) is int and 500 <= status <= 599) or has_saved_generation(row)
+            return False
+        selected = cause
+    return False
 
 
 logger = logging.getLogger(__name__)
