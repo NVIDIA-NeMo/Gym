@@ -66,9 +66,15 @@ gym eval prepare --benchmark decision_index ++decision_index_fetch_only_jsonl=/a
 
 ## Run
 
+Serve the decision engine yourself, next to the Gym run (the standard way): start its `/v1/systemone` server on the
+job's GPUs and point `DECISION_ENGINE_BASE_URL` at `http://127.0.0.1:<port>`. The endpoint is required and has no
+default. For throughput, shard the rows over several local servers (one `gym eval run` per server, each with its own
+`head_server.port`) and merge the shards' `di_result` with `verifier.score_index`. Do not point full runs at a shared
+production endpoint.
+
 ```bash
-# Decision engine
-DECISION_ENGINE_BASE_URL=https://host DECISION_ENGINE_API_KEY=... DECISION_ENGINE_MODEL=nemotron-decide \
+# Decision engine (served locally)
+DECISION_ENGINE_BASE_URL=http://127.0.0.1:8770 DECISION_ENGINE_MODEL=nemotron-decide \
 gym eval run --benchmark decision_index/config_decision --split benchmark \
     --output results/di_decision/rollouts.jsonl \
     ++observability_enabled=true ++model_call_capture_dir=$PWD/results/di_decision/capture
