@@ -774,8 +774,11 @@ def prepare_one_config(
     from datasets import load_dataset  # imported lazily
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "raw" if output_format == "raw" else "benchmark"
-    output_path = output_dir / f"speed_bench_{speed_config}_{suffix}.jsonl"
+    if output_format == "gym":
+        output_path = output_dir / f"speed_bench_{speed_config}_benchmark.jsonl"
+    else:
+        # This path is used to maintain backward compatability with other repositories that uses the preparation script
+        output_path = output_dir / f"{speed_config}.jsonl"
 
     LOG.info("Loading %s config %s at revision %s", dataset_repo, speed_config, dataset_revision or "default")
     dataset = load_dataset(dataset_repo, speed_config, split="test", revision=dataset_revision)
