@@ -624,7 +624,7 @@ async def _diagnosed_session(close_code: int, notice: str | None) -> tuple[OpenS
             cause=cause,
             failure_kind=PROVIDER_OOM_KILLED,
             reason=notice,
-            evidence_source="lifecycle_status",
+            provider_status_reason="OOMKilled",
         )
 
     ws = FakeWs([CONNECTED], close_code=close_code)
@@ -1710,7 +1710,7 @@ async def test_pty_create_http_failure_is_a_serializable_sandbox_event(status, k
     failure = caught.value
     assert failure.boundary.value == "sandbox"
     assert failure.failure_kind == kind and failure.http_status == status
-    assert failure.sandbox.sandbox_id == "sb"
+    assert failure.details.sandbox_id == "sb"
     assert failure.to_record()["failure_events"][failure.event_id]["http_status"] == status
     assert len(client.post_calls) == 1 and client.closed
 
@@ -1734,7 +1734,7 @@ async def test_recovered_pty_create_is_retained_in_success_report(monkeypatch):
         assert report.failure_id is None
         event = next(iter(report.events.values()))
         assert event.failure_kind == "provider_unavailable" and event.http_status == 503
-        assert event.sandbox.sandbox_id == "sb"
+        assert event.details.sandbox_id == "sb"
         assert len(client.post_calls) == 2
     finally:
         await session.close()

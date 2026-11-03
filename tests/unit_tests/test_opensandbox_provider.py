@@ -1137,7 +1137,7 @@ def test_execution_outcome_rejects_unknown_or_contradictory_status(execution: An
     assert exc_info.value.failure_kind == PROVIDER_COMMAND_OUTCOME_UNKNOWN
     assert exc_info.value.boundary == "sandbox"
     assert exc_info.value.operation == "exec"
-    assert exc_info.value.sandbox.sandbox_id == "sb"
+    assert exc_info.value.details.sandbox_id == "sb"
 
 
 @pytest.mark.parametrize(
@@ -1736,7 +1736,7 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     with raises_failure(PROVIDER_OOM_KILLED) as exc_info:
         await provider.exec(handle, "allocate memory", timeout_s=30)
 
-    assert exc_info.value.sandbox.sandbox_id == "sandbox-oom"
+    assert exc_info.value.details.sandbox_id == "sandbox-oom"
     message = str(exc_info.value)
     assert "OOM-killed" in message
     assert "SandboxResources.memory_mib" not in message
@@ -1854,7 +1854,9 @@ async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbo
             if oom_confirmed
             else isinstance(exc_info.value.__cause__, Backend410Error)
         )
-        assert exc_info.value.sandbox.sandbox_id == "sandbox-oom"
+        assert exc_info.value.details.sandbox_id == "sandbox-oom"
+        assert exc_info.value.details.provider_status_reason is None
+        assert exc_info.value.details.provider == "opensandbox"
     else:
         with raises_failure(PROVIDER_UNAVAILABLE, match="outcome is unknown") as exc_info:
             await provider.exec(handle, "allocate memory", timeout_s=30)
@@ -1959,7 +1961,7 @@ async def test_exec_background_inspects_current_container_after_persistent_statu
         with raises_failure(PROVIDER_OOM_KILLED, match="inspect confirms") as exc_info:
             await provider.exec(handle, "agent command", timeout_s=10_800)
         assert isinstance(exc_info.value.__cause__.__cause__, TimeoutError)
-        assert exc_info.value.sandbox.sandbox_id == "sandbox-timeout"
+        assert exc_info.value.details.sandbox_id == "sandbox-timeout"
     else:
         with raises_failure(PROVIDER_STATUS_UNAVAILABLE, match="unavailable beyond"):
             await provider.exec(handle, "agent command", timeout_s=10_800)
@@ -2432,10 +2434,11 @@ async def test_exec_and_pty_require_explicit_oom_evidence(reason, message, expec
     handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
     evidence = await provider._sandbox_death_evidence(handle, deadline=asyncio.get_running_loop().time() + 1)
     assert evidence.outcome == expected
-    assert evidence.source == "lifecycle_status"
+    assert evidence.provider_status_reason == reason
     failure = await provider._pty_failure(handle, ConnectionError("socket lost"))
     assert failure.failure_kind == (PROVIDER_OOM_KILLED if expected == "oom" else PROVIDER_COMMAND_OUTCOME_UNKNOWN)
-    assert failure.sandbox.evidence_source == "lifecycle_status"
+    assert failure.details.provider_status_reason == reason
+    assert "lifecycle status" in failure.failure_reason
 
 
 @pytest.mark.parametrize("request_timeout_s", [120, None])
@@ -4000,8 +4003,13 @@ async def test_direct_create_applies_the_provider_image_policy(fake_opensandbox_
     assert FakeSandbox.created_kwargs["image"] == "python:3.11"
 
 
+@pytest.mark.parametrize("return_code,error_type,exit_code", [(1, None, 1), (-1, "timeout", None)])
 async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the_create(
-    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+    return_code: int,
+    error_type: str | None,
+    exit_code: int | None,
 ) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         probe={"command": None},
@@ -4017,7 +4025,10 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
     async def exec_(handle, command, **kwargs):
         calls.append((command, kwargs.get("user"), kwargs.get("timeout_s")))
         return opensandbox_provider.SandboxExecResult(
-            stdout="", stderr="boom" if command == "false" else "", return_code=int(command == "false")
+            stdout="",
+            stderr="boom" if command == "false" else "",
+            return_code=return_code if command == "false" else 0,
+            error_type=error_type if command == "false" else None,
         )
 
     async def cleanup(handle):
@@ -4028,6 +4039,8 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
     with pytest.raises(NgFailureEvent, match="setup command failed.*false") as failure_info:
         await provider.create(SandboxSpec(image="python:3.11", env={"A": "spec"}))
     assert failure_info.value.failure_kind == "provider_setup_failed"
+    assert failure_info.value.details.exit_code is exit_code
+    assert failure_info.value.details.provider == "opensandbox"
     assert calls == [("apt-get update", "root", 12), ("false", "root", 12)]
     assert cleaned == ["sandbox-1"]
     # The provider's environment sits under the spec's own variables.
@@ -4122,6 +4135,7 @@ async def test_a_setup_command_that_fails_as_the_images_user_still_fails_the_cre
     with pytest.raises(NgFailureEvent, match=r"exit 4.*sed -i x\nsed: Permission denied") as failure_info:
         await provider.create(SandboxSpec(image="python:3.11"))
     assert failure_info.value.failure_kind == "provider_setup_failed"
+    assert failure_info.value.details.exit_code == 4
     assert cleaned == ["sandbox-1"]
 
 

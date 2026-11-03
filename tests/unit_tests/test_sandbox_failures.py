@@ -52,7 +52,9 @@ def test_causal_chain_roundtrips_sandbox_evidence_and_origin_ids():
             encoded = json.loads(json.dumps(outer.to_record()))
     restored = NgFailureEvent.from_record(encoded)
     assert restored.__cause__.event_id == inner.event_id
-    assert restored.__cause__.sandbox.execution_id == "exec-1"
+    assert restored.__cause__.details.execution_id == "exec-1"
+    assert restored.__cause__.details.provider == "opensandbox"
+    assert "sandbox" not in encoded["failure_events"][inner.event_id]
     assert restored.__cause__.http_status == 502
     assert restored.__cause__.foreign_error.message == "request refused"
     assert restored.to_record() == encoded
@@ -84,7 +86,7 @@ def test_text_cannot_establish_cause_or_status(message):
     failure = opensandbox_failure(operation="run", sandbox_id="sb", cause=RuntimeError(message))
     assert failure.failure_kind == PROVIDER_REQUEST_FAILED
     assert failure.http_status is None
-    assert failure.sandbox.evidence_source is None
+    assert failure.details.provider_status_reason is None
 
 
 def provider_and_handle(monkeypatch, commands, **operations):
@@ -133,7 +135,7 @@ async def test_recovered_status_failure_reaches_success_report(monkeypatch):
     assert len(report.events) == 1
     event = next(iter(report.events.values()))
     assert event.failure_kind == PROVIDER_IO_TIMEOUT
-    assert event.sandbox.execution_id == "exec-1"
+    assert event.details.execution_id == "exec-1"
     assert event.foreign_error.exception_type == "TimeoutError"
     commands.run.assert_awaited_once()
     assert [call.args for call in commands.get_command_status.await_args_list] == [("exec-1",), ("exec-1",)]
@@ -200,7 +202,8 @@ async def test_pty_uses_the_same_explicit_evidence(state, reason, message, kind)
     assert failure.failure_kind == kind
     assert failure.__cause__ is cause
     if kind == PROVIDER_OOM_KILLED:
-        assert failure.sandbox.evidence_source == "lifecycle_status"
+        assert failure.details.provider_status_reason == "OOMKilled"
+        assert "lifecycle status" in failure.failure_reason
 
 
 @pytest.mark.parametrize("command", [True, False])
@@ -298,7 +301,7 @@ async def test_real_sdk_wrapped_transport_failure_recovers_and_retains_observati
         event = next(e for e in report.events.values() if e.failure_kind == expected_kind)
         assert event.boundary.value == "sandbox"
         assert event.foreign_error.message
-        assert event.sandbox.sandbox_id == "sb"
+        assert event.details.sandbox_id == "sb"
     finally:
         await adapter._httpx_client.aclose()
         await adapter._sse_client.aclose()
@@ -326,7 +329,8 @@ def test_sdk_message_survives_event_serialization():
     assert event["foreign_error"]["message"] == "explicit provider diagnostic"
     assert event["failure_kind"] == "provider_credentials_rejected"
     assert event["http_status"] == 403
-    assert failure.sandbox is None  # No invented sandbox id before creation succeeds.
+    assert failure.details.sandbox_id is None  # No invented sandbox id before creation succeeds.
+    assert failure.details.provider == "opensandbox"
 
 
 @pytest.mark.asyncio
@@ -462,8 +466,8 @@ def test_shared_constructor_keeps_provider_selected_facts_and_child_evidence():
     assert outer.failure_kind == PROVIDER_REQUEST_FAILED
     assert outer.http_status is None
     assert outer.foreign_error is None
-    assert outer.sandbox is None
+    assert outer.details is None
     restored = NgFailureEvent.from_record(outer.to_record())
     assert restored.__cause__.event_id == child.event_id
     assert restored.__cause__.http_status == 503
-    assert restored.__cause__.sandbox.sandbox_id == "sb"
+    assert restored.__cause__.details.sandbox_id == "sb"

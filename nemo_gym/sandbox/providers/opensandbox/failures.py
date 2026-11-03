@@ -24,7 +24,8 @@ def opensandbox_failure(
     failure_kind: str | None = None,
     reason: str | None = None,
     execution_id: str | None = None,
-    evidence_source: str | None = None,
+    provider_status_reason: str | None = None,
+    exit_code: int | None = None,
     http_status: int | None = None,
 ) -> NgFailureEvent:
     """Classify this operation's evidence, then construct its sandbox event.
@@ -87,6 +88,8 @@ def opensandbox_failure(
         cause=cause,
         reason=reason,
         execution_id=execution_id,
-        evidence_source=evidence_source,
+        provider="opensandbox",
+        provider_status_reason=provider_status_reason,
+        exit_code=exit_code,
         http_status=status,
     )
