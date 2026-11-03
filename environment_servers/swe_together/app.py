@@ -62,6 +62,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    model_sampling_path_segment,
     verifier_invocation_context,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
@@ -156,6 +157,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
     config: SWETConfig
     request_model = SWETRequest
     response_model = SWETResponse
+    # The candidate is the agent a training framework trains, so its model calls sample with the episode's values.
+    # The judge, the user simulator and the interaction scorer keep their own sampling.
+    applies_model_sampling = True
     _runtime: RuntimeProvisioner | None = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
@@ -428,7 +432,11 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             and (block.get("all_agents") or config.get("token_id_capture"))
         )
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{segment}/v1/responses"
+        # TODO(#5252): read the trained participant from token_id_capture.training_agent_instances, and give
+        # capture and the sampling segment the same selection, so a participant is never captured for training
+        # while it samples with its own values.
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
+        return f"/ng-rollout/{request.episode_id.capture_key}{segment}{sampling_segment}/v1/responses"
 
     async def _new_sandbox(self, state: Episode, *, judge: bool = False) -> AsyncSandbox:
         sandbox_config = self.config.sandbox_config | (self.config.judge_sandbox_config if judge else {})
@@ -584,6 +592,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             self.config.simulator_model.name,
             cookies={},
             temperature=self.config.simulator_temperature,
+            model_sampling=self.model_sampling_segment(state.request, trained=False),
         )
         state.simulator = UserAgent(
             llm=state.simulator_model, original_user_messages=messages, session_analysis=analysis, max_messages=None
@@ -791,6 +800,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         deadline=deadline,
                         cleanup_timeout=self.config.cleanup_timeout_seconds,
                         evidence=result,
+                        model_sampling=self.model_sampling_segment(state.request, trained=False),
                     )
                     result.update(
                         verdict=verdict,
@@ -818,7 +828,13 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 _ng_failure_class=JUDGE_FAILED,
                 _ng_failure_judge_error=str(error),
             )
-        auxiliary = AuxiliaryModel(self.server_client, self.config.interaction_model.name, cookies={}, temperature=0)
+        auxiliary = AuxiliaryModel(
+            self.server_client,
+            self.config.interaction_model.name,
+            cookies={},
+            temperature=0,
+            model_sampling=self.model_sampling_segment(state.request, trained=False),
+        )
         try:
             async with asyncio.timeout(max(0, deadline - monotonic())):
                 result.update(
