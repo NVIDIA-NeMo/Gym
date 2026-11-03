@@ -484,6 +484,49 @@ def test_a_follow_up_the_scheduler_refuses_is_a_typed_stop_not_unknown_accountin
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "reply,refused",
+    [
+        (_QOS_SUBMIT_LIMIT_REPLY, True),
+        (
+            "sbatch: error: Batch job submission failed: Invalid account or account/partition combination specified",
+            True,
+        ),
+        ("sbatch: error: Batch job submission failed: Requested node configuration is not available", True),
+        ("sbatch: error: Batch job submission failed: Job dependency problem", True),
+        # The request or its reply may have been lost: the job may exist, so the accounting stays unknown.
+        ("sbatch: error: Batch job submission failed: Socket timed out on send/recv operation", False),
+        ("sbatch: error: Batch job submission failed: Transport endpoint is not connected", False),
+        ("sbatch: error: Batch job submission failed: Broken pipe", False),
+        ("sbatch: error: Batch job submission failed: Unspecified error", False),
+        ("sbatch: error: Batch job submission failed: Unable to contact slurm controller (connect failure)", False),
+    ],
+)
+def test_only_a_definite_refusal_of_the_follow_up_is_a_typed_stop(tmp_path, reply, refused):
+    _run_prologue(tmp_path, ResumeConfig(), None, extra_env={"FAKE_SBATCH_REFUSES": reply})
+
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert marker.startswith(FOLLOW_UP_SUBMISSION_REFUSED if refused else ACCOUNTING_UNKNOWN_PREFIX), marker
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_recovery_resubmits_a_run_whose_follow_up_the_scheduler_refused(tmp_path):
+    from nemo_gym.orchestration.recovery import RecoveryAction, decide_from_collected
+    from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir
+
+    # The segment's prologue took its follow-up claim, and the scheduler refused the submission.
+    job = write_job_dir(tmp_path, n=2, results=[ident(0, reward=1.0)], failures=[])
+    _run_prologue(job, ResumeConfig(), None, extra_env={"FAKE_SBATCH_REFUSES": _QOS_SUBMIT_LIMIT_REPLY})
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    # The accounting is known: the chain stopped on a refusal, not on an unobserved submission.
+    assert collected.infra_retries_state != "unknown" and collected.walltime_state != "unknown"
+    assert decision.action == RecoveryAction.RESUBMIT, decision.reason
+    assert f"the chain recorded: {FOLLOW_UP_SUBMISSION_REFUSED}" in decision.reason
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_follow_up_submission_without_a_definite_reply_stays_unknown_and_logs_the_reply(tmp_path):
     failed = _run_prologue(tmp_path, ResumeConfig(), None, sbatch_loses_reply=True)
 

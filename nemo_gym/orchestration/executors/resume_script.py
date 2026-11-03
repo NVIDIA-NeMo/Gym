@@ -724,11 +724,13 @@ if ! _gym_claim_followup; then
         _gym_stop_accounting_unknown "The existing follow-up claim has no unique observed pending job; it may already have run."
     fi
 fi
-# Whether sbatch's reply is the scheduler's refusal: an error it reported, with no sign that the request or its reply
-# was lost on the way (a timeout or a connection failure leaves the submission's outcome unknown).
+# Whether sbatch's reply is the scheduler's definite refusal (an invalid request, a policy or limit it violates, a
+# resource or dependency that is not available), with no sign that the request or its reply was lost on the way. Any
+# other error leaves the submission's outcome unknown: the job may exist.
 _gym_submission_refused() {{
     [[ "$1" == *"sbatch: error:"* ]] || return 1
-    ! grep -qiE 'timed out|time out|socket|unable to contact|connection|communication|zero bytes|try again|temporarily' <<< "$1"
+    grep -qiE 'invalid|violates|policy|limit|not available|dependency|qos|account' <<< "$1" || return 1
+    ! grep -qiE 'timed out|time out|socket|unable to contact|connection|communication|zero bytes|try again|temporarily|broken pipe|not connected|unreachable|no route|resolve|standby|i/o error' <<< "$1"
 }}
 if [[ $_gym_queue_followup == 1 ]]; then
     # kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
