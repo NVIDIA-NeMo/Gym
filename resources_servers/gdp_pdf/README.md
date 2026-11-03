@@ -232,7 +232,7 @@ Upstream dataset: MIT. Evaluation only — see the warning above.
 the same individual-criterion grader as single-turn GDP.pdf. The agent receives
 the original question and `/workspace/document.pdf`; it can extract text, render
 pages, inspect images and calculate with Python. Rubrics stay outside the sandbox.
-The complete final chat message is graded. The single-turn configuration is unchanged.
+Only the final answer is graded; Gym-wrapped thinking is excluded. The single-turn configuration is unchanged.
 
 Build the small PDF-tools image, or supply an equivalent image with Python,
 PyMuPDF, pandas, Pillow, Poppler and Tesseract:

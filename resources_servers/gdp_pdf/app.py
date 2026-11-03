@@ -65,6 +65,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.models import ResponsesConverter
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -144,22 +145,26 @@ class GdpPdfVerifyResponse(BaseVerifyResponse):
 
 
 def _extract_generated_answer(response: NeMoGymResponse) -> str:
-    """Return the last assistant message text from the model response.
-
-    Only ``message`` items are read, so chain-of-thought never reaches the judge:
-    a correctly configured server (``--reasoning-parser qwen3``, ``muse_glimmer``,
-    ...) emits reasoning as a separate ``reasoning`` item. Serve a thinking model
-    WITHOUT a reasoning parser and it leaves the whole chain-of-thought inline in
-    the message, which the judge would then grade as part of the answer.
-    """
+    """Return the last assistant answer, excluding structured or gateway-wrapped reasoning."""
     for item in reversed(response.output):
         if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
             content = getattr(item, "content", None)
             if isinstance(content, list):
                 texts = [getattr(c, "text", "") for c in content if getattr(c, "type", None) == "output_text"]
-                return "\n".join(t for t in texts if t).strip()
+                content = "\n".join(t for t in texts if t)
             if isinstance(content, str):
-                return content.strip()
+                # Gym's Chat gateway wraps reasoning in tags; external harnesses
+                # can return that text verbatim. Reuse its inverse conversion.
+                parsed = ResponsesConverter(
+                    uses_reasoning_parser=True, return_token_id_information=False
+                ).postprocess_assistant_message_dict({"role": "assistant", "content": content})
+                return "\n".join(
+                    part.text
+                    for message in parsed
+                    if message.type == "message"
+                    for part in message.content
+                    if part.type == "output_text"
+                ).strip()
     return ""
 
 
