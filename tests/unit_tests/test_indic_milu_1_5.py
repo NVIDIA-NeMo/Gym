@@ -207,8 +207,8 @@ def test_examples_and_config(monkeypatch):
     from omegaconf import OmegaConf
 
     import nemo_gym.config.global_config as global_config
-    from nemo_gym.benchmarks import BenchmarkConfig, _benchmark_config_paths
     from nemo_gym.cli.main import _asset_config_path
+    from nemo_gym.environment.benchmarks import BenchmarkConfig, _benchmark_config_paths
     from nemo_gym.environment.manifest import load_manifest
 
     prompt = load_prompt_config(str(module.DIRECTORY / "prompts/default.yaml"))
@@ -258,7 +258,7 @@ def test_examples_and_config(monkeypatch):
 
 
 def test_run_overrides_preserve_row_scoped_vllm_metadata(tmp_path):
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     row = module.build_rows([source()], language="hi")[0]
     row["agent_ref"] = {"name": "milu_1_5_simple_agent"}

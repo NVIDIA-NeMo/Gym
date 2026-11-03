@@ -12,10 +12,10 @@ from unittest.mock import patch
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.benchmarks import BenchmarkConfig, _is_benchmark_config
 from nemo_gym.config import GlobalConfigDictParser, maybe_get_server_instance_config
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
-from nemo_gym.registry import discover_environment_catalog
+from nemo_gym.environment import BenchmarkConfig, discover_environment_catalog
+from nemo_gym.environment.benchmarks import _is_benchmark_config
 from resources_servers.swe_atlas_qa import prepare
 
 
