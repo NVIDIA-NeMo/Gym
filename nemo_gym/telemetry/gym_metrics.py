@@ -191,6 +191,28 @@ HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+CONCURRENCY_QUEUE_WAIT_INSTRUMENT = "gym.concurrency.queue_wait_duration_ms"
+# From a few milliseconds of contention to a judge or sandbox queue of half an hour.
+CONCURRENCY_QUEUE_WAIT_BOUNDARIES_MS: tuple[float, ...] = (
+    1,
+    5,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_800_000,
+)
 RUN_METRIC_PREFIX = "gym.run."
 RUN_ID_ATTRIBUTE = "nemo.gym.run.id"
 RUN_INFO_INSTRUMENT = "gym.run.info"
@@ -538,6 +560,18 @@ def record_run_summary(summary: Mapping[str, float], *, run_id: Optional[str]) -
             gauge.set(value, attributes=attributes)
         except Exception:
             logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
+
+
+def record_concurrency_queue_wait(duration_ms: float, attributes: dict[str, str]) -> None:
+    """Record how long one admitted caller queued for a concurrency-limit slot (``MeteredSemaphore`` attributes)."""
+    _record_histogram(
+        CONCURRENCY_QUEUE_WAIT_INSTRUMENT,
+        "ms",
+        "Time one admitted caller waited for a concurrency-limit slot; callers that did not queue record nothing.",
+        duration_ms,
+        attributes,
+        boundaries=CONCURRENCY_QUEUE_WAIT_BOUNDARIES_MS,
+    )
 
 
 def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:

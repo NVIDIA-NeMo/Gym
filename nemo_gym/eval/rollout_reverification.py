@@ -89,6 +89,7 @@ from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, r
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
@@ -2026,7 +2027,9 @@ class RolloutReverificationHelper(BaseModel):
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
-            semaphore = Semaphore(config.num_samples_in_parallel)
+            semaphore = MeteredSemaphore(
+                config.num_samples_in_parallel, component="rollout_driver", limit_name="reverifications"
+            )
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         run_labels = rollout_run_labels(payloads_to_reverify)

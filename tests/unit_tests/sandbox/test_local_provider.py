@@ -405,3 +405,16 @@ async def test_caller_workdir_and_exec_overrides(tmp_path: Path, monkeypatch, ab
     finally:
         await sandbox.stop()
     assert workdir.is_dir() and override.is_dir()
+
+
+def test_providers_with_the_same_concurrency_share_one_exec_limit_while_alive():
+    import gc
+
+    first = LocalProvider(concurrency=3)
+    second = LocalProvider(concurrency=3)
+    assert first._semaphore is second._semaphore
+
+    del first, second
+    gc.collect()
+    # A limit no live provider holds is dropped, so its slots are not reported next to a new limit.
+    assert 3 not in LocalProvider._semaphores

@@ -21,7 +21,9 @@ import os
 import shutil
 import signal
 import tempfile
+import threading
 import uuid
+import weakref
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -31,6 +33,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -45,7 +48,10 @@ class LocalProvider:
     """Runs commands on the host. No isolation: use a container provider for untrusted code."""
 
     name = "local"
-    _semaphores: dict[int, asyncio.Semaphore] = {}
+    # One exec limit per concurrency value, shared by the live providers that use it; a limit no provider holds any
+    # more is dropped, so its slots stop being reported.
+    _semaphores: "weakref.WeakValueDictionary[int, MeteredSemaphore]" = weakref.WeakValueDictionary()
+    _semaphores_lock = threading.Lock()
 
     def __init__(
         self,
@@ -57,7 +63,12 @@ class LocalProvider:
         self._workspace_root = Path(workspace_root).expanduser() if workspace_root else None
         self._shell = shell
         self._default_timeout_s = default_timeout_s
-        self._semaphore = LocalProvider._semaphores.setdefault(concurrency, asyncio.Semaphore(concurrency))
+        with LocalProvider._semaphores_lock:
+            semaphore = LocalProvider._semaphores.get(concurrency)
+            if semaphore is None:
+                semaphore = MeteredSemaphore(concurrency, component="sandbox_provider", limit_name="local_exec")
+                LocalProvider._semaphores[concurrency] = semaphore
+        self._semaphore = semaphore
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """A caller-supplied workdir is theirs to keep. One we allocate is ours to delete."""
