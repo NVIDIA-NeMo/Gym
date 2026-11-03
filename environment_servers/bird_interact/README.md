@@ -69,9 +69,9 @@ If the user model fails during an a-Interact `ask`, the result masks the sample 
 
 The episode starts a sandbox and stops it when the episode ends, on every path; at shutdown the server finishes
 the cleanups of episodes still running, and `sandbox_config.ttl_s` lets the provider reclaim a sandbox that a
-crashed server left. The server uploads `grading.py` and the database source and runs
-`python3 grading.py <setup|execute|grade> <request.json>` there, so the image needs only `python3` (default
-`python:3.12-slim`). The agent's SQL and the grading run in the sandbox, never in the server process, and the agent
+crashed server left. The server uploads `grading.py`, and for SQLite the database source, and runs
+`python3 grading.py <setup|execute|grade> <request.json>` there. For SQLite the image needs only `python3` (default
+`python:3.12-slim`); for PostgreSQL see [PostgreSQL (Lite and Full)](#postgresql-lite-and-full). The agent's SQL and the grading run in the sandbox, never in the server process, and the agent
 never gets the sandbox itself. `grading.py` deletes each request file once it has read it, so the solution SQL in a
 grade request does not stay in the sandbox.
 
@@ -88,8 +88,10 @@ retried, and a-Interact masks the sample with `failure_kind: bird_interact:sandb
 ## Grading
 
 `grading.py` is an independent implementation of BIRD-Interact's default test case. It removes comments, `DISTINCT`
-and `ROUND(...)` from both queries, runs each on a scratch copy of the episode's database, rounds floats to two
-places, and compares rows in order when `conditions.order` is set, or as sets otherwise. An empty result fails.
+and `ROUND(...)` from both queries and runs each without changing the episode's database: on a scratch copy for
+SQLite, in a transaction it rolls back for PostgreSQL. It rounds floats and decimals to two places (decimals half-up),
+compares dates and timestamps as `YYYY-MM-DD` and JSON values as sorted JSON, and compares rows in order when
+`conditions.order` is set, or as sets otherwise. An empty result fails.
 
 ## Harnesses
 
@@ -120,7 +122,7 @@ and Codex, in a-Interact over `mcp`, have run BIRD with a model; the other rows 
 `database_dir` holds one directory for each database, in the BIRD-Interact layout:
 
 ```text
-<db>/<db>.sqlite (or <db>.sql)
+<db>/<db>.sqlite (or <db>.sql), for SQLite only
 <db>/<db>_schema.txt
 <db>/<db>_column_meaning_base.json
 <db>/<db>_kb.jsonl
@@ -137,12 +139,43 @@ The agent's config declares the file once for each mode's taskset, `bird_interac
 The public BIRD-Interact releases (Mini-Interact, Lite, Full) withhold `sol_sql` and `test_cases`. The authors
 send them on request. A row without `sol_sql` fails the episode at seed, for good. Mini-Interact uses SQLite, so its
 databases work as downloaded from [`birdsql/mini-interact`](https://huggingface.co/datasets/birdsql/mini-interact),
-after the ground truth is merged into the rows.
+after the ground truth is merged into the rows. Lite and Full use PostgreSQL.
+
+## PostgreSQL (Lite and Full)
+
+With `database_engine: postgresql`, a task's database is `<db>_template` in the PostgreSQL server of the sandbox
+image, and each episode starts its own sandbox from that image. The image build restores every database of the
+release once (`postgres/Dockerfile`), so an episode starts PostgreSQL instead of restoring dumps, and a write in one
+episode never reaches another. `setup` starts the server and applies `preprocess_sql`; after that, each query runs in
+a transaction that is rolled back.
+
+1. Build the image for Lite or Full and push it where the sandbox provider pulls from. The build commands are at the
+   top of `postgres/Dockerfile`.
+2. Download the release's schema, column meanings and knowledge base, which are the `database_dir` files, with its
+   rows:
+
+   ```bash
+   huggingface-cli download birdsql/bird-interact-lite --repo-type dataset --local-dir data/bird_interact_lite
+   ```
+
+3. Merge the ground truth from the authors into `bird_interact_data.jsonl` (the BIRD-Interact repository's
+   `combine_public_with_gt.py` does this), and write the rows as tasks, as in [Running](#running).
+4. Point both servers at them:
+
+   ```yaml
+   database_engine: postgresql
+   database_dir: data/bird_interact_lite
+   sandbox_config:
+     image: <registry>/bird-interact-postgres:lite
+   ```
+
+Only query tasks run: management tasks have custom `test_cases`. Lite has 195 query tasks of 300 and Full 410 of
+600, and every task has a follow-up phase.
 
 ## Not supported yet
 
 - Rows with custom `test_cases` (BIRD-Interact's management tasks). The episode fails at seed, for good.
-- PostgreSQL (Lite and Full).
+- PostgreSQL dollar-quoted bodies (`$$ ... $$`) in the agent's SQL: a semicolon inside one splits the statement.
 - Database changes that carry over from phase 1 to phase 2. Each submission runs on a scratch copy.
 - The data and catalog checks that `gym env test` runs for a Resources Server (GYMINT-643).
 
