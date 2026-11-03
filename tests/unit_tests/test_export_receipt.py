@@ -274,7 +274,7 @@ def test_a_repeat_export_of_an_exported_run_leaves_the_run_lock_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     from nemo_gym.cli import eval as eval_cli
-    from nemo_gym.rollout_recovery import run_lock_path_for
+    from nemo_gym.rollouts.rollout_recovery import run_lock_path_for
 
     artifacts = _run(tmp_path)
     assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
@@ -325,7 +325,7 @@ def test_a_receipt_that_appears_while_waiting_for_the_lock_is_verified_not_prepa
     monkeypatch.setattr(eval_cli, "get_global_config_dict", lambda **_: config)
     monkeypatch.setattr(eval_cli, "_prepare_run_health_metrics", lambda output: prepared.append(output))
     monkeypatch.setattr("nemo_gym.artifacts.exporters.load_run_exporter_class", lambda _name: Registered)
-    monkeypatch.setattr("nemo_gym.rollout_recovery.run_lock", racing_lock)
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_recovery.run_lock", racing_lock)
     eval_cli.export_run()
 
     assert "Export mlflow: skipped" in capsys.readouterr().out

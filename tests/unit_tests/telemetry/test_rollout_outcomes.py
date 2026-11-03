@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym import rollout_collection
+from nemo_gym.rollouts import rollout_collection
 from nemo_gym.telemetry import gym_metrics
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
+from tests.unit_tests.rollouts.test_rollout_recovery import runner_config  # noqa: F401 - fixture
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
-from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
-from tests.unit_tests.test_rollout_recovery import runner_config  # noqa: F401 - fixture
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")
@@ -142,7 +142,7 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     collected_metrics,
     monkeypatch,  # noqa: F811
 ):
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     _rollout_group_only(monkeypatch)
     runner_config.route_failures_to_sidecar = True
@@ -187,7 +187,7 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
 
 
 async def test_outcome_rejected_by_storage_is_not_counted(runner_config, collected_metrics, monkeypatch):  # noqa: F811
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     _rollout_group_only(monkeypatch)
     install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
@@ -257,7 +257,7 @@ async def test_legacy_counter_keeps_routing_class_and_only_explicit_kind(
 async def test_transport_counter_does_not_invent_a_kind(
     runner_config, collected_metrics, monkeypatch, status, failure_class
 ):  # noqa: F811
-    from tests.unit_tests.test_rollout_collection import http_error
+    from tests.unit_tests.rollouts.test_rollout_collection import http_error
 
     _rollout_group_only(monkeypatch)
 
@@ -387,9 +387,9 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
     import asyncio
 
     from nemo_gym.core.episode import EpisodeId
-    from nemo_gym.rollout_outcomes import RolloutFailureRecord
-    from nemo_gym.rollout_records import logical_rollout_id
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+    from nemo_gym.rollouts.rollout_records import logical_rollout_id
+    from nemo_gym.rollouts.rollout_store import RolloutStore
     from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     _rollout_group_only(monkeypatch)

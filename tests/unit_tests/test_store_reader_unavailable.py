@@ -60,7 +60,7 @@ def test_a_reader_that_ran_and_refused_the_artifacts_is_not_unavailable(tmp_path
 def test_a_local_reader_that_cannot_import_the_store_is_unavailable(tmp_path, monkeypatch):
     job = tmp_path / "job"
     prepare_managed(job, "missing", n=2)
-    monkeypatch.setitem(sys.modules, "nemo_gym.rollout_store", None)
+    monkeypatch.setitem(sys.modules, "nemo_gym.rollouts.rollout_store", None)
     result = select_managed_evidence(collect(job), job)
     assert (result.managed_selection, result.managed_reader_unavailable) == (None, True)
 

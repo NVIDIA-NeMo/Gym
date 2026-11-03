@@ -2414,8 +2414,7 @@ def test_a_result_without_a_sandbox_start_failure_has_no_failure_fields() -> Non
 
 
 def test_a_sandbox_start_timeout_is_retried_within_the_attempt_cap_and_then_stops(tmp_path, monkeypatch) -> None:
-    from nemo_gym.rollout_recovery import RunManifest
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts import RolloutStore, RunManifest
 
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
     rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "osworld"}}]

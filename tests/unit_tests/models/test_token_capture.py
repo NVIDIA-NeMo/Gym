@@ -97,7 +97,7 @@ from nemo_gym.models.token_capture.sink import (
     set_token_sink,
 )
 from nemo_gym.models.token_capture.store import TokenCaptureStore, make_token_store
-from nemo_gym.observability.model_calls import read_model_call_records
+from nemo_gym.rollouts.model_calls import read_model_call_records
 
 
 _ASSISTANT_TURN = {

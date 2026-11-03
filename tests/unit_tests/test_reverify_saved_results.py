@@ -26,10 +26,10 @@ from nemo_gym.orchestration.recovery import (
     reverification_cause,
     saved_row_evidence,
 )
-from nemo_gym.rollout_records import logical_rollout_id, rejudge_predecessor_id
-from nemo_gym.rollout_recovery import RunManifest
 from nemo_gym.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_records import logical_rollout_id, rejudge_predecessor_id
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for
 from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, scored
 
@@ -358,7 +358,7 @@ async def test_a_result_scored_in_a_separate_rescoring_output_is_still_settled_i
     """A rescore of the run into a separate output (``gym eval reverify`` on a managed run) scores the saved answer
     there and leaves the run as it was; the run's own settle still grades that answer and settles it, once."""
     import nemo_gym.rollout_reverification as reverify
-    from nemo_gym.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
+    from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
 
     monkeypatch.setattr(reverify, "get_exporters", list)
     output = _run(tmp_path, [verify_transport_masked()])
@@ -459,7 +459,7 @@ def test_a_strict_rejection_is_decided_from_the_settled_run(tmp_path, monkeypatc
     from types import SimpleNamespace
 
     from nemo_gym.cli import eval as eval_cli
-    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
     output = _run(tmp_path, [verify_transport_masked()], not_started=1)
     monkeypatch.setattr(eval_cli, "_rejudge_saved_judge_failures", lambda *args, **kwargs: None)

@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 import nemo_gym.rollout_reverification as reverify
-from nemo_gym.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
-from nemo_gym.rollout_store import RolloutStore
-from tests.unit_tests.test_rollout_store import prepared_run, snapshot  # noqa: F401
+from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
+from nemo_gym.rollouts.rollout_store import RolloutStore
+from tests.unit_tests.rollouts.test_rollout_store import prepared_run, snapshot  # noqa: F401
 
 
 def _config(output: Path, destination: Path, **kwargs) -> reverify.RolloutReverificationConfig:
@@ -121,7 +121,7 @@ def test_seeded_projection_keeps_selected_successes_and_source_provenance(prepar
 
 
 async def test_rescore_source_provenance_stays_out_of_verifier_request(tmp_path, monkeypatch):
-    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     reply = FakeResponse(200, {"response": {}, "reward": 1.0})
     client = install_fake_server_client(monkeypatch, AsyncMock(return_value=reply))

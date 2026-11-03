@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
 from nemo_gym.exception_inspection import error_to_http_status
-from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.server_runtime.episode_types import FailureBoundary, SandboxFailureDetails
 from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 
 
@@ -270,12 +270,12 @@ class SandboxPtyError(RuntimeError):
 def sandbox_credentials_rejected(
     error: BaseException,
     *,
-    boundary: FailureBoundary,
     operation: str,
+    details: SandboxFailureDetails | None = None,
     stage: FailureStage | None = None,
     sdk_message: str | None = None,
 ) -> NgFailureEvent | None:
-    """The failure for ``error`` when its HTTP status is 401 or 403, caused by ``error``; else ``None``.
+    """A sandbox-boundary failure for an observed HTTP 401/403, caused by ``error``; else ``None``.
 
     The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
     the caller selected for the provider's SDK (see ``sdk_error_details``).
@@ -284,8 +284,9 @@ def sandbox_credentials_rejected(
     if status not in (401, 403):
         return None
     rejected = NgFailureEvent(
-        boundary=boundary,
+        boundary=FailureBoundary.SANDBOX,
         failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        details=details,
         failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
         operation=operation,
         stage=stage,

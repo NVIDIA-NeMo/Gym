@@ -80,7 +80,7 @@ from nemo_gym.core import (
 from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR, MODEL_POLICY_RESPONSE_TIMEOUT
 from nemo_gym.exception_inspection import explicit_causes
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow, RequestFailureLog, report_for_current_request
-from nemo_gym.health.timeouts import TimeoutEvent
+from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,

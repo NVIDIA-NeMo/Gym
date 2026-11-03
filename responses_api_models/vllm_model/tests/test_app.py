@@ -82,16 +82,8 @@ from nemo_gym.models import (
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.models.token_capture import (
-    CaptureContext,
-    InMemoryLineageStore,
-    ParentResolutionStatus,
-    TokenCaptureStore,
-    reset_token_sink,
-    resolve_parent,
-    set_token_sink,
-)
-from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
+from nemo_gym.rollouts import is_terminal_failure
+from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row
 from nemo_gym.server_runtime import (
     CheckpointRequest,
     FailureBoundary,
@@ -8884,7 +8876,7 @@ async def test_refit_output_budget_to_window_off_keeps_the_refusal(
 
 
 def test_the_trajectory_carries_the_refitted_budget() -> None:
-    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 
     trajectory = _build_trajectory_record(
         {"_ng_task_index": 0, "_ng_rollout_index": 0},

@@ -979,7 +979,7 @@ def _core_pending(job_dir: Path, monkeypatch: pytest.MonkeyPatch, cap: int) -> l
     """The inputs rollout collection's resume would run (`_load_from_cache`), as a resume without resubmit loads it."""
     from types import SimpleNamespace
 
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(cap))
     artifacts = job_dir / "artifacts"

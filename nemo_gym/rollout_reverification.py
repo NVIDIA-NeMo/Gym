@@ -64,7 +64,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
@@ -73,7 +73,7 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     matches_failure_class,
 )
-from nemo_gym.rollout_records import (
+from nemo_gym.rollouts.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
     RUN_ID_KEY,
@@ -85,8 +85,8 @@ from nemo_gym.rollout_records import (
     resolve_rollout_owner,
     resolve_rollout_path,
 )
-from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, run_lock
-from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
+from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (

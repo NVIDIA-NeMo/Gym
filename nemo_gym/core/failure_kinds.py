@@ -209,7 +209,7 @@ MALFORMED_ANSWER = "malformed_answer"
 MODEL_SERVER_ERROR = "model_server_error"
 NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 # An ``agent_timeout`` whose window held a recorded server-side fault (``is_infrastructure_agent_timeout`` in
-# ``nemo_gym.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
+# ``nemo_gym.rollouts.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
 AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
 INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 INVALID_REQUEST_PARAMETER = "invalid_request_parameter"
@@ -277,6 +277,11 @@ def is_gate_derived(name: str) -> bool:
 def is_registered(name: str) -> bool:
     """Whether ``name`` is part of the shared vocabulary."""
     return name in FAILURE_KINDS
+
+
+JUDGE_FAILURE_KINDS = ("judge_failed", "judge_invalid", JUDGE_UNPARSEABLE)
+"""The judge failures whose saved answer is judged again, never regenerated: a failed judge call, a verdict that did not
+parse (``judge_unparseable``), and collection's own legacy class for an invalid judge response (``judge_invalid``)."""
 
 
 def is_namespaced(name: str) -> bool:

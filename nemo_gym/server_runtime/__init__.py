@@ -94,6 +94,8 @@ if TYPE_CHECKING:
         FailureBoundary,
         FailureReport,
         MaterializedTask,
+        ModelFailureDetails,
+        SandboxFailureDetails,
     )
     from nemo_gym.server_runtime.mcp_auto_exposure import (
         TOKEN_HEADER,
@@ -112,6 +114,7 @@ if TYPE_CHECKING:
         SingleAgentTurnResult,
         SingleAgentTurnTaskInput,
     )
+    from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
         DirectHTTPToolAccess,
         MCPStreamableHTTPConnection,
@@ -165,6 +168,7 @@ _PUBLIC_API = {
     "MCPTool": "mcp_auto_exposure",
     "MCPToolAccess": "tool_access",
     "MaterializedTask": "episode_types",
+    "ModelFailureDetails": "episode_types",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
     "ParticipantControlPlane": "_checkpoint.control",
@@ -184,6 +188,7 @@ _PUBLIC_API = {
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
+    "SandboxFailureDetails": "episode_types",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
     "SingleAgentTurnFailure": "single_agent_turn_types",
@@ -195,6 +200,7 @@ _PUBLIC_API = {
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
     "ToolAccess": "tool_access",
+    "check_resources_session_contract": "testing.session_conformance",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
     "harvest_tools": "mcp_auto_exposure",

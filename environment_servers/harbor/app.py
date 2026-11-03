@@ -2040,7 +2040,6 @@ class HarborEnvironmentServer(
             LOGGER.exception("Sandbox setup failed for %s", task.task_id)
             setup_failure = sandbox_credentials_rejected(
                 exc,
-                boundary=FailureBoundary.ENVIRONMENT,
                 operation="sandbox.setup",
                 stage="seed",
                 sdk_message=_opensandbox_message(exc),

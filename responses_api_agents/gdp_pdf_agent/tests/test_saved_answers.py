@@ -16,14 +16,14 @@ from fastapi import FastAPI, Request
 from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client as http_client
-import nemo_gym.rollout_collection as collection
+import nemo_gym.rollouts.rollout_collection as collection
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.rollout_recovery import has_saved_generation
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts import RolloutStore
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,

@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from nemo_gym.rollout_collection import _build_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 
 
 @pytest.mark.parametrize(

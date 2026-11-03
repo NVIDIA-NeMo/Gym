@@ -87,7 +87,7 @@ def test_unencodable_saved_text_leaves_grade_unbound():
 @pytest.mark.asyncio
 async def test_canonical_export_retains_grading_facts_without_raw_payload():
     from nemo_gym.artifacts.rollout_rows import _rollout_for_export
-    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 
     async def verify():
         return observe_programmatic_grading(lambda: result(1))

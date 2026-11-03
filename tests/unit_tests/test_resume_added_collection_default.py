@@ -23,10 +23,10 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.rollout_recovery as recovery
+import nemo_gym.rollouts.rollout_recovery as recovery
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_collection import RolloutCollectionConfig
-from nemo_gym.rollout_recovery import (
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig
+from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
     _configuration_identity,
     _digest,

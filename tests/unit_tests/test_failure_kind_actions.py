@@ -31,8 +31,8 @@ from nemo_gym.orchestration.recovery import (
     decide_recovery,
     select_managed_evidence,
 )
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_possibly_delivered_replay import _ANSWER, _route_failure_row
 
 

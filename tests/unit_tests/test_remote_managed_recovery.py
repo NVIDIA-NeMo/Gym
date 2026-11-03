@@ -7,8 +7,8 @@ import pytest
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence
 from nemo_gym.orchestration.recovery import select_managed_evidence
+from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
 from tests.unit_tests.test_managed_recovery_selection import collect, decide, prepare_managed, saved_bytes
-from tests.unit_tests.test_rollout_recovery import runner_config as runner_config
 
 
 class ProjectionConnection:
