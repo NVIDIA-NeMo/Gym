@@ -91,9 +91,9 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
-        id="tool_call_failed",
+        id="rollout_tool_call_failed",
         evaluation_scope=CheckScope.ROLLOUT,
-        subject=CheckSubject.TOOL_CALL,
+        subject=CheckSubject.ROLLOUT,
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY}),
     ),
     CheckSpec(
@@ -923,7 +923,7 @@ def _tool_output_text(output: Any) -> str | None:
     return None
 
 
-def _tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _rollout_tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
     """One finding per rollout, counting the tool outputs that open with a harness tool-failure marker."""
     failed = 0
     for call in trajectory.get("tool_calls") or []:
@@ -934,7 +934,7 @@ def _tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int | str])
         return []
     return [
         Finding(
-            check="tool_call_failed",
+            check="rollout_tool_call_failed",
             subject=subject,
             detail={"reason": "tool output reports that the harness tool could not run", "count": failed},
         )
@@ -975,5 +975,7 @@ _ROLLOUT_CHECKS: dict[
     "model_call_runaway_generation": lambda record, trajectory, bindings, subject: _model_call_runaway_generation(
         bindings, subject
     ),
-    "tool_call_failed": lambda record, trajectory, bindings, subject: _tool_call_failed(trajectory, subject),
+    "rollout_tool_call_failed": lambda record, trajectory, bindings, subject: _rollout_tool_call_failed(
+        trajectory, subject
+    ),
 }

@@ -1299,7 +1299,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
         "trajectory_capture_mismatch",
         "rollout_token_count_mismatch",
         "model_call_runaway_generation",
-        "tool_call_failed",
+        "rollout_tool_call_failed",
     }
 
     # A malformed line must not be grouped with a valid rollout whose numeric
@@ -3991,7 +3991,7 @@ def _tool_call_failed_findings(tmp_path: Path, tool_calls: list[dict], **record_
     record["ng_trajectory"]["tool_calls"] = tool_calls
     record.update(record_updates)
     [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1).rollouts
-    return record, [finding for finding in digest.findings if finding.check == "tool_call_failed"]
+    return record, [finding for finding in digest.findings if finding.check == "rollout_tool_call_failed"]
 
 
 def test_tool_outputs_that_report_the_harness_tool_could_not_run_are_one_counted_finding(tmp_path: Path) -> None:
@@ -4031,7 +4031,7 @@ def test_tool_call_failed_leaves_the_verdict_to_the_finding_only(tmp_path: Path)
     record["ng_trajectory"]["tool_calls"] = [_tool_call(1, "ripgrep execution failed: x")]
     result = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1)
     [digest] = result.rollouts
-    assert [finding.check for finding in digest.findings] == ["tool_call_failed"]
+    assert [finding.check for finding in digest.findings] == ["rollout_tool_call_failed"]
     assert digest.verdict == "unhealthy"
 
 

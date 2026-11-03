@@ -91,7 +91,6 @@ class CheckSubject(str, Enum):
     ROLLOUT = "rollout"
     AGENT_TURN = "agent_turn"
     MODEL_CALL = "model_call"
-    TOOL_CALL = "tool_call"
     TRAJECTORY_CAPTURE = "trajectory_capture"
     TASK = "task"
     RUN = "run"
