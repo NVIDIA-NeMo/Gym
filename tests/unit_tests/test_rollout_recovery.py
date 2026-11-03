@@ -1150,6 +1150,22 @@ def test_known_operational_settings_do_not_change_resume_identity(saved_manifest
     assert RunManifest.create(source, rows, config, servers).config_digest != before
 
 
+def test_inference_metrics_do_not_change_resume_identity(saved_manifest):
+    source, rows, _, config, servers, _, _ = saved_manifest
+    before = RunManifest.create(source, rows, config, servers).config_digest
+    metrics_config = collection.InferenceMetricsConfig(
+        enabled=True, endpoints={"replica0": "http://localhost:8000/metrics"}
+    )
+    changed = config | {"inference_metrics": metrics_config.model_dump()}
+    assert RunManifest.create(source, rows, changed, servers).config_digest == before
+    assert (
+        RunManifest.create(
+            source, rows, changed, servers | {"inference_metrics": metrics_config.model_dump(mode="json")}
+        ).config_digest
+        == before
+    )
+
+
 @pytest.mark.parametrize(
     "headers", ["headers", "default_headers", "openai_default_headers", "artifact_request_headers"]
 )

@@ -1,0 +1,45 @@
+input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___mooncakemetricstry2___kvcacheremoveintermediatemamba.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___prims.sqsh
+
+slurm:
+  account: nemotron_n4_post
+  partition: batch
+  qos: interactive
+  gpus-per-node: "4"
+  mem: "0"
+  container-mounts: ${oc.env:PWD}:${oc.env:PWD}
+
+vllm:
+  repo: https://github.com/bxyu-nvidia/vllm.git
+  branch: bxyu/v0.32.0-prims
+  version: "0.32.0"
+  precompiled_wheel_commit: v0.32.0
+
+flashinfer:
+  repo: https://github.com/bxyu-nvidia/flashinfer
+  branch: bxyu/v0.7.0.post1-bxyudev
+  invalidate_modules:
+  - fused_moe_trtllm_sm100
+  cpus_per_task: 128
+
+warmup:
+  env:
+    MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
+    VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh
+    NUM_PREFILL_NODES: 2
+    NUM_DECODE_NODES: 2
+    ENABLE_MOONCAKE: 1
+    ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE: 4
+    SLURM_COMMENT: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"720","reason":"benchmarking","description":"POR - https://nvaiinfa.aha.io/ideas/ideas/NMP-I-791"}}'
+    MOUNTS: ${oc.env:PWD}:${oc.env:PWD},${oc.env:PWD}:/opt/Gym
+
+run:
+  env:
+    _copy: warmup.env
+    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dp4tp1-prims
+    SBATCH_TIMELIMIT: "01:30:00"
+  args: |
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config benchmarks/swebench/verified/opencode.yaml \
+    ++swebench_verified_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=2700 \
+    ++num_samples_in_parallel=1024

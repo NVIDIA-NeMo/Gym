@@ -23,10 +23,10 @@ from pathlib import Path
 from typing import BinaryIO
 
 
-CACHE_ROOT = Path("/opt/super-vl-evals/flashinfer-autotune-cache")
-JIT_WORKSPACE = Path("/opt/super-vl-evals/flashinfer-warmup-workspace")
-VLLM_CACHE_ROOT = Path("/opt/super-vl-evals/vllm-cache")
-CUTE_CACHE_ROOT = Path("/opt/super-vl-evals/prims-cute-cache")
+CACHE_ROOT = Path("/opt/flashinfer-autotune-cache")
+JIT_WORKSPACE = Path("/opt/flashinfer-warmup-workspace")
+VLLM_CACHE_ROOT = Path("/opt/vllm-cache")
+CUTE_CACHE_ROOT = Path("/opt/prims-cute-cache")
 
 
 def wait_for_engines(urls: list[str], timeout: int) -> None:

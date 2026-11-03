@@ -350,18 +350,18 @@ export MOONCAKE_CACHE_TRACE=$MOONCAKE_CACHE_TRACE
 export VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
 source "$VLLM_CONFIG"
 
-if [[ -f /opt/super-vl-evals/flashinfer-autotune-cache/warmed-manifest.json ]]; then
+if [[ -f /opt/flashinfer-autotune-cache/warmed-manifest.json ]]; then
     python3 -c "\$warm_cache_helper" inspect
 fi
 
-baked_cache=/opt/super-vl-evals/flashinfer-autotune-cache
+baked_cache=/opt/flashinfer-autotune-cache
 if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.baked" ]]; then
     export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="\$baked_cache"
     mkdir -p "\$baked_cache"
     echo "Using image-local FlashInfer autotune cache: \$baked_cache on \$(hostname)"
 fi
 if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.startup-plans-baked" ]]; then
-    export VLLM_CACHE_ROOT=/opt/super-vl-evals/vllm-cache
+    export VLLM_CACHE_ROOT=/opt/vllm-cache
     export VLLM_ENABLE_STARTUP_PLAN="\${VLLM_ENABLE_STARTUP_PLAN:-1}"
     echo "Using image-local vLLM startup plans: \$VLLM_CACHE_ROOT/startup_plan on \$(hostname)"
 fi
@@ -370,13 +370,13 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     export VLLM_ENABLE_STARTUP_PLAN=1
     # Keep every worker's runtime JIT output inside its named container. The
     # export step collects these libraries from all nodes and installs them as AOT.
-    export FLASHINFER_WORKSPACE_BASE=/opt/super-vl-evals/flashinfer-warmup-workspace
+    export FLASHINFER_WORKSPACE_BASE=/opt/flashinfer-warmup-workspace
     touch "\$baked_cache/.warmup-start"
 fi
 
 # Custom images contain patched AOT kernels and their build-time smoke check.
 # Do this once on every node before any prefill/decode/headless workers fork.
-flashinfer_manifest=/opt/super-vl-evals/flashinfer-build.env
+flashinfer_manifest=/opt/flashinfer-build.env
 if [[ -f "\$flashinfer_manifest" ]]; then
     if ! grep -qx 'FLASHINFER_REPLAY_VERIFIED=1' "\$flashinfer_manifest"; then
         echo "ERROR: Rebuild this image with the updated custom_flashinfer_version.sh (unverified ReplaySSM kernels)." >&2
@@ -390,12 +390,12 @@ if [[ -f "\$flashinfer_manifest" ]]; then
     mkdir -p "\$FLASHINFER_WORKSPACE_BASE"
     unset FLASHINFER_DISABLE_JIT
     echo "FlashInfer build=\$flashinfer_build_id workspace=\$FLASHINFER_WORKSPACE_BASE on \$(hostname)"
-    FLASHINFER_DISABLE_JIT=1 python3 /opt/super-vl-evals/verify-flashinfer.py \\
-        --verify /opt/super-vl-evals/flashinfer-warmup.env
-elif [[ -f /opt/super-vl-evals/flashinfer-slim.json ]]; then
+    FLASHINFER_DISABLE_JIT=1 python3 /opt/verify-flashinfer.py \\
+        --verify /opt/flashinfer-warmup.env
+elif [[ -f /opt/flashinfer-slim.json ]]; then
     # Slim images invalidate native modules instead of compiling them. A new
     # workspace namespace prevents mounted caches from supplying old binaries.
-    flashinfer_build_id=\$(sha256sum /opt/super-vl-evals/flashinfer-slim.json)
+    flashinfer_build_id=\$(sha256sum /opt/flashinfer-slim.json)
     flashinfer_build_id=\${flashinfer_build_id%% *}
     export FLASHINFER_WORKSPACE_BASE="\${FLASHINFER_WORKSPACE_BASE:-/tmp}/flashinfer-builds/\$flashinfer_build_id"
     mkdir -p "\$FLASHINFER_WORKSPACE_BASE"
@@ -404,7 +404,7 @@ elif [[ -f /opt/super-vl-evals/flashinfer-slim.json ]]; then
 fi
 
 # CuTe-DSL has its own cache, separate from the FlashInfer native module cache.
-prims_cache=/opt/super-vl-evals/prims-cute-cache
+prims_cache=/opt/prims-cute-cache
 if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.cute-cache-baked" ]]; then
     # Set before workers import CuTe. Export/install merges this exact directory
     # across nodes, including Prims GEMMs compiled by either PD role.
@@ -627,7 +627,7 @@ MOONCAKE_CONFIG
 
     # custom_mooncake_version.sh bakes the fork and its native dependencies into
     # the image. The PyPI distribution owns the same files and would overwrite it.
-    mooncake_manifest=/opt/super-vl-evals/mooncake-build.env
+    mooncake_manifest=/opt/mooncake-build.env
     if [[ -f "\$mooncake_manifest" ]]; then
         echo "Using image-local Mooncake build:"
         cat "\$mooncake_manifest"

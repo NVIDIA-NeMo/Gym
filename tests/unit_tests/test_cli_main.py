@@ -65,6 +65,7 @@ def _split_overrides(overrides: list[str]) -> tuple[set[str], set[str]]:
 
 # `gym <command>` -> the legacy ng_<command> function it dispatches to, for the config-accepting commands.
 CONFIG_COMMANDS = [
+    (["build-containers"], "nemo_gym.orchestration.build_containers:main"),
     (["env", "start"], "nemo_gym.cli.env:run"),
     (["env", "resolve"], "nemo_gym.cli.env:dump_config"),
     (["env", "validate"], "nemo_gym.cli.env:validate"),

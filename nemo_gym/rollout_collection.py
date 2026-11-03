@@ -49,6 +49,7 @@ from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.artifacts.exporters.base import HistogramMetric
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.rollout_rows import (
     NG_DISPATCH_DRAINED_KEY,
@@ -104,6 +105,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.health.types import RunHealthConfig
+from nemo_gym.inference_metrics import InferenceMetricsConfig, collect_inference_metrics
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
@@ -1264,6 +1266,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 class SharedRolloutCollectionConfig(
     RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, RunHealthConfig, BaseNeMoGymCLIConfig
 ):
+    inference_metrics: InferenceMetricsConfig = Field(default_factory=InferenceMetricsConfig)
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -3882,6 +3885,7 @@ class RolloutCollectionHelper(BaseModel):
         if len(dispatched_per_agent) > 1:
             print(f"Dispatching rollouts round-robin across {len(dispatched_per_agent)} agents")
         completed_count = 0
+        task_completion_times_s: list[float] = []
         sources_dropped = False
         collection_succeeded = False
         latency_tracker = DispatchLatencyTracker()
@@ -3929,6 +3933,8 @@ class RolloutCollectionHelper(BaseModel):
                 upload_spool = output_files.enter_context(upload_spool_fpath.open("w+b"))
                 for record in store.selected_records("success").values():
                     upload_spool.write(orjson.dumps(_rollout_for_export(record.read())) + b"\n")
+            await output_files.enter_async_context(collect_inference_metrics(config.inference_metrics))
+
             if run_timing is not None:
 
                 async def _timing_heartbeat() -> None:
@@ -4160,6 +4166,18 @@ class RolloutCollectionHelper(BaseModel):
                 if failure_class is not None:
                     result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.manifest.max_rollout_attempts
                 completed_count += 1
+                # Completed rollouts only: failures and undispatched rows do not
+                # describe task completion time. Each repeat is one observation.
+                if (
+                    exporters_enabled
+                    and not no_persist
+                    and failure_class is None
+                    and not no_result
+                    and rollout_latency_ms is not None
+                    and math.isfinite(rollout_latency_ms)
+                    and rollout_latency_ms >= 0
+                ):
+                    task_completion_times_s.append(rollout_latency_ms / 1000)
                 if config.retain_results_in_memory:
                     rows.append(row)
                     results.append(result)
@@ -4292,7 +4310,13 @@ class RolloutCollectionHelper(BaseModel):
                     tqdm.write(print_str)
 
                     if get_exporters():
-                        step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                        step_metrics: dict[str, float | HistogramMetric] = {
+                            "progress/total/rollouts_per_min": rollouts_per_min
+                        }
+                        if task_completion_times_s:
+                            step_metrics["progress/total/task_completion_time_seconds"] = HistogramMetric(
+                                values=tuple(task_completion_times_s)
+                            )
                         for agent_name, metrics in agent_name_to_metrics.items():
                             scored = agent_name_to_metric_counts[agent_name]["reward"]
                             if not scored:
@@ -4314,7 +4338,11 @@ class RolloutCollectionHelper(BaseModel):
                                 )
                             )
 
-                        export_metrics(step_metrics, step=int(current_pct))
+                        if config.inference_metrics.enabled:
+                            step_metrics["progress/completion_pct"] = current_pct
+                            export_metrics(step_metrics)
+                        else:
+                            export_metrics(step_metrics, step=int(current_pct))
 
                 # Last, so a cancellation here costs a health sample and never the bookkeeping above.
                 health_span_context = completed.dispatch_span_context

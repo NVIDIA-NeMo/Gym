@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 _BOOL = TypeAdapter(bool)
 
 
+@dataclass(frozen=True)
+class HistogramMetric:
+    """An observation snapshot for exporters that support histogram metrics."""
+
+    values: tuple[float, ...]
+
+
 class ExportState(str, Enum):
     SUCCEEDED = "succeeded"
     SKIPPED = "skipped"
@@ -229,7 +236,7 @@ class BaseExporter(Exporter):
 
     @abstractmethod
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
-        """Record scalar metrics. `step` is the training step, or None for a one-shot eval."""
+        """Record metrics supported by this backend. `step` may be None for a one-shot eval."""
 
     @abstractmethod
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:

@@ -75,6 +75,7 @@ _COLLECTION_OPTIONS = frozenset(
         "count_missing_rollouts_as_zero",
         "route_failures_to_sidecar",
         # Timing/queue reports observe the run; they do not change task execution.
+        "inference_metrics",
         "dispatch_start_report_within_s",
         "dispatch_start_report_min_fraction",
         "dispatch_all_started_within_s",
