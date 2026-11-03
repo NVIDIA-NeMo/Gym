@@ -42,6 +42,7 @@ NO_FACTS = {
     "unit_tests": None,
     "node_f1": None,
     "guarded_objectives": None,
+    "native_score": None,
 }
 
 

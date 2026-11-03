@@ -1552,6 +1552,15 @@ def guarded_objectives(r):
         return None
     return {k: finite(metrics.get(k)) for k in
             ("aa_headline", "objectives_passed", "objectives_total", "guardrails_violated", "guardrails_total")}
+def native_score(r):
+    # A native scorer's saved metrics (native_metrics: weighted_score, execution) and whether it saved diagnostics.
+    # Numbers and a flag only; the diagnostics stay local.
+    metrics = r.get("native_metrics")
+    if not isinstance(metrics, dict) or "weighted_score" not in metrics:
+        return None
+    diagnostics = r.get("native_diagnostics")
+    return {"weighted_score": finite(metrics.get("weighted_score")), "execution": finite(metrics.get("execution")),
+            "diagnostics": isinstance(diagnostics, dict) and bool(diagnostics)}
 def judge_verdicts(value):
     # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
     # not parse; the label text stays local.
@@ -1609,6 +1618,7 @@ def grading_facts(r):
         "unit_tests": unit_tests(r),
         "node_f1": node_f1(r),
         "guarded_objectives": guarded_objectives(r),
+        "native_score": native_score(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -4869,6 +4879,24 @@ def _guarded_objective_score(row: Mapping[str, Any]) -> bool:
     return _reward(row) == score["aa_headline"] == expected and _bound_answer(row)
 
 
+def _native_scorer_score(row: Mapping[str, Any]) -> bool:
+    """A native scorer's saved score (``native_metrics``): the row's reward equals the saved ``weighted_score`` in
+    [0, 1], the scorer saved its binary ``execution`` flag and its diagnostics. The score is the scorer's own, not a
+    re-run of it. The saved answer and score are bound."""
+    score = _grading_facts(row).get("native_score")
+    if not isinstance(score, dict):
+        return False
+    weighted = score.get("weighted_score")
+    return (
+        type(weighted) in (int, float)
+        and 0.0 <= weighted <= 1.0
+        and score.get("execution") in (0.0, 1.0)
+        and score.get("diagnostics") is True
+        and _reward(row) == weighted
+        and _bound_answer(row)
+    )
+
+
 def _environment_reward(row: Mapping[str, Any]) -> bool:
     """The environment's own reward record: ``result.reward_info.reward`` equal to the row's reward."""
     recorded = _grading_facts(row).get("environment_reward")
@@ -4891,6 +4919,7 @@ GRADING_ARTIFACTS = (
     ("node_set_f1", _node_set_f1),
     ("session_reward_file", _session_reward_file),
     ("guarded_objective_score", _guarded_objective_score),
+    ("native_scorer_score", _native_scorer_score),
 )
 
 
