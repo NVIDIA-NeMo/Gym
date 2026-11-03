@@ -49,7 +49,12 @@ from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutco
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.config.config_types import (
+    ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
@@ -306,6 +311,9 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     )
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
+    # Resources servers, such as a search server, whose MCP tools each episode grants this agent besides its own
+    # Resources server's. A single_agent_turn Environment Server seeds them; one may also set its own list.
+    tool_servers: list[ResourcesServerRef] = Field(default_factory=list)
     # Whether this agent's rollouts participate in training token capture.
     # Native agents already receive token ids inline and normally leave this disabled.
     # Opaque external harnesses enable it because their returned output has no token ids.

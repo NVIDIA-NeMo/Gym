@@ -32,6 +32,16 @@ environment_servers:
 
 `direct_http` grants the Agent Server scoped HTTP access to the Resources Server. `mcp` requires the Resources seed response to provide HTTP MCP connection metadata. Selecting neither transport sends `tool_accesses=[]` when the agent session is seeded.
 
-With partial-rollout checkpointing on, an episode that grants `mcp` access restarts from its input after a crash instead of continuing from a checkpoint. Its agent holds an MCP session token that names the episode's attempt, and the Resources Server refuses that token once a restore replaces the attempt.
+To grant tools from other Resources servers as well, such as a search server, list them in `tool_servers`. Each episode seeds its own session on every listed server, with the episode's task data, grants that server's MCP tools as a required `MCPToolAccess`, and closes the session at cleanup. A listed server must expose its tools over MCP (`expose_tools_over_mcp: true`). Unset, `tool_servers` falls back to the bound agent's own `tool_servers`, so an agent moved off the `legacy_agent` relay keeps the tool servers its `/run` seeded; set it to `[]` to grant none:
+
+```yaml
+environment_servers:
+  single_agent_turn:
+    tool_servers:
+      - type: resources_servers
+        name: tavily
+```
+
+With partial-rollout checkpointing on, an episode that grants `mcp` access or any tool server restarts from its input after a crash instead of continuing from a checkpoint. Its agent holds an MCP session token that names the episode's attempt, and the Resources Server refuses that token once a restore replaces the attempt.
 
 The server supports `num_workers > 1`. Episode state and cleanup remain local to the worker handling that request. `max_concurrent_episodes` and queue admission are also enforced independently by each worker, so the deployment-wide concurrency limit is approximately `num_workers * max_concurrent_episodes`.
