@@ -21,7 +21,8 @@ Upstream runs the tasks with Harbor on Modal. `prepare.py` changes only what Mod
   no transcript counts as unjudged.
 - **Judges and graders.** The four codex judges (`gpt-5.6-terra`) and the arenahardwriting and healthbench graders
   (`gpt-5-mini`) call `judge_base_url` with the key in `judge_api_key_env`, by that endpoint's model names
-  (`judge_models`). For those two benchmarks upstream also gives the agent an OpenAI key for its own grader. The
+  (`judge_models`). The judges' Codex config names `judge_base_url` as `openai_base_url`, because the pinned
+  Codex CLI ignores `OPENAI_BASE_URL`. For those two benchmarks upstream also gives the agent an OpenAI key for its own grader. The
   agent can read and use that key, so it never gets the judges' key: set `agent_api_key_env` to a separate,
   budget-limited key for the same endpoint. Without one the agent gets no key, and its own grader for
   arenahardwriting and healthbench cannot run (the final evaluation is not affected).

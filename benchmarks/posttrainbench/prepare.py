@@ -7,7 +7,8 @@ The task folders come from ``src/harbor_adapter`` of the pinned PostTrainBench r
 for what Modal provided and Gym does not: the trained weights reach the separate verifier through
 ``/logs/artifacts`` instead of a Modal volume, the agent's Claude Code transcript is staged where the
 judges read it, the judges and graders (and the agent's own grader, for the two benchmarks that give it an
-OpenAI key, with a key of its own) call an OpenAI-compatible endpoint by its model names, and the verifier
+OpenAI key, with a key of its own) call an OpenAI-compatible endpoint by its model names (the judges' Codex
+config names it as ``openai_base_url``), and the verifier
 writes the post-fallback score of ``scripts/collect.py`` as the reward. ``environment/`` changes only in the
 grader model name of those two benchmarks' ``evaluate.py``, and its Dockerfile starts from one prebuilt image
 for all tasks (see README, Images).
@@ -324,6 +325,8 @@ def adapt_task(
         path = task_dir / relative
         if path.is_file():
             path.write_text(rename_judge_models(path.read_text(), judge_models))
+    judge_lib = task_dir / JUDGE_MODEL_FILES[0]
+    judge_lib.write_text(point_judges_at(judge_lib.read_text(), judge_base_url))
     tests = task_dir / "tests"
     utils_dest = tests / UPSTREAM_UTILS_DEST
     utils_dest.parent.mkdir(parents=True, exist_ok=True)
@@ -388,6 +391,21 @@ def rename_judge_models(text: str, judge_models: dict[str, str]) -> str:
     for upstream, endpoint in judge_models.items():
         text = re.sub(rf'(["\']){re.escape(upstream)}\1', rf"\g<1>{endpoint}\g<1>", text)
     return text
+
+
+# The Codex config judge_lib.sh writes for JUDGE_RUNTIME=local (the Harbor verifier), as a printf format.
+CODEX_LOCAL_CONFIG = "printf '[projects."
+
+
+def point_judges_at(judge_lib: str, judge_base_url: str) -> str:
+    """judge_lib.sh with the judges' Codex config naming ``judge_base_url`` as its ``openai_base_url``.
+
+    The pinned Codex CLI (0.144.5) ignores OPENAI_BASE_URL, so without it every judge calls api.openai.com with
+    the judges' key, gets 401 and writes no verdict.
+    """
+    if re.search(r"""['"%\\\s]""", judge_base_url):
+        raise ValueError(f"judge_base_url {judge_base_url!r} cannot go into judge_lib.sh's printf format")
+    return _replace_once(judge_lib, CODEX_LOCAL_CONFIG, f'printf \'openai_base_url = "{judge_base_url}"\\n[projects.')
 
 
 GYM_PREAMBLE = """# Gym (benchmarks/posttrainbench/prepare.py): the judges run as nobody, so the verifier's code is owned by this

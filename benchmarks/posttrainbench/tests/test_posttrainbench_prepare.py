@@ -121,6 +121,56 @@ def test_judge_models_are_renamed_in_code_but_not_in_comments() -> None:
     )
 
 
+# Upstream's src/judges/judge_lib.sh (at prepare.PTB_REVISION): the Codex setup of JUDGE_RUNTIME=local.
+UPSTREAM_CODEX_SETUP = r"""setup_judge_codex_auth() {
+    local job_dir="$1"
+
+    if [ "$JUDGE_RUNTIME" = "local" ]; then
+        export CODEX_API_KEY="${CODEX_API_KEY:-${OPENAI_API_KEY:-}}"
+        export OPENAI_API_KEY="${OPENAI_API_KEY:-$CODEX_API_KEY}"
+        if [ -z "$CODEX_API_KEY" ]; then
+            echo "ERROR: JUDGE_RUNTIME=local needs OPENAI_API_KEY or CODEX_API_KEY" >&2
+            return 1
+        fi
+        mkdir -p "$job_dir/.codex"
+        printf '[projects."%s/task"]\ntrust_level = "trusted"\n\n[shell_environment_policy]\ninherit = "all"\n' \
+            "$job_dir" > "$job_dir/.codex/config.toml"
+        return 0
+    fi
+}
+"""
+
+
+def test_the_judges_codex_config_names_the_judge_endpoint(tmp_path: Path) -> None:
+    # The oci-aga smoke (job 1572795): with upstream's config the pinned Codex called api.openai.com with the
+    # judges' key, got 401 on every judge and wrote no verdict, so each submitted model was masked as unjudged.
+    judge_lib = tmp_path / "judge_lib.sh"
+    judge_lib.write_text(prepare.point_judges_at(UPSTREAM_CODEX_SETUP, "https://judge.example/v1"))
+    job = tmp_path / "job"
+
+    subprocess.run(
+        ["bash", "-c", f'source {judge_lib} && setup_judge_codex_auth "$1"', "_", str(job)],
+        env={"PATH": os.environ["PATH"], "JUDGE_RUNTIME": "local", "CODEX_API_KEY": "judge-key"},
+        check=True,
+    )
+
+    config = tomllib.loads((job / ".codex/config.toml").read_text())
+    assert config["openai_base_url"] == "https://judge.example/v1"
+    assert config["projects"] == {f"{job}/task": {"trust_level": "trusted"}}
+    assert config["shell_environment_policy"] == {"inherit": "all"}
+
+
+@pytest.mark.parametrize("url", ["https://judge.example/v1'; rm -rf /", "https://judge.example/%s", 'https://x/"v1'])
+def test_a_judge_endpoint_the_printf_cannot_carry_is_refused(url: str) -> None:
+    with pytest.raises(ValueError, match="cannot go into judge_lib.sh"):
+        prepare.point_judges_at(UPSTREAM_CODEX_SETUP, url)
+
+
+def test_a_judge_lib_without_the_codex_config_is_refused() -> None:
+    with pytest.raises(ValueError, match="adapter output changed"):
+        prepare.point_judges_at('JUDGE_DEFAULT_MODEL="gpt-5.6-terra"\n', "https://judge.example/v1")
+
+
 def test_adapt_task_rewrites_the_verifier_side_only(tmp_path: Path) -> None:
     source = tmp_path / "source"
     (source / "scripts").mkdir(parents=True)
@@ -130,7 +180,7 @@ def test_adapt_task_rewrites_the_verifier_side_only(tmp_path: Path) -> None:
     (task / "environment/evaluate.py").write_text('JUDGE_MODEL = "gpt-5-mini"\n')
     judge_lib = task / "tests/ptb/src/judges/judge_lib.sh"
     judge_lib.parent.mkdir(parents=True)
-    judge_lib.write_text('JUDGE_DEFAULT_MODEL="gpt-5.6-terra"\n')
+    judge_lib.write_text('JUDGE_DEFAULT_MODEL="gpt-5.6-terra"\n' + UPSTREAM_CODEX_SETUP)
     (task / "tests/test.sh").write_text('#!/bin/bash\necho "=== Verification complete ==="\n')
     (task / "task.toml").write_text(UPSTREAM_TOML)
 
@@ -142,7 +192,9 @@ def test_adapt_task_rewrites_the_verifier_side_only(tmp_path: Path) -> None:
         judge_models=prepare.DEFAULT_JUDGE_MODELS,
     )
 
-    assert judge_lib.read_text() == 'JUDGE_DEFAULT_MODEL="azure/openai/gpt-5.6-terra"\n'
+    assert judge_lib.read_text() == 'JUDGE_DEFAULT_MODEL="azure/openai/gpt-5.6-terra"\n' + prepare.point_judges_at(
+        UPSTREAM_CODEX_SETUP, "https://judge.example/v1"
+    )
     assert (task / "environment/evaluate.py").read_text() == 'JUDGE_MODEL = "azure/openai/gpt-5-mini"\n'
     assert (task / "tests/ptb/scripts/utils.py").read_text() == "# upstream verdict readers\n"
     assert (task / "tests/gym_score.py").read_text() == prepare.GYM_SCORE_SCRIPT.read_text()
