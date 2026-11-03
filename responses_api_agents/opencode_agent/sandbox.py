@@ -204,6 +204,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         self._retained_activations[self.activation_id] = (self.activation_observations, self.activation_trajectory)
         bundles = [bundle for bundle, _ in self._retained_activations.values()]
         self.observations = AgentObservationBundle(
+            schema_version="2.0",
             source="opencode",
             records=[record for bundle in bundles for record in bundle.records],
             gaps=[gap for bundle in bundles for gap in bundle.gaps],

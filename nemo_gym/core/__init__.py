@@ -49,6 +49,7 @@ if TYPE_CHECKING:
         is_registered,
         validate_failure_kind,
     )
+    from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
     from nemo_gym.core.responses_api_types import (
         CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
         REQUIRED_TOKEN_METADATA_FIELDS,
@@ -102,6 +103,8 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "OperationTiming": "operation_timing",
+    "TimingBoundary": "operation_timing",
     "AGENT_INVALID_OUTPUT": "failure_kinds",
     "AGENT_LIMIT": "failure_kinds",
     "AGENT_TIMEOUT": "failure_kinds",

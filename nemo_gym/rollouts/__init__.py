@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         RolloutCollectionHelper,
         SharedRolloutCollectionConfig,
         get_max_rollout_attempts,
+        enrich_run_result,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "enrich_run_result": "rollout_collection",
     "AGENT_REQUEST_FAILED_FAILURE_CLASS": "rollout_collection",
     "DispatchLatencyTracker": "rollout_collection",
     "ELAPSED_S_KEY": "health.timeouts",
