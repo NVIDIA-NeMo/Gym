@@ -4,7 +4,6 @@
 import ast
 import json
 import os
-import runpy
 import shlex
 import shutil
 import subprocess
@@ -13,18 +12,25 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.orchestration.build_containers import BuildContainerConfig, FlashInferBuilder, FlashInferConfig
 
-SCRIPT = Path(__file__).resolve().parents[2] / "benchmarks/nemotron_3.5_super/build_containers.py"
+
+@pytest.fixture
+def container_config(tmp_path):
+    return BuildContainerConfig(
+        input_container_fpath=tmp_path / "base.sqsh",
+        output_container_fpath=tmp_path / "output.sqsh",
+    )
 
 
 @pytest.fixture
 def builder(tmp_path):
-    module = runpy.run_path(str(SCRIPT))
-    return module["FlashInferBuilder"](
-        config=module["FlashInferConfig"](
+    return FlashInferBuilder(
+        config=FlashInferConfig(
             repo="repo with spaces $(touch INJECTED)",
             branch="main",
             invalidate_modules=["fused_moe_trtllm_sm100", "checkpointing_ssu_*", "replayssm_materialize_*"],
+            cpus_per_task=128,
         ),
         log_file=tmp_path / "build.log",
     )
@@ -32,12 +38,12 @@ def builder(tmp_path):
 
 def test_flashinfer_command_requires_preflight(builder):
     with pytest.raises(RuntimeError, match="preflight"):
-        builder.get_command_str()
+        builder.get_srun_command_str()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("git") is None, reason="Requires git")
-async def test_preflight_quotes_local_repo_and_pins_commit(builder, tmp_path, monkeypatch):
+async def test_preflight_quotes_local_repo_and_pins_commit(builder, container_config, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     repo = tmp_path / builder.config.repo
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
@@ -63,21 +69,24 @@ async def test_preflight_quotes_local_repo_and_pins_commit(builder, tmp_path, mo
     await builder.perform_preflight_checks()
     # Moving the branch after preflight must not change the queued command's SHA.
     subprocess.run([*commit[:-1], "second"], check=True)
-    command = shlex.split(builder.get_command_str())
-    assert command[-3:] == [str(repo), expected, ",".join(builder.config.invalidate_modules)]
+    builder.get_srun_command_str()
+    env = builder.get_srun_env_vars(container_config)
+    assert env["FLASHINFER_REPO"] == str(repo)
+    assert env["FLASHINFER_HEAD_SHA"] == expected
+    assert env["FLASHINFER_INVALIDATE_MODULES"] == ",".join(builder.config.invalidate_modules)
     assert not (tmp_path / "INJECTED").exists()
     builder.config.branch = "missing"
     with pytest.raises(RuntimeError, match="Preflight git repo"):
         await builder.perform_preflight_checks()
     with pytest.raises(RuntimeError, match="preflight"):
-        builder.get_command_str()
+        builder.get_srun_command_str()
 
 
 @pytest.mark.parametrize("selection", [[], ["checkpointing_ssu_*", "replayssm_materialize_*"]])
-def test_generated_command_passes_literal_configuration_and_cleans_up(builder, tmp_path, selection):
+def test_generated_command_passes_literal_configuration_and_cleans_up(builder, container_config, tmp_path, selection):
     builder._head_sha = "a" * 40
     builder.config.invalidate_modules = selection
-    command = builder.get_command_str()
+    command = builder.get_srun_command_str()
     argv = shlex.split(command)
     assert argv[:2] == ["bash", "-c"]
     subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
@@ -85,7 +94,7 @@ def test_generated_command_passes_literal_configuration_and_cleans_up(builder, t
         ast.parse(block.split("\nPY\n", 1)[0])
 
     # Stop at fetch rather than installing anything. Exercise the actual shell
-    # prologue, positional arguments, exported environment, and EXIT trap.
+    # prologue, builder environment, and EXIT trap.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     git = bin_dir / "git"
@@ -109,6 +118,7 @@ def test_generated_command_passes_literal_configuration_and_cleans_up(builder, t
             "BASE_IMAGE": "base.sqsh",
             "CAPTURE_FILE": str(capture),
             "FLASHINFER_INVALIDATE_MODULES": "unwanted_inherited_value",
+            **builder.get_srun_env_vars(container_config),
         },
         capture_output=True,
         text=True,
@@ -128,4 +138,4 @@ def test_flashinfer_command_rejects_invalid_patterns(builder, pattern):
     builder._head_sha = "a" * 40
     builder.config.invalidate_modules = [pattern]
     with pytest.raises(ValueError, match="Invalid FlashInfer module"):
-        builder.get_command_str()
+        builder.get_srun_command_str()
