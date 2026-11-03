@@ -213,6 +213,11 @@ NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
 INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 INVALID_REQUEST_PARAMETER = "invalid_request_parameter"
+# A ``provider_oom_killed`` of the agent's own sandbox during its command that the policy made a final zero
+# (``agent_phase_oom`` in ``nemo_gym.rollouts.rollout_recovery``): the model exhausted the benchmark's memory limit,
+# so it is the model's result. The kind alone stays evaluation-side (a setup or verification kill, or a row without
+# the policy's final-zero markers); the gate derives this class from a counted terminal row.
+AGENT_SANDBOX_OOM_KILLED = "agent_sandbox_oom_killed"
 GATE_DERIVED_KINDS: frozenset[str] = frozenset(
     {
         TRUNCATED_ANSWER,
@@ -223,6 +228,7 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
         AGENT_TIMEOUT_INFRASTRUCTURE,
         INVALID_OUTPUT_BUDGET,
         INVALID_REQUEST_PARAMETER,
+        AGENT_SANDBOX_OOM_KILLED,
     }
 )
 
@@ -231,7 +237,8 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
 # A model fault is the evaluated model's own outcome under the benchmark protocol: its request rejected or timed out
 # (``MODEL_POLICY_RESPONSE_TIMEOUT``: a deployment's slowness is on the model's side by default; the acceptance gate's
 # ``policy_timeout_counts_as_model`` setting can move it to the server class), its context limit, its agent's limit, timeout, invalid output or a command the
-# harness refused (the model issued it), or an answer it left cut off, empty or malformed. The evaluation gate counts
+# harness refused (the model issued it), an agent-stage memory kill of its own sandbox that the policy counted as its
+# final zero (``AGENT_SANDBOX_OOM_KILLED``), or an answer it left cut off, empty or malformed. The evaluation gate counts
 # these by kind and never fails health on them; RL treats them as the policy's own failures. A server fault is a
 # server that did not start, a model transport error, a model server's 5xx reply or an agent timeout whose window held
 # such a fault (``AGENT_TIMEOUT_INFRASTRUCTURE``): evaluation-side. Any other kind is
@@ -248,6 +255,7 @@ MODEL_FAULT_KINDS: frozenset[str] = frozenset(
         TRUNCATED_ANSWER,
         EMPTY_ANSWER,
         MALFORMED_ANSWER,
+        AGENT_SANDBOX_OOM_KILLED,
     }
 )
 SERVER_FAULT_KINDS: frozenset[str] = frozenset(

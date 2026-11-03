@@ -42,6 +42,13 @@ def test_the_gate_uses_the_shared_class_lists():
     } <= failure_kinds.MODEL_FAULT_KINDS
 
 
+def test_a_memory_kill_is_the_models_fault_only_as_the_gate_derived_class():
+    # The provider's kind stays evaluation-side by itself; the gate derives the model class from a counted terminal row.
+    assert fault_class("provider_oom_killed") == "server"
+    assert "provider_oom_killed" not in failure_kinds.MODEL_FAULT_KINDS
+    assert fault_class("agent_sandbox_oom_killed") == "model"
+
+
 def test_a_command_the_harness_refused_is_the_models_fault():
     from collections import Counter
 
@@ -61,6 +68,7 @@ def test_a_command_the_harness_refused_is_the_models_fault():
         "non_policy_model_rejection",
         "invalid_output_budget",
         "invalid_request_parameter",
+        "agent_sandbox_oom_killed",
     ],
 )
 def test_the_gate_derived_classes_are_registered_but_no_producer_may_emit_them(kind):
