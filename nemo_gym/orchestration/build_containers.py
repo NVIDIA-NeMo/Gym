@@ -74,7 +74,6 @@ class WarmupConfig(BaseNeMoGymCLIConfig):
                 "SBATCH_ACCOUNT",
                 "SBATCH_PARTITION",
                 "SBATCH_QOS",
-                "SBATCH_TIMELIMIT",
                 "SBATCH_GPUS_PER_NODE",
                 "SBATCH_GRES",
             }:
@@ -694,7 +693,6 @@ class BuildContainerHelper(BaseModel):
                 CONTAINER=str(output),
                 SAVE_WARMED_CONTAINER=str(warmed),
                 SBATCH_WAIT="1",
-                SBATCH_TIMELIMIT="00:30:00",
             )
             # sbatch prints its ID before --wait completes. Record it without
             # changing the launcher's output, so interruption can cancel that job.

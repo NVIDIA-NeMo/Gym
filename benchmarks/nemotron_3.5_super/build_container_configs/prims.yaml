@@ -35,6 +35,7 @@ shared_run_warmup_env_vars:
 warmup:
   env:
     _copy: shared_run_warmup_env_vars
+    SBATCH_TIMELIMIT: "01:00:00"
     # Compilation
     MAX_JOBS: 64
     FLASHINFER_NVCC_THREADS: 1
