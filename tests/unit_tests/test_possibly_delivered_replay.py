@@ -136,3 +136,49 @@ def test_a_legacy_run_error_without_an_agent_event_reruns_only_after_a_5xx(statu
     del row["_ng_failure_events"]["agent"]
     del row["_ng_failure_events"]["dispatch"]["cause_id"]
     assert has_unclassified_execution_failure(row) is refused
+
+
+def test_an_omitted_failure_report_never_blocks_resume_by_itself():
+    # The transport's size bound dropped the report: its events say nothing either way, so the row's own record decides.
+    omitted = _route_failure_row(_ng_failure_events_omitted=True)
+    assert not has_unclassified_execution_failure(omitted)
+    # The selected event may be one the bound dropped: still no veto from the transport.
+    partial = _route_failure_row(_ng_failure_events_omitted=True, _ng_failure_id="dropped")
+    assert not has_unclassified_execution_failure(partial)
+    # A kept answer is still never run again.
+    assert has_unclassified_execution_failure(
+        _lost_connection_row(_ng_failure_events_omitted=True, _ng_failure_response=_ANSWER)
+    )
+
+
+def test_a_judge_failure_resume_leaves_to_recovery_is_counted_and_named(tmp_path, capsys):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"_ng_task_index": 1, "_ng_rollout_index": 0}]
+    source = tmp_path / "source.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def prepare():
+        return rows, RunManifest.create(source, rows, {}, {}).model_copy(update={"max_rollout_attempts": 3})
+
+    output = artifacts / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for index, failure_class in ((0, "judge_failed"), (1, "agent_request_failed")):
+            row = dict(rows[index])
+            store.allocate_attempt(row)
+            failure = _lost_connection_row(_ng_failure_class=failure_class)
+            failure["_ng_failure_record"] = failure["_ng_failure_record"] | {
+                "run_id": store.manifest.run_id,
+                "episode_id": {"rollout_id": f"{index}-0", "attempt": row["_ng_attempt_index"]},
+                "failure": failure["_ng_failure_record"]["failure"] | {"failure_kind": failure_class},
+            }
+            store.record_outcome(row | failure)
+    reader = RolloutStore.read(output)
+    capsys.readouterr()
+    # The lost connection is run again; the judge failure is left to verification recovery, and says so.
+    assert [row["_ng_task_index"] for row in reader.pending()] == [1]
+    assert "1 failed rollout(s) are not run again" in capsys.readouterr().out
+    coverage = reader.coverage()
+    assert coverage["stopped_not_retried"] == 1 and coverage["retryable"] == 1
+    # It is one of the final failures resume does not run again, now named apart from terminal ones.
+    assert coverage["failed_final"] == 1 and coverage["failed_not_final"] == 1

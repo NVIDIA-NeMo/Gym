@@ -143,8 +143,10 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     if possibly_delivered and holds_response(row):
         return True
     if row.get("_ng_failure_events_omitted"):
-        # Missing causal evidence cannot authorize another agent execution.
-        return True
+        # The transport's size bound omitted the report, so its events say nothing either way: the row's own failure
+        # record and kind decide, as for a row without a report. The answer gates above (and a saved generation,
+        # recorded grade or partial response, which every caller checks beside this) still keep a saved answer.
+        return False
     events = row.get("_ng_failure_events")
     selected = row.get("_ng_failure_id")
     if "_ng_failure_id" not in row:

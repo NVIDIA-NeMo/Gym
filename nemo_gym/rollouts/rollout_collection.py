@@ -3186,6 +3186,8 @@ class RolloutCollectionHelper(BaseModel):
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
 - {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
+- {len(unclassified - successes_seen - terminal_keys - maxed_out)} kept answers, judge failures or unclassified \
+executions → not run again (left to recovery)
 - {len(input_rows)} rows that still need to be run"""
         )
 

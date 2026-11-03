@@ -553,6 +553,21 @@ class RolloutRecords:
             ) >= max_attempts
         return exhausted
 
+    def stopped_count(self, max_attempts: int) -> int:
+        """Failed rollouts resume does not run again although they are neither final nor at their cap: a kept answer
+        or a judge failure (left to verification recovery) and an unclassified execution (left to recovery)."""
+        return sum(
+            self.disposition(identity) == "failure"
+            and not self._final(identity)
+            and self.failure_count(identity) < max_attempts
+            and not self._retryable(identity)
+            for identity in self.expected
+        )
+
+    def _final(self, identity: str) -> bool:
+        payload = self.payloads.get((identity, self.latest.get(identity)))
+        return payload is not None and (payload.terminal or payload.final_zero)
+
     def pending(self, max_attempts: int) -> list[dict]:
         pending = []
         for identity, original in self.expected.items():
@@ -610,6 +625,9 @@ class RolloutRecords:
             ),
             "counted_failures": sum(self.failure_count(identity) for identity in self.expected),
             "failure_budget_exhausted": self.exhausted_count(max_attempts),
+            # Of failed_final: failed rollouts neither terminal nor at their cap that resume still does not run again,
+            # left to (verification) recovery.
+            "stopped_not_retried": self.stopped_count(max_attempts),
             "retryable": sum(
                 self._retryable(identity) and self.failure_count(identity) < max_attempts for identity in self.expected
             ),
