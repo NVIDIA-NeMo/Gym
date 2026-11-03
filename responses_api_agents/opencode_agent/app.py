@@ -494,7 +494,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             db_path = data_home / "opencode" / "opencode.db"
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
-                ([], {"input_tokens": 0, "output_tokens": 0}) if timed_out else parse_opencode_session(db_path)
+                ([], {"input_tokens": 0, "output_tokens": 0})
+                if timed_out
+                else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
             observations = AgentObservationBundle(source="opencode")
             if collect_observations:
@@ -1010,7 +1012,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 ):
                     continue
                 try:
-                    items = parse_opencode_export({"messages": [{"info": message["info"], "parts": [part]}]})
+                    items = parse_opencode_export(
+                        {"messages": [{"info": message["info"], "parts": [part]}]},
+                        gym_reasoning=self.config.model_server is not None,
+                    )
                     if part.get("type") == "tool":
                         state = part.get("state") or {}
                         for item in items:

@@ -47,6 +47,7 @@ from responses_api_agents.opencode_agent.app import (
     _parse_opencode_session,
     parse_opencode_session,
 )
+from responses_api_agents.opencode_agent.observability import split_gym_reasoning
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 
 
@@ -148,7 +149,56 @@ class TestExtractInstruction:
         assert system is None
 
 
+GYM_REPLY = "<think>try 2 + 2</think>\n\nthe answer is 4"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (GYM_REPLY, ("try 2 + 2", "the answer is 4")),
+        ("<think>call a tool first</think>", ("call a tool first", "")),
+        (" <think>r</think> answer", (None, " <think>r</think> answer")),
+        ("answer <think>r</think>", (None, "answer <think>r</think>")),
+        ("<think>unclosed", (None, "<think>unclosed")),
+    ],
+)
+def test_only_the_reasoning_block_a_reply_starts_with_is_split(text, expected) -> None:
+    assert split_gym_reasoning(text) == expected
+
+
 class TestParseOpencodeSession:
+    @pytest.mark.parametrize("gym_reasoning", [True, False])
+    def test_a_gym_reply_reasoning_block_is_not_the_answer(self, tmp_path, gym_reasoning) -> None:
+        tool_turn = "<think>call a tool first</think>"
+        db = _session_db(
+            tmp_path, [("assistant", [{"type": "text", "text": tool_turn}, {"type": "text", "text": GYM_REPLY}])]
+        )
+        items, _ = parse_opencode_session(db, gym_reasoning=gym_reasoning)
+        texts = [item.content[0].text for item in items]
+        assert texts == (["the answer is 4"] if gym_reasoning else [tool_turn, GYM_REPLY])
+
+    @pytest.mark.parametrize("model_ref", [ModelServerRef(type="responses_api_models", name="policy"), None])
+    def test_a_gym_reply_reasoning_block_is_observed_as_reasoning(self, tmp_path, model_ref) -> None:
+        db = _session_db(
+            tmp_path,
+            [("assistant", [{"type": "step-start"}, {"type": "text", "text": GYM_REPLY}, {"type": "step-finish"}])],
+        )
+        trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0")
+        [invocation] = _invocations(_parse_opencode_session(db, "fallback", trajectory, model_ref=model_ref))
+        [turn] = trajectory.turns
+        answers = [part["text"] for item in turn.answer if item["type"] == "message" for part in item["content"]]
+        if model_ref is None:
+            assert [item.type for item in invocation.conversation] == ["message"]
+            assert invocation.conversation[0].content[0].text == GYM_REPLY
+            assert turn.reasoning_content is None
+            assert answers == [GYM_REPLY]
+        else:
+            assert [item.type for item in invocation.conversation] == ["reasoning", "message"]
+            assert invocation.conversation[0].summary[0].text == "try 2 + 2"
+            assert invocation.conversation[1].content[0].text == "the answer is 4"
+            assert [part["text"] for part in turn.reasoning_content] == ["try 2 + 2"]
+            assert answers == ["the answer is 4"]
+
     def test_missing_db(self, tmp_path) -> None:
         items, usage = parse_opencode_session(tmp_path / "nope.db")
         assert items == []

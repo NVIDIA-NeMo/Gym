@@ -353,6 +353,46 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     agent.server_client.post.assert_not_called()
 
 
+def test_http_splits_the_reasoning_block_a_gym_reply_starts_with(setup, tmp_path):
+    # The Gym Model Server returns a reply's reasoning ahead of its text as <think>...</think>, which OpenCode stores
+    # as a text part; graded output and observations carry it as reasoning, not as the answer.
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][1]
+    tool = assistant["parts"][1]
+    assistant["parts"] = [
+        {"type": "text", "text": "<think>run pwd</think>"},
+        tool,
+        {"type": "text", "text": "<think>it printed /app</think>\n\nAnswer: /app"},
+    ]
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        output = result.json()["output"]
+        assert [item["type"] for item in output] == [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "message",
+        ]
+        assert output[0]["summary"][0]["text"] == "run pwd"
+        assert output[3]["summary"][0]["text"] == "it printed /app"
+        assert output[4]["content"][0]["text"] == "Answer: /app"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    invocation = next(
+        record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+    )
+    persisted = [item for item in invocation["conversation"] if item.get("role") != "user"]
+    assert [item["type"] for item in persisted] == [item["type"] for item in output]
+    assert persisted[4]["content"][0]["text"] == "Answer: /app"
+
+
 @pytest.mark.parametrize("part_type", ["text", "reasoning"])
 @pytest.mark.parametrize("text", ["literal <think> opening", "literal </think> closing", " <think>x</think> \n"])
 def test_http_preserves_typed_literal_think_tags_and_unique_ids(setup, tmp_path, part_type, text):

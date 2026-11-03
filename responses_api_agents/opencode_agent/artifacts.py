@@ -40,7 +40,11 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from responses_api_agents.opencode_agent.observability import append_opencode_turns, opencode_tool_outcome
+from responses_api_agents.opencode_agent.observability import (
+    append_opencode_turns,
+    opencode_tool_outcome,
+    split_gym_reasoning,
+)
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -186,20 +190,32 @@ def _parse_opencode_session(
 
         text = part.get("text")
         if ptype == "text" and isinstance(text, str) and text.strip():
-            if message_id in summary_text:
+            gym_reasoning = None
+            if role == "assistant" and model_ref is not None:
+                gym_reasoning, text = split_gym_reasoning(text)
+            if message_id in summary_text and text:
                 summary_text[message_id].append(text)
             if role == "user" and part.get("ignored") is not True:
                 conversation.append(NeMoGymEasyInputMessage(role="user", content=text))
             elif role == "assistant":
-                item = NeMoGymResponseOutputMessage(
-                    id=row["id"],
-                    content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-                conversation.append(item)
-                first_item_id_by_message.setdefault((session_id, message_id), row["id"])
+                if gym_reasoning is not None:
+                    reasoning_id = f"{row['id']}-reasoning"
+                    conversation.append(
+                        NeMoGymResponseReasoningItem(
+                            id=reasoning_id, summary=[NeMoGymSummary(type="summary_text", text=gym_reasoning)]
+                        )
+                    )
+                    first_item_id_by_message.setdefault((session_id, message_id), reasoning_id)
+                if text:
+                    item = NeMoGymResponseOutputMessage(
+                        id=row["id"],
+                        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                    conversation.append(item)
+                    first_item_id_by_message.setdefault((session_id, message_id), row["id"])
             continue
         if ptype == "reasoning" and role == "assistant" and isinstance(text, str) and text.strip():
             conversation.append(
@@ -409,7 +425,9 @@ def _parse_opencode_session(
     )
 
 
-def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) -> tuple[list[Any], dict[str, int]]:
+def parse_opencode_session(
+    db_path: Path, *, root_session_only: bool = False, gym_reasoning: bool = False
+) -> tuple[list[Any], dict[str, int]]:
     """Convert an OpenCode session database into the existing Gym response shape.
 
     ``root_session_only`` restricts the transcript to sessions without a
@@ -417,7 +435,9 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
     (stored with ``parent_id``), and its parts would otherwise interleave with
     the root conversation. Parts are ordered by creation time and then id,
     OpenCode's own order, because parallel tool parts can share a creation
-    millisecond.
+    millisecond. With ``gym_reasoning``, set when OpenCode calls a Gym Model
+    Server, the reasoning block that starts a reply's text is left out like
+    OpenCode's own reasoning parts.
     """
     output_items: list[Any] = []
     input_tokens = 0
@@ -448,15 +468,17 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
             output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
             reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
-            output_items.append(
-                NeMoGymResponseOutputMessage(
-                    id=f"msg-{len(output_items)}",
-                    content=[NeMoGymResponseOutputText(type="output_text", text=part["text"], annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
+            text = split_gym_reasoning(part["text"])[1] if gym_reasoning else part["text"]
+            if text:
+                output_items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg-{len(output_items)}",
+                        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
                 )
-            )
         elif roles.get(row["message_id"]) == "assistant" and ptype == "tool":
             state = part.get("state") or {}
             call_id = part.get("callID") or f"call-{uuid4().hex[:8]}"
@@ -496,8 +518,14 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
 parse_opencode_observations = _parse_opencode_session
 
 
-def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
-    """Convert persisted OpenCode export messages into Gym conversation items."""
+def parse_opencode_export(
+    opencode_export: Dict[str, Any], *, gym_reasoning: bool = False
+) -> List[NeMoGymResponseOutputItem]:
+    """Convert persisted OpenCode export messages into Gym conversation items.
+
+    With ``gym_reasoning``, set when OpenCode calls a Gym Model Server, the reasoning block that starts a reply's text
+    becomes a reasoning item.
+    """
     messages = []
     for message in opencode_export["messages"]:
         if message["info"]["role"] == "user":
@@ -511,17 +539,28 @@ def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymRespon
             messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
         elif message["info"]["role"] == "assistant":
             for part in message["parts"]:
-                # OpenCode already supplies typed parts; literal think tags are content.
+                # OpenCode types its own parts, so think tags in text are the model's literal text, except the
+                # reasoning block a Gym Model Server reply starts with.
                 if part["type"] == "text":
-                    messages.append(
-                        NeMoGymResponseOutputMessage(
-                            id=f"msg_{uuid4().hex}",
-                            role="assistant",
-                            status="completed",
-                            type="message",
-                            content=[NeMoGymResponseOutputText(type="output_text", text=part["text"], annotations=[])],
+                    reasoning, text = split_gym_reasoning(part["text"]) if gym_reasoning else (None, part["text"])
+                    if reasoning is not None:
+                        messages.append(
+                            NeMoGymResponseReasoningItem(
+                                id=f"rs_{uuid4().hex}",
+                                type="reasoning",
+                                summary=[NeMoGymSummary(type="summary_text", text=reasoning)],
+                            )
                         )
-                    )
+                    if text or reasoning is None:
+                        messages.append(
+                            NeMoGymResponseOutputMessage(
+                                id=f"msg_{uuid4().hex}",
+                                role="assistant",
+                                status="completed",
+                                type="message",
+                                content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+                            )
+                        )
                 elif part["type"] == "reasoning":
                     messages.append(
                         NeMoGymResponseReasoningItem(
