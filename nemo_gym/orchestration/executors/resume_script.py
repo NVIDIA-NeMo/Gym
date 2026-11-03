@@ -591,7 +591,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             # A server that did not start (its port taken, for instance) before the run saved anything: there is
             # nothing to resume, and the failure is the infrastructure's, so the segment starts the run again fresh,
             # once, as an infra retry. A run with saved rollouts keeps the saved-evidence path below.
-            if [[ ! -e "$OUTPUT_DIR/artifacts/rollouts_manifest.json" ]]; then
+            if [[ "$_prev_state" == FAILED && ! -e "$OUTPUT_DIR/artifacts/rollouts_manifest.json" ]]; then
                 _gym_run_dir="${{OUTPUT_DIR%/*}}"
                 if [[ -e "$OUTPUT_DIR/{fresh_restart_marker_name}.$_prev_slurm_job_id" ]] || (( _retries >= _gym_max_retries )); then
                     _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {server_start_failed} on job $_prev_slurm_job_id before any rollout was saved; fresh restart exhausted; resubmit fresh: gym eval resubmit ${{_gym_run_dir##*/}} ${{OUTPUT_DIR##*/}}"
