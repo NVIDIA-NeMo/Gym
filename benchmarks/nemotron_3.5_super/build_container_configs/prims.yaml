@@ -32,6 +32,12 @@ warmup:
     ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE: 4
     SLURM_COMMENT: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"720","reason":"benchmarking","description":"POR - https://nvaiinfa.aha.io/ideas/ideas/NMP-I-791"}}'
     MOUNTS: ${oc.env:PWD}:${oc.env:PWD},${oc.env:PWD}:/opt/Gym
+    # Debug env vars
+    CUDA_LOG_FILE: stderr
+    PYTHONFAULTHANDLER: "1"
+    CUTE_DSL_FILTER_STACKTRACE: "0"
+    CUTE_DSL_LOG_TO_CONSOLE: "1"
+    CUTE_DSL_LOG_LEVEL: "10
 
 run:
   env:
