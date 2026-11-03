@@ -9,6 +9,16 @@ readonly ci_dir
 repo_root="$(cd "${ci_dir}/../.." && pwd)"
 readonly repo_root
 
+# No arguments retains the portable, unsharded core contract.
+if [[ $# -ne 0 && ( $# -ne 2 || ! "$1" =~ ^[0-9]+$ || ! "$2" =~ ^[0-9]+$ ) ]]; then
+    echo "Usage: $0 [SHARD_INDEX NUM_SHARDS]" >&2
+    exit 2
+fi
+if [[ $# -eq 2 ]] && (( 10#$2 == 0 || 10#$1 >= 10#$2 )); then
+    echo "Expected 0 <= SHARD_INDEX < NUM_SHARDS" >&2
+    exit 2
+fi
+
 cd "${repo_root}"
 # shellcheck source=scripts/ci/sanitize_env.sh
 source "${ci_dir}/sanitize_env.sh"
@@ -25,10 +35,13 @@ source "${ci_dir}/setup_dev.sh"
 # extras must be present here.
 uv sync --extra dev --extra ray --extra telemetry --extra mlflow --extra wandb
 pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'
+if [[ $# -eq 2 ]]; then
+    pytest_addopts+=" --core-shard-index=$1 --core-num-shards=$2"
+fi
 if [[ -n "${GYM_CI_JUNIT_DIR:-}" ]]; then
     mkdir -p "${GYM_CI_JUNIT_DIR}"
     printf -v junit_xml_path '%q' "${GYM_CI_JUNIT_DIR%/}/core.xml"
-    pytest_addopts+=" --junitxml=${junit_xml_path} --junit-prefix=nemo_gym.core"
+    pytest_addopts+=" --junitxml=${junit_xml_path} --junit-prefix=nemo_gym.core -o junit_family=xunit1"
 fi
 export PYTEST_ADDOPTS="${pytest_addopts}"
 exec ng_dev_test

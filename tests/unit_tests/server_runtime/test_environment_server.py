@@ -30,6 +30,7 @@ from nemo_gym.server_runtime.episode_types import (
     EpisodeFailure,
     MaterializedTask,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 class _TaskInput(BaseModel):
@@ -567,39 +568,29 @@ def test_only_transport_failures_retry_without_a_status(error: Exception, retrya
     assert is_retryable_dependency_error(error) is retryable
 
 
-class _EvidenceFailure(EpisodeFailure):
-    partial_response: str | None = None
-
-
 def test_dependency_failure_keeps_the_dependencys_reason_and_classifies_it() -> None:
     refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
     refusal.response_content = b'{"detail":"agent does not support sandbox access"}'
 
-    failure = dependency_failure(
-        refusal, failure_model=_EvidenceFailure, stage="agent", partial_response="partial"
-    ).failure
+    failure = dependency_failure(refusal, stage="agent", partial_response="partial")
 
-    assert type(failure) is _EvidenceFailure
-    assert failure.stage == "agent"
-    assert failure.terminal is True
-    assert failure.failure_reason.startswith("422, message='Unprocessable Content'")
-    assert "agent does not support sandbox access" in failure.failure_reason
-    assert failure.partial_response == "partial"
+    assert isinstance(failure, NgFailureEvent)
+    assert failure.event.stage == "agent"
+    assert failure.episode_terminal is True
+    assert failure.event.failure_reason.startswith("422, message='Unprocessable Content'")
+    assert "agent does not support sandbox access" in failure.event.failure_reason
+    assert failure.episode_evidence["partial_response"] == "partial"
 
 
 def test_dependency_failure_names_the_error_type_bounds_the_reason_and_honors_terminal() -> None:
-    failure = dependency_failure(
-        TimeoutError("x" * 3000), failure_model=EpisodeFailure, stage="cleanup", name_error_type=True
-    ).failure
-    assert failure.terminal is False
-    assert failure.failure_reason.startswith("TimeoutError: xxx")
-    assert len(failure.failure_reason) == 2000
+    failure = dependency_failure(TimeoutError("x" * 3000), stage="cleanup", name_error_type=True)
+    assert failure.episode_terminal is False
+    assert failure.event.failure_reason.startswith("TimeoutError: xxx")
+    assert len(failure.event.failure_reason) == 2000
 
-    forced = dependency_failure(
-        TimeoutError("timed out"), failure_model=EpisodeFailure, stage="cleanup", terminal=True
-    ).failure
-    assert forced.terminal is True
-    assert forced.failure_reason == "timed out"
+    forced = dependency_failure(TimeoutError("timed out"), stage="cleanup", terminal=True)
+    assert forced.episode_terminal is True
+    assert forced.event.failure_reason == "timed out"
 
 
 def test_a_protocol_may_derive_the_episode_deadline_per_request() -> None:
@@ -665,3 +656,72 @@ async def test_a_request_cancelled_while_its_bound_resolves_releases_its_admissi
     response = await server.run_request(_request())
     assert response.failure is not None and "RuntimeError: snapshot lost" in response.failure.failure_reason
     assert not server._admission.locked()
+
+
+@pytest.mark.parametrize("primary_kind", [None, "model_request_error", "judge_failed"])
+@pytest.mark.parametrize("cleanup_error", [None, "connection", "timeout", "typed"])
+def test_cleanup_observations_preserve_the_episode_outcome(primary_kind, cleanup_error, caplog):
+    from nemo_gym.server_runtime.base_environment_server import handled_episode_failure
+
+    primary = None
+    if primary_kind:
+        primary = handled_episode_failure(
+            failure_kind=primary_kind,
+            failure_reason="original failure",
+            terminal=True,
+            stage="verification" if primary_kind == "judge_failed" else "agent",
+            operation="episode",
+        )
+    cause = NgFailureEvent(
+        boundary="resources_server",
+        failure_kind="session_release_failed",
+        failure_reason="release not confirmed",
+        operation="resources.close",
+        event_id="original-cleanup-cause",
+    )
+
+    class Environment(_EnvironmentServer):
+        async def run(self, request, cleanup):
+            async def close():
+                if cleanup_error == "connection":
+                    raise ConnectionError("cleanup connection lost")
+                if cleanup_error == "timeout":
+                    raise TimeoutError("cleanup deadline")
+                if cleanup_error == "typed":
+                    raise cause
+
+            cleanup.register_cleanup("resources session", close)
+            if primary is not None:
+                raise primary
+            return await super().run(request, cleanup)
+
+    server = Environment(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    reply = TestClient(server.setup_webserver()).post("/run", json=_request().model_dump(mode="json"))
+    assert reply.status_code == 200
+    response = _Response.model_validate(reply.json())
+    if primary is None:
+        assert response.result == "result" and response.failure is None
+        assert response.failure_report is None or response.failure_report.failure_id is None
+    else:
+        assert response.failure.failure_kind == primary_kind and response.failure.terminal is True
+        assert response.failure_report.failure_id == primary.event_id
+        assert response.failure_report.events[primary.event_id].operation == "episode"
+    cleanup_events = [
+        e
+        for e in (response.failure_report.events.values() if response.failure_report else [])
+        if e.operation == "episode.cleanup"
+    ]
+    assert len(cleanup_events) == int(cleanup_error is not None)
+    if cleanup_error:
+        [event] = cleanup_events
+        assert event.failure_kind == "session_release_failed" and event.stage == "cleanup"
+        assert event.failure_reason == "Episode cleanup failed: resources session"
+        assert response.episode_id == _request().episode_id
+        assert "Episode cleanup" in caplog.text
+        if cleanup_error == "typed":
+            assert event.cause_id == cause.event_id
+            assert response.failure_report.events[cause.event_id].operation == "resources.close"
+        else:
+            assert event.foreign_error.exception_type.endswith(
+                "TimeoutError" if cleanup_error == "timeout" else "ConnectionError"
+            )

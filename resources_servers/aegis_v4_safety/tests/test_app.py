@@ -21,7 +21,9 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import ReverifyMode
-from nemo_gym.verification import JudgeError, exercise_verifier_fixture
+from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification import exercise_verifier_fixture
+from nemo_gym.verification.judge import is_judge_failure
 
 
 async def test_verifier_fixture() -> None:
@@ -232,8 +234,9 @@ class TestVerification:
     async def test_judge_transport_failure_raises_judge_error(self) -> None:
         server, client = _server()
         client.post = AsyncMock(side_effect=ConnectionError("offline"))
-        with pytest.raises(JudgeError, match="offline"):
+        with pytest.raises(NgFailureEvent, match="offline") as failure:
             await server.verify(_request("A response"))
+        assert is_judge_failure(failure.value)
 
     async def test_reverification_is_stateless(self) -> None:
         server, _ = _server()

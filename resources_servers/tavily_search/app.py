@@ -58,7 +58,8 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 from resources_servers.tavily_search.task_data import TaskData
 
@@ -667,7 +668,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 metrics=self._session_id_to_metrics.get(session_id) or TavilySearchMetrics(),
             )
             if judge_error is not None:
-                raise JudgeError(judge_error)
+                raise judge_error
             return response
         finally:
             if session_id not in self._typed_sessions:
@@ -742,7 +743,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _verify_answer_with_judge(
         self, question: str, ground_truth: str, response: str
-    ) -> tuple[JudgeEvaluation, Optional[str]]:
+    ) -> tuple[JudgeEvaluation, Optional[Exception]]:
         async def _get_judge_response(
             question: str, ground_truth: str, response: str
         ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
@@ -786,8 +787,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         try:
             judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
-        except JudgeError as e:
-            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), str(e)
+        except JUDGE_FAILURES as e:
+            if not is_judge_failure(e):
+                raise
+            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), e
         judge_evaluation = _grade_sample(judge_create_params, judge_response)
         return judge_evaluation, None
 
