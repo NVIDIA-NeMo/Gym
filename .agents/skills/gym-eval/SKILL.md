@@ -206,7 +206,7 @@ takes `--walltime-reason`; `--extend-retries` and `--extend-attempts` take none,
 records the count and its kind, so put the reason in your report. A long-task benchmark whose 16-hour cap
 was spent with rows missing continues with `--max-walltime 24:00:00 --walltime-reason "<why>"`.
 
-A masked result that kept its saved answer is never sampled again by default, and when it has neither a gradeable artifact nor a recorded grade nothing can measure it. `--recover --rerun-masked-without-artifact --rerun-reason "<why>"` is the explicit opt-in: it appends one line (time, reason, each identity with its attempt count) to `artifacts/rerun-masked-journal.jsonl`, and each listed row then counts one failed attempt, runs again within its attempt cap and is superseded by the new attempt. The reason is required, `--inspect` never writes the journal, and only rows the plan finds qualifying at that moment are approved.
+A masked result that kept its saved answer is never sampled again by default, and when it has neither a gradeable artifact nor a recorded grade nothing can measure it. `--recover --rerun-masked-without-artifact --rerun-reason "<why>"` is the explicit opt-in: it appends one line (time, reason, each identity with its attempt count) to `artifacts/rollouts_rerun_masked_journal.jsonl`, and each listed row then counts one failed attempt, runs again within its attempt cap and is superseded by the new attempt. The reason is required, `--inspect` never writes the journal, and only rows the plan finds qualifying at that moment are approved.
 
 ## 5. Retriable and final
 

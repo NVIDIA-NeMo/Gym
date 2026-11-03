@@ -2067,7 +2067,7 @@ COMMANDS = {
                     "but have neither a gradeable artifact nor a recorded grade (a resume keeps them and re-verification "
                     "cannot grade them; --inspect names them). Each counts one failed attempt within its attempt cap. "
                     "The identities the plan finds qualifying are journaled with the reason in the run's artifacts "
-                    "(rerun-masked-journal.jsonl); nothing reopens them otherwise.",
+                    "(rollouts_rerun_masked_journal.jsonl); nothing reopens them otherwise.",
                 ),
             ),
             Flag(

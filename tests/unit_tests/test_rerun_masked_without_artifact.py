@@ -425,3 +425,18 @@ def test_the_command_passes_the_stripped_reason_to_recovery_and_inspect(monkeypa
     called = seen["inspect" if inspect_only else "recover"]
     assert called["rerun_masked_without_artifact"] is True and called["rerun_reason"] == "why"
     capsys.readouterr()
+
+
+def test_an_approval_belongs_to_the_rollouts_file_it_was_journaled_beside(tmp_path):
+    # Two rollouts files in one directory: an approval journaled for one does not reopen the other's rows.
+    from nemo_gym.rollouts.rollout_recovery import load_rerun_masked_approvals
+    from nemo_gym.utils.path_utils import rerun_masked_journal_path_for
+
+    first, second = tmp_path / "rollouts.jsonl", tmp_path / "other_rollouts.jsonl"
+    rerun_masked_journal_path_for(first).write_text(
+        json.dumps({"reason": "r", "identities": [{"identity": [3, 1], "attempt": 0, "attempts": 1}]}) + "\n"
+    )
+
+    assert rerun_masked_journal_path_for(first).name == RERUN_MASKED_JOURNAL_NAME
+    assert load_rerun_masked_approvals(first) == frozenset({(3, 1, 0)})
+    assert load_rerun_masked_approvals(second) == frozenset()
