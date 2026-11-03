@@ -201,9 +201,24 @@ gym eval run --no-serve \
 
 1. **`POST /seed_session`** — Creates an environment instance and calls `env.reset()`.
 2. **`POST /<tool_name>`** (MCP) or **`POST /step`** (non-MCP) — Calls `env.step(action)` and accumulates reward.
-3. **`POST /verify`** — Returns accumulated reward, closes the environment, cleans up session. If `verifier_metadata.expected_output` is present, checks stdout match instead.
+3. **`POST /verify`** — Returns accumulated reward, closes the environment, cleans up session.
 
 For MCP environments, tool endpoints are discovered at startup via `ListToolsAction`.
+
+### Sessions under an Environment Server
+
+An Environment Server such as `single_agent_turn` seeds with a typed `ResourcesSeedSessionRequest` instead of the legacy
+body. The environment instance is keyed by its `resources_session_id`, and the session cookie is bound to that ID so
+the agent's tool calls reach it. Seeding the same ID again for the same episode keeps the instance it already has; a
+seed that binds the ID to another episode is refused with 409. The rows carry no task fields, so the seed reads nothing from `task_data`.
+
+After `/verify`, the Environment Server calls `/close_session`. It closes the environment instance if `/verify` has not
+already done so, and succeeds for an unknown or already-closed session. If `env.close()` raises, the close fails and
+can be retried. A seed that reuses a closed `resources_session_id` is refused with 409.
+
+A tool call (`/step` or `/<tool_name>`) for a session the server no longer holds fails with 404
+(`failure_kind: session_lost`), and `/verify` for it returns a masked sample (`mask_sample: true`) instead of a
+reward of 0.
 
 ## Tests
 

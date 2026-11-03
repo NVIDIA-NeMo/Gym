@@ -21,6 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.openenv.app import (
     OpenEnvResourcesServer,
     OpenEnvResourcesServerConfig,
@@ -357,8 +360,8 @@ class TestMCPAdapter:
         assert data["result"] == "echoed: hello"
         assert data["error"] is None
 
-    def test_mcp_tool_call_no_session_returns_error(self) -> None:
-        """MCP tool call without seed_session should return an error."""
+    def test_mcp_tool_call_no_session_is_lost(self) -> None:
+        """MCP tool call without seed_session should answer 404 with the session_lost failure kind."""
         _patch_openenv_mcp_types()
 
         mock_tools = [_make_mock_tool("echo_message", {"message": {"type": "string"}})]
@@ -376,9 +379,9 @@ class TestMCPAdapter:
         client = _make_test_client(server)
 
         response = client.post("/echo_message", json={"message": "hello"})
-        data = response.json()
-        assert data["error"] is not None
-        assert "No active session" in data["error"]
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == "session_lost"
+        assert "No active OpenEnv session" in response.json()["detail"]["message"]
 
     def test_mcp_tool_call_after_done_returns_error(self) -> None:
         """MCP tool call after done=True should return an error."""
@@ -522,8 +525,8 @@ class TestVerify:
         assert len(server._sessions) == 0
         mock_env_instance.close.assert_called_once()
 
-    def test_verify_without_session_returns_zero_reward(self) -> None:
-        """verify() without a prior seed_session should return reward=0.0."""
+    def test_verify_without_session_is_masked(self) -> None:
+        """verify() without a live session has no reward to report, so the sample is masked."""
         server = _make_server(is_mcp=False)
         client = _make_test_client(server)
 
@@ -544,6 +547,8 @@ class TestVerify:
         assert response.status_code == 200
         data = response.json()
         assert data["reward"] == 0.0
+        assert data["mask_sample"] is True
+        assert data["failure_kind"] == "session_lost"
 
 
 class TestSchemaConversion:
@@ -635,15 +640,14 @@ class TestErrorHandling:
         assert "error" in data
         assert "Invalid move" in data["error"]
 
-    def test_step_no_session_returns_error(self) -> None:
-        """Calling /step without seed_session should return an error."""
+    def test_step_no_session_is_lost(self) -> None:
+        """Calling /step without seed_session should answer 404 with the session_lost failure kind."""
         server = _make_server(is_mcp=False)
         client = _make_test_client(server)
 
         response = client.post("/step", json={})
-        data = response.json()
-        assert "error" in data
-        assert "No active session" in data["error"]
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == "session_lost"
 
 
 class TestIntegrationMCPLifecycle:
@@ -789,3 +793,142 @@ class TestIntegrationNonMCPLifecycle:
         assert data["reward"] == pytest.approx(1.0)  # 0.4 + 0.6
         assert len(server._sessions) == 0
         mock_env_instance.close.assert_called_once()
+
+
+VERIFY_BODY = {
+    "responses_create_params": {"input": "test"},
+    "response": {
+        "id": "test",
+        "output": [],
+        "created_at": 0,
+        "model": "test",
+        "object": "response",
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+}
+
+
+def _typed_seed(resources_session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
+    # The rows carry no task fields, so an Environment Server's task_data is empty.
+    return ResourcesSeedSessionRequest(
+        resources_session_id=resources_session_id,
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="openenv", task_id="0"),
+        task_data={},
+    )
+
+
+def _typed_close(resources_session_id: str = "resources-session") -> dict:
+    return ResourcesCloseSessionRequest(
+        resources_session_id=resources_session_id, episode_id=EpisodeId(rollout_id="rollout", attempt=0)
+    ).model_dump(mode="json")
+
+
+def _session_server(**kwargs) -> tuple[OpenEnvResourcesServer, list[MagicMock]]:
+    """A non-MCP server whose env class makes a fresh mock env per seed; returns the envs it made."""
+    envs: list[MagicMock] = []
+
+    def make_env():
+        envs.append(_make_mock_env(**kwargs))
+        return envs[-1]
+
+    server = _make_server(is_mcp=False)
+    server._env_class = MagicMock(side_effect=make_env)
+    server._action_class = MagicMock()
+    return server, envs
+
+
+class TestResourcesSessions:
+    def test_resources_session_contract(self) -> None:
+        server, envs = _session_server()
+
+        check_resources_session_contract(
+            server.setup_webserver(),
+            _typed_seed("contract-session"),
+            keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server._sessions,
+            verify_body=VERIFY_BODY,
+        )
+        # The seeded session and the one whose seed reply was lost; the repeated seed reused the first env.
+        assert len(envs) == 2
+        for env in envs:
+            env.close.assert_called_once()
+
+    def test_typed_seed_binds_cookie_and_repeated_seed_keeps_env(self) -> None:
+        step_obs = MagicMock(reward=0.5, done=False)
+        step_obs.model_dump.return_value = {"reward": 0.5, "done": False}
+        server, envs = _session_server(step_obs=step_obs)
+
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/step", json={}).status_code == 200
+            # A seed retried after its reply was lost arrives without the cookie.
+            client.cookies.clear()
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            response = client.post("/verify", json=VERIFY_BODY)
+
+        assert len(envs) == 1
+        assert response.json()["reward"] == pytest.approx(0.5)
+        assert response.json()["mask_sample"] is False
+
+    def test_close_after_verify_succeeds_without_closing_twice(self) -> None:
+        server, envs = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            assert client.post("/verify", json=VERIFY_BODY).status_code == 200
+            response = client.post("/close_session", json=_typed_close())
+
+        assert response.status_code == 200
+        envs[0].close.assert_called_once()
+        assert server._sessions == {}
+        assert server._session_episodes == {}
+
+    def test_failed_env_close_raises_and_a_retried_close_releases(self) -> None:
+        server, envs = _session_server()
+
+        with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+            client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            envs[0].close.side_effect = RuntimeError("env would not stop")
+            response = client.post("/close_session", json=_typed_close())
+            assert response.status_code == 500
+            # Not recorded as closed: the env is still held and a later seed is not fenced.
+            assert "resources-session" in server._sessions
+
+            envs[0].close.side_effect = None
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        assert server._sessions == {}
+        assert envs[0].close.call_count == 2
+
+    def test_tool_calls_after_close_are_lost(self) -> None:
+        server, envs = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            client.post("/close_session", json=_typed_close())
+            response = client.post("/step", json={})
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == "session_lost"
+        envs[0].step.assert_not_called()
+
+    def test_failed_reset_closes_the_env(self) -> None:
+        server, envs = _session_server()
+
+        def failing_env():
+            env = _make_mock_env()
+            env.reset.side_effect = RuntimeError("reset failed")
+            envs.append(env)
+            return env
+
+        server._env_class = MagicMock(side_effect=failing_env)
+
+        with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+            response = client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+
+        assert response.status_code == 500
+        envs[0].close.assert_called_once()
+        assert server._sessions == {}
