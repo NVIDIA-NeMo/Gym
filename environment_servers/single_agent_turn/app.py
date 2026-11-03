@@ -9,20 +9,22 @@ from uuid import uuid4
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    OutcomeAction,
+    agent_outcome_policy,
 )
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
+    TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
-    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -565,7 +567,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return reward
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         agent_config = get_first_server_config_dict(
             self.server_client.global_config_dict,
             self.config.agent_server.name,

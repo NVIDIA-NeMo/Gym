@@ -12,7 +12,7 @@ import pytest
 from fastapi import HTTPException
 
 import nemo_gym.client.http_client
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
