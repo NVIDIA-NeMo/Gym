@@ -1568,6 +1568,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if agent_num_tool_calls is None:
             agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
         reset_count = getattr(body.response, "reset_count", 0) or 0
+        # browsecomp_agent marks a rollout it stopped at rollout_timeout_s.
+        timed_out = bool(getattr(body.response, "timed_out", False))
         sid = request.session[SESSION_ID_KEY]
         if self._fence.closed_episode(sid) is not None:
             # Masked although the score reads only the response, so every server under the resources session contract
@@ -1581,13 +1583,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 num_tool_calls=agent_num_tool_calls,
                 reset_count=reset_count,
                 metrics=TavilySearchMetrics(),
+                timed_out=int(timed_out),
             )
 
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
-        # browsecomp_agent marks a rollout it stopped at rollout_timeout_s.
-        timed_out = bool(getattr(body.response, "timed_out", False))
 
         judge_error = None
         if timed_out:
