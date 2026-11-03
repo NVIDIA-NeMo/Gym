@@ -102,6 +102,7 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -111,7 +112,6 @@ from nemo_gym.observability.model_calls import (
     observability_enabled_from_config,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
@@ -189,6 +189,7 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
+from nemo_gym.agents.skills import SkillsConfig, load_skill_directory
 from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -199,25 +200,25 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
-from nemo_gym.skills import SkillsConfig, load_skill_directory
-from nemo_gym.task_materialization import TASK_ID_FIELDS
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
+    TokenCaptureConfig,
     TokenCaptureStore,
-    TokenIdCaptureConfig,
     clear_token_captures_for_rollouts,
     installed_token_source,
     mask_incomplete_when_attributed_from_config,
-    token_id_capture_dirs_from_config,
+    token_capture_dirs_from_config,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_config, token_id_capture_enabled_for_agent
-from nemo_gym.token_id_capture.delivery import (
+from nemo_gym.models.token_capture.config import token_capture_config as read_token_capture_config
+from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
-from nemo_gym.token_id_capture.protocols import CaptureLedger
+from nemo_gym.models.token_capture.protocols import CaptureLedger
 
 
 logger = logging.getLogger(__name__)
@@ -314,7 +315,7 @@ NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 NG_RESULT_TYPE_KEY = "_ng_result_type"
 NG_TASK_ID_KEY = "_ng_task_id"
 # Provenance stamps preparation writes into a materialized row's task_data (the same strings as
-# nemo_gym.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
+# nemo_gym.data.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
 # The collector copies only these from a row onto its record: task_data is dataset-controlled, and any
 # other `_ng_*` key there (`_ng_no_persist`, `_ng_failure_class`, ...) would steer the collector.
 NG_DIGEST_KEY = "_ng_digest"
@@ -3798,7 +3799,7 @@ class RolloutCollectionHelper(BaseModel):
         # Resolve the training-token store directory once.
         # Training capture is independent of evaluation capture.
         # An empty result disables training-token capture.
-        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        token_capture_dirs = token_capture_dirs_from_config(global_config)
         # The finalizer reads and freezes records through this source.
         # The source is absent when capture or response rebuilding is disabled.
         # A framework-owned transport may rebuild through its own source.
@@ -3806,7 +3807,7 @@ class RolloutCollectionHelper(BaseModel):
         # Reruns still clear deterministic rollout ids before dispatch.
         token_source = None
         owned_token_source = None
-        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        token_capture_config = TokenCaptureConfig.model_validate(global_config)
         if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
             token_source = installed_token_source()
 
@@ -3822,7 +3823,7 @@ class RolloutCollectionHelper(BaseModel):
         def token_capture_enabled_for_row(row: dict[str, Any]) -> bool:
             agent_name = self._agent_name_for_row(row, global_config)
             if agent_name not in token_capture_enabled_by_agent:
-                token_capture_enabled_by_agent[agent_name] = token_id_capture_enabled_for_agent(
+                token_capture_enabled_by_agent[agent_name] = token_capture_enabled_for_agent(
                     global_config, agent_name, config=token_capture_config
                 )
             return token_capture_enabled_by_agent[agent_name]
@@ -4980,7 +4981,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if route_failures_to_sidecar and server_client.global_config_dict.get("token_id_capture", {}).get(
             "external_staging", False
         ):
-            failure_ledger = token_id_capture_config(server_client.global_config_dict).build_lineage_store()
+            failure_ledger = read_token_capture_config(server_client.global_config_dict).build_lineage_store()
             if not isinstance(failure_ledger, CaptureLedger):
                 raise ValueError("routing externally staged rollout failures requires a shared CaptureLedger")
         if environment_server_name is not None:

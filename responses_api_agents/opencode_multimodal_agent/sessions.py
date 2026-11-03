@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 
 from fastapi import HTTPException
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
 from responses_api_models.vllm_model.app import VLLMModel
 from responses_api_models.vllm_model.app_opencode import OpenCodeVLLMModel
 from responses_api_models.vllm_model.image_guard import IMAGE_LIMIT_NOTICE, limit_request_images

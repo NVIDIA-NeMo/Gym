@@ -13,8 +13,8 @@ from fastapi import HTTPException
 from PIL import Image
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.client import ServerClient
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
 from responses_api_agents.opencode_multimodal_agent.app import (
     OpenCodeMultimodalAgent,

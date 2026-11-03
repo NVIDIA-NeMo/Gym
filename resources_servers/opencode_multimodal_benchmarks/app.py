@@ -9,14 +9,14 @@ from typing import Any, ClassVar
 import aiohttp
 from pydantic import Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import request
+from nemo_gym.core import NeMoGymChatCompletion
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import NeMoGymChatCompletion
-from nemo_gym.server_utils import request
+from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
 from resources_servers.opencode_multimodal_benchmarks.verifier import (

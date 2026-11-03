@@ -4,7 +4,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 
 
 @pytest.mark.parametrize("reasoning", [None, "", "Inspect the image first."])

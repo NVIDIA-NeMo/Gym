@@ -6,9 +6,9 @@ import asyncio
 
 import aiohttp
 
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import NeMoGymChatCompletion
-from nemo_gym.server_utils import request
+from nemo_gym.client import request
+from nemo_gym.core import NeMoGymChatCompletion
+from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.opencode_multimodal_benchmarks.agentx_rubric import (
     OFFICIAL_GOAL_SYSTEM_PROMPT,
     judge_prompt,

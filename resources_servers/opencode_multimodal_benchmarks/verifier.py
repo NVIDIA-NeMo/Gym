@@ -4,8 +4,8 @@
 
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.judge import JudgeError
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.verification import JudgeError
 from resources_servers.opencode_multimodal_benchmarks.agentx_rubric import final_response
 from resources_servers.opencode_multimodal_benchmarks.mcq import (
     MCQ_SCORER,

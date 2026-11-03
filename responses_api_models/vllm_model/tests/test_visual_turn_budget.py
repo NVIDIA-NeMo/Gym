@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException, Request
 
-from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import rollout_context
 from responses_api_agents.opencode_multimodal_agent.eval_budget import FINAL_TURN_NOTICE, EvalTurnBudget
 from responses_api_models.vllm_model.app import VLLMModel
 from responses_api_models.vllm_model.visual_eval import VisualEvalModel

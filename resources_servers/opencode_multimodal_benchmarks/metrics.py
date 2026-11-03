@@ -4,7 +4,7 @@
 
 from typing import Any
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME
 
 
 def average_repeats(tasks: list[list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], bool]:

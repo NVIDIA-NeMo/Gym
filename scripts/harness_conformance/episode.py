@@ -10,6 +10,7 @@ import importlib
 import importlib.util
 import io
 import json
+import math
 import os
 import shutil
 import socket
@@ -22,12 +23,11 @@ import uvicorn
 import yaml
 from fastapi import Request, Response
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-from nemo_gym.base_responses_api_model import NeMoGymResponse
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, SimpleResponsesAPIAgent
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
 
-from .provider import Probe
+from .provider import OpenClawProbe, Probe
 from .registry import HARNESSES
 from .scenarios import SCENARIOS
 
@@ -135,6 +135,10 @@ def _config(
         agent["timeout"] = timeout
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
+    if harness == "openclaw":
+        agent["timeout"] = math.ceil(timeout)
+        if not use_agent_sessions:
+            agent["workspace_root"] = str(directory / "workspace")
     if harness == "opencode":
         # Auxiliary title/summary requests would consume the scripted policy replies.
         agent["opencode_config"] = {"permission": {"bash": "allow"}}
@@ -211,7 +215,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe = Probe(
+    probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
+    probe = probe_cls(
         scenario,
         directory,
         sandbox_workspace_root=directory / "workspace"

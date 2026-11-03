@@ -75,7 +75,7 @@ For session-based evaluation, compose a benchmark catalog configuration with
 [`opencode_sessions.yaml`](../../benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml)
 and a Gym sandbox-provider configuration. Supply a Linux task image with Python,
 Pillow, numpy, scipy and OpenCV, and a model endpoint reachable from that image.
-The example uses the pinned OpenCode runtime's default system prompt, 131072 tokens,
+The example preserves the pinned evaluation profile’s frozen OpenCode prompt, 131072 tokens,
 and a 55-turn budget with ten grace turns. The agent and model gateway share the
 budget; configure both when changing it.
 

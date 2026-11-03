@@ -1,57 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Compose after one of the benchmark catalog configs, plus a sandbox provider.
+# Compose after one catalog config, plus model and sandbox-provider configurations.
+config_paths:
+- benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml
 visual_agent:
+  _inherit_from: visual_opencode
   responses_api_agents:
     _delete_key: simple_agent
     opencode_multimodal_agent:
-      entrypoint: eval.py
       num_workers: 1
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      model: ${policy_model_name}
-      opencode_version: 1.17.11
       command: opencode
+      sandbox: null
+      env:
+        _delete_key: PATH
       sandbox_provider: sandbox
       sandbox_config:
         image: ???
         workdir: /testbed
         ttl_s: 18000
-      system_prompt: null
-      build_system_prompt: null
-      context_window: 131072
-      max_output_tokens: 131072
-      max_turns: 65
-      max_images: null
-      max_source_pixels: 150000000
-      preserve_image_format: true
-      timeout: 14400
-      command_exec_timeout: 120
-      token_id_capture: false
-      tool_rewards: null
-      compaction_auto: false
-      capture_message_ids: true
-      turn_budget:
-        regular_turns: 55
-        grace_turns: 10
-        grace_tool_turns: 2
-        grace_tool_calls: 2
-policy_model:
-  responses_api_models:
-    vllm_model:
-      entrypoint: visual_eval.py
-      num_workers: 1
-      max_images: null
-      return_token_id_information: false
-      uses_reasoning_parser: true
-      chat_template_kwargs:
-        truncate_history_thinking: false
-      uses_interleaved_reasoning: true
-      extra_body:
-        skip_special_tokens: false
-      turn_budget:
-        regular_turns: 55
-        grace_turns: 10
-        grace_tool_turns: 2
-        grace_tool_calls: 2

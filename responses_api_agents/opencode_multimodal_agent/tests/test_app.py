@@ -14,9 +14,9 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.app import OpenCodeAgent
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
 from responses_api_agents.opencode_multimodal_agent import app
@@ -531,7 +531,7 @@ def test_sessions_accept_provider_configuration():
 
 
 def test_missing_session_provider_is_a_final_http_refusal(monkeypatch):
-    from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+    from nemo_gym.agents import AgentSeedSessionRequest
     from nemo_gym.core import EpisodeId, TaskId
     from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 

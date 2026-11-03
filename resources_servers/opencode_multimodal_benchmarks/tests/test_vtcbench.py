@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification import JudgeError
 from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksServer
 from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request, server  # noqa: F401
 from resources_servers.opencode_multimodal_benchmarks.vtcbench import judge_score, rule_score

@@ -9,8 +9,8 @@
 from fastapi import Request
 from pydantic import Field
 
-from nemo_gym.base_responses_api_model import Body
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.models import Body
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.image_guard import limit_request_images
 

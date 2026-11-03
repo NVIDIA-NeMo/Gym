@@ -15,13 +15,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
-from nemo_gym.chat_streaming import synthesize_chat_completion_sse
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion
-from nemo_gym.responses_streaming import (
+from nemo_gym.models import (
+    ModelCallCaptureConfig,
     flatten_namespace_tools,
+    install_model_call_capture,
     restore_namespace_tool_calls,
+    synthesize_chat_completion_sse,
     synthesize_responses_sse,
 )
 from nemo_gym.server_runtime import (
@@ -35,7 +36,7 @@ from nemo_gym.verification import call_judge
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec")
+SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec")
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
@@ -134,24 +135,27 @@ class Probe:
                 return name, args, namespaces
         return None
 
+    def _accepted_result_ids(self, call: dict, history: list) -> set[str]:
+        """Require the original ID unless a provider-specific replay rule applies."""
+        return {call["id"]}
+
     def _observe_tool_results(self, body: dict) -> None:
         history = body.get("messages", body.get("input", []))
+        if not isinstance(history, list):
+            history = []
         for call in self.tool_calls:
-            results = (
-                [
-                    item
-                    for item in history
-                    if isinstance(item, dict)
-                    and (
-                        item.get("role") == "tool"
-                        and item.get("tool_call_id") == call["id"]
-                        or item.get("type") == "function_call_output"
-                        and item.get("call_id") == call["id"]
-                    )
-                ]
-                if isinstance(history, list)
-                else []
-            )
+            result_ids = self._accepted_result_ids(call, history)
+            results = [
+                item
+                for item in history
+                if isinstance(item, dict)
+                and (
+                    item.get("role") == "tool"
+                    and item.get("tool_call_id") in result_ids
+                    or item.get("type") == "function_call_output"
+                    and item.get("call_id") in result_ids
+                )
+            ]
             call["result_seen"] = call["result_seen"] or any(
                 call["token"] in json.dumps(item.get("content", item.get("output"))) for item in results
             )
@@ -424,3 +428,29 @@ class Probe:
             app.post(prefix + "/verify")(observe_verifier(verify, enabled=True))
             app.post(prefix + "/bash")(bash)
         return app
+
+
+class OpenClawProbe(Probe):
+    """Match OpenClaw replay IDs while retaining the original captured identities."""
+
+    def _accepted_result_ids(self, call: dict, history: list) -> set[str]:
+        result_ids = super()._accepted_result_ids(call, history)
+        # The pinned custom-provider replay strips the underscore from our short
+        # UUID IDs. Require the matching assistant call as well as the tool result.
+        replay_id = call["id"].replace("_", "")
+        for item in history:
+            if not isinstance(item, dict) or item.get("role") != "assistant":
+                continue
+            for replay in item.get("tool_calls") or []:
+                function = replay.get("function") or {}
+                try:
+                    arguments = json.loads(function.get("arguments", ""))
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    replay.get("id") == replay_id
+                    and function.get("name") == call["name"]
+                    and arguments == call["arguments"]
+                ):
+                    result_ids.add(replay_id)
+        return result_ids

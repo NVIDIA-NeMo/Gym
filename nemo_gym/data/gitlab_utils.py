@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from os import environ
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import requests
+
+from nemo_gym.config.config_types import (
+    ConfigError,
+    DownloadJsonlDatasetGitlabConfig,
+    MLFlowConfig,
+    UploadJsonlDatasetGitlabConfig,
+)
+from nemo_gym.server_runtime.base_server import get_global_config_dict
+
+
+if TYPE_CHECKING:
+    from mlflow import MlflowClient
+
+
+def has_gitlab_storage_credentials(config: MLFlowConfig) -> bool:
+    return bool(config.mlflow_tracking_uri and config.mlflow_tracking_token)
+
+
+def gitlab_storage_extras(config: Any) -> tuple[str, ...]:
+    """The install extras GitLab dataset storage needs when `config` carries its credentials.
+
+    A driver that installs Gym must add these, or a prepare step that downloads from GitLab fails.
+    """
+    return ("mlflow",) if has_gitlab_storage_credentials(MLFlowConfig.model_validate(config)) else ()
+
+
+def create_mlflow_client() -> "MlflowClient":  # pragma: no cover
+    # mlflow is an optional extra (`nemo-gym[mlflow]`): the GitLab dataset/model-registry
+    # integration is built on it, but a plain Gym install must not require it just to import
+    # this module. Import lazily here so the failure is scoped to this call and actionable.
+    try:
+        from mlflow import MlflowClient
+    except ImportError as e:
+        raise ConfigError(
+            "GitLab dataset storage needs the mlflow extra. Install with:\n  pip install nemo-gym[mlflow]"
+        ) from e
+
+    global_config = get_global_config_dict()
+    config = MLFlowConfig.model_validate(global_config)
+
+    # Only the registry half of MLFlowConfig is needed here; experiment/run name are exporter-only.
+    if not has_gitlab_storage_credentials(config):
+        raise ConfigError(
+            "GitLab dataset storage needs MLflow credentials. Add to env.yaml:\n"
+            "  mlflow_tracking_uri: <your_gitlab_uri>\n"
+            "  mlflow_tracking_token: <your_gitlab_token>"
+        )
+
+    environ["MLFLOW_TRACKING_TOKEN"] = config.mlflow_tracking_token
+    client = MlflowClient(tracking_uri=config.mlflow_tracking_uri)
+
+    return client
+
+
+def upload_jsonl_dataset(
+    config: UploadJsonlDatasetGitlabConfig,
+) -> None:  # pragma: no cover
+    client = create_mlflow_client()
+    from mlflow.exceptions import RestException
+
+    try:
+        client.create_registered_model(config.dataset_name)
+    except RestException:
+        pass
+
+    tags = {"gitlab.version": config.version}
+    try:
+        model_version = client.get_model_version(config.dataset_name, config.version)
+    except RestException:
+        model_version = client.create_model_version(config.dataset_name, config.version, tags=tags)
+
+    run_id = model_version.run_id
+    client.log_artifact(run_id, config.input_jsonl_fpath, artifact_path="")
+
+    filename = Path(config.input_jsonl_fpath).name
+    DownloadJsonlDatasetGitlabConfig
+    print(f"""Download this artifact:
+gym dataset download --storage gitlab \\
+    +dataset_name={config.dataset_name} \\
+    +version={config.version} \\
+    +artifact_fpath={filename} \\
+    +output_fpath={config.input_jsonl_fpath}
+""")
+
+
+def download_jsonl_dataset(
+    config: DownloadJsonlDatasetGitlabConfig,
+) -> None:  # pragma: no cover
+    # TODO: There is probably a much better way to do this, but it is not clear at the moment.
+    client = create_mlflow_client()
+    from mlflow.artifacts import get_artifact_repository
+    from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
+
+    model_version = client.get_model_version(config.dataset_name, config.version)
+    run_id = model_version.run_id
+    repo = get_artifact_repository(artifact_uri=f"runs:/{run_id}", tracking_uri=client.tracking_uri)
+    artifact_uri = repo.repo.artifact_uri
+    download_link = f"{artifact_uri.rstrip('/')}/{config.artifact_fpath.lstrip('/')}"
+
+    response = requests.get(
+        download_link,
+        headers={"Authorization": f"Bearer {MLFLOW_TRACKING_TOKEN.get()}"},
+    )
+    # Relative outputs such as `data/x.jsonl` only exist in the Gym root; create the directory like the HF download.
+    output_fpath = Path(config.output_fpath)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_fpath, "w") as f:
+        f.write(response.content.decode())
+
+
+def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
+    client = create_mlflow_client()
+    from mlflow.exceptions import RestException
+
+    # model_name in gitlab is case sensitive
+    try:
+        client.get_registered_model(model_name)
+    except RestException as e:
+        print(f"[Nemo-Gym] - Model '{model_name}' not found in Gitlab: {e}")
+        return False
+
+    return True
+
+
+def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover
+    client = create_mlflow_client()
+    client.delete_registered_model(model_name)
+
+
+# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "upload_jsonl_dataset_cli": "nemo_gym.cli.dataset",
+        "download_jsonl_dataset_cli": "nemo_gym.cli.dataset",
+    },
+)

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
 from responses_api_models.vllm_model.app import VLLMModel
 from responses_api_models.vllm_model.app_opencode import (
     OPENCODE_1_17_11_MAX_STEPS,
@@ -66,8 +66,8 @@ def test_final_answer_budget_metadata_reaches_engine(reserve):
 
     from starlette.requests import Request
 
-    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
+    from nemo_gym.client import ServerClient
 
     config = OpenCodeVLLMModelConfig(
         host="localhost",

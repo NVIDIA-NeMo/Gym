@@ -12,14 +12,14 @@ from pathlib import Path
 
 from PIL import Image
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.rollout_observability import AgentInvocation
+from nemo_gym.trajectory import AgentInvocation
 from responses_api_agents.opencode_agent.app import _parse_opencode_session, parse_opencode_session
 
 

@@ -15,17 +15,17 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.base_responses_api_agent import Body
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import Body
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentEpisode, ObservationGap, TrajectoryRecord
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.trajectory import AgentEpisode, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.app import (
     _INTERNAL_OBSERVATIONS_KEY,
     _INTERNAL_TRAJECTORY_KEY,
@@ -97,6 +97,8 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
 
     @model_validator(mode="after")
     def validate_episode_config(self) -> "OpenCodeMultimodalAgentConfig":
+        if self.system_prompt_mode != "append":
+            raise ValueError("Use build_system_prompt in the evaluation or combined entrypoint to replace the prompt")
         if self.sandbox_provider is not None and self.sandbox is not None:
             raise ValueError("Choose session sandbox_provider or local sandbox, not both")
         if self.final_answer_reserve is not None:

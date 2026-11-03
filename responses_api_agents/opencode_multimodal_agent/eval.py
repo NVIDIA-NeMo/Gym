@@ -14,9 +14,9 @@ from aiohttp import ClientResponseError
 from fastapi import HTTPException, Request
 from pydantic import Field, model_validator
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import _parse_opencode_session, parse_opencode_session
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_multimodal_agent.app import (
