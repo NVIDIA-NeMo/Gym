@@ -66,7 +66,10 @@ def test_a_real_error_beside_unverified_health_is_failed():
     collected.score = None
     _, _, task = _gate(collected)
     assert task["status"] == "FAILED"
-    assert "score unavailable: no requested metric was read" in task["errors"]
+    assert (
+        "score unavailable: no requested metric was read (pass --score-key, and --score-agent or --score-environment for a Gym aggregate)"
+        in task["errors"]
+    )
     assert any(w.startswith("response/trial health unknown") for w in task["warnings"])
 
 

@@ -4602,12 +4602,12 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
-        # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
-        # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
         if config.require_complete and (
             stop := await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
         ):
             raise stop
+        # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
+        # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,

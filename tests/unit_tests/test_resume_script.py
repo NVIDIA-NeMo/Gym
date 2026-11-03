@@ -1003,6 +1003,22 @@ def test_a_sentinel_that_cannot_read_its_follow_up_stops_with_unknown_accounting
     )
     assert (tmp_path / ".gym_job_chain").read_text() == "100\n"
     assert _sbatch_calls(tmp_path) == []
+    # The stop names the operator's continuation; the marker keeps only the reason its readers match.
+    assert "gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT" in result.stdout
+    assert "--recover" not in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_chain_whose_accounting_is_already_unknown_names_the_continuation_and_keeps_its_marker(tmp_path):
+    marker = "GYM_ACCOUNTING_UNKNOWN: Cannot record the allocation.\n"
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text(marker)
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT")
+
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert "Allocation accounting remains unknown" in result.stdout
+    assert "gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT" in result.stdout
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == marker
+    assert _sbatch_calls(tmp_path) == []
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")

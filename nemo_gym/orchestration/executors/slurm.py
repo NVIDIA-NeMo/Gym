@@ -1087,7 +1087,15 @@ def _remote_managed_evidence(
     try:
         command = f"python -c {shlex.quote(_remote_managed_reader_script())} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
         entrypoint = render_driver_entrypoint(
-            repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True, private_uv=True
+            repo=install.repo,
+            ref=install.ref,
+            prepare_cmd=None,
+            command=command,
+            cleanup=True,
+            private_uv=True,
+            # The reader asks the tracking server for the exported run's status (`query_mlflow_status`), as the
+            # login-host export does; without the client that read fails and delivery stays unverified.
+            extras=("mlflow",),
         )
         # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
         # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
@@ -1663,9 +1671,10 @@ class SlurmExecutor(BaseExecutor):
         reader placement, with ``judge_qos`` or a QOS derived for it), or, for a run that serves its judge on a node
         pool of its own, on that saved pool with those services started and the run's QOS, for the run's segment
         walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``.
-        ``acknowledge_failed_judge_jobs`` (with ``acknowledge_reason``) lets one more judge-only job queue when the last ones
-        ended without settling a saved answer (see ``_queue_judge_job``). Either way the job settles through ``gym eval reverify --judge-failed-only
-        --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
+        ``acknowledge_failed_judge_jobs`` (with ``acknowledge_reason``) lets one more judge-only job queue when the last
+        ones ended without settling a saved answer (see ``_queue_judge_job``). Either way the job settles through
+        ``gym eval reverify --judge-failed-only --settle-into-source``. This never starts a policy service or turns an
+        unavailable judge into a model run.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -1784,8 +1793,6 @@ class SlurmExecutor(BaseExecutor):
             script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
             script_path = job_dir / f"reverify-{nonce}.sh"
             expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
-            if evidence.source_digests is None:
-                return stopped("saved source snapshot is unavailable")
             config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
             config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
             if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
@@ -2349,7 +2356,8 @@ class SlurmExecutor(BaseExecutor):
                 else []
             )
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
-            # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
+            # The job itself resets the run's retry and attempt state when it starts, unless the resubmit keeps its
+            # budget (see RESUBMIT_ENV and KEEP_BUDGET_ENV).
             results = _parse_sbatch_results(
                 output := conn.run(
                     exports

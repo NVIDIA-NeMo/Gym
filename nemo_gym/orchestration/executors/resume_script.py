@@ -178,9 +178,10 @@ _gym_stop_incomplete() {{
     exit 1
 }}
 
+# The marker keeps the reason alone (readers match it); the log line also names the operator's next step.
 _gym_stop_accounting_unknown() {{
     echo "{accounting_unknown_prefix} $1" > "$_incomplete_file"
-    _gym_stop_incomplete "$1"
+    _gym_stop_incomplete "$1 Reconcile the queue and the job chain, then continue with gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT, adding --extend-retries N when the retries are spent."
 }}
 
 # A run that is complete and exported needs no further segment, whatever the scheduler says about the last one: a
@@ -445,7 +446,7 @@ done
 [[ ! -e "$OUTPUT_DIR/{resubmit_lock_name}" ]] || \
     _gym_stop_accounting_unknown "Submission acknowledgement is still unresolved."
 if grep -q '^{accounting_unknown_prefix}' "$_incomplete_file" 2>/dev/null; then
-    _gym_stop_incomplete "Allocation accounting remains unknown; reconcile the complete queue and terminal chain before recovery."
+    _gym_stop_incomplete "Allocation accounting remains unknown; reconcile the complete queue and terminal chain, then continue with gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT, adding --extend-retries N when the retries are spent."
 fi
 # An unresolved earlier claim can name a job whose sbatch reply was lost. Its absence from squeue
 # does not prove that it never ran. The current allocation's own claim is checked below.

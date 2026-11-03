@@ -44,6 +44,11 @@ come from the serving image: `vllm serve --help=all` lists the choices of `--too
 `--reasoning-parser`. Pick the tool-call parser whose format the template emits, and say in your
 notes which parser you chose and why.
 
+If the benchmarks use tools, also check that the served template renders them. It needs a `tools` branch
+(`grep -c tools chat_template.jinja` is above 0) that renders the request's `tools`, the assistant's tool calls and the
+tool results. A template without one drops the tools without any error: the model answers in free text, the agent
+sees no tool call, and every rollout ends in a format error and scores 0.0.
+
 ## 2. Write the policy service
 
 Write everything site-specific (images, paths, account, partition, hosts) as `${oc.env:VAR}` and
@@ -203,12 +208,15 @@ driver:
 
 `limit` counts tasks; the run log prints the tasks and the rows they become. Bound the smoke to
 one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`;
-when it completes, it cancels the chain's pending follow-up and sentinel itself (see gym-eval, step 10).
+when it completes, it cancels the chain's pending follow-up and sentinel itself (see gym-eval, step 2).
 Then follow the [gym-eval](../gym-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
-<benchmark> --recover --inspect` and `gym eval health-check` (gym-eval, step 9). Look for answers that end mid-thought (the output token
+<benchmark> --recover --inspect` and `gym eval health-check` (gym-eval, step 6). Look for answers that end mid-thought (the output token
 budget or `--max-model-len` is too small), reasoning that lands in the answer (the reasoning parser
 or `uses_reasoning_parser` is wrong), and tool calls that arrive as plain text (the tool-call
-parser is wrong). In the inspection's output, `gate_task.evaluation_health.model.kinds` and
+parser is wrong). For a tool-using benchmark also count the tool calls: `ng_perf.num_tool_calls` in `rollouts.jsonl`
+must be above 0 on the rows that need tools, and a request's `prompt_tokens` must exceed the token count of its
+messages alone (equal means the template dropped the tools). In the inspection's output,
+`gate_task.evaluation_health.model.kinds` and
 `gate_task.failures.response_failures.by_cause` (`truncated`, `empty`, `malformed`) are the model's
 own faults: they count in the score, never fail health, and point at the deployment (output
 budget, `--max-model-len`, parsers). `UNVERIFIED` with `trial_counts.unobserved_reason` naming the
