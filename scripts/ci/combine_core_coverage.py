@@ -15,8 +15,19 @@ def combine(directory: Path) -> None:
         if not path.is_file() or not path.stat().st_size:
             raise FileNotFoundError(f"Missing or empty coverage input: {path}")
     subprocess.run([sys.executable, "-m", "coverage", "combine", "--keep", *map(str, inputs)], check=True)
-    # fail_under and precision come from pyproject.toml, just like the serial gate.
-    subprocess.run([sys.executable, "-m", "coverage", "report", "--show-missing"], check=True)
+    from coverage import Coverage
+
+    coverage = Coverage()
+    coverage.load()
+    tracked = set(subprocess.check_output(["git", "ls-files", "-z"]).decode().split("\0"))
+    # Shards can execute dependency-cache helpers and synthetic code (e.g. x.py).
+    # Those sources aren't portable artifacts. Keep every measured repository
+    # source, including tracked files that are missing, so reporting fails closed.
+    sources = sorted(coverage.get_data().measured_files() & tracked)
+    if not sources:
+        raise ValueError("No tracked repository sources in combined coverage")
+    # fail_under, precision and exclusions remain owned by pyproject.toml.
+    subprocess.run([sys.executable, "-m", "coverage", "report", "--show-missing", *sources], check=True)
 
 
 if __name__ == "__main__":

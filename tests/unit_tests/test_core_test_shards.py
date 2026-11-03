@@ -103,7 +103,7 @@ def test_combine_rejects_each_missing_input_before_reporting(tmp_path, monkeypat
     assert not calls
 
 
-def test_combine_enforces_the_configured_gate_across_checkout_roots(tmp_path, monkeypatch):
+def test_combine_enforces_the_configured_gate_across_checkout_roots(tmp_path, monkeypatch, capfd):
     from coverage import Coverage, CoverageData
 
     monkeypatch.chdir(tmp_path)
@@ -113,6 +113,9 @@ def test_combine_enforces_the_configured_gate_across_checkout_roots(tmp_path, mo
         '[tool.coverage.run]\nrelative_files = true\nsource = ["target"]\n'
         "[tool.coverage.report]\nfail_under = 95.0\nprecision = 2\n"
     )
+    # Report repository sources, not temporary dependencies or synthetic code.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "target.py"], cwd=tmp_path, check=True)
     inputs = tmp_path / "inputs"
     inputs.mkdir()
     for index, name in enumerate([*(f".coverage.core-{i}" for i in range(4)), ".coverage.sandbox"]):
@@ -133,6 +136,66 @@ def test_combine_enforces_the_configured_gate_across_checkout_roots(tmp_path, mo
     coverage = Coverage()
     coverage.load()
     assert coverage.get_data().measured_files() == {"target.py"}
+
+    # These paths were recorded by real CI shards but don't exist on the
+    # reporting runner. They must not hide missing tracked production code.
+    data = CoverageData(basename=str(inputs / ".coverage.core-0"))
+    data.read()
+    data.add_lines({"cache/uv/.temporary/python/__init__.py": [1], "x.py": [1]})
+    data.write()
+    combine(inputs)
+    (tmp_path / "target.py").unlink()
+    with pytest.raises(subprocess.CalledProcessError):
+        combine(inputs)
+    assert "No source for code: 'target.py'" in capfd.readouterr().out
+    subprocess.run(["git", "rm", "--cached", "target.py"], check=True)
+    with pytest.raises(ValueError, match="No tracked repository sources"):
+        combine(inputs)
+
+
+def test_production_coverage_records_one_relative_source_across_checkout_roots(tmp_path):
+    from coverage import CoverageData
+
+    config = ROOT / "pyproject.toml"
+    databases = []
+    for index in range(2):
+        checkout = tmp_path / f"checkout-{index}"
+        checkout.mkdir()
+        (checkout / "target.py").write_text("answer = 42\n")
+        database = tmp_path / f".coverage.producer-{index}"
+        # Use the production config, including relative_files and source. The
+        # temporary fixture must not inherit the production /tmp/* omission.
+        producer = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import runpy, sys; from coverage import Coverage; "
+                "cov = Coverage(config_file=sys.argv[1], data_file=sys.argv[2], omit=[]); "
+                "cov.start(); runpy.run_path('target.py', run_name='__main__'); cov.stop(); cov.save(); "
+                "print(cov.get_data().data_filename())",
+                str(config),
+                str(database),
+            ],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        # Production multiprocessing coverage adds a process-specific suffix.
+        database = producer.stdout.strip()
+        data = CoverageData(basename=database)
+        data.read()
+        assert data.measured_files() == {"target.py"}
+        assert data.lines("target.py") == [1]
+        databases.append(str(database))
+
+    combined = CoverageData(basename=str(tmp_path / ".coverage.combined"))
+    for database in databases:
+        data = CoverageData(basename=database)
+        data.read()
+        combined.update(data)
+    assert combined.measured_files() == {"target.py"}
+    assert combined.lines("target.py") == [1]
 
 
 def test_workflow_requires_all_shards_sandbox_and_coverage_and_preserves_routing():

@@ -110,5 +110,7 @@ Keep all four shards on the same checked-in weights so they select disjoint part
 Sandbox tests run once on a separate runner. Coverage uses relative paths across runner checkouts.
 The coverage job requires all four core files and the sandbox file before combining them.
 Only the combined report enforces `pyproject.toml`'s coverage threshold and precision.
+The report includes measured Git-tracked sources, not dependency-cache helpers or synthetic code from tests.
+Missing tracked sources still fail reporting; the job does not ignore coverage errors.
 The existing `Test` check requires every core shard, sandbox tests, combined coverage, and any required changed-server tests.
 The eight server shards and the separate on-demand `full-test-suite.yml` keep their existing behavior.
