@@ -73,10 +73,12 @@ if TYPE_CHECKING:
         HARNESS_RUNNER_FILE,
         HARNESS_RUNNER_SCRIPT,
         HarnessPauseResult,
+        NothingCapturedError,
         SandboxCommand,
         SandboxSession,
         shell_assignments,
     )
+    from nemo_gym.agents.utils.setup_retry import exec_idempotent
     from nemo_gym.agents.utils.supervisor_client import (
         CLEANUP_PHASE_COUNT,
         DEFAULT_CLEANUP_TIMEOUT,
@@ -126,6 +128,7 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
     "HARNESS_STEP_LIMIT_METADATA_KEY": "agent_outcome",
     "HarnessPauseResult": "utils.sandbox_session",
+    "NothingCapturedError": "utils.sandbox_session",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
@@ -145,6 +148,7 @@ _PUBLIC_API = {
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "confirmed_policy_response_timeout": "agent_outcome",
+    "exec_idempotent": "utils.setup_retry",
     "exec_timeout": "utils.supervisor_client",
     "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",

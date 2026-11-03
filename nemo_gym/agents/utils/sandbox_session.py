@@ -99,6 +99,10 @@ def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, st
     return "".join(f"{line}\n" for line in lines)
 
 
+class NothingCapturedError(RuntimeError):
+    """An adapter's capture found nothing because the launch ended before the harness wrote any; logged in one line."""
+
+
 class ExpiryUnsupportedError(Exception):
     """``expire`` cannot stop this running harness: its sandbox's uploads can wait for capacity the harness holds."""
 
@@ -618,6 +622,9 @@ class SandboxSession[Artifacts]:
                     async with asyncio.timeout(timeout):
                         self.artifacts = await self._collect()
                     self.capture_error = None
+                except NothingCapturedError as error:
+                    self.capture_error = error
+                    LOG.warning("%s captured nothing: %s", self.harness, error)
                 except Exception as error:
                     self.capture_error = error
                     LOG.exception("%s artifact capture failed after confirmed harness termination", self.harness)
