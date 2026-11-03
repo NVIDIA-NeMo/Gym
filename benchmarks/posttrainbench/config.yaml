@@ -7,6 +7,10 @@ config_paths:
   - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The sandboxes only need the policy model. Everything else, the head server above all, stays on loopback:
+# its unauthenticated config endpoint returns the merged config, keys included.
+absolute_ip_server_types: [responses_api_models]
+
 environment_server_routes:
   posttrainbench: posttrainbench_environment_server
 
