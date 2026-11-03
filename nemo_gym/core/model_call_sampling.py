@@ -58,7 +58,7 @@ class ModelCallSampling(BaseModel):
 
 # The segment value of a call whose caller keeps its own sampling.
 MODEL_SAMPLING_NULL = "null"
-# Sent by a Model Server with a ``null`` call to the server that generates for it, valued ``null``, so a training
+# vllm_model sends this header, valued ``null``, on the Chat Completions request of a ``null`` call, so a training
 # framework's generation server can tell a call it does not train from its trained agents' calls. Others ignore it.
 MODEL_SAMPLING_HEADER = "x-ng-sampling"
 # Room for every field, and well within the URL lengths that servers and proxies accept.
@@ -161,14 +161,15 @@ def with_model_sampling_segment(url_path: str, segment: Optional[str]) -> str:
 class ModelCallSamplingConfig(BaseModel):
     """The global ``model_call_sampling`` block. A training framework sets it when its rows carry values.
 
-    Its presence marks the run: resources servers then send ``null`` with their model calls, so their judges keep
-    their own sampling.
+    Its presence marks the run: resources servers then send ``null`` with the model calls they make through Gym's
+    server client while handling a request, so their judges keep their own sampling.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     # Model Servers of the agents the framework trains. A generation call without a segment fails on them, so a path
-    # that drops the values fails instead of sampling with others. They cannot also set ``sampling_overrides``.
+    # that drops the values fails instead of sampling with others. They cannot also pin sampling with
+    # ``sampling_overrides``; they may pin only ``logprobs`` and ``top_logprobs``, which change what the engine reports.
     required_model_servers: list[str] = Field(default_factory=list)
 
 
