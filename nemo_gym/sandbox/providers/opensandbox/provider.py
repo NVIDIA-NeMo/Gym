@@ -30,7 +30,18 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Literal, NoReturn
 from urllib.parse import urlsplit
 
-from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
+# Re-exported names keep their old import path (see tests/unit_tests/fixtures/import_surface.json).
+from nemo_gym.sandbox.attribution import (  # noqa: F401
+    ATTRIBUTION_KEY_PREFIX_RE,
+    DEFAULT_ATTRIBUTION_KEY_PREFIX,
+    METADATA_VALUE_RE,
+    RUN_KEY,
+    AttributionConfig,
+    log_attribution_once,
+    resolve_attribution,
+    resolve_run_id,
+    sanitize_label_value,
+)
 from nemo_gym.sandbox.providers.base import (
     ORPHAN_REAP_TIMEOUT_S,
     SandboxCreateError,
@@ -159,9 +170,7 @@ RETRYABLE_ERROR_MARKERS = (
     "timed out",
     "timeout",
 )
-METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 # Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/run).
-DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Per-attempt metadata key (under the attribution prefix): the only handle on a sandbox whose create
 # request never returned, so a timed-out attempt can find and delete what it started.
 CREATE_ATTEMPT_KEY = "create-attempt"
@@ -177,7 +186,6 @@ CREATE_BUDGET_SLACK_S = 30.0
 # attribute would repeat the warning on every create of a configuration that is below the sum.
 _BUDGET_WARNINGS: set[tuple[float, float, float]] = set()
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
-ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
 # Returned as stderr when a finished background command's output file was deleted,
 # so a caller that needed the output sees why it is empty.
 DELETED_OUTPUT_NOTE = (
@@ -537,9 +545,7 @@ def _resource_map(resources: SandboxResources) -> dict[str, str]:
 
 
 def _metadata_value(value: Any) -> str:
-    normalized = METADATA_VALUE_RE.sub("_", str(value)).strip("._-")
-    normalized = normalized[:63].strip("._-")
-    return normalized or "metadata"
+    return sanitize_label_value(value)
 
 
 def _metadata_map(values: dict[str, Any]) -> dict[str, str]:
@@ -666,45 +672,8 @@ class OpenSandboxConnectionConfig:
             self.protocol = scheme
 
 
-@dataclass(frozen=True)
-class OpenSandboxAttributionConfig:
-    """Job attribution merged into every sandbox's metadata (Kubernetes labels on the sandbox).
-
-    OpenSandbox propagates sandbox metadata as Kubernetes labels on the sandbox resources, so
-    attribution is queryable both through the OpenSandbox list API and at the cluster level
-    (e.g. ``kubectl get pods -l nemo-gym.nvidia.com/team=my-team``). ``key_prefix`` namespaces
-    the label keys (Kubernetes prefixed-key convention); set it to ``""`` for bare
-    ``team`` / ``user`` / ``workload`` / ``run`` keys.
-
-    Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD``
-    environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
-    ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME``), then the OS login name for ``user`` (``root`` is
-    ignored) and the gym CLI's ``NEMO_GYM_CONFIG_PATH`` server instance name for ``workload``.
-    Fields that cannot be resolved are omitted. ``run`` scopes sandboxes to one launch of the
-    creating process (``NEMO_GYM_RUN_ID``, else generated per process and logged) so a run's
-    sandboxes can be listed and cleaned up exactly. Explicit ``SandboxSpec.metadata`` keys
-    always take precedence over attribution keys.
-    """
-
-    enabled: bool = True
-    team: str | None = None
-    user: str | None = None
-    workload: str | None = None
-    run: str | None = None
-    key_prefix: str = DEFAULT_ATTRIBUTION_KEY_PREFIX
-
-    def __post_init__(self) -> None:
-        normalized = self.key_prefix.strip()
-        if normalized and not normalized.endswith("/"):
-            normalized += "/"
-        if normalized and not ATTRIBUTION_KEY_PREFIX_RE.fullmatch(normalized[:-1]):
-            # Invalid prefixes would otherwise fail server-side at sandbox create with an
-            # opaque error; values are sanitized by the provider but keys pass through.
-            raise ValueError(
-                f"attribution key_prefix {self.key_prefix!r} must be a lowercase DNS subdomain "
-                "(Kubernetes label-key prefix), e.g. 'nemo-gym.nvidia.com/', or '' for bare keys"
-            )
-        object.__setattr__(self, "key_prefix", normalized)
+# Shared with the other providers that forward attribution as Kubernetes labels.
+OpenSandboxAttributionConfig = AttributionConfig
 
 
 @dataclass(frozen=True)
@@ -2052,27 +2021,13 @@ class OpenSandboxProvider:
 
         raise OpenSandboxCreateError("OpenSandbox create retry loop did not run")
 
-    def _attribution_metadata(self) -> dict[str, str]:
-        if not self._attribution.enabled:
-            return {}
-        resolved = resolve_attribution(
-            team=self._attribution.team,
-            user=self._attribution.user,
-            workload=self._attribution.workload,
-        )
-        resolved[RUN_KEY] = resolve_run_id(self._attribution.run)
-        prefix = self._attribution.key_prefix
-        metadata = {f"{prefix}{key}": value for key, value in resolved.items()}
-        log_attribution_once(metadata)
-        return metadata
-
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create one sandbox through the configured OpenSandbox path.
 
         Job attribution keys (``team`` / ``user`` / ``workload`` / ``run``) are merged into the
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
         """
-        spec = replace(spec, metadata={**self._attribution_metadata(), **spec.metadata})
+        spec = replace(spec, metadata={**self._attribution.metadata(), **spec.metadata})
         return await self._create_with_retries(_normalize_spec(spec))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
