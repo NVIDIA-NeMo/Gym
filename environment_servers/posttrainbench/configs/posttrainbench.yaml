@@ -14,6 +14,10 @@ posttrainbench_environment_server:
       gpu_sandbox_provider: sandbox_gpu
       # The H100 pool can be busy for a long time: a pending sandbox is not a failed one.
       sandbox_ready_timeout_s: 3600
+      # A verifier that finds no free H100 (OpenSandbox's 504 POD_READY_TIMEOUT after its own retries) is started
+      # again within that hour instead of masking a task whose agent already ran.
+      verifier_start_retries: 6
+      verifier_start_retry_delay_s: 120
       # All 24 tasks at once by default; lower it to fit the pool's free H100s.
       max_concurrent_episodes: null
       queue_timeout_seconds: null
