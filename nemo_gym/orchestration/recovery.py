@@ -382,6 +382,11 @@ class RecoveryOutcome(BaseModel):
     scheduler_refusal: dict[str, Any] | None = None
 
 
+# Why a scored row is planned for a re-judge: its judge gave no verdict or its grading did not resolve. Health still counts
+# it as an evaluation-side fault of a scored trial (``_health_view``) while the re-judge is pending.
+SCORED_UNPARSEABLE_REASON = "judge gave no verdict (unparseable); re-judge planned"
+
+
 class IdentityEvidence(BaseModel):
     identity: Identity
     state: IdentityState
@@ -838,9 +843,10 @@ def decide_recovery(
 
     evidence: list[IdentityEvidence] = []
     policy_stopped = False
-    # Masked results re-verified from their saved answers (``reverification_cause``): no failure attempt is spent. A
-    # scored result whose grading was never recorded stays SCORED here (the trial gate reports it unobserved); the
-    # run's completion pass grades it again.
+    # Results re-verified from their saved answers (``reverification_cause``): masked ones, and scored ones whose judge
+    # gave no verdict or whose grading did not resolve (``judge_unparseable``). No failure attempt is spent. A scored
+    # result whose grading was never recorded stays SCORED here (the trial gate reports it unobserved); the run's
+    # completion pass grades it again.
     saved_results: set[Identity] = set()
     for identity in sorted(expected_set):
         if identity in result_rows:
@@ -932,6 +938,20 @@ def decide_recovery(
                         identity=identity,
                         state=IdentityState.UNKNOWN,
                         failure_kind=row.get("failure_kind") or "result_without_usable_grade",
+                    )
+                )
+                continue
+            if not judge and reverification_cause(row) == REVERIFY_JUDGE:
+                # Scored, but its reward is no grade: the judge gave no verdict or the grading did not resolve. Its
+                # saved answer is judged again, never rerun.
+                saved_results.add(identity)
+                evidence.append(
+                    IdentityEvidence(
+                        identity=identity,
+                        state=IdentityState.JUDGE_RECOVERABLE,
+                        failure_kind=JUDGE_UNPARSEABLE,
+                        events=_events(row),
+                        reason=SCORED_UNPARSEABLE_REASON,
                     )
                 )
                 continue
@@ -1211,10 +1231,19 @@ def decide_recovery(
     if not needs_policy:
         if counts.get(IdentityState.JUDGE_RECOVERABLE):
             if saved_results:
+                unparsed = sum(1 for item in evidence if item.reason == SCORED_UNPARSEABLE_REASON)
+                why = [
+                    *(
+                        [f"{len(saved_results) - unparsed} masked by a judge or verify-transport failure"]
+                        if len(saved_results) > unparsed
+                        else []
+                    ),
+                    *([f"{unparsed} scored, but the {SCORED_UNPARSEABLE_REASON}"] if unparsed else []),
+                ]
                 return decision(
                     RecoveryAction.REVERIFY,
                     f"{counts[IdentityState.JUDGE_RECOVERABLE]} saved answer(s) only need grading again "
-                    f"({len(saved_results)} masked by a judge or verify-transport failure): re-verify "
+                    f"({'; '.join(why)}): re-verify "
                     "the saved answers with `gym eval reverify --judge-failed-only --settle-into-source`",
                 )
             return decision(
@@ -3556,6 +3585,7 @@ def response_health(
     selected responses is unknown, neither pass nor fail). Failed trials have no response row and are left out, as
     the policy leaves failed attempts out of the response denominator.
     """
+    decision = _health_view(decision)
     r = (quality or {}).get("responses")
     fields = ("rollouts", "unknown", "selected", "faulted", "duplicated")
     if not isinstance(r, dict) or not all(type(r.get(k)) is int and r[k] >= 0 for k in fields):
@@ -3680,6 +3710,7 @@ def _observed_trial_operations(
     inside one completed operation is recovered the same way (``policy_recovery`` receives its counts): each failed
     attempt is an event of that operation and of the row, and the answer is the final attempt's.
     """
+    decision = _health_view(decision)
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     # A settled model failure (MODEL_FINAL) or a rollout that ended on a failed policy request is a counted trial
@@ -4809,6 +4840,30 @@ def _verifying_servers(collected: CollectedEvidence) -> str:
     return ", ".join(names) if names else "a resources server the run provenance does not name"
 
 
+def _health_view(decision: RecoveryDecision) -> RecoveryDecision:
+    """``decision`` as the trial gate counts it: a scored row planned for a re-judge because its judge gave no verdict
+    (``SCORED_UNPARSEABLE_REASON``) is a scored trial whose fault, ``judge_unparseable``, is evaluation-side. The
+    recovery action is unchanged; only health reads the row as it stands until the re-judge settles it."""
+    planned = {
+        item.identity
+        for item in decision.evidence
+        if item.state == IdentityState.JUDGE_RECOVERABLE and item.reason == SCORED_UNPARSEABLE_REASON
+    }
+    if not planned:
+        return decision
+    evidence = [
+        item.model_copy(update={"state": IdentityState.SCORED, "failure_kind": None, "reason": None})
+        if item.identity in planned and item.state == IdentityState.JUDGE_RECOVERABLE
+        else item
+        for item in decision.evidence
+    ]
+    identities: dict[str, list[Identity]] = {}
+    for item in evidence:
+        identities.setdefault(item.state.value, []).append(item.identity)
+    counts = {state: len(ids) for state, ids in identities.items()}
+    return decision.model_copy(update={"evidence": evidence, "identities": identities, "counts": counts})
+
+
 def trial_population(decision: RecoveryDecision) -> int:
     """The trial denominator: every expected trial, including repeats, failed and missing ones, less the rows an
     accepted partial stage omitted (no trial: reported separately, never in a numerator or denominator)."""
@@ -4826,6 +4881,7 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     grading, so they are unverified, never healthy. ``observed_healthy`` are the rest; ``verifier_recorded`` of them
     are observed only through the verifier's grading record. None until the run is complete.
     """
+    decision = _health_view(decision)
     trials = trial_population(decision)
     if not decision.complete or trials <= 0 or collected is None:
         return None
@@ -5322,6 +5378,7 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     judge evaluation recorded no verdict (``judge_unparseable``) or that record their own failure kind, each counted
     once (``_scored_fault``).
     """
+    decision = _health_view(decision)
     final_zero = final_zero_trials(decision, collected)
     infrastructure = infrastructure_timeouts(decision, collected)
     kinds = Counter(
@@ -5418,6 +5475,7 @@ def trial_verdict(
 
     The report is ``status`` (PASS, FAIL or UNVERIFIED), the evaluation-side rate, ``exact`` and the fault counts.
     """
+    decision = _health_view(decision)
     # A row an accepted partial stage omitted is no trial: it is neither in the numerator nor the denominator.
     trials = trial_population(decision)
     if not decision.complete or trials <= 0:
@@ -5607,6 +5665,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     rollout that records its own failure kind or whose judge recorded no verdict, or an observed grading without a
     valid verdict, by the cause its failure kind names (``trial_failure_cause``).
     """
+    decision = _health_view(decision)
     population = trial_population(decision)
     if population <= 0:
         return None
@@ -5729,6 +5788,7 @@ def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | N
     leaves out of its metric, such as an agent deadline that kept its answer, is a trial the metric did not cover.
     The denominator is the trial gate's: every expected trial, less the rows an accepted partial stage omitted.
     """
+    decision = _health_view(decision)
     from nemo_gym.rollout_collection import is_non_superseding_rollout_row
 
     declared = collected.benchmark_metric_coverage if collected is not None else None
