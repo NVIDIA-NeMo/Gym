@@ -44,6 +44,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
 )
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 from nemo_gym.typed_exceptions import NgFailureEvent
 
@@ -237,7 +238,7 @@ async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, tim
         create=environment["sandbox_provider"]["opensandbox"]["create"]
     )
     errors = {
-        "client": opensandbox_provider.OpenSandboxCreateTimeoutError("create timeout"),
+        "client": sandbox_failure(operation="create", failure_kind="provider_create_timeout", reason="create timeout"),
         "server": SandboxApiException("POD_READY_TIMEOUT: BATCHSANDBOX_PENDING", status_code=504),
         "readiness": SandboxReadyTimeoutException("readiness timeout"),
     }
@@ -266,8 +267,11 @@ async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, tim
     if recovers:
         assert await provider.create(SandboxSpec(image="task")) is handle
     else:
-        with pytest.raises(type(errors[timeout_kind])):
+        with pytest.raises(NgFailureEvent) as caught:
             await provider.create(SandboxSpec(image="task"))
+        assert caught.value.failure_kind == (
+            "provider_unavailable" if timeout_kind == "server" else "provider_create_timeout"
+        )
     assert provider._create_once.await_count == 6
     assert [call.args[0] for call in sleep.await_args_list] == [2.5, 5, 10, 20, 30]
     assert bounds[:5] == [(0, 5), (0, 10), (0, 20), (0, 40), (0, 60)]
@@ -278,8 +282,10 @@ async def test_create_does_not_retry_rejected_credentials():
 
     provider = opensandbox_provider.OpenSandboxProvider(create={"retries": 5})
     provider._create_once = AsyncMock(side_effect=SandboxApiException("unauthorized", status_code=401))
-    with pytest.raises(SandboxApiException):
+    with pytest.raises(NgFailureEvent) as caught:
         await provider.create(SandboxSpec(image="task"))
+    assert caught.value.failure_kind == "provider_credentials_rejected"
+    assert caught.value.http_status == 401
     provider._create_once.assert_awaited_once()
 
 
@@ -331,14 +337,17 @@ async def test_renewal_failure_surfaces_and_still_allows_cleanup(fake_opensandbo
     handle.raw.kill = AsyncMock()
     handle.raw.close = AsyncMock()
     task = provider._renewals[handle.sandbox_id]
-    with pytest.raises(RuntimeError, match="renewal rejected"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    assert observed_failure.value.failure_kind == "provider_request_failed"
     operation = AsyncMock()
-    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
+    with pytest.raises(NgFailureEvent, match="lifetime renewal failed") as observed_failure:
         await provider._await_sdk_operation(operation, operation="get_info", sandbox_id=handle.sandbox_id, timeout_s=1)
+    assert observed_failure.value.failure_kind == "provider_unavailable"
     operation.assert_not_awaited()
-    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
+    with pytest.raises(NgFailureEvent, match="lifetime renewal failed") as observed_failure:
         await provider.close(handle)
+    assert observed_failure.value.failure_kind == "provider_unavailable"
     handle.raw.kill.assert_awaited_once()
     handle.raw.close.assert_awaited_once()
     await provider.aclose()
@@ -472,7 +481,7 @@ def test_sdk_import_helpers_and_retry_classification() -> None:
 
     assert opensandbox_provider._exception_status_code(StatusCodeError("rate limited")) == 429
     assert opensandbox_provider._is_retryable_create_error(
-        opensandbox_provider.OpenSandboxCreateError("create failed")
+        sandbox_failure(operation="create", failure_kind="provider_internal_error", reason="create failed")
     )
 
     from opensandbox.exceptions import (  # noqa: PLC0415
@@ -492,7 +501,7 @@ def test_sdk_import_helpers_and_retry_classification() -> None:
     nonretryable_api_error = SandboxApiException("not found")
     nonretryable_api_error.status_code = 404
     assert opensandbox_provider._is_retryable_create_error(nonretryable_api_error) is False
-    assert opensandbox_provider._is_retryable_create_error(SandboxException("gateway timeout")) is True
+    assert opensandbox_provider._is_retryable_create_error(SandboxException("gateway timeout")) is False
 
     status_only_not_found = SandboxApiException("gone")
     status_only_not_found.status_code = 404
@@ -537,7 +546,7 @@ def test_missing_optional_dependency_import_helpers(monkeypatch: pytest.MonkeyPa
         opensandbox_provider._require_tenacity()
 
     block_imports("opensandbox.exceptions")
-    assert opensandbox_provider._is_retryable_create_error(RuntimeError("gateway timeout")) is True
+    assert opensandbox_provider._is_retryable_create_error(RuntimeError("gateway timeout")) is False
 
 
 async def test_provider_conversion_helpers(
@@ -2506,8 +2515,9 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
 
     monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(provider, "_exec", bad_probe)
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateVerificationError):
+    with pytest.raises(NgFailureEvent) as failure_info:
         await provider._verify_created_handle(handle)
+    assert failure_info.value.failure_kind == "provider_not_ready"
 
     provider = opensandbox_provider.OpenSandboxProvider(
         probe={"command": "probe", "expected_stdout": None, "stable_count": 2, "stable_delay_s": 0.01},
@@ -2565,7 +2575,7 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
         async def close(self) -> None:
             raise RuntimeError("close failed")
 
-    with pytest.raises(RuntimeError, match="stop failed"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await provider.close(
             opensandbox_provider.SandboxHandle(
                 sandbox_id="sandbox-2",
@@ -2573,6 +2583,7 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
                 raw=StopAndCloseFailRaw(),
             ),
         )
+    assert observed_failure.value.failure_kind == "provider_request_failed"
 
     class StopFailsCloseSucceedsRaw:
         async def kill(self) -> None:
@@ -2581,7 +2592,7 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
         async def close(self) -> None:
             return None
 
-    with pytest.raises(RuntimeError, match="stop failed"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await provider.close(
             opensandbox_provider.SandboxHandle(
                 sandbox_id="sandbox-3",
@@ -2589,6 +2600,7 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
                 raw=StopFailsCloseSucceedsRaw(),
             ),
         )
+    assert observed_failure.value.failure_kind == "provider_request_failed"
 
 
 async def test_close_treats_missing_sandbox_as_terminated_without_retry(caplog: pytest.LogCaptureFixture) -> None:
@@ -2644,7 +2656,7 @@ async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None
             get_info_calls += 1
             raise not_found
 
-    with pytest.raises(SandboxApiException, match="not found"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await provider.status(
             opensandbox_provider.SandboxHandle(
                 sandbox_id="sandbox-1",
@@ -2652,6 +2664,7 @@ async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None
                 raw=MissingRaw(),
             ),
         )
+    assert observed_failure.value.failure_kind == "provider_request_failed"
 
     assert get_info_calls == 1
 
@@ -2715,11 +2728,12 @@ async def test_create_once_and_connect_after_create_error_paths(
         return None
 
     monkeypatch.setattr(opensandbox_provider.asyncio, "sleep", no_sleep)
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+    with pytest.raises(NgFailureEvent) as failure_info:
         await provider._connect_after_create(
             opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=None),
             SandboxSpec(image="image:tag"),
         )
+    assert failure_info.value.failure_kind == "provider_create_timeout"
 
     class CancelledConnectSandbox(FakeSandbox):
         @classmethod
@@ -2751,11 +2765,12 @@ async def test_create_once_and_connect_after_create_error_paths(
         lambda: (NonRetryableConnectSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
     )
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
-    with pytest.raises(ValueError, match="bad connection request"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await provider._connect_after_create(
             opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=None),
             SandboxSpec(image="image:tag", ready_timeout_s=1),
         )
+    assert observed_failure.value.failure_kind == "provider_request_failed"
 
     monkeypatch.setattr(
         opensandbox_provider,
@@ -2785,8 +2800,9 @@ async def test_create_once_and_connect_after_create_error_paths(
         create={"timeout_s": 0.01},
         probe={"command": None},
     )
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+    with pytest.raises(NgFailureEvent) as failure_info:
         await provider._create_once(SandboxSpec(image="image:tag"))
+    assert failure_info.value.failure_kind == "provider_create_timeout"
 
     class EmptyCreateSandbox(FakeSandbox):
         @classmethod
@@ -2799,7 +2815,7 @@ async def test_create_once_and_connect_after_create_error_paths(
         lambda: (EmptyCreateSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
     )
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
-    with pytest.raises(RuntimeError, match="returned no sandbox handle"):
+    with pytest.raises(NgFailureEvent, match="returned no sandbox handle"):
         await provider._create_once(SandboxSpec(image="image:tag"))
 
     monkeypatch.setattr(
@@ -2830,20 +2846,6 @@ async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.Mo
     )
     assert await provider.aclose() is None
     assert await provider._await_sdk_call(_return_value("ok"), operation="op", sandbox_id="sandbox-1", timeout_s=None)
-    assert opensandbox_provider._is_retryable_sdk_operation_error(TimeoutError("command timeout")) is False
-    assert opensandbox_provider._is_retryable_sdk_operation_error(ConnectionError("connection failed")) is True
-    wrapped = RuntimeError("wrapper")
-    wrapped.__cause__ = ConnectionError("connection reset")
-    assert opensandbox_provider._is_retryable_sdk_operation_error(wrapped) is True
-    wrapped.__cause__ = wrapped
-    assert opensandbox_provider._is_retryable_sdk_operation_error(wrapped) is False
-
-    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
-
-    cyclic_api_error = SandboxApiException("proxy failed")
-    cyclic_api_error.status_code = 500
-    cyclic_api_error.__cause__ = cyclic_api_error
-    assert opensandbox_provider._is_retryable_sdk_operation_error(cyclic_api_error) is True
 
     async def cancelled() -> None:
         raise asyncio.CancelledError()
@@ -2882,7 +2884,7 @@ async def test_retry_loop_empty_iterator_guards(monkeypatch: pytest.MonkeyPatch)
             sandbox_id="sandbox-1",
             timeout_s=None,
         )
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateError, match="create retry loop did not run"):
+    with pytest.raises(RuntimeError, match="create retry loop did not run"):
         await provider._create_with_retries(SandboxSpec(image="image:tag"))
 
 
@@ -3064,9 +3066,10 @@ async def test_connect_preserves_failure_when_cleanup_stalls(
         probe={"command": None},
     )
 
-    with pytest.raises(ConnectionError, match="readiness failed"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         async with asyncio.timeout(0.5):
             await provider.connect({"sandbox_id": "sandbox-9"})
+    assert observed_failure.value.failure_kind == "provider_unavailable"
     close.assert_awaited_once_with()
 
 
@@ -3100,8 +3103,9 @@ async def test_pause_failure_is_not_retried() -> None:
     )
     handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
-    with pytest.raises(ConnectionError, match="outcome is unknown"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await provider.pause(handle)
+    assert observed_failure.value.failure_kind == "provider_unavailable"
 
     raw.pause.assert_awaited_once_with()
 
@@ -3127,8 +3131,9 @@ async def test_pause_timeout_bounds_the_full_transition() -> None:
     )
     handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
-    with pytest.raises(TimeoutError, match=r"waiting .* to pause after 0\.1s"):
+    with pytest.raises(NgFailureEvent, match="waiting .* to pause after 0\\.1s") as observed_failure:
         await asyncio.wait_for(provider.pause(handle), timeout=0.14)
+    assert observed_failure.value.failure_kind == "provider_io_timeout"
     assert status_started.is_set()
 
 
@@ -3140,8 +3145,9 @@ async def test_pause_preserves_a_shorter_request_timeout() -> None:
     raw = SimpleNamespace(pause=AsyncMock(side_effect=asyncio.Event().wait))
     handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
-    with pytest.raises(TimeoutError, match="OpenSandbox pause after 0.001s"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await provider.pause(handle)
+    assert observed_failure.value.failure_kind == "provider_io_timeout"
 
 
 async def test_resume_rebuilds_the_sdk_handle_after_readiness(fake_opensandbox_sdk: None) -> None:
@@ -3181,8 +3187,9 @@ async def test_resume_failure_keeps_the_paused_handle(monkeypatch: pytest.Monkey
     raw = SimpleNamespace(close=AsyncMock())
     handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
-    with pytest.raises(ConnectionError, match="outcome is unknown"):
+    with pytest.raises(NgFailureEvent) as observed_failure:
         await provider.resume(handle)
+    assert observed_failure.value.failure_kind == "provider_unavailable"
 
     assert resume.await_count == 1
     raw.close.assert_not_awaited()
@@ -3208,8 +3215,11 @@ async def test_resume_timeout_bounds_the_full_lifecycle(monkeypatch: pytest.Monk
     raw = SimpleNamespace(close=AsyncMock())
     handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
-    with pytest.raises(TimeoutError, match=r"to resume after 0\.05s; reconnect and check status\(\)"):
+    with pytest.raises(
+        NgFailureEvent, match="to resume after 0\\.05s; reconnect and check status\\(\\)"
+    ) as observed_failure:
         await asyncio.wait_for(provider.resume(handle), timeout=1)
+    assert observed_failure.value.failure_kind == "provider_io_timeout"
 
     assert resume_started.is_set()
     assert handle.raw is raw
@@ -3245,8 +3255,9 @@ async def test_resume_timeout_closes_an_sdk_owned_transport(monkeypatch: pytest.
     )
     handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", SimpleNamespace(close=AsyncMock()))
 
-    with pytest.raises(TimeoutError, match=r"to resume after 0\.05s"):
+    with pytest.raises(NgFailureEvent, match="to resume after 0\\.05s") as observed_failure:
         await asyncio.wait_for(provider.resume(handle), timeout=1)
+    assert observed_failure.value.failure_kind == "provider_io_timeout"
 
     transport_close.assert_awaited_once_with()
 
@@ -3699,8 +3710,9 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
 
     monkeypatch.setattr(provider, "exec", exec_)
     monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
-    with pytest.raises(opensandbox_provider.OpenSandboxSetupError, match="setup command failed.*false"):
+    with pytest.raises(NgFailureEvent, match="setup command failed.*false") as failure_info:
         await provider.create(SandboxSpec(image="python:3.11", env={"A": "spec"}))
+    assert failure_info.value.failure_kind == "provider_setup_failed"
     assert calls == [("apt-get update", "root", 12), ("false", "root", 12)]
     assert cleaned == ["sandbox-1"]
     # The provider's environment sits under the spec's own variables.
@@ -3727,14 +3739,16 @@ async def test_direct_create_does_not_retry_a_failed_setup_command(
 
     monkeypatch.setattr(provider, "exec", exec_)
     monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
-    # A setup failure stays a SandboxCreateError, so callers' `except SandboxCreateError` (anyswe_agent/app.py,
+    # Setup remains a sandbox observation and is not retried by default.
+    # Legacy callers must migrate their exception checks (anyswe_agent/app.py,
     # cvdp/testbench_runner.py) classify it as a sandbox failure, while the transient-looking stderr never re-runs
     # the create.
-    with pytest.raises(opensandbox_provider.SandboxCreateError) as info:
+    with pytest.raises(NgFailureEvent) as info:
         await provider.create(SandboxSpec(image="python:3.11"))
+    assert info.value.failure_kind == "provider_setup_failed"
     assert calls == ["false"] and cleaned == ["sandbox-1"]
-    assert isinstance(info.value, opensandbox_provider.OpenSandboxSetupError)
-    assert isinstance(info.value, opensandbox_provider.OpenSandboxCreateError)
+    assert info.value.failure_kind == "provider_setup_failed"
+    assert info.value.boundary.value == "sandbox"
 
 
 # The OpenSandbox runtime's refusal when the exec daemon runs as the image's non-root USER on a cell that drops
@@ -3790,8 +3804,9 @@ async def test_a_setup_command_that_fails_as_the_images_user_still_fails_the_cre
 
     monkeypatch.setattr(provider, "exec", exec_)
     monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
-    with pytest.raises(opensandbox_provider.OpenSandboxSetupError, match=r"exit 4.*sed -i x\nsed: Permission denied"):
+    with pytest.raises(NgFailureEvent, match=r"exit 4.*sed -i x\nsed: Permission denied") as failure_info:
         await provider.create(SandboxSpec(image="python:3.11"))
+    assert failure_info.value.failure_kind == "provider_setup_failed"
     assert cleaned == ["sandbox-1"]
 
 
@@ -3978,9 +3993,10 @@ async def test_ready_timeout_caps_the_request_but_a_configured_attempt_budget_st
     )
     started = asyncio.get_running_loop().time()
     with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
-        with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError, match="after 0.05s") as info:
+        with pytest.raises(NgFailureEvent, match="after 0.05s") as info:
             await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.03))
-    assert not isinstance(info.value, opensandbox_provider.OpenSandboxCreatePendingError)
+        assert info.value.failure_kind == "provider_create_timeout"
+    assert not info.value.failure_kind == "provider_create_pending"
     assert asyncio.get_running_loop().time() - started < 5
     assert HangingCreateSandbox.created_kwargs["connection_config"].kwargs["request_timeout"] == timedelta(
         seconds=0.03
@@ -3990,21 +4006,24 @@ async def test_ready_timeout_caps_the_request_but_a_configured_attempt_budget_st
     warnings = [r.getMessage() for r in caplog.records if "create.timeout_s=0.05 is below" in r.getMessage()]
     assert len(warnings) == 1 and "0.03s plus the spec's ready_timeout_s of 0.03s" in warnings[0]
     caplog.clear()
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+    with pytest.raises(NgFailureEvent) as failure_info:
         await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.03))
+    assert failure_info.value.failure_kind == "provider_create_timeout"
     # Nor by the next provider built for the same configuration: servers build one per sandbox.
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+    with pytest.raises(NgFailureEvent) as failure_info:
         await opensandbox_provider.OpenSandboxProvider(
             create={"timeout_s": 0.05, "request_timeout_s": 1200}, probe={"command": None}
         )._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.03))
+    assert failure_info.value.failure_kind == "provider_create_timeout"
     assert not [r for r in caplog.records if "create.timeout_s=0.05 is below" in r.getMessage()]
 
     # Without a ready timeout the create budget is the configured one, unchanged.
     provider = opensandbox_provider.OpenSandboxProvider(
         create={"timeout_s": 0.01, "request_timeout_s": 1200}, probe={"command": None}
     )
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError, match="after 0.01s"):
+    with pytest.raises(NgFailureEvent, match="after 0.01s") as failure_info:
         await provider._create_once(SandboxSpec(image="image:tag"))
+    assert failure_info.value.failure_kind == "provider_create_timeout"
     assert HangingCreateSandbox.created_kwargs["connection_config"].kwargs["request_timeout"] == timedelta(
         seconds=1200
     )
@@ -4093,20 +4112,25 @@ async def test_timed_out_create_deletes_its_orphan_and_a_pending_one_is_retried_
     monkeypatch.setattr(provider, "_reap_orphaned_create", seed_orphans)
 
     with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
-        with pytest.raises(opensandbox_provider.OpenSandboxCreatePendingError) as info:
+        with pytest.raises(NgFailureEvent) as info:
             await provider.create(SandboxSpec(image="image:tag", ready_timeout_s=0.05))
+        assert info.value.failure_kind == "provider_create_pending"
     message = str(info.value)
     assert "this-attempt" in message and "PENDING" in message and "BATCHSANDBOX_PENDING" in message
-    assert "after 0.05s" in message and "requests against its limits" in message
-    assert ("Not retrying" in message) is fail_fast
+    assert "after 0.05s" in message and "Pending alone does not distinguish" in message
+    assert "retry" not in message.lower()
     assert attempts == (1 if fail_fast else 3)  # the default retries a Pending orphan like any other timeout
     assert service.killed == ["this-attempt"] * attempts  # and deletes what each attempt left behind
     assert len(service.filters) == attempts
     assert set(service.filters[0].metadata) == {run_key, attempt_key}
     assert service.filters[0].page == 1 and service.filters[0].page_size == 100
     assert any("Deleted OpenSandbox sandbox this-attempt" in r.getMessage() for r in caplog.records)
-    assert opensandbox_provider._is_retryable_create_error(info.value) is (not fail_fast)
-    assert opensandbox_provider._is_retryable_create_error(opensandbox_provider.OpenSandboxCreateTimeoutError("x"))
+    assert opensandbox_provider._is_retryable_create_error(info.value, fail_fast_on_pending=fail_fast) is (
+        not fail_fast
+    )
+    assert opensandbox_provider._is_retryable_create_error(
+        sandbox_failure(operation="create", failure_kind="provider_create_timeout", reason="x")
+    )
 
 
 async def test_sdk_request_timeout_reaps_the_orphan_like_the_attempt_budget_does(
@@ -4144,8 +4168,9 @@ async def test_sdk_request_timeout_reaps_the_orphan_like_the_attempt_budget_does
     # The aiohttp transport's read timeout, as the SDK wraps it (SandboxInternalException with the httpx cause).
     read_timeout = httpx.ReadTimeout("Timeout on reading data from socket")
     failures.append(SandboxInternalException("Network connectivity error: read", cause=read_timeout))
-    with pytest.raises(opensandbox_provider.OpenSandboxCreatePendingError) as info:
+    with pytest.raises(NgFailureEvent) as info:
         await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=1200))
+    assert info.value.failure_kind == "provider_create_pending"
     assert "left-behind" in str(info.value) and "CREATING" in str(info.value)
     assert "SDK's request timeout of 30s" in str(info.value)  # nothing configured: the SDK default
     assert isinstance(info.value.__cause__, SandboxInternalException) and service.killed == ["left-behind"]
@@ -4156,9 +4181,10 @@ async def test_sdk_request_timeout_reaps_the_orphan_like_the_attempt_budget_does
     provider = opensandbox_provider.OpenSandboxProvider(create={"request_timeout_s": 600}, probe={"command": None})
     monkeypatch.setattr(provider, "_reap_orphaned_create", seed)
     failures.append(SandboxInternalException("Network connectivity error: read", cause=httpx.ReadTimeout("read")))
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError) as info:
+    with pytest.raises(NgFailureEvent) as info:
         await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=1200))
-    assert not isinstance(info.value, opensandbox_provider.OpenSandboxCreatePendingError)
+    assert info.value.failure_kind == "provider_create_timeout"
+    assert not info.value.failure_kind == "provider_create_pending"
     assert "SDK's request timeout of 600s" in str(info.value) and service.killed == ["left-behind"] * 2
 
     # Other SDK failures are not request timeouts: no list, no reclassification. A connect timeout sent no
@@ -4191,9 +4217,10 @@ async def test_orphan_reap_failures_never_hide_the_create_timeout(
     install_lifecycle(monkeypatch, BrokenLifecycleService(sandboxes=[]))
     provider = opensandbox_provider.OpenSandboxProvider(create={"timeout_s": 0.05}, probe={"command": None})
     with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
-        with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError) as info:
+        with pytest.raises(NgFailureEvent) as info:
             await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.05))
-    assert not isinstance(info.value, opensandbox_provider.OpenSandboxCreatePendingError)
+        assert info.value.failure_kind == "provider_create_timeout"
+    assert not info.value.failure_kind == "provider_create_pending"
     assert any("Could not reap the sandbox" in r.getMessage() for r in caplog.records)
 
     # A delete that finds the sandbox already gone is success; any other delete failure is reported, not raised.
@@ -4206,8 +4233,9 @@ async def test_orphan_reap_failures_never_hide_the_create_timeout(
         return real_reap(metadata, attempt_key)
 
     monkeypatch.setattr(provider, "_reap_orphaned_create", seed)
-    with pytest.raises(opensandbox_provider.OpenSandboxCreatePendingError):
+    with pytest.raises(NgFailureEvent) as failure_info:
         await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.05))
+    assert failure_info.value.failure_kind == "provider_create_pending"
     assert gone.killed == ["gone"]
 
 

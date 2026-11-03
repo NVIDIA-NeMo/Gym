@@ -27,6 +27,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
@@ -34,7 +36,6 @@ from nemo_gym.sandbox.providers import (
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
-    SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
     SandboxSpec,
@@ -96,7 +97,11 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
     while needle not in buffer:
         chunk = await session.read()
         if not chunk:
-            raise SandboxPtyError("PTY session ended before the command finished")
+            raise sandbox_failure(
+                operation="pty_exec",
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason="PTY session ended before the command finished",
+            )
         buffer.extend(chunk)
 
     stdout, _, trailing = bytes(buffer).partition(needle)

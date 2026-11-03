@@ -167,14 +167,24 @@ The provider constructor accepts these optional config sections:
 | `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. |
 | `diagnostics` | Shared `timeout_s`, per-request `request_timeout_s` and `poll_interval_s`. `inspect_oom` is an opt-in OpenSandbox 1.1.0 text fallback, disabled by default. |
 
-Runtime failures use `NgFailureEvent(boundary="sandbox")`; see [Error Handling](./index#error-handling).
+## Failure reporting and recovery
+
+Creation, readiness, lifecycle and runtime failures use `NgFailureEvent(boundary="sandbox")`; see [Error Handling](./index#error-handling).
 Status and log reads retry through `operations.outcome_policy`, whose HTTP rules take precedence over kind rules.
 Partial overrides merge with defaults. Supported actions are `retry` and `fail`; budgets and replay safety remain
 execution constraints. A failed submission is never replayed without a non-delivery receipt, even with
 `command_retries` or a retry policy enabled. Transport-level 429 retries are disabled for OpenSandbox so they
-cannot bypass this policy. Create and lifecycle retries retain their existing behavior.
+cannot bypass this policy. Lifecycle SDK operations use the same event/reporting path.
+Creation and reconnect recovery use `create.outcome_policy`, with retry defaults for transport failures,
+SDK internal failures, create deadlines, Pending observations and failed readiness probes. Setup-command failures
+and unclassified requests fail by default. HTTP rules take precedence over kind rules. Error text alone never
+selects a retry. `create.fail_fast_on_pending` still prevents another Pending attempt when enabled.
+Failed create attempts and recovered PTY requests are retained in the request failure report.
 
 ```yaml
+create:
+  outcome_policy:
+    by_failure_kind: {provider_not_ready: fail}  # Other create defaults remain.
 operations:
   command_timeout_headroom_s: 60
   status_recovery_timeout_s: 300
