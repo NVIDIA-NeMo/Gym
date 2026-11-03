@@ -429,6 +429,13 @@ def test_slim_invalidates_selected_families_in_all_caches(tmp_path, monkeypatch,
     script = shlex.split(builder.get_srun_command_str())[2]
     program = script.split("# Python 3:", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
     program = program[program.index('root = Path(os.environ["BUILD_DIR"])') :]
+    warmup_paths = runpy.run_path(str(ROOT / BENCHMARK / "save_warmed_vllm_container.py"))
+    image_root = tmp_path / "image"
+
+    def image_path(path):
+        path = Path(path)
+        return image_root / path.relative_to("/opt") if path.is_relative_to("/opt") else path
+
     aot = tmp_path / "installed-aot"
     provider_roots = [tmp_path / arch / "jit_cache" for arch in ("sm100a", "sm100f")]
     cache = tmp_path / "cache"
@@ -440,6 +447,7 @@ def test_slim_invalidates_selected_families_in_all_caches(tmp_path, monkeypatch,
         "replayssm_materialize_shape1",
     ]
     jit_roots = [cache / version / "cached_ops" for version in ("old/100a", "new/100f")]
+    jit_roots.append(image_path(warmup_paths["JIT_WORKSPACE"]) / "flashinfer-builds/test/100a/cached_ops")
     # Existing AOT overrides are restored after pip, then selected entries removed.
     roots = [tmp_path / "aot", *provider_roots, *jit_roots]
     for root in roots:
@@ -460,7 +468,7 @@ def test_slim_invalidates_selected_families_in_all_caches(tmp_path, monkeypatch,
     }.items():
         monkeypatch.setenv(key, value)
     namespace = dict(
-        Path=Path,
+        Path=image_path,
         os=os,
         json=json,
         shutil=shutil,
@@ -491,6 +499,15 @@ def test_slim_invalidates_selected_families_in_all_caches(tmp_path, monkeypatch,
     namespace["metadata"].version = lambda name: "0.8.0"
     with pytest.raises(RuntimeError, match="Unexpected binary package change"):
         exec(compile(program, "flashinfer-cache-invalidation", "exec"), namespace)
+
+
+def test_flashinfer_cleanup_matches_warmup_cache_roots(builder):
+    builder._head_sha = "a" * 40
+    script = shlex.split(builder.get_srun_command_str())[2].replace("\\\n", " ")
+    cleanup = next(shlex.split(line) for line in script.splitlines() if line.strip().startswith("rm -rf /opt/"))
+    warmup_paths = runpy.run_path(str(ROOT / BENCHMARK / "save_warmed_vllm_container.py"))
+    # Includes the warmed manifest and startup/CuTe files consumed by the launcher.
+    assert set(cleanup[2:]) == {str(warmup_paths[key]) for key in ("CACHE_ROOT", "VLLM_CACHE_ROOT", "CUTE_CACHE_ROOT")}
 
 
 @pytest.fixture
