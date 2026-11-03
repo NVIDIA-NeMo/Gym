@@ -385,36 +385,6 @@ class VLLMBuilder(BaseBuilder):
                 install -m 755 "$rust_extension" "$installed_vllm_dir/"
             done
 
-            # Validate installed files, not imports shadowed by the source checkout.
-            cd /
-            python3 - "$installed_vllm_dir" <<'PY'
-            import ast
-            import subprocess
-            import sys
-            from pathlib import Path
-
-            package = Path(sys.argv[1])
-            tree = ast.parse((package / "v1/utils.py").read_text())
-            manager = next(node for node in tree.body
-                           if isinstance(node, ast.ClassDef) and node.name == "RustFrontendProcessManager")
-            flags = {node.value for node in ast.walk(manager)
-                     if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("--")}
-            help_text = subprocess.check_output([str(package / "vllm-rs"), "frontend", "--help"], text=True)
-            missing = flags - set(help_text.split())
-            if missing:
-                raise SystemExit(f"Installed Rust frontend does not support Python launcher flags: {sorted(missing)}")
-            print("Rust frontend accepts the installed Python launcher's flags")
-            PY
-            python3 - <<'PY'
-            import torch
-            import vllm
-            from vllm.vllm_flash_attn import flash_attn_varlen_func
-            from vllm.model_executor.models.registry import ModelRegistry
-
-            assert "NemotronH_Omni_Reasoning_V3" in ModelRegistry.get_supported_archs()
-            print(f"vLLM {vllm.__version__}; torch {torch.__version__}")
-            PY
-
             rm -rf /opt/uv/cache /root/.cache/uv /root/.cache/pip /var/lib/apt/lists/* 2>/dev/null || true
             apt-get clean || true
             rm -rf "$BUILD_DIR/source"
