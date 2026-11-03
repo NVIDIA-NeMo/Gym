@@ -51,6 +51,26 @@ def test_a_record_that_does_not_name_the_self_grading_agent_stays_unobserved(rec
     assert counts["verifier_recorded"] == 0 and counts["unobserved"] == 2
 
 
+def _environment_scored(collected):
+    """Each row with the environment's own reward record of the episode, as an environment that scores it saves it."""
+    for row in collected.results:
+        row["_ng_collected_grading_facts"] = {"environment_reward": row["reward"]}
+    return collected
+
+
+def test_a_self_grading_agents_trial_without_a_verifier_is_observed_through_the_environments_reward():
+    # No verifier ran: the environment scored the episode and saved its reward record (a tau2-style agent).
+    passed, reason, counts, covered = _gate(_environment_scored(_agent_owned(record=None)))
+    assert covered is True and passed is True, reason
+    assert counts["unobserved"] == 0
+
+
+def test_an_environment_reward_beside_a_verifier_that_ran_does_not_observe_a_self_grading_agents_trial():
+    # A verifier ran and saved no record naming the agent: the environment's reward does not stand in for it.
+    passed, reason, counts, covered = _gate(_environment_scored(_agent_owned(record="mcqa")))
+    assert covered is False and passed is None, reason
+
+
 # The verdict an earlier self-grading agent run had before agents could own their verifier, read from that code.
 UNOBSERVED_REASON = (
     "no completed grading operation or grading record was recorded by the verifier (a resources server the run "
