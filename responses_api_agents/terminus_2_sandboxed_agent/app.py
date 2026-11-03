@@ -51,9 +51,9 @@ from nemo_gym.core import (
     NeMoGymSummary,
     TaskId,
 )
+from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -181,7 +181,7 @@ def _collector_task_identity(task_id: TaskId) -> str:
     """The task identity rollout collection expects on a session run's trajectory.
 
     A materialized row carries ``task_id`` as the ``TaskId`` mapping, and the collector's canonical
-    identity for it is that mapping's ``str`` (``_trajectory_identity`` in ``rollout_collection``).
+    identity for it is that mapping's ``str`` (``_trajectory_identity`` in ``nemo_gym.rollouts.trajectory_builder``).
     The environment server posts only the task's ``responses_create_params`` on the turn, so the
     seeded session request is the harness's only copy of that identity.
     """

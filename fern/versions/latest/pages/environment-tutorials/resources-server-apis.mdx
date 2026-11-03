@@ -106,6 +106,41 @@ async def verify(
 - **Custom task metadata** requires a `BaseVerifyRequest` subclass. Declare fields such as `answer` or `expected_state`; undeclared fields are not retained by the base Pydantic model.
 - **`request: Request`**, when added to either method signature, provides access to the per-rollout session ID.
 
+### Initial Observation for a Single Agent Turn
+
+A Resources Server used by `environment_servers/single_agent_turn` can return an
+optional `observation` string in its `ResourcesSeedSessionResponse` when the task
+prompt becomes available during seeding or an environment reset:
+
+```python
+return ResourcesSeedSessionResponse(
+    resources_session_id=body.resources_session_id,
+    observation="Inspect the initialized workspace and complete the task.",
+)
+```
+
+The `single_agent_turn` Environment Server appends a nonempty observation
+verbatim as one user message after a copy of the authored
+`responses_create_params.input`. A nonempty string input becomes the first user
+message; an empty string contributes no message. List inputs keep their items
+and order. Model settings and tools stay as authored, and `/verify` receives the
+original authored request. Omitting `observation`, returning `null`, or returning
+an empty string leaves the agent request unchanged.
+When a server does not set `observation`, serialization omits the field to preserve
+existing seed responses. An explicitly supplied `null` or empty string remains in the response.
+
+The observation is retained with the episode's session handles, so restoring at
+agent invocation still supplies it once without seeding again. This consumption
+behavior belongs to `single_agent_turn`; other Environment Servers and Agent
+Servers must define how they use a seed observation.
+
+<Note>
+When Resources supplies the prompt, leave the authored user input empty for an
+agent that accepts only one user message. For example, use
+`responses_create_params: {input: ""}`. Adding an authored user prompt as well
+would send two user messages.
+</Note>
+
 ### Direct HTTP Tool-Calling Protocol
 
 The seed/verify episode protocol does not itself define how the Agent acts on the environment. `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:
@@ -370,7 +405,7 @@ Do not put rollout-specific mutable data in an unkeyed server attribute.
 - **Seed/verify protocol**: remove custom state in `verify()`, preferably in a `finally` block. `SimpleResourcesServer` does not automatically clear custom state.
 - **Gymnasium protocol**: when `step()` returns `terminated=True` or `truncated=True`, `GymnasiumServer` calls `close_session()` and removes the entry from `self.session_state`.
 - **Heavyweight state**: override `close_session()`, release the external resource, and call `await super().close_session(session_id)`.
-- **Environment Server sessions**: an Environment Server seeds with a `ResourcesSeedSessionRequest` and closes through `/close_session`. `SimpleResourcesServer` answers both with no-op defaults, so a server without per-rollout state needs no changes. A server with state overrides `seed_session()` and `close_resources_session()`, which is named differently from the Gymnasium `close_session()` helper. Release state by `resources_session_id`, not by the cookie: after a lost seed reply the close arrives without one. Refuse a seed that no retry can fix with `ResourcesSeedRejectedError` (422) for invalid input or `ResourcesSessionConflictError` (409) for an ID bound to another episode, and answer a verify for a session the server no longer holds with the masked sample from `lost_session_verification()`. `ResourcesSessionFence` serializes seed and close per session and refuses a seed after close; check these rules from the server's tests with `check_resources_session_contract(app, seed, keeps_state=True, holds_state=..., verify_body=...)` from `nemo_gym.testing.session_conformance`.
+- **Environment Server sessions**: an Environment Server seeds with a `ResourcesSeedSessionRequest` and closes through `/close_session`. `SimpleResourcesServer` answers both with no-op defaults, so a server without per-rollout state needs no changes. A server with state overrides `seed_session()` and `close_resources_session()`, which is named differently from the Gymnasium `close_session()` helper. Release state by `resources_session_id`, not by the cookie: after a lost seed reply the close arrives without one. Refuse a seed that no retry can fix with `ResourcesSeedRejectedError` (422) for invalid input or `ResourcesSessionConflictError` (409) for an ID bound to another episode, and answer a verify for a session the server no longer holds with the masked sample from `lost_session_verification()`. `ResourcesSessionFence` serializes seed and close per session and refuses a seed after close; check these rules from the server's tests with `check_resources_session_contract(app, seed, keeps_state=True, holds_state=..., verify_body=...)` from `nemo_gym.server_runtime.testing.session_conformance`.
 
 ```python
 async def close_session(self, session_id):

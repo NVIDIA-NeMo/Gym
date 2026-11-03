@@ -34,8 +34,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
@@ -1361,7 +1360,7 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         SingleAgentTurnEnvironmentServerConfig,
     )
     from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.server_runtime import SingleAgentTurnRequest
 
     agent, sandbox = setup
@@ -2191,8 +2190,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     gaps = [gap.code for gap in close.agent_observations.gaps]
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
-        from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.trajectory import join_agent_model_calls
+        from nemo_gym.trajectory import ModelCallRecord, join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"

@@ -38,6 +38,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentOutcome,
     AgentSeedSessionRequest,
+    check_agent_seed_rejected,
 )
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import (
@@ -57,7 +58,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     TaskId,
 )
-from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     AgentSessionParticipant,
@@ -79,7 +80,6 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     StaleAttemptError,
 )
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,

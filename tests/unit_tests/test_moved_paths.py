@@ -22,6 +22,7 @@ import pickle
 import pkgutil
 import re
 import runpy
+import subprocess
 import sys
 import textwrap
 import types
@@ -705,3 +706,24 @@ if __name__ == "__main__":
     IMPORT_SURFACE_PATH.write_text(
         "{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in sorted(surface.items())) + "\n}\n"
     )
+
+
+@pytest.mark.parametrize("first", ["", "import nemo_gym.data.tasks.harbor\n"])
+def test_harbor_cli_imports_from_the_old_package(first: str) -> None:
+    # In a fresh interpreter: an earlier `import nemo_gym.tasks.harbor.cli` would bind `cli` on the package.
+    code = first + (
+        "import importlib\n"
+        "from nemo_gym.tasks.harbor import cli\n"
+        "assert cli is importlib.import_module('nemo_gym.data.tasks.harbor.prepare')\n"
+        "assert cli.run_target is importlib.import_module('nemo_gym.cli.eval').run_target\n"
+        "from nemo_gym.data.tasks.harbor import prepare\n"
+        "assert prepare is cli\n"
+        "import nemo_gym.data.tasks.harbor as harbor\n"
+        "try:\n"
+        "    harbor.not_a_module\n"
+        "except AttributeError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('unknown attribute resolved')\n"
+    )
+    subprocess.run([sys.executable, "-W", "ignore::DeprecationWarning", "-c", code], check=True)
