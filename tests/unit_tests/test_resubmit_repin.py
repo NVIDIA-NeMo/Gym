@@ -173,16 +173,38 @@ def test_a_repin_whose_job_is_not_queued_restores_both_files(tmp_path, slurm_bin
     assert not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
 
 
-def test_the_resubmit_help_lists_repin_and_inspect_refuses_it(capsys):
+def test_the_resubmit_help_lists_repin_and_a_repin_needs_recover(capsys):
     parser = build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["eval", "resubmit", "--help"])
     assert "--repin" in capsys.readouterr().out
     from nemo_gym.cli.main import _eval_resubmit
 
-    args = parser.parse_args(
-        ["eval", "resubmit", "job", "bench", "--recover", "--inspect", "--repin", NEW, "--repin-reason", "x"]
-    )
+    args = parser.parse_args(["eval", "resubmit", "job", "bench", "--repin", NEW, "--repin-reason", "x"])
     with pytest.raises(SystemExit):
         _eval_resubmit(args, [])
-    assert "cannot be used with --inspect" in capsys.readouterr().err
+    assert "--repin and --repin-reason need --recover" in capsys.readouterr().err
+
+
+def test_an_inspect_at_a_repin_reads_the_plan_there_and_changes_nothing(tmp_path, slurm_bin, launcher_at, monkeypatch):
+    # The dry run of a repinned recovery: the Store is read at the target commit, nothing is rendered or queued.
+    from nemo_gym.orchestration.submit import inspect_recovery
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path)
+    before = _digests(job_dir) | {"job.sh": hashlib.sha256((job_dir / "job.sh").read_bytes()).hexdigest()}
+    seen = []
+    real = SlurmExecutor.recovery_evidence
+
+    def spy(self, *args, **kwargs):
+        seen.append(kwargs.get("reader_ref"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(SlurmExecutor, "recovery_evidence", spy)
+    out = inspect_recovery(*_handle(job_dir), repin=NEW, repin_reason="preview the fixed revision")
+    assert seen == [NEW]
+    assert out.dispatched is None
+    assert any(w.startswith(f"INSPECTED AT REPIN {NEW}") for w in out.gate_task["warnings"]), out.gate_task
+    after = _digests(job_dir) | {"job.sh": hashlib.sha256((job_dir / "job.sh").read_bytes()).hexdigest()}
+    assert after == before
+    assert not list(job_dir.glob("job.sh.pre-repin-*")) and not (job_dir / REPIN_JOURNAL_NAME).exists()

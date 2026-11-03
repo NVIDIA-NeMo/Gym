@@ -170,12 +170,19 @@ def inspect_recovery(
     mlflow_run_id: str | None = None,
     extend_retries: int = 0,
     extend_attempts: int = 0,
+    repin: str | None = None,
+    repin_reason: str | None = None,
 ) -> RecoveryOutcome:
-    """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action."""
+    """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action.
+
+    With ``repin`` it reports the plan a recovery repinned to that commit would follow: the run's Store is read at the
+    target commit, as the repinned resume would read it, and nothing is rendered, repinned or queued.
+    """
     outcome = _recover(
         gym_job_id,
         benchmark,
         inspect_only=True,
+        **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
         original_record=original_record,
         extend_retries=extend_retries,
         extend_attempts=extend_attempts,
@@ -374,6 +381,16 @@ def _recover(
                 "warnings": [
                     *gate_task["warnings"],
                     f"PLANNED (NOT DISPATCHED): --inspect reports the {decision.action.value} decision and runs nothing",
+                ],
+            }
+        if repin is not None:
+            # The plan was read at the repin target, as a repinned recovery would read it; nothing was repinned.
+            gate_task = {
+                **gate_task,
+                "warnings": [
+                    *gate_task["warnings"],
+                    f"INSPECTED AT REPIN {repin}: the plan of a recovery repinned to this commit; the run is not "
+                    "repinned and nothing was dispatched",
                 ],
             }
         return RecoveryOutcome(
