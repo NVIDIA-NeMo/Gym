@@ -449,9 +449,17 @@ class BenchmarkRunConfig(_StrictModel):
     # API key (when driver.policy_model is set) so the script can reach the served
     # model without repeating its address.
     command: str | None = None
+    # Post-run exports of this benchmark's rollouts, by exporter name (see `gym eval export`). Each value is that
+    # exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export.
+    export: dict[str, dict[str, Any] | None] = {}
 
     @model_validator(mode="after")
     def _validate_command(self, info: ValidationInfo) -> "BenchmarkRunConfig":
+        if self.command is not None and any(settings is not None for settings in self.export.values()):
+            raise ValueError(
+                "A benchmark sets both `command` and `export`, but an export reads the rollouts file `gym eval run` "
+                "writes, which `command` replaces. Drop `export`, or run through `gym eval run`."
+            )
         # A saved config holds the policy keys driver.policy_model wrote into a command's run at submit, which
         # the command reads as NEMO_GYM_POLICY_*. SubmitConfig checks a saved command, where the policy is known.
         if self.command is not None and self.run and not (info.context and info.context.get(SAVED_CONFIG)):
@@ -519,6 +527,9 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
 class JobConfig(_StrictModel):
     # Remote base directory. Each submit creates a timestamped subdirectory here.
     output_path: str
+    # Post-run exports every benchmark runs by default, by exporter name; a benchmark's own `export` override
+    # them. Benchmarks that run a `command` take none of them.
+    export: dict[str, dict[str, Any] | None] = {}
 
 
 class OtelConfig(_StrictModel):
@@ -757,6 +768,13 @@ class SubmitConfig(_StrictModel):
                         )
                     benchmark.run.update(copy.deepcopy(policy_run))
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_exports(self) -> "SubmitConfig":
+        from nemo_gym.orchestration.exports import validate_exports
+
+        validate_exports(self)
         return self
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:

@@ -27,8 +27,8 @@ import pydantic
 import pytest
 
 from nemo_gym.models.token_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
-from nemo_gym.models.token_capture.staging import resolve_terminal
 from nemo_gym.models.token_capture.staging.records import CallRecord
+from nemo_gym.models.token_capture.terminal import resolve_terminal
 
 
 def _assistant_item(text: str) -> dict:
