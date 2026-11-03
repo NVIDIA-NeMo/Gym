@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import asyncio
 import fnmatch
 import json
 import os
@@ -15,6 +16,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from omegaconf import OmegaConf
+from pydantic import ValidationError
 
 import nemo_gym.orchestration.build_containers as build_containers
 from nemo_gym.cli.main import main as cli_main
@@ -29,7 +32,12 @@ from nemo_gym.orchestration.build_containers import (
     MooncakeConfig,
     VLLMBuilder,
     VLLMConfig,
+    WarmupConfig,
 )
+
+
+ROOT = Path(__file__).resolve().parents[2]
+BENCHMARK = Path("benchmarks/nemotron_3.5_super")
 
 
 @pytest.fixture
@@ -181,7 +189,9 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
         "  build_parallel_level: 8\n"
     )
     override = tmp_path / "override.yaml"
-    override.write_text("flashinfer:\n  branch: dev\n")
+    override.write_text(
+        "flashinfer:\n  branch: dev\nwarmup:\n  env:\n    MODEL: /models/nemotron\n    NUM_PREFILL_NODES: 2\n"
+    )
     monkeypatch.chdir(tmp_path)
     # Exercise real config composition without reading developer credentials or
     # launching subprocesses, copying images, or submitting a Slurm job.
@@ -215,6 +225,7 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
     assert resolved.flashinfer.invalidate_modules == ["fused_moe_trtllm_sm100"]
     assert resolved.mooncake.branch == "mooncake-dev"
     assert resolved.mooncake.build_parallel_level == 8
+    assert resolved.warmup.env == {"MODEL": "/models/nemotron", "NUM_PREFILL_NODES": 2}
 
 
 @pytest.fixture
@@ -363,12 +374,13 @@ def test_vllm_installed_rust_launcher_compatibility(vllm_builder, tmp_path, supp
         assert "--input-listener-fd" in result.stderr
 
 
-@pytest.mark.parametrize("failed_stage", [None, "build-vllm", "build-flashinfer", "build-mooncake"])
+@pytest.mark.parametrize("failed_stage", [None, "build-vllm", "build-flashinfer", "build-mooncake", "warmup"])
 async def test_container_stage_order_and_cleanup(container_config, tmp_path, monkeypatch, failed_stage):
     container_config.input_container_fpath.write_text("base")
     container_config.vllm = VLLMConfig(repo="vllm", branch="dev", version="0.32.0", precompiled_wheel_commit="b" * 40)
     container_config.flashinfer = FlashInferConfig(repo="fi", branch="dev", invalidate_modules=[], cpus_per_task=64)
     container_config.mooncake = MooncakeConfig(repo="mooncake", branch="dev", cpus_per_task=32, build_parallel_level=8)
+    container_config.warmup = WarmupConfig(env={"MODEL": "/models/nemotron"})
     monkeypatch.setattr(build_containers.BaseBuilder, "_preflight_check_git_repo", AsyncMock(return_value="a" * 40))
     stages = []
 
@@ -384,8 +396,17 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
         return CommandOutput(returncode=1 if stage == failed_stage else 0, output_lines=[])
 
     monkeypatch.setattr(BuildContainerHelper, "_run_single_srun", run_stage)
+
+    async def warmup(self):
+        assert container_config.output_container_fpath.read_text() == "build-mooncake"
+        stages.append("warmup")
+        if failed_stage == "warmup":
+            raise RuntimeError("Command failed")
+        container_config.output_container_fpath.write_text("warmup")
+
+    monkeypatch.setattr(BuildContainerHelper, "_run_warmup", warmup)
     helper = BuildContainerHelper(config=container_config)
-    expected_stages = ["build-vllm", "build-flashinfer", "build-mooncake"]
+    expected_stages = ["build-vllm", "build-flashinfer", "build-mooncake", "warmup"]
     if failed_stage:
         with pytest.raises(RuntimeError, match="Command failed"):
             await helper.run()
@@ -394,7 +415,7 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
     else:
         await helper.run()
         assert stages == expected_stages
-        assert container_config.output_container_fpath.read_text() == "build-mooncake"
+        assert container_config.output_container_fpath.read_text() == "warmup"
     assert container_config.input_container_fpath.read_text() == "base"
 
 
@@ -595,3 +616,174 @@ elif tool == "uv" and args == ["cache", "clean"]:
         assert calls[-1]["args"] == ["cache", "clean"]
         assert calls[-1]["cwd"] == "/"
         assert not calls[-1]["build_exists"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "CONTAINER",
+        "SAVE_WARMED_CONTAINER",
+        "SBATCH_WAIT",
+        "SBATCH_ACCOUNT",
+        "SBATCH_PARTITION",
+        "SBATCH_QOS",
+        "SBATCH_TIMELIMIT",
+        "SBATCH_GPUS_PER_NODE",
+        "SBATCH_GRES",
+        "BAD-NAME",
+        "X=$(touch bad)",
+    ],
+)
+def test_warmup_rejects_invalid_or_managed_env(key):
+    with pytest.raises(ValidationError):
+        WarmupConfig(env={key: "value"})
+
+
+def test_warmup_example_uses_shared_slurm_config(monkeypatch):
+    monkeypatch.setenv("PWD", str(ROOT))
+    config = OmegaConf.load(ROOT / BENCHMARK / "build_container_configs/prims.yaml")
+    resolved = BuildContainerConfig.model_validate(OmegaConf.to_container(config, resolve=True))
+    assert resolved.vllm is not None
+    assert resolved.flashinfer is not None
+    assert resolved.warmup.env["NUM_PREFILL_NODES"] == 2
+    assert resolved.slurm["account"] == "nemotron_n4_post"
+    assert resolved.slurm["partition"] == "batch"
+    assert resolved.slurm["qos"] == "interactive"
+    assert not {"SBATCH_ACCOUNT", "SBATCH_PARTITION", "SBATCH_QOS", "SBATCH_TIMELIMIT"} & resolved.warmup.env.keys()
+    assert resolved.warmup.env["MOUNTS"] == f"/lustre:/lustre,{ROOT}:/opt/Gym"
+    assert "CONTAINER" not in resolved.warmup.env
+    assert resolved.slurm["gpus-per-node"] == "4"
+    assert "SBATCH_GRES" not in resolved.warmup.env
+    assert "SBATCH_GPUS_PER_NODE" not in resolved.warmup.env
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "missing", "empty", "cancel"])
+@pytest.mark.parametrize(
+    "gpu_key,gpu_value,gpu_env",
+    [("gpus-per-node", "4", "SBATCH_GPUS_PER_NODE"), ("gres", "gpu:4", "SBATCH_GRES")],
+)
+async def test_warmup_real_launcher_waits_and_publishes(tmp_path, monkeypatch, outcome, gpu_key, gpu_value, gpu_env):
+    # Run the actual launcher with a fake sbatch. No allocation or GPU is used.
+    benchmark = tmp_path / BENCHMARK
+    benchmark.mkdir(parents=True)
+    for name in ("sbatch_external_vllm.sh", "save_warmed_vllm_container.py"):
+        shutil.copyfile(ROOT / BENCHMARK / name, benchmark / name)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    sbatch = bin_dir / "sbatch"
+    sbatch.write_text(
+        f"#!{sys.executable}\n"
+        + """import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ["CAPTURE_DIR"])
+assert os.environ["SBATCH_WAIT"] == "1"
+assert not any(arg.startswith("--dependency") for arg in sys.argv)
+(root / "submitted.tmp").write_text(json.dumps({
+    "env": dict(os.environ), "args": sys.argv[1:],
+}))
+print("12345;test-cluster", flush=True)
+(root / "submitted.tmp").replace(root / "submitted.json")
+# Simulate --wait: only finish after the test allows the remote job to complete.
+while not (root / "release").exists():
+    time.sleep(0.01)
+outcome = os.environ["TEST_OUTCOME"]
+if outcome != "missing":
+    Path(os.environ["SAVE_WARMED_CONTAINER"]).write_bytes(b"" if outcome == "empty" else b"warmed")
+sys.exit(7 if outcome == "failure" else 0)
+"""
+    )
+    sbatch.chmod(0o755)
+    scancel = bin_dir / "scancel"
+    scancel.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > cancelled\n')
+    scancel.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("USER", "warmup-test")
+    monkeypatch.setenv("NODELIST", "")
+    # Inherited image settings must never override the stage-owned paths.
+    monkeypatch.setenv("CONTAINER", "wrong.sqsh")
+    monkeypatch.setenv("SAVE_WARMED_CONTAINER", "wrong-warmed.sqsh")
+    monkeypatch.setenv("SBATCH_WAIT", "0")
+    for key in ("SBATCH_ACCOUNT", "SBATCH_PARTITION", "SBATCH_QOS", "SBATCH_TIMELIMIT"):
+        monkeypatch.setenv(key, "wrong")
+    config = BuildContainerConfig(
+        input_container_fpath=tmp_path / "base.sqsh",
+        output_container_fpath=tmp_path / "output.sqsh",
+        slurm={
+            "account": "warmup-account",
+            "partition": "batch",
+            "qos": "interactive",
+            "time": "02:00:00",
+            gpu_key: gpu_value,
+        },
+        warmup=WarmupConfig(
+            env={
+                "MODEL": "/models/nemotron",
+                "VLLM_CONFIG": "serving.sh",
+                "MOUNTS": f"{tmp_path}:/opt/Gym",
+                "NUM_PREFILL_NODES": 2,
+                "NUM_DECODE_NODES": 2,
+                "ENABLE_MOONCAKE": True,
+                "SLURM_COMMENT": '{"reason":"test warmup"}',
+                "TEST_LITERAL": "a value $(touch INJECTED) `touch ALSO_INJECTED`",
+                "TEST_OUTCOME": outcome,
+                "CAPTURE_DIR": str(tmp_path),
+            }
+        ),
+    )
+    config.input_container_fpath.write_bytes(b"base")
+    task = asyncio.create_task(BuildContainerHelper(config=config).run())
+    try:
+        async with asyncio.timeout(15):
+            capture = tmp_path / "submitted.json"
+            while not capture.exists():
+                if task.done():
+                    await task  # Surface launcher errors instead of waiting for timeout.
+                await asyncio.sleep(0.01)
+            submitted = json.loads(capture.read_text())
+            env = submitted["env"]
+            saved_path = Path(env["SAVE_WARMED_CONTAINER"])
+            assert env["CONTAINER"] == str(config.output_container_fpath)
+            assert saved_path.parent.parent == tmp_path
+            assert not saved_path.exists()
+            assert not task.done()
+            assert config.output_container_fpath.read_bytes() == b"base"
+            assert env["ENABLE_MOONCAKE"] == "1"
+            assert env["SBATCH_ACCOUNT"] == "warmup-account"
+            assert env["SBATCH_PARTITION"] == "batch"
+            assert env["SBATCH_QOS"] == "interactive"
+            assert env["SBATCH_TIMELIMIT"] == "00:30:00"
+            assert env[gpu_env] == gpu_value
+            assert "--time=00:30:00" in submitted["args"]
+            assert env["TEST_LITERAL"] == config.warmup.env["TEST_LITERAL"]
+            assert "--nodes=4" in submitted["args"]
+            assert "--comment=" + config.warmup.env["SLURM_COMMENT"] in submitted["args"]
+            if outcome == "cancel":
+                job_file = saved_path.parent / "job-id"
+                while not job_file.exists() or not job_file.read_text().strip():
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert (tmp_path / "cancelled").read_text().splitlines() == ["--clusters", "test-cluster", "12345"]
+                assert not config.output_container_fpath.exists()
+            elif outcome == "success":
+                (tmp_path / "release").touch()
+                await task
+                assert config.output_container_fpath.read_bytes() == b"warmed"
+            else:
+                (tmp_path / "release").touch()
+                match = "returncode 7" if outcome == "failure" else "without a nonempty image"
+                with pytest.raises(RuntimeError, match=match):
+                    await task
+                assert not config.output_container_fpath.exists()
+            assert not saved_path.parent.exists()
+            assert config.input_container_fpath.read_bytes() == b"base"
+            assert not (tmp_path / "INJECTED").exists()
+            assert not (tmp_path / "ALSO_INJECTED").exists()
+    finally:
+        (tmp_path / "release").touch()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task

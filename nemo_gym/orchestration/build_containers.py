@@ -10,10 +10,11 @@ from os import killpg
 from pathlib import Path
 from shlex import join, quote
 from signal import SIGKILL
+from tempfile import TemporaryDirectory
 from textwrap import dedent
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.config.global_config import get_global_config_dict
@@ -45,6 +46,41 @@ class MooncakeConfig(BaseNeMoGymCLIConfig):
     build_parallel_level: int = Field(gt=0)
 
 
+class WarmupConfig(BaseNeMoGymCLIConfig):
+    """Run the vLLM startup-only launcher after installing all build stages.
+
+    Environment values are literal (no shell expansion). CONTAINER,
+    SAVE_WARMED_CONTAINER, and SBATCH_WAIT are managed by the builder.
+    Account, partition, QoS, and GPU resources come from slurm; the time limit is 30 minutes.
+    Run from the Gym checkout, as when invoking the launcher directly.
+    """
+
+    env: dict[str, str | int | float | bool]
+
+    @field_validator("env")
+    @classmethod
+    def validate_env(cls, values: dict[str, str | int | float | bool]) -> dict[str, str | int | float | bool]:
+        """Reject malformed names and overrides of stage-owned settings."""
+        for key, value in values.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ValueError(f"Invalid warmup environment variable: {key!r}")
+            if key in {
+                "CONTAINER",
+                "SAVE_WARMED_CONTAINER",
+                "SBATCH_WAIT",
+                "SBATCH_ACCOUNT",
+                "SBATCH_PARTITION",
+                "SBATCH_QOS",
+                "SBATCH_TIMELIMIT",
+                "SBATCH_GPUS_PER_NODE",
+                "SBATCH_GRES",
+            }:
+                raise ValueError(f"{key} is managed by the warmup stage; omit it from warmup.env")
+            if isinstance(value, str) and "\0" in value:
+                raise ValueError(f"Warmup environment variable {key} contains a NUL byte")
+        return values
+
+
 class BuildContainerConfig(BaseNeMoGymCLIConfig):
     input_container_fpath: Path
     output_container_fpath: Path
@@ -54,6 +90,7 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     vllm: Optional[VLLMConfig] = None
     flashinfer: Optional[FlashInferConfig] = None
     mooncake: Optional[MooncakeConfig] = None
+    warmup: Optional[WarmupConfig] = None
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -571,6 +608,73 @@ class BuildContainerHelper(BaseModel):
                 raise RuntimeError(
                     f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
                 )
+
+        if self.config.warmup is not None:
+            await self._run_warmup()
+
+    async def _run_warmup(self) -> None:
+        launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
+        if not launcher.is_file():
+            raise FileNotFoundError(f"Warmup launcher not found: {launcher}. Run from the Gym checkout.")
+        assert self.config.warmup is not None
+        output = self.config.output_container_fpath
+        # The launcher publishes via a hard link and requires a nonexistent target.
+        # Keep the input image intact until the completed job has exported its caches.
+        with TemporaryDirectory(prefix=f".{output.stem}-warmup-", dir=output.parent) as directory:
+            warmed = Path(directory) / "warmed.sqsh"
+            job_file = Path(directory) / "job-id"
+            env = {
+                key: str(int(value)) if isinstance(value, bool) else str(value)
+                for key, value in self.config.warmup.env.items()
+            }
+            slurm_env_vars = {
+                "account": "SBATCH_ACCOUNT",
+                "partition": "SBATCH_PARTITION",
+                "qos": "SBATCH_QOS",
+                "gpus-per-node": "SBATCH_GPUS_PER_NODE",
+                "gres": "SBATCH_GRES",
+            }
+            for key, env_var in slurm_env_vars.items():
+                if key in self.config.slurm:
+                    env[env_var] = str(self.config.slurm[key])
+            env.update(
+                CONTAINER=str(output),
+                SAVE_WARMED_CONTAINER=str(warmed),
+                SBATCH_WAIT="1",
+                SBATCH_TIMELIMIT="00:30:00",
+            )
+            # sbatch prints its ID before --wait completes. Record it without
+            # changing the launcher's output, so interruption can cancel that job.
+            script = (
+                "set -euo pipefail\n"
+                f'sbatch() {{ command sbatch "$@" | tee {quote(str(job_file))}; }}\n'
+                "export -f sbatch\n"
+                f"exec bash {quote(str(launcher))}\n"
+            )
+            command = join(["env", *(f"{key}={value}" for key, value in env.items()), "bash", "-c", script])
+            try:
+                result = await _run_command(command, self.config.log_file)
+            except BaseException:
+                # Killing the local sbatch waiter does not cancel the allocation.
+                job = job_file.read_text().strip() if job_file.exists() else ""
+                match = re.fullmatch(r"([0-9]+)(?:;([A-Za-z0-9_.-]+))?", job)
+                if match:
+                    cancel = ["scancel"]
+                    if match[2]:
+                        cancel.extend(["--clusters", match[2]])
+                    cancel.append(match[1])
+                    cancelled = await _run_command(join(cancel), self.config.log_file)
+                    if cancelled.returncode:
+                        print(f"Could not cancel warmup job {job}; see {self.config.log_file}")
+                raise
+            if result.returncode != 0:
+                raise RuntimeError(f"Warmup failed with returncode {result.returncode}. See {self.config.log_file}")
+            if not warmed.is_file() or warmed.stat().st_size == 0:
+                raise RuntimeError(
+                    f"Warmup completed without a nonempty image at {warmed}. See {self.config.log_file}"
+                )
+            warmed.replace(output)
+        print(f"Saved warmed container: {output}")
 
     async def _clean_on_failure(self) -> None:
         command_output = await _run_command(

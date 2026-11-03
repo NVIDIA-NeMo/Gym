@@ -20,3 +20,14 @@ flashinfer:
   invalidate_modules:
   - fused_moe_trtllm_sm100
   cpus_per_task: 128
+
+warmup:
+  env:
+    MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
+    VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh
+    NUM_PREFILL_NODES: 2
+    NUM_DECODE_NODES: 2
+    ENABLE_MOONCAKE: 1
+    ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE: 4
+    SLURM_COMMENT: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"720","reason":"benchmarking","description":"POR - https://nvaiinfa.aha.io/ideas/ideas/NMP-I-791"}}'
+    MOUNTS: ${oc.env:PWD}:${oc.env:PWD},${oc.env:PWD}:/opt/Gym
