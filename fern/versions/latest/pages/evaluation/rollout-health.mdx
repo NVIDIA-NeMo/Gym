@@ -307,15 +307,23 @@ as a number of calls.
 
 `run.artifacts` also counts the run against its `<output stem>_materialized_inputs.jsonl` inventory:
 
+- `state`: whether the health check observed the run. `observed` means it read the rollouts and the inventory.
+  `unavailable` means an input it needs is missing: there is no inventory, or the run stopped before its rollouts were
+  read. `disabled` means `--no-health-check` (`disable_health_check`) is set. `state_reason` says why when the state is
+  not `observed`.
 - `expected`: rollouts in the inventory.
+- `completed`: expected rollouts with a saved result. Without an inventory, every rollout with a saved result.
+- `scored`: completed rollouts with a numeric reward that are not masked, as `measured` in the run's coverage report. A
+  failure that a policy settles as a scored zero counts in `failed`, not here. Null when the rollouts were not read and
+  the run has no manifest.
 - `failed`: selected failures from the run manifest and saved history, as `total`, `final`, `not_final` and `by_class`. Intentional omissions are excluded; exhausted retry budgets count as final. For legacy runs without a manifest, this uses the last sidecar failure for each rollout that did not later land. `final` failures are ones a resume does not retry; `not_final` ones are still retryable. The split is by retry eligibility only and does not say whether the model or the infrastructure caused a failure. Null when there is no sidecar.
 - `missing`: for a run with a manifest, reserved executions with no outcome. Legacy runs use owed rollouts with neither a record nor a failure row.
 - `not_started`: tasks with no reserved execution in a managed run.
 - `omitted`: intentional omissions in a managed run; these do not count toward failure limits.
-- `healthy`: false when a rollout is missing or not started, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set. `unhealthy_reasons` names each cause.
+- `healthy`: true only when `state` is `observed` and the run has no reason to be unhealthy. It is false when no expected rollout completed, a rollout is missing or not started, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set; a run with 8 expected rollouts and 8 failures is still unhealthy, because none of them completed. `unhealthy_reasons` names each cause.
 - `limits`: the limits the run was judged by (`max_not_final_failure_fraction`, `max_final_failure_fraction`, null for no limit) and, in `source`, where each limit came from: `config` for the run's own settings, `persisted` when `gym eval health-check` reused it, `override` when its own limit flag replaced it. A flag value of `none` removes the limit, recorded as null with `override`.
 
-`expected`, `missing` and `healthy` are null without an inventory. After collection starts, the summary is also written when collection fails or Slurm stops the job with SIGTERM. The built-in collector retains its run lock through reporting. A refused resume does not remove or replace reports from the saved run.
+`expected`, `missing` and `healthy` are null without an inventory, and `state` is `unavailable`. After collection starts, the summary is also written when collection fails or Slurm stops the job with SIGTERM. When the check is disabled, the summary still exists: it has the `state` and `state_reason`, null counts and a null `healthy`, and no `rollout_verdicts.jsonl`. A check that cannot run (for example, a history with superseded outcomes and no merged projection, or a check that raises) writes no summary; read a missing summary as unavailable. The built-in collector retains its run lock through reporting. A refused resume does not remove or replace reports from the saved run.
 
 ### Timeouts
 
@@ -405,7 +413,7 @@ such as `health/timeouts/timed_out` and `health/timeouts/by_evidence/typed`. A n
 enforcer that only an earlier failed attempt named is sent as 0, so a resumed tracking run does not keep its old
 count. A failed export is logged and does not stop the run.
 
-A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A SIGTERM-stopped run exits with status 143. An interactive interruption with `require_complete` enabled reports `EVAL FAILED`.
+A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, `state: unavailable`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A SIGTERM-stopped run exits with status 143. An interactive interruption with `require_complete` enabled reports `EVAL FAILED`.
 
 ### `rollout_verdicts.jsonl`
 
@@ -452,6 +460,10 @@ All registered checks are enabled by default. To skip health verification entire
 gym eval run ... --no-health-check
 gym eval aggregate ... --no-health-check
 ```
+
+`gym eval run --no-health-check` then writes a `quality_summary.json` with `run.artifacts.state: disabled` and a
+null `healthy`, so a reader can tell a disabled check from a run that the check found healthy. `gym eval aggregate
+--no-health-check` writes no summary.
 
 To exclude specific checks from one automatic run:
 
