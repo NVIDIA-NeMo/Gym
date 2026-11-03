@@ -497,6 +497,36 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 3. Keep the run directory. To evaluate something different, submit a new run to a new location
    rather than reusing this one; a fresh `gym eval run` at an existing output path replaces it.
 
+## What the stack does not decide for you
+
+A Gym run reports what it recorded. These outcomes are scored or retried today in a way you must
+correct or report yourself, until the matching policy lands in Gym.
+
+- **A sandbox killed for memory.** A kill during the agent's own command is the model's outcome, not
+  a fault to rerun. Where the stack retries it (harness-agent rows, kind `provider_oom_killed`, the
+  provider text in `failure_reason`) or scores it 0 (Terminal-Bench 4.0: read `sandbox_resource_limit`,
+  resource `memory`, with the provider text in `detail`), count it as the model's. A process killed
+  inside a live sandbox (exit 137) is a scored 0 marked interrupted. SWE-family and SkillsBench keep
+  nothing typed about it.
+- **A sandbox that ended for its own limit.** Terminal-Bench 4.0 scores 0 only when the provider text
+  names the sandbox's own memory or storage limit; read `sandbox_resource_limit` before you accept
+  that zero. Other sandbox deaths there are `infrastructure_error` and are retried. In SkillsBench a
+  sandbox that dies mid-trial is `harbor_failed` and is retried, not scored; it scores 0 only when it
+  ended at the agent deadline with no test result.
+- **SkillsBench agent timeouts.** The row is final and scored. Many are zeros without a verifier
+  result (the sandbox was discarded before verification, or the verifier produced nothing). Report the
+  score over the rows the verifier graded beside the headline score.
+- **AutomationBench rows that ended on a serving timeout or a 5xx.** They are graded on the partial
+  world. Count them from `rollout_error` before you publish a score; its `kind_candidate` is a
+  candidate (`http_5xx`, `http_429`, `timeout`, `connection`), and the verifier's own time limit
+  leaves no `rollout_error`.
+- **SciCode.** A killed grading subprocess shows as a wrong answer unless the step exit is recorded.
+  Gym records it: look for `killed:<SIGNAL>` in `step_exits[].exit` (`killed:SIGKILL` for a memory
+  kill). It is recorded for the run that decided the step, so a kill in another grading interpreter
+  of the same row is not shown.
+
+Name each correction in your report with its count.
+
 ## Exit checks
 
 - [ ] `--inspect` shows `SUCCESS`, or the remaining STOP is explained and accepted by the operator.
