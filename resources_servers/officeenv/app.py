@@ -68,6 +68,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 if TYPE_CHECKING:
@@ -351,3 +352,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     OfficeEnvResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`; Gym's
+    # session routing sends each episode's requests to the worker that seeded it.
+    app = OfficeEnvResourcesServer.run_webserver()  # noqa: F401
