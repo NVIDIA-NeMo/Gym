@@ -54,6 +54,9 @@ _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
 # The tool OpenCode substitutes, in the history it sends back, for a call to a tool it does not offer.
 _UNAVAILABLE_TOOL_PLACEHOLDER = "invalid"
+# A lookup reads each placeholder-shaped call in an echoed turn either way, which is 2**n keys for n such calls.
+# Beyond this many, it tries only reading none and reading all of them.
+_MAX_INDEPENDENT_PLACEHOLDERS = 6
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -331,7 +334,7 @@ def _served_tool_name(name: str, arguments: str) -> str:
     return served if isinstance(served, str) and served and isinstance(payload["error"], str) else name
 
 
-def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: bool = False) -> str:
+def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozenset[str] = frozenset()) -> str:
     """Fingerprint a complete model turn while tolerating rewritten tool arguments.
 
     Every tool ID and name, their order, and all non-tool assistant content must
@@ -341,11 +344,11 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: bool = F
     This fallback key supplements the versioned content fingerprint and the
     request-context digest in both in-memory and durable lineage indexes.
 
-    ``read_placeholders`` reads a call in OpenCode's unavailable-tool placeholder
-    as the call the model was served (``_served_tool_name``). Only a lookup of a
-    harness's echoed history sets it, next to the key without it
-    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it,
-    so stored keys keep their meaning across this change.
+    ``read_placeholders`` names the tool-call IDs whose call, if it has the shape of
+    OpenCode's unavailable-tool placeholder, counts as the call the model was served
+    (``_served_tool_name``). Only a lookup of a harness's echoed history sets it
+    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it, so
+    stored keys keep their meaning across this change.
     """
     hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
     seen_ids: set[str] = set()
@@ -366,18 +369,37 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: bool = F
                 return ""
             seen_ids.add(call_id)
             _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", _served_tool_name(name, arguments) if read_placeholders else name)
+            _update_field(
+                hasher, b"\x03", _served_tool_name(name, arguments) if call_id in read_placeholders else name
+            )
     return hasher.hexdigest() if seen_ids else ""
 
 
 def echoed_tool_call_turn_fingerprints(items: list[dict]) -> list[str]:
-    """The fallback keys an echoed model turn can match: as echoed, then with placeholders read.
+    """The fallback keys an echoed model turn can match, the turn as echoed first.
 
-    A lookup pools the candidates of every key before it decides uniqueness, so a served call
-    that itself looks like the placeholder still matches its stored key.
+    Each placeholder-shaped call is read both ways, independently: OpenCode's rewrite of an
+    unavailable tool and a call the model itself made to ``invalid`` look the same, and one
+    turn can hold both. A lookup pools the candidates of every key before it decides
+    uniqueness. Past ``_MAX_INDEPENDENT_PLACEHOLDERS`` such calls in one turn, only reading
+    none and reading all of them are tried.
     """
+    placeholder_ids = [
+        call_id
+        for item in items or []
+        if isinstance(item, dict) and _is_assistant_authored(item)
+        for call_id, name, arguments in _tools_of(item)
+        if call_id and _served_tool_name(name, arguments) != name
+    ]
+    if len(placeholder_ids) <= _MAX_INDEPENDENT_PLACEHOLDERS:
+        readings = [
+            frozenset(call_id for bit, call_id in enumerate(placeholder_ids) if mask >> bit & 1)
+            for mask in range(1 << len(placeholder_ids))
+        ]
+    else:
+        readings = [frozenset(), frozenset(placeholder_ids)]
     keys: list[str] = []
-    for read_placeholders in (False, True):
+    for read_placeholders in readings:
         key = tool_call_turn_fingerprint(items, read_placeholders=read_placeholders)
         if key and key not in keys:
             keys.append(key)

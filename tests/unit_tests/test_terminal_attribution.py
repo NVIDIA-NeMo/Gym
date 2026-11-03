@@ -432,6 +432,65 @@ def test_tool_id_reading_counts_an_unavailable_tool_placeholder_under_its_served
         assert not verdict.attributed and "no_content_match" in verdict.reason
 
 
+def _mixed_turn_entry(call_id: str, prompt: list[int], gen: list[int]) -> TokenEntry:
+    """An entry whose output calls a tool OpenCode does not offer and, in the same turn, `invalid` itself."""
+    entry = TokenEntry(
+        rollout_id="r",
+        model_call_id=call_id,
+        prompt_token_ids=prompt,
+        generation_token_ids=gen,
+        generation_log_probs=[-0.1] * len(gen),
+        output_items=[
+            {"type": "function_call", "call_id": "x", "name": "exec_command", "arguments": '{"cmd": "ls"}'},
+            {
+                "type": "function_call",
+                "call_id": "y",
+                "name": "invalid",
+                "arguments": json.dumps({"tool": "read", "error": "bad"}),
+            },
+        ],
+        token_item_index=0,
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    return entry
+
+
+@pytest.mark.parametrize("distinct_sibling", [False, True])
+def test_tool_id_reading_reads_each_placeholder_in_a_mixed_turn_on_its_own(distinct_sibling):
+    # OpenCode echoes the exec_command call as its placeholder, and the model's own `invalid` call with rewritten
+    # arguments. Only reading the first one matches the served turn.
+    a = _entry("a", [1, 2], [3], text="plan")
+    entries = [a, _mixed_turn_entry("b", [1, 2, 3, 4], [5])]
+    if distinct_sibling:
+        entries.append(_mixed_turn_entry("c", [1, 2, 3, 4], [6]))
+    echoed = [
+        {
+            "type": "function_call",
+            "call_id": "x",
+            "name": "invalid",
+            "arguments": json.dumps({"tool": "exec_command", "error": "unavailable"}),
+            "status": "completed",
+        },
+        {
+            "type": "function_call",
+            "call_id": "y",
+            "name": "invalid",
+            "arguments": json.dumps({"tool": "read", "error": "rewritten"}),
+            "status": "completed",
+        },
+    ]
+    response = {
+        "output": [_assistant_item("plan"), {"type": "function_call_output", "call_id": "earlier", "output": "ok"}]
+        + echoed
+    }
+    verdict = resolve_terminal(entries, response)
+    if distinct_sibling:
+        # Two different token sequences match the same turn, so the reading abstains.
+        assert not verdict.attributed
+    else:
+        assert (verdict.model_call_id, verdict.method) == ("b", "content_tool_ids")
+
+
 def test_no_response_object_abstains():
     att = resolve_terminal(_chain_entries(), None)
     assert not att.attributed and "no_response_object" in att.reason

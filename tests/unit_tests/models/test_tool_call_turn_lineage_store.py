@@ -264,8 +264,12 @@ def test_placeholder_keeps_the_served_turn_key_and_other_renames_do_not() -> Non
     placeholder[2] = {**placeholder[2], "name": "invalid", "arguments": '{"error":"unavailable","tool":"Read"}'}
     renamed = deepcopy(served)
     renamed[2] = {**renamed[2], "name": "invalid", "arguments": "{}"}
-    assert tool_call_turn_fingerprint(placeholder, read_placeholders=True) == tool_call_turn_fingerprint(served)
-    assert tool_call_turn_fingerprint(renamed, read_placeholders=True) != tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(
+        placeholder, read_placeholders=frozenset({"call_1"})
+    ) == tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(renamed, read_placeholders=frozenset({"call_1"})) != tool_call_turn_fingerprint(
+        served
+    )
     # Keys of served output never read placeholders.
     assert tool_call_turn_fingerprint(placeholder) != tool_call_turn_fingerprint(served)
 
@@ -324,6 +328,43 @@ async def test_a_served_placeholder_shaped_call_resolves_when_its_echo_rewrites_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reverse", [False, True], ids=["rewritten call first", "own invalid call first"])
+async def test_a_turn_mixing_a_rewritten_call_and_an_own_invalid_call_resolves(stores, reverse) -> None:
+    # OpenCode rewrote the model's Bash call into its placeholder, and the model also called `invalid` itself.
+    # Each placeholder-shaped call is read on its own, so the turn still matches what was served.
+    served = _placeholder_shaped("bad")
+    echoed = deepcopy(served)
+    echoed[1] = {**echoed[1], "name": "invalid", "arguments": json.dumps({"tool": "Bash", "error": "unavailable"})}
+    echoed[2] = {**echoed[2], "arguments": json.dumps({"tool": "Read", "error": "rewritten"})}
+    if reverse:
+        served[1], served[2] = served[2], served[1]
+        echoed[1], echoed[2] = echoed[2], echoed[1]
+    await _publish(stores, output=served)
+    result = await stores[2].resolve("r", deepcopy(CONTEXT) + echoed + _request()[4:])
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.match.model_call_id == "a"
+    assert result.reason == "tool_call_turn"
+
+
+def test_many_placeholder_shaped_calls_fall_back_to_reading_none_or_all() -> None:
+    turn = [{"role": "assistant", "content": "many"}] + [
+        {
+            "type": "function_call",
+            "call_id": f"call_{index}",
+            "name": "invalid",
+            "arguments": json.dumps({"tool": "Read", "error": "unavailable"}),
+        }
+        for index in range(7)
+    ]
+    keys = echoed_tool_call_turn_fingerprints(turn)
+    assert keys == [
+        tool_call_turn_fingerprint(turn),
+        tool_call_turn_fingerprint(turn, read_placeholders=frozenset(f"call_{index}" for index in range(7))),
+    ]
+    assert len(echoed_tool_call_turn_fingerprints(turn[:7])) == 2**6
+
+
+@pytest.mark.asyncio
 async def test_a_served_placeholder_shaped_call_keeps_its_stored_key_across_replay(tmp_path) -> None:
     # Stored keys never read placeholders, so a ledger written before this mapping existed holds the same key, and
     # replaying its commit after a checkpoint import stays a no-op instead of a conflicting record.
@@ -333,7 +374,9 @@ async def test_a_served_placeholder_shaped_call_keeps_its_stored_key_across_repl
     await writer.record(commit)
     [row] = writer.export_rows("r")
     assert row["tool_call_turn_fingerprint"] == tool_call_turn_fingerprint(output)
-    assert row["tool_call_turn_fingerprint"] != tool_call_turn_fingerprint(output, read_placeholders=True)
+    assert row["tool_call_turn_fingerprint"] != tool_call_turn_fingerprint(
+        output, read_placeholders=frozenset({"call_1"})
+    )
     restored = FileLineageStore(tmp_path / "restored")
     restored.import_rows("r", [row])
     await restored.record(commit)
