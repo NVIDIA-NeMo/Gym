@@ -14,6 +14,10 @@ from time import monotonic, time
 from typing import Any
 
 
+# Compaction compatibility: tested with hermes-agent 0.6.0 at cmunley1/hermes-agent@26bb847a.
+# The runtime is pinned in requirements.txt. Revalidate these hooks and session_*
+# counters, plus auxiliary.compression routing in sandbox_runner.py, when changing that pin.
+# Source: https://github.com/cmunley1/hermes-agent/tree/26bb847a
 _SUMMARY_CAPTURE: ContextVar[Any] = ContextVar("gym_hermes_summary_capture", default=None)
 
 
@@ -213,6 +217,7 @@ class SandboxHermesObserver:
                 summaries.append(response.choices[0].message.content)
                 usage = response.usage
                 if usage is not None:
+                    # Map Chat Completions usage fields to Hermes's existing session counters.
                     for source, target in (
                         ("prompt_tokens", "session_prompt_tokens"),
                         ("completion_tokens", "session_completion_tokens"),
