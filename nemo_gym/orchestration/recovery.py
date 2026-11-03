@@ -1494,7 +1494,7 @@ def substep_tests(r):
     return {"steps": len(steps), "passed": sum(steps), "num_steps_total": count(r.get("num_steps_total")),
             "num_steps_passed": count(r.get("num_steps_passed")), "problem_accuracy": boolean(r.get("problem_accuracy")),
             "environment_results": len(environments) if isinstance(environments, list) else None}
-import re
+import json, re
 JUDGE_VERDICT = re.compile(r"^(?:\[\[(A=B|A!=B)\]\]|judgement:\s*(yes|no))$", re.IGNORECASE)
 def unit_tests(r):
     # Saved per-test unit test results of the answer's extracted code (True passes; False or an error code does
@@ -1505,6 +1505,43 @@ def unit_tests(r):
     return {"tests": len(tests), "passed": sum(test is True for test in tests),
             "all_passed": all(test is True for test in tests), "code": isinstance(r.get("extracted_model_code"), str),
             "reasoning_format_violation_rate": finite(r.get("reasoning_format_violation_rate"))}
+def node_f1(r):
+    # A saved node-set F1 (predicted_nodes, parse_failed, f1) re-graded from the answer's last non-empty line
+    # ("Final Answer: [n1, n2]") against the saved expected node list, as the verifier scores it. Only the scores and
+    # whether the re-parse reproduces the saved nodes leave the run host; the answer and nodes stay local.
+    nodes, failed, saved = r.get("predicted_nodes"), r.get("parse_failed"), finite(r.get("f1"))
+    if not isinstance(nodes, list) or type(failed) is not bool or saved is None or not isinstance(r.get("expected_answer"), str):
+        return None
+    response = r.get("response")
+    output = response.get("output") if isinstance(response, dict) else None
+    if not isinstance(output, list):
+        return {"f1": saved, "regraded": None, "parse_matches": None}
+    text = "".join(part["text"] for item in output if isinstance(item, dict) and item.get("type") == "message"
+                   and isinstance(item.get("content"), list)
+                   for part in item["content"] if isinstance(part, dict) and part.get("type") == "output_text"
+                   and isinstance(part.get("text"), str))
+    lines = [line for line in text.strip().split("\n") if line.strip()]
+    match = re.search(r"Final Answer:\s*\[(.*)\]", lines[-1]) if lines else None
+    if match is None:
+        predicted, parse_failed = [], True
+    else:
+        predicted = [item.strip() for item in match.group(1).split(",") if item.strip()]
+        parse_failed = False
+    try:
+        expected = set(json.loads(r["expected_answer"]))
+    except (ValueError, TypeError):
+        expected = set()
+    chosen = set(predicted)
+    if parse_failed:
+        f1 = 0.0
+    elif not expected and not chosen:
+        f1 = 1.0
+    elif not expected or not chosen or not chosen & expected:
+        f1 = 0.0
+    else:
+        precision, recall = len(chosen & expected) / len(chosen), len(chosen & expected) / len(expected)
+        f1 = 2 * precision * recall / (precision + recall)
+    return {"f1": saved, "regraded": f1, "parse_matches": predicted == nodes and parse_failed is failed}
 def judge_verdicts(value):
     # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
     # not parse; the label text stays local.
@@ -1560,6 +1597,7 @@ def grading_facts(r):
         "test_run": test_run(r),
         "substep_tests": substep_tests(r),
         "unit_tests": unit_tests(r),
+        "node_f1": node_f1(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -1600,6 +1638,32 @@ def grading_result_binding(result):
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
     except (TypeError, ValueError, UnicodeError, RecursionError):
         return None
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+def session_reward(r):
+    # The verifier's own reward file of the row's session (resources/<session_id>/verifier/reward.json, else
+    # reward.txt), for a completed evaluation with no infrastructure error: its "reward" number only. A file that
+    # exists but cannot be read is unreadable, never a fact.
+    session = r.get("session_id")
+    if (r.get("evaluation_completed") is not True or r.get("infrastructure_error") is not None
+            or not isinstance(session, str) or not SESSION_ID.match(session) or ".." in session):
+        return None
+    directory = os.path.join(d, "resources", session, "verifier")
+    for name in ("reward.json", "reward.txt"):
+        path = os.path.join(directory, name)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "rb") as fh:
+                text = fh.read(65536).decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            unreadable.add(os.path.relpath(path, d))
+            return None
+        try:
+            value = json.loads(text) if name == "reward.json" else {"reward": float(text)}
+        except ValueError:
+            return None
+        return finite(value.get("reward")) if isinstance(value, dict) else None
+    return None
 def trial_grading(value):
     if not isinstance(value, list):
         return None
@@ -1656,6 +1720,9 @@ def rows(name, skip=0):
                 if binding is not None:
                     selected["_ng_collected_grading_binding"] = binding
                 facts = grading_facts(r)
+                reward_file = session_reward(r)
+                if reward_file is not None:
+                    facts["session_reward"] = reward_file
                 # A zero is a fact (a wrong answer's library_reward, a passing exit code), so compare by identity.
                 if any(value is not None and value is not False and value != [] for value in facts.values()):
                     selected["_ng_collected_grading_facts"] = facts
@@ -3690,6 +3757,20 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
     )
 
 
+def _cut_judge_reply(call: Mapping[str, Any]) -> bool:
+    """Whether a captured judge reply was cut short: an incomplete Responses reply, or a chat completion that stopped
+    on its output cap or a content filter."""
+    meta = call.get("response_metadata") if isinstance(call, Mapping) else None
+    return isinstance(meta, Mapping) and (
+        (meta.get("dialect") == "responses" and meta.get("response_status") == "incomplete")
+        or (
+            meta.get("dialect") == "chat"
+            and meta.get("response_status") is None
+            and meta.get("finish_reason") in ("length", "content_filter")
+        )
+    )
+
+
 def _observed_trial_operations(
     decision: RecoveryDecision,
     collected: CollectedEvidence | None,
@@ -3866,7 +3947,11 @@ def _observed_trial_operations(
                     for key, event in events.items()
                     if isinstance(event, dict) and event.get("operation_id") == op_id
                 }
-                if len(owned) != attempts - int(final):
+                # A failed HTTP attempt or a transport failure (no HTTP status) before the final attempt is its own
+                # recorded event of this operation, as for a policy request.
+                if len(owned) != attempts - int(final) + transport or transport != sum(
+                    event.get("http_status") is None for event in owned.values()
+                ):
                     return False
                 ids = set()
                 for key, event in owned.items():
@@ -3883,8 +3968,10 @@ def _observed_trial_operations(
                         or event.get("operation") != "model_request"
                         or event.get("failure_kind") != "model_request_error"
                         or event.get("cause_id") is not None
-                        or type(event.get("http_status")) is not int
-                        or not 400 <= event["http_status"] <= 599
+                        or not (
+                            event.get("http_status") is None
+                            or (type(event["http_status"]) is int and 400 <= event["http_status"] <= 599)
+                        )
                     ):
                         return False
                     ids.add(eid)
@@ -4149,10 +4236,12 @@ def _observed_trial_operations(
             # grading; the verifier's captured calls (a judge's) are then its own, never the policy's.
             artifact = None
             recorded = single is not None and _verifier_recorded(single, row, owner)
-            if resource is None and not recorded:
-                return False
             if not graded and not recorded:
                 artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
+            # An agent without a resources server is observed through its own grading record, or, when no verifier
+            # ran, through the environment's own reward record.
+            if resource is None and not recorded and not (artifact == "environment_reward" and verifiers == []):
+                return False
             if artifact is not None and single is not None and isinstance(calls, list):
                 owned = single.get("model_calls")
                 if not isinstance(owned, list):
@@ -4237,15 +4326,26 @@ def _observed_trial_operations(
                 grading_ids.add(grade["operation_id"])
             if verifier is not None:
                 populations[3].add(verifier["invocation_id"])
+            # A completed grade that rests on a judge reply cut by its output cap or a content filter has no valid
+            # verdict behind it: where the caller counts those, it is an observed grading without a valid verdict.
+            cut_reply = (
+                grade is not None
+                and judge_calls is not None
+                and grade["outcome"] == "completed"
+                and grading_failures is not None
+                and any(_cut_judge_reply(call) for call in judge_calls)
+            )
             if (
                 grade is not None
                 and judge_calls is not None
                 and not all(
-                    completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed")
+                    completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed" and not cut_reply)
                     for call in judge_calls
                 )
             ):
                 return False
+            if cut_reply:
+                invalid_grades.append(_identity(row))
             if (
                 grade is not None
                 and judge_calls is not None
@@ -4702,6 +4802,35 @@ def _unit_test_results(row: Mapping[str, Any]) -> bool:
     return _reward(row) == expected and _bound_answer(row)
 
 
+def _node_set_f1(row: Mapping[str, Any]) -> bool:
+    """A saved node-set F1 re-graded from the answer: the collector re-parses the saved answer's final
+    ``Final Answer: [...]`` line, reproduces the saved predicted nodes and parse outcome, and scores them against the
+    saved expected node list as the verifier does; the row's reward equals that re-graded F1 and the saved ``f1``.
+    The saved answer and score are bound."""
+    f1 = _grading_facts(row).get("node_f1")
+    return (
+        isinstance(f1, dict)
+        and f1.get("parse_matches") is True
+        and type(f1.get("regraded")) is float
+        and _reward(row) == f1["regraded"] == f1.get("f1")
+        and _bound_answer(row)
+    )
+
+
+def _session_reward_file(row: Mapping[str, Any]) -> bool:
+    """The verifier's own reward file of the row's session, read by the collector beside the artifacts
+    (``resources/<session_id>/verifier/reward.json``): the evaluation completed with no infrastructure error and the
+    row's reward equals the file's ``reward``. Test counts and partial credit are metadata, never the grade. The saved
+    answer and score are bound."""
+    recorded = _grading_facts(row).get("session_reward")
+    return (
+        recorded is not None
+        and row.get("evaluation_completed") is True
+        and _reward(row) == recorded
+        and _bound_answer(row)
+    )
+
+
 def _environment_reward(row: Mapping[str, Any]) -> bool:
     """The environment's own reward record: ``result.reward_info.reward`` equal to the row's reward."""
     recorded = _grading_facts(row).get("environment_reward")
@@ -4721,6 +4850,8 @@ GRADING_ARTIFACTS = (
     ("repository_test_run", _repository_test_run),
     ("substep_tests", _substep_tests),
     ("unit_test_results", _unit_test_results),
+    ("node_set_f1", _node_set_f1),
+    ("session_reward_file", _session_reward_file),
 )
 
 
@@ -5592,6 +5723,20 @@ def trial_verdict(
         # A reported fact, never a condition: trials whose agent run failed and whose answer was still graded.
         facts = {"agent_invocation_failed_grading_recorded": len(agent_failed)} if agent_failed else {}
         fact_text = f"; agent invocation failed, grading recorded: {len(agent_failed)}" if agent_failed else ""
+        # A reported fact too: trials whose verifier recorded no grading operation and no grading record, graded
+        # through a saved grading artifact (``GRADING_ARTIFACTS``), by artifact: their grading is derived from the
+        # saved verifier output, not observed as it ran.
+        verifier_recorded = set(recorded)
+        derived = Counter(
+            name
+            for row in collected.results or []
+            if not _graded(row) and _identity(row) not in verifier_recorded and (name := grading_artifact(row))
+        )
+        if derived:
+            facts["grading_derived_from_saved_output"] = dict(sorted(derived.items()))
+            fact_text += "; grading derived from saved verifier output: " + ", ".join(
+                f"{name} {count}" for name, count in sorted(derived.items())
+            )
         if incomplete:
             # Trajectory evidence is observability, never coverage: the grading bound to every answer decides.
             evidence = trajectory_evidence(incomplete, trials)
