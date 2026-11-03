@@ -796,6 +796,14 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--rerun-masked-without-artifact needs a nonempty --rerun-reason")
     if rerun_reason is not None and not rerun_masked:
         args._parser.error("--rerun-reason goes with --rerun-masked-without-artifact")
+    acknowledge_jobs = getattr(args, "acknowledge_failed_judge_jobs", False)
+    acknowledge_reason = getattr(args, "acknowledge_reason", None)
+    if (acknowledge_jobs or acknowledge_reason is not None) and not getattr(args, "recover", False):
+        args._parser.error("--acknowledge-failed-judge-jobs and --acknowledge-reason need --recover")
+    if acknowledge_jobs and not (acknowledge_reason or "").strip():
+        args._parser.error("--acknowledge-failed-judge-jobs needs a nonempty --acknowledge-reason")
+    if acknowledge_reason is not None and not acknowledge_jobs:
+        args._parser.error("--acknowledge-reason goes with --acknowledge-failed-judge-jobs")
 
     try:
         if run_dir is not None:
@@ -847,6 +855,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 extra["judge_qos"] = judge_qos
             if rerun_masked:
                 extra |= {"rerun_masked_without_artifact": True, "rerun_reason": rerun_reason.strip()}
+            if acknowledge_jobs:
+                extra |= {"acknowledge_failed_judge_jobs": True, "acknowledge_reason": acknowledge_reason.strip()}
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -2065,6 +2075,23 @@ COMMANDS = {
                     "--rerun-reason",
                     metavar="TEXT",
                     help="With --rerun-masked-without-artifact: why those results run again; recorded in the journal.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--acknowledge-failed-judge-jobs",
+                    action="store_true",
+                    help="With --recover and --acknowledge-reason: after the last two judge-only jobs ended without "
+                    "settling a saved answer (recovery then queues no third), read their receipts and logs and allow "
+                    "exactly one more. The acknowledgement names those jobs and is journaled with the reason when the new "
+                    "job is queued (judge-job-acknowledgement-journal.jsonl); if that job fails too, acknowledge again.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--acknowledge-reason",
+                    metavar="TEXT",
+                    help="With --acknowledge-failed-judge-jobs: why one more judge-only job may queue; recorded in the journal.",
                 ),
             ),
             Flag(
