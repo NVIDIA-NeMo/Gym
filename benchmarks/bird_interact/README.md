@@ -10,15 +10,15 @@ recipe.
 
 | Config | Release | Mode | Tasks |
 |---|---|---|---|
-| `config.yaml` | Lite: 18 databases | c-Interact: the agent asks and submits with two tools, and the server opens each turn | Up to 195 of 300 |
-| `a_interact.yaml` | Lite | a-Interact: the agent calls tools, `ask` among them | Up to 195 of 300 |
-| `full.yaml` | Full: 22 databases | c-Interact | Up to 410 of 600 |
-| `full_a_interact.yaml` | Full | a-Interact | Up to 410 of 600 |
+| `config.yaml` | Lite: 18 databases | c-Interact: the agent asks and submits with two tools, and the server opens each turn | 300 |
+| `a_interact.yaml` | Lite | a-Interact: the agent calls tools, `ask` among them | 300 |
+| `full.yaml` | Full: 22 databases | c-Interact | 600 |
+| `full_a_interact.yaml` | Full | a-Interact | 600 |
 
-Every task has a follow-up question, its phase 2. Only query tasks run, the ones auto-ontology-eval runs. As in
-BIRD-Interact, a query is graded by comparing its result with the solution's, even when its ground truth has test
-cases; a management task (105 in Lite, 190 in Full) is graded by its custom test cases, which the server does not run
-yet, so `prepare.py` leaves out each task that has such a phase. Every query task's follow-up is a query too.
+Every task has a follow-up question, its phase 2. Both kinds of task run. As in BIRD-Interact, a query (195 in Lite,
+410 in Full) is graded by comparing its result with the solution's, even when its ground truth has test cases. A
+management task (105 in Lite, 190 in Full) is graded by its own test cases, in the episode's sandbox. auto-ontology-eval
+runs only the query tasks, so compare its scores with the query tasks' alone.
 
 ## 1. Build the database image
 
