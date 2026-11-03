@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import runpy
 import time
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -14,31 +15,52 @@ import httpx
 import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
+from fastapi import Response
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from environment_servers.single_agent_turn.app import (
+    SessionHandles,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionRequest,
+    AgentOutcome,
+    AgentOutcomePolicyConfig,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
-from nemo_gym.core import MODEL_TRANSPORT_ERROR, EpisodeId, NeMoGymResponse, TaskId, current_rollout_id
+from nemo_gym.config import (
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseServerConfig,
+    ResourcesServerRef,
+)
+from nemo_gym.core import (
+    MODEL_TRANSPORT_ERROR,
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
+    current_rollout_id,
+)
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
+    HandledEpisodeError,
+    MaterializedTask,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    SimpleServer,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
+    SingleAgentTurnTaskInput,
     is_retryable_dependency_error,
 )
-from nemo_gym.server_runtime.episode_types import MaterializedTask
-from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
-from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
 
@@ -965,8 +987,7 @@ async def test_an_episode_that_grants_mcp_access_is_a_restart(transports: list[L
 
 
 async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_and_stays_ready() -> None:
-    from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, ParticipantControlPlane
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
 
     environment_server, client = _environment_server()
     participant = EnvironmentParticipant(mode="exported")
@@ -1001,7 +1022,7 @@ async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_an
 
 
 async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_invoking_the_agent() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _environment_server()
     participant = EnvironmentParticipant(mode="exported")
@@ -1030,7 +1051,7 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
 
 
 async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifying() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _skipping_environment_server(
         environment={"skip_verification": True, "skip_verification_reward": 0.5}, agent={}
@@ -1077,14 +1098,16 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
     stage: str, tmp_path: Path
 ) -> None:
     from environment_servers.single_agent_turn.app import SessionHandles
-    from nemo_gym.server_runtime._checkpoint.control import (
+    from nemo_gym.server_runtime import (
         CheckpointRequest,
         CommitRequest,
+        EnvironmentParticipant,
+        EpisodeRecord,
         ParticipantControlPlane,
         RestoreRequest,
+        task_digest,
+        write_participant_state,
     )
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
-    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     environment_server, client = _environment_server(client_type=_HoldingClient)
     participant = EnvironmentParticipant(mode="exported")
@@ -1174,8 +1197,7 @@ class _AgentGateClient(_Client):
 
 
 async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_resume() -> None:
-    from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, ParticipantControlPlane
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
 
     environment_server, client = _environment_server(client_type=_AgentGateClient)
     participant = EnvironmentParticipant(mode="exported")
@@ -1301,8 +1323,12 @@ def _checkpointed_agent(model_calls: list[str]) -> tuple[Any, httpx.AsyncClient]
 
 async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_the_activation() -> None:
     from environment_servers.single_agent_turn.app import SessionHandles
-    from nemo_gym.server_runtime import ResourcesSeedSessionResponse
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import (
+        EnvironmentParticipant,
+        EpisodeRecord,
+        ResourcesSeedSessionResponse,
+        task_digest,
+    )
 
     request = _request()
     first_attempt = request.model_copy(update={"episode_id": request.episode_id.model_copy(update={"attempt": 1})})
@@ -1357,7 +1383,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
 
 
 async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attempt() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import EnvironmentParticipant
 
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     environment_server._checkpoint = EnvironmentParticipant(mode="exported")
@@ -1377,6 +1403,120 @@ async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> 
     # So the Resources Server keeps the session tracked until the close, which then runs its close handler.
     assert verify_call["headers"] == {"x-ng-checkpoint-close-follows": "1"}
     assert paths.index("/close_session") > paths.index("/verify")
+
+
+def _lookup_reply() -> MagicMock:
+    response = MagicMock(status=200, cookies={}, ok=True)
+    response.content.read = AsyncMock(return_value=b"42")
+    return response
+
+
+def _tool_calling_agent() -> Any:
+    """A Simple Agent with capture on whose model calls the ``lookup`` tool once, then answers."""
+    from responses_api_agents.simple_agent.app import ModelServerRef, SimpleAgent, SimpleAgentConfig
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True}
+    agent = SimpleAgent(
+        config=SimpleAgentConfig(
+            host="agent",
+            port=8001,
+            entrypoint="app.py",
+            name="agent",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+        ),
+        server_client=client,
+    )
+    tool_call = NeMoGymResponse.model_validate(
+        _agent_response().model_dump(mode="json")
+        | {
+            "id": "response-tool",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "function-call",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": '{"q": "x"}',
+                    "status": "completed",
+                }
+            ],
+        }
+    )
+    model_replies = iter((tool_call, _agent_response()))
+
+    def reply(body: dict) -> MagicMock:
+        response = MagicMock(status=200, cookies={}, ok=True)
+        response.read = AsyncMock(return_value=orjson.dumps(body))
+        return response
+
+    async def post(*, server_name: str, url_path: str, **kwargs: Any) -> Any:
+        if server_name == "model":
+            return reply(next(model_replies).model_dump(mode="json"))
+        if server_name == "agent":
+            # /run dispatches its episode to the agent's own /v1/responses.
+            rollout_id = url_path.split("/")[2]
+            request = MagicMock(cookies=kwargs.get("cookies") or {}, path_params={"rollout_id": rollout_id})
+            return reply((await agent.responses(request, Response(), kwargs["json"])).model_dump(mode="json"))
+        if url_path == "/lookup":
+            return _lookup_reply()
+        if url_path == "/seed_session":
+            return reply({})
+        assert url_path == "/verify"
+        return reply(kwargs["json"] | {"reward": 1.0})
+
+    client.post = AsyncMock(side_effect=post)
+    return agent
+
+
+async def test_a_session_reports_the_tools_the_agent_executed_as_run_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.rollout_collection import _attach_trajectory_record, _build_ng_perf
+    from responses_api_agents.simple_agent import app as simple_agent_app
+    from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
+
+    row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "instance_id": "task"}
+
+    def collected(result: dict) -> tuple[list[tuple], int]:
+        _attach_trajectory_record(row, result)
+        trajectory = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        tools = [(tool.invocation_id, tool.tool_name, tool.status, tool.output) for tool in trajectory.tool_calls]
+        return tools, _build_ng_perf(result, rollout_latency_ms=None)["num_tool_calls"]
+
+    run_agent = _tool_calling_agent()
+    run_result = await run_agent.run(
+        MagicMock(cookies={}),
+        SimpleAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": "task"}, "instance_id": "task", **row}
+        ),
+    )
+    run_tools = collected(run_result.model_dump(mode="json"))
+
+    session_agent = _tool_calling_agent()
+    tool_calls: list[str] = []
+
+    async def tool_request(*, url: str, **kwargs: Any) -> Any:
+        tool_calls.append(url)
+        return _lookup_reply()
+
+    monkeypatch.setattr(simple_agent_app, "http_request", tool_request)
+    environment, client = _environment_server(
+        client_type=_AgentForwardingClient, resources_tool_transports=["direct_http"]
+    )
+    # The agent answers its own calls; the Resources Server's seed, verification, and close are scripted.
+    del client.responses[1:4]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=session_agent.setup_webserver()), base_url="http://agent"
+    ) as agent_http:
+        client.agent = agent_http
+        response = await environment.run_request(_request())
+    legacy = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)._legacy_result(
+        response
+    )
+
+    assert tool_calls == ["http://resources:8000/lookup"]
+    assert collected(legacy) == run_tools == ([("root", "lookup", "completed", "42")], 1)
 
 
 @pytest.mark.parametrize(
@@ -1468,7 +1608,7 @@ def test_invalid_agent_policy_config_rejected(config: dict) -> None:
 async def _assert_classified_agent_failure_policy(
     outcome: dict, verifiable: bool, retryable: bool, *, config: dict | None = None
 ) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 
     environment, client = _environment_server()
     if config is not None:
@@ -1532,7 +1672,7 @@ async def test_nonfailed_outcomes_still_reach_verification(status: str | None) -
 
 @pytest.mark.parametrize("action", ["fail", "retry"])
 async def test_incomplete_context_limit_verifies_partial_work(action: str) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 
     environment, client = _environment_server()
     environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
@@ -1558,9 +1698,33 @@ async def test_incomplete_context_limit_verifies_partial_work(action: str) -> No
     assert verify["json"]["response"] == response
 
 
+@pytest.mark.parametrize("action", ["fail", "retry"])
+async def test_a_stopped_run_is_verified_and_its_result_keeps_the_stop_marker(action: str) -> None:
+    from nemo_gym.agents import ROLLOUT_STOP_METADATA_KEY
+
+    environment, client = _environment_server()
+    environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
+    stopped = _agent_response().model_dump(mode="json")
+    stopped.update(status="incomplete", metadata={ROLLOUT_STOP_METADATA_KEY: '{"reason":"budget"}'})
+    client.responses[2] = _Response(stopped)
+    verification = orjson.loads(client.responses[4].body)
+    verification.update(response=stopped)
+    client.responses[4] = _Response(verification)
+
+    result = await environment.run_request(_request())
+
+    # A stop is not a failure: no failure policy applies, and the graded result carries the marker.
+    assert result.failure is None
+    assert result.result.reward == 1.0
+    verify = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    assert verify["json"]["response"] == stopped
+    assert result.result.response.status == "incomplete"
+    assert result.result.response.metadata == {ROLLOUT_STOP_METADATA_KEY: '{"reason":"budget"}'}
+
+
 @pytest.mark.parametrize("raw", ["not valid JSON", '{"failure_kind":"unregistered_error"}'])
 async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 
     environment, client = _environment_server()
     response = _agent_response().model_dump(mode="json")
@@ -1575,6 +1739,151 @@ async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) ->
     assert result.failure.partial_response.model_dump(mode="json") == response
     assert "/verify" not in [path for _, path, _ in client.calls]
     assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize(
+    "authored, prefix",
+    [
+        ("Authored task", [{"role": "user", "content": "Authored task"}]),
+        ("", []),
+        ([], []),
+        ([{"role": "system", "content": "Policy"}], [{"role": "system", "content": "Policy"}]),
+        (
+            [
+                {"role": "system", "content": "Policy"},
+                {"type": "reasoning", "id": "rs_history", "summary": []},
+                {"type": "function_call", "call_id": "call_history", "name": "shell", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_history", "output": "Done"},
+                {"role": "user", "content": "Authored task"},
+            ],
+            [
+                {"role": "system", "content": "Policy"},
+                {"type": "reasoning", "id": "rs_history", "summary": []},
+                {"type": "function_call", "call_id": "call_history", "name": "shell", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_history", "output": "Done"},
+                {"role": "user", "content": "Authored task"},
+            ],
+        ),
+    ],
+    ids=["string", "empty-string", "empty-list", "system-list", "mixed-list"],
+)
+@pytest.mark.parametrize(
+    "seed_fields",
+    [{}, {"observation": None}, {"observation": ""}, {"observation": " \nReset prompt\t"}],
+    ids=["missing", "null", "empty", "text"],
+)
+async def test_seed_observation_is_appended_only_to_the_agent_request(
+    authored, prefix: list, seed_fields: dict
+) -> None:
+    environment, client = _environment_server()
+    client.responses[0] = _Response({"resources_session_id": "resources-session", **seed_fields})
+    request = _request()
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=authored,
+        model="authored-model",
+        temperature=0.5,
+        max_output_tokens=42,
+        tools=[{"type": "function", "name": "shell", "parameters": {"type": "object"}, "strict": False}],
+    )
+    request.task.task_input.responses_create_params = params
+    original = deepcopy(request.model_dump(mode="json", exclude_unset=True))
+    expected = params.model_dump(mode="json", exclude_unset=True)
+    observation = seed_fields.get("observation")
+    if observation:
+        expected["input"] = [*prefix, {"role": "user", "content": observation}]
+
+    result = await environment.run_request(request)
+
+    assert result.failure is None
+    agent_call = next(kwargs for _, path, kwargs in client.calls if path.endswith("/v1/responses"))
+    assert agent_call["json"] == expected
+    verify_call = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    assert verify_call["json"] == {
+        **request.task.task_input.task_data,
+        "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
+        "response": _agent_response().model_dump(mode="json"),
+    }
+    assert verify_call["cookies"] == {"session": "updated-cookie"}
+    assert request.task.task_input.responses_create_params is params
+    assert request.model_dump(mode="json", exclude_unset=True) == original
+
+
+@pytest.mark.parametrize("retain_observation", [True, False], ids=["observation", "checkpoint-without-field"])
+async def test_serialized_invoke_boundary_preserves_the_seed_observation(
+    monkeypatch: pytest.MonkeyPatch, retain_observation: bool
+) -> None:
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord
+
+    environment, client = _environment_server()
+    participant = EnvironmentParticipant(mode="exported")
+    environment._checkpoint = participant
+    client.responses[0] = _Response({"resources_session_id": "resources-session", "observation": "Reset prompt"})
+    request = _request()
+    request.task.task_input.responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="")
+    saved: list[str] = []
+    invoke = environment._invoke_agent
+
+    async def export_before_invoke(request: SingleAgentTurnRequest, handles: SessionHandles) -> NeMoGymResponse:
+        [record] = participant.export_records(None)
+        assert record.boundary["next"] == "invoke_agent"
+        assert record.boundary["handles"]["observation"] == "Reset prompt"
+        saved.append(record.model_dump_json())
+        return await invoke(request, handles)
+
+    monkeypatch.setattr(environment, "_invoke_agent", export_before_invoke)
+    assert (await environment.run_request(request)).failure is None
+
+    record = EpisodeRecord.model_validate_json(saved[0])
+    if not retain_observation:
+        del record.boundary["handles"]["observation"]
+    restored, restored_client = _environment_server()
+    restored_participant = EnvironmentParticipant(mode="exported")
+    restored_participant.restore_records([EpisodeRecord.model_validate_json(record.model_dump_json())])
+    restored._checkpoint = restored_participant
+    del restored_client.responses[:2]
+    replacement = request.model_copy(
+        update={"episode_id": request.episode_id.model_copy(update={"attempt": request.episode_id.attempt + 1})}
+    )
+
+    result = await restored.run_request(replacement)
+
+    assert result.failure is None
+    assert [path for _, path, _ in restored_client.calls] == [
+        "/ng-rollout/rollout-a3/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    assert restored_client.calls[0][2]["json"] == {
+        "input": [{"role": "user", "content": "Reset prompt"}] if retain_observation else ""
+    }
+    verify = restored_client.calls[2][2]["json"]
+    assert verify["responses_create_params"] == {"input": ""}
+    assert replacement.task.task_input.responses_create_params.input == ""
+
+
+@pytest.mark.parametrize(
+    "seed_fields",
+    [
+        {"observation": []},
+        {"observation": "Untrusted", "extra": True},
+        {"resources_session_id": "different", "observation": "Untrusted"},
+    ],
+)
+async def test_unvalidated_seed_observations_do_not_enter_session_handles(
+    monkeypatch: pytest.MonkeyPatch, seed_fields: dict
+) -> None:
+    environment, client = _environment_server()
+    handles = SessionHandles.new()
+
+    async def reply(self: _Client, **kwargs) -> _Response:
+        return _Response({"resources_session_id": handles.resources_session_id, **seed_fields})
+
+    monkeypatch.setattr(_Client, "post", reply)
+    with pytest.raises(HandledEpisodeError) as error:
+        await environment._seed_resources(_request(), handles)
+    assert error.value.failure.stage == "seed"
+    assert handles.observation is None
 
 
 @pytest.mark.parametrize("outcome", ["completed", "judge_failure", "exception", "timeout"])

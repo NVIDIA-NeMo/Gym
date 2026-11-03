@@ -25,7 +25,7 @@ R1  Host processes. No module under ``environment_servers/harbor`` (``tests/`` a
     subprocess as sp; sp.run`` is ``subprocess.run``, ``from os import execvp as e; e()`` is ``os.execvp``), a
     ``from`` import of any of those functions is refused, and so is an ``import`` of ``subprocess``,
     ``multiprocessing`` or ``pty`` outside the spawning modules, unless it sits under ``if TYPE_CHECKING:`` (never
-    executed; ``build_plan`` names ``subprocess.CompletedProcess`` that way). Under ``nemo_gym/tasks/harbor`` only
+    executed; ``build_plan`` names ``subprocess.CompletedProcess`` that way). Under ``nemo_gym/data/tasks/harbor`` only
     the dataset tooling spawns, each a fixed program: ``hub.py`` and ``manifest.py`` run ``git`` (argv literals
     whose first element is ``"git"``), ``build_tools.py`` runs the configured image build tool (``self.tool``,
     one of ``BUILD_TOOLS``) or ``docker`` through its one ``subprocess.run`` in ``_run_default``, and no spawn
@@ -64,7 +64,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 ENV_SERVER = ROOT / "environment_servers" / "harbor"
-TASKS = ROOT / "nemo_gym" / "tasks" / "harbor"
+TASKS = ROOT / "nemo_gym" / "data" / "tasks" / "harbor"
 
 # R1: the modules allowed to spawn, and the programs each may run (``self.tool`` is the configured build tool).
 SPAWNING_MODULES = {
@@ -335,7 +335,7 @@ def test_r1_build_tools_runs_only_the_build_tool_and_docker():
     heads = sorted({first_program_of_list(lst) for lst in argv_literals(tree)}, key=str)
     assert heads and set(heads) <= SPAWNING_MODULES[path] | {"*argv"}, heads
     # The build tool itself is one of a fixed set, validated where the configuration is read.
-    from nemo_gym.tasks.harbor.build_plan import BUILD_TOOLS
+    from nemo_gym.data.tasks.harbor.build_plan import BUILD_TOOLS
 
     assert set(BUILD_TOOLS) <= {"docker", "buildah", "podman"}
     options = (TASKS / "build_options.py").read_text()

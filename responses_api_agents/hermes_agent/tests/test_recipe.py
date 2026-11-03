@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 from responses_api_agents.hermes_agent.app import HermesAgentConfig
@@ -58,7 +58,7 @@ def test_hermes_recipe_resolves_to_session_environment(model_override: str | Non
         config.swebench_pro_hermes_agent.responses_api_agents.hermes_agent.model = model_override
     assert config.get("environment_routing_mode", "agent") == "agent"
     environment_name = "swebench_pro_hermes"
-    environment = SingleAgentTurnEnvironmentServerConfig(
+    environment = SingleAgentTurnLegacyEnvironmentServerConfig(
         name=environment_name,
         host="localhost",
         port=8000,

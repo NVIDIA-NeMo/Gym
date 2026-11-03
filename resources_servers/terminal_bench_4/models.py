@@ -15,7 +15,7 @@ class SessionRequest(BaseModel):
 
 
 class AgentTermination(BaseModel):
-    reason: Literal["completed", "timeout", "nonzero_exit", "cancelled", "infrastructure_error"]
+    reason: Literal["completed", "timeout", "nonzero_exit", "killed", "cancelled", "infrastructure_error"]
     exit_code: int | None = None
     detail: str | None = None
     artifacts: list[str] = Field(default_factory=list)

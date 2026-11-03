@@ -12,10 +12,10 @@ import yaml
 from benchmarks.indic.frontier_math import prepare as prep
 from benchmarks.indic.frontier_math.summarize import summarize
 from nemo_gym.cli.main import _asset_config_path
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.registry import _manifest_entry
-from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
 
 
 @pytest.mark.parametrize("rendered", [False, True], ids=["raw", "rendered"])
@@ -101,7 +101,7 @@ def test_native_config_routes_to_frontiermath_without_global_sampling_defaults()
         "indic_frontiermath_simple_agent",
         "indic_frontiermath_environment_server",
     }
-    environment = config.indic_frontiermath_environment_server.environment_servers.legacy_agent
+    environment = config.indic_frontiermath_environment_server.environment_servers.single_agent_turn_legacy
     assert environment.agent_server.name == "indic_frontiermath_simple_agent"
     agent = config.indic_frontiermath_simple_agent.responses_api_agents.simple_agent
     assert agent.resources_server.name == "frontiermath"

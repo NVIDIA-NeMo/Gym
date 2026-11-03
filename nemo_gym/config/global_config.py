@@ -117,6 +117,7 @@ PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
 SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
+SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME = "server_shutdown_timeout_seconds"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
@@ -139,8 +140,8 @@ QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
-# See ``nemo_gym/token_id_capture/config.py``.
-TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+# See ``nemo_gym/models/token_capture/config.py``.
+TOKEN_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -172,6 +173,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
+    SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
@@ -187,7 +189,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
-    TOKEN_ID_CAPTURE_BLOCK,
+    TOKEN_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -204,6 +206,33 @@ AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # The field an environment server names its agent in.
 AGENT_SERVER_REF_KEY_NAME = "agent_server"
 ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
+# Agent types whose servers implement agent sessions (`_seed_agent_session_state`), so an environment server
+# such as `single_agent_turn_legacy` can drive them. Config composition cannot import agent apps to ask,
+# so this list is the source of truth; a unit test keeps it in step with the agent apps.
+AGENT_SESSION_AGENT_TYPES = frozenset(
+    {
+        "claude_code_agent",
+        "codex_agent",
+        "harbor_oracle_agent",
+        "hermes_agent",
+        "kilocode_agent",
+        "miniswe_sandboxed_agent",
+        "nooa_agent",
+        "openclaw_agent",
+        "opencode_agent",
+        "pi_agent",
+        "pool_agent",
+        "simple_agent",
+        "stirrup_agent",
+        "terminus_2_sandboxed_agent",
+    }
+)
+# An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
+# fallback through a legacy_agent relay.
+SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
+LEGACY_AGENT_SERVER_TYPE = "legacy_agent"
+# Kept when a single_agent_turn_legacy server falls back to a legacy_agent relay; the rest only applies to sessions.
+_LEGACY_RELAY_KEPT_KEYS = ("entrypoint", AGENT_SERVER_REF_KEY_NAME, "host", "port", "num_workers")
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -918,6 +947,8 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._retarget_environment_servers(global_config_dict, renames)
+            if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
+                self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
 
@@ -942,6 +973,32 @@ Duplicate config paths:
                 for reference in environment_server_agent_refs(server):
                     if reference.get("name") in renames:
                         reference["name"] = renames[reference["name"]]
+
+    @staticmethod
+    def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
+        """Replace each single_agent_turn_legacy server fronting one of `agent_names` with a legacy_agent relay.
+
+        Those agents do not implement agent sessions, so single_agent_turn_legacy would fail every episode.
+        The relay calls the agent's own /run, as the environment did before it moved to agent sessions.
+        """
+        for instance_name, instance in global_config_dict.items():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            server = servers.get(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
+            if not isinstance(server, DictConfig):
+                continue
+            agent_name = (server.get(AGENT_SERVER_REF_KEY_NAME) or {}).get("name")
+            if agent_name not in agent_names:
+                continue
+            logger.info(
+                f"Environment server '{instance_name}' runs '{agent_name}' through a legacy_agent relay: "
+                f"that agent type does not implement the agent sessions single_agent_turn_legacy needs."
+            )
+            servers[LEGACY_AGENT_SERVER_TYPE] = {key: server[key] for key in _LEGACY_RELAY_KEPT_KEYS if key in server}
+            servers.pop(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -1690,6 +1747,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             # Bound server startup independently of model-endpoint readiness. Multi-worker
             # supervisors can otherwise replace a deterministically failing worker forever.
             global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+            global_config_dict.setdefault(SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME, 1)
 
             # How long `gym env start` waits for the model endpoints named in the config to accept
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
@@ -2317,3 +2375,10 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
 
     This server will NOT be started.
     """
+
+
+# Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

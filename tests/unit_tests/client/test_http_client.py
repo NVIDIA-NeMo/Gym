@@ -58,7 +58,7 @@ from yarl import URL
 import nemo_gym.client.http_client
 import nemo_gym.client.server_client
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym.client.http_client import (
     GlobalAIOHTTPAsyncClientConfig,
     _format_upstream_error_log,
@@ -1190,7 +1190,7 @@ class TestHTTPClient:
 
 
 def test_a_process_that_imports_only_the_client_closes_its_sessions_at_exit() -> None:
-    # In a fresh interpreter: the other tests here import nemo_gym.server_utils, which would hide a missing hook.
+    # In a fresh interpreter: the other tests here import nemo_gym.server_runtime.base_server, which would hide a missing hook.
     code = (
         "import asyncio, sys\n"
         "from nemo_gym.client import http_client\n"
@@ -1199,7 +1199,7 @@ def test_a_process_that_imports_only_the_client_closes_its_sessions_at_exit() ->
         "loop = asyncio.new_event_loop()\n"
         "asyncio.set_event_loop(loop)\n"
         "loop.run_until_complete(open_client())\n"
-        "assert 'nemo_gym.server_utils' not in sys.modules\n"
+        "assert 'nemo_gym.server_runtime.base_server' not in sys.modules\n"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "Unclosed client session" not in result.stderr
