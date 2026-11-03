@@ -44,6 +44,7 @@ then be read as if it meant the new thing. Anything of that kind needs a
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -51,7 +52,7 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,48 @@ class BenchmarkJob(BaseModel):
     job_dir: str
     job_id: str | None = None
     error: str | None = None
+    # Set by a repinned recovery: the Gym commit this benchmark's job runs, when it differs from the submission's.
+    gym_commit: str | None = None
+    # Set by a recovery that raised the walltime: the Slurm walltime this benchmark's job now runs with.
+    walltime: str | None = None
+
+
+class SubmissionTelemetry(BaseModel):
+    """Resolved submission-time telemetry controls, not credentials or a delivery claim."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    token_env: str
+    remote_export: StrictBool
+
+    @field_validator("token_env")
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+            raise ValueError("Telemetry credential metadata must be an environment variable name")
+        return name
+
+
+class SubmissionEnvironment(BaseModel):
+    """Names observed at submission, never values.
+
+    required_env names submit-shell inputs (host: references and required forwarding).
+    forwarded_env names variables actually exported by the submission transport. A
+    runtime: alias is not a submit-shell requirement unless explicitly forwarded.
+    None on the containing record means this observation was not recorded.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    required_env: list[str]
+    forwarded_env: list[str]
+    telemetry: SubmissionTelemetry
+
+    @field_validator("required_env", "forwarded_env")
+    @classmethod
+    def validate_names(cls, names: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in names):
+            raise ValueError("Submission environment metadata must contain only variable names")
+        return sorted(set(names))
 
 
 class SubmissionRecord(BaseModel):
@@ -174,6 +217,7 @@ class SubmissionRecord(BaseModel):
     # above cannot express -- a k8s namespace, say. Free-form because the shape
     # is the executor's business; a reader keys off `executor` before reading it.
     executor_metadata: dict[str, str] = {}
+    environment: SubmissionEnvironment | None = Field(default=None, exclude_if=lambda value: value is None)
     schema_version: int = SCHEMA_VERSION
 
     @property
