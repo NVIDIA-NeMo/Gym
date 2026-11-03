@@ -211,7 +211,16 @@ harnesses that work inside the task sandbox can take its place: see
 ### Reuse a local task
 
 To add a task to your dataset, copy an existing task folder into it, then adapt its instruction, verifier and
-reference solution. The examples under `environments/` demonstrate different task structures.
+reference solution. These examples under `environments/` demonstrate different task structures:
+
+| Example | Demonstrates |
+| --- | --- |
+| [Hello World](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_world) | A single task with a Dockerfile and shell verifier. |
+| [Hello Dataset](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_dataset) | Two independent tasks organized as one dataset. |
+| [Hello Python Verifier](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_python_verifier) | Scoring with `tests/verifier.py`. |
+| [Hello Verifier Reuse](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_verifier_reuse) | Sharing Python verifier logic across tasks. |
+| [Hello MCP Tool](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_mcp_tool) | A task that provides its own MCP tool. |
+| [Hello Parameterized Tasks](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_parameterized_tasks) | Generating tasks from a shared template and JSONL rows. |
 
 ### Pull from the Harbor hub
 
@@ -235,14 +244,8 @@ gym dataset pull terminal_bench_2_1
 gym dataset validate terminal_bench_2_1 --sandbox opensandbox
 ```
 
-`--sandbox opensandbox` loads the shipped provider config,
-`nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`. It reads the server address from
-`OPENSANDBOX_DOMAIN` and its key from `OPENSANDBOX_API_KEY`; [OpenSandbox](/main/infrastructure/sandbox/opensandbox)
-covers setting them up. The command builds the rest of the configuration itself. It writes
-`run_config_<agent>.yaml` to the results folder, which binds a `harbor` Environment Server instance for the dataset
-to the harness. It then loads that file, the harness's config, `environment_servers/harbor/configs/harbor.yaml` and
-the provider config, in that order. `--config` files follow, then the model server config that `--model-type` names
-(for `gym eval run`), then `env.yaml`. Command-line overrides load last, so they win.
+For sandbox setup, see
+[Sandbox providers](/main/agent-interactions/harbor#sandbox-providers).
 
 The pull fetches into the entry's own folder (the task folders are gitignored), or into
 `$NEMO_GYM_DATASETS_DIR/<entry>/` when that variable is set. Pulling the reference an entry declares lands there

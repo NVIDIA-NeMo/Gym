@@ -98,6 +98,12 @@ Deployment settings stay out of task and dataset files, so a dataset runs unchan
 | Server config, a YAML file passed with `--config` | The `harbor` server block, the `sandbox:` provider block and the `builds:` block. |
 | Command line | Harness, sandbox provider, task selection, repeats and `++<key>=<value>` overrides. |
 
+`gym eval run` and `gym dataset validate` write `run_config_<agent>.yaml` to the results folder, binding a `harbor`
+Environment Server instance for the dataset to the harness. They load that file, the harness's config,
+`environment_servers/harbor/configs/harbor.yaml` and the provider config, in that order. `--config` files follow,
+then the model server config that `--model-type` names (for `gym eval run`), then `env.yaml`. Command-line overrides
+load last, so they win.
+
 The shipped server block is `environment_servers/harbor/configs/harbor.yaml`, instance `harbor_environment_server`.
 For each taskset, `run_config_<agent>.yaml` defines `harbor_<taskset>_environment`, which inherits from that instance,
 and `harbor_<taskset>_agent`, which inherits from the harness's shipped config. Each byte of the taskset's UTF-8 name
@@ -173,6 +179,11 @@ top-level `sandbox:` block. Use `docker` on one machine and `opensandbox` on a c
 a `--config` file that repeats the `sandbox:` block. See [Sandbox API](/main/infrastructure/sandbox) for the
 providers, [Multi-Container Tasks](/main/data/task-folders/compose-tasks) for what Compose tasks need, and
 [Harbor image builds](/main/reference/configuration#harbor-image-builds) for Dockerfiles that need a build.
+
+For example, `--sandbox opensandbox` loads
+`nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`. It reads the server address from
+`OPENSANDBOX_DOMAIN` and its key from `OPENSANDBOX_API_KEY`; see
+[OpenSandbox](/main/infrastructure/sandbox/opensandbox) for setup instructions.
 
 ## What the server writes
 
