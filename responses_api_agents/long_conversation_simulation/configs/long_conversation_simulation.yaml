@@ -1,0 +1,41 @@
+long_conversation_simulation:
+  responses_api_agents:
+    long_conversation_simulation:
+      entrypoint: app.py
+      assistant_model_server:
+        type: responses_api_models
+        name: conversation_assistant_model
+      user_model_server:
+        type: responses_api_models
+        name: conversation_user_model
+      helper_model_server:
+        type: responses_api_models
+        name: conversation_helper_model
+      # BEAM's templates (ai_assistant_llm_template, check_include_question_template,
+      # check_need_followup_template, user_llm_answer_question_template,
+      # user_llm_ask_followup_question_template); the calling recipe supplies them.
+      assistant_system_prompt_fpath: ???
+      check_include_question_prompt_fpath: ???
+      check_need_followup_prompt_fpath: ???
+      user_answer_question_prompt_fpath: ???
+      user_followup_question_prompt_fpath: ???
+      tiktoken_encoding: cl100k_base
+      call_timeout_seconds: 1800
+      max_call_retries: 3
+
+conversation_assistant_model:
+  _copy: policy_model
+
+conversation_user_model:
+  _copy: policy_model
+
+conversation_helper_model:
+  _copy: policy_model
+
+long_conversation_simulation_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: long_conversation_simulation
