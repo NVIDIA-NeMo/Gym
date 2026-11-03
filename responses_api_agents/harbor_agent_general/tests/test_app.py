@@ -593,3 +593,38 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
         if nemo_gym.client.http_client.is_global_aiohttp_client_setup():
             loop.run_until_complete(nemo_gym.client.http_client.get_global_aiohttp_client().close())
         loop.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "running, phase",
+    [
+        ({"environment_setup": (True, False)}, "setup"),
+        ({"environment_setup": (True, True), "agent_setup": (True, True), "agent_execution": (True, False)}, "agent"),
+        ({"agent_execution": (True, True), "verifier": (True, False)}, "verify"),
+        ({"agent_execution": (True, True)}, "unknown"),
+    ],
+)
+async def test_a_failed_trial_names_the_phase_it_was_in(tmp_path, monkeypatch, running, phase):
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text("{}")
+    timings = {
+        name: SimpleNamespace(started_at="t0" if started else None, finished_at="t1" if finished else None)
+        for name, (started, finished) in running.items()
+    }
+    failure = SimpleNamespace(exception_type="SandboxApiException", exception_message="sandbox ended")
+    trial = SimpleNamespace(task_name="task", exception_info=failure, step_results=[], **timings)
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError) as raised:
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    message = str(raised.value)
+    assert message.startswith(f"[sandbox phase={phase} ")
+    assert " reason=SandboxApiException] Harbor trial failed with SandboxApiException: sandbox ended" in message
