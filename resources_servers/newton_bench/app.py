@@ -251,6 +251,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 self._session_episodes[session_id] = (body.episode_id, body.task_id)
             elif identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            else:
+                # An idle sweep or /end_session may already have released the state. Never acknowledge a retry
+                # as successfully seeded when its first tool call can only report a lost session.
+                self._require_metadata(session_id)
             # A repeated seed for the same episode keeps the session, including its Python worker's state.
             request.session[SESSION_ID_KEY] = session_id
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
@@ -478,7 +482,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 evaluation_error=f"Evaluation failed: {str(e)}",
             )
         finally:
-            self._close_session(session_id)
+            # Typed sessions have an explicit close, so a lost verify reply can be retried with the same metadata.
+            # An Agent's /run has no close and still releases its session here.
+            if session_id not in self._session_episodes:
+                self._close_session(session_id)
 
     async def end_session(self, request: Request, body: NewtonBenchEndSessionRequest) -> NewtonBenchEndSessionResponse:
         """Clean up session handle for Python execution and metadata."""

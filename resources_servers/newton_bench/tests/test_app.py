@@ -1357,11 +1357,12 @@ class TestResourcesSessions:
         with TestClient(server.setup_webserver()) as client:
             client.post("/seed_session", json=_typed_seed())
             verify = client.post("/verify", json=VERIFY_BODY)
-            # Verify releases the session for an Agent's /run, which never closes it.
+            # Typed verification retains state for retries until the Environment Server closes the session.
             assert verify.json()["mask_sample"] is False
-            assert server.session_metadata == {}
+            assert "resources-session" in server.session_metadata
             assert client.post("/close_session", json=_typed_close()).status_code == 200
 
+        assert server.session_metadata == {}
         assert server._session_episodes == {}
 
     def test_tool_calls_after_close_are_lost(self) -> None:
@@ -1377,6 +1378,42 @@ class TestResourcesSessions:
             assert response.status_code == 404
             assert response.json()["detail"]["failure_kind"] == "session_lost"
         assert server._sessions == {}
+
+    def test_typed_verify_retry_keeps_metadata_until_close(self) -> None:
+        server = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            for _ in range(2):
+                response = client.post("/verify", json=VERIFY_BODY)
+                assert response.status_code == 200
+                assert response.json()["mask_sample"] is False
+                assert response.json()["evaluation_error"] == (
+                    "No law found in response. Expected <final_law>...</final_law> tags."
+                )
+            assert "resources-session" in server.session_metadata
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        assert server.session_metadata == {}
+
+    @mark.parametrize("release", ["expiry", "end_session"])
+    def test_repeated_seed_does_not_confirm_a_released_session(self, release: str) -> None:
+        server = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            if release == "expiry":
+                server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
+                server._cleanup_sessions()
+            else:
+                assert client.post("/end_session", json={}).status_code == 200
+            response = client.post("/seed_session", json=_typed_seed())
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == (
+            "session_expired" if release == "expiry" else "session_lost"
+        )
+        assert server.session_metadata == {}
 
     def test_session_reaped_by_idle_sweep_reports_expired(self) -> None:
         server = _session_server()
