@@ -22,7 +22,8 @@ import pytest
 
 import nemo_gym.rollouts.rollout_records as records
 from nemo_gym.orchestration.recovery import STORE_SKIP_KEYS
-from nemo_gym.rollouts import RolloutStore, RunManifest
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 
 
 _SKIP = frozenset({"ng_trajectory", "ng_model_call_capture"})

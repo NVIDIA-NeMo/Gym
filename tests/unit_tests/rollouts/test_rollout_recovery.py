@@ -2275,7 +2275,7 @@ async def test_typed_episode_outcomes_settle_stop_or_retry_through_collection_an
 
 
 def _identity_case(tmp_path: Path, settings: dict) -> tuple:
-    from nemo_gym.rollouts import RunManifest
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
 
     source = tmp_path / "input.jsonl"
     source.write_text("{}\n")
@@ -2347,7 +2347,7 @@ def test_a_new_manifest_treats_a_null_setting_as_absent(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("succeeded", [0, 1], ids=["all-rejected", "one-succeeded"])
 async def test_rejected_sandbox_credentials_end_the_run_without_a_retry(runner_config, monkeypatch, succeeded):
-    from nemo_gym.rollouts import IncompleteEvaluationError
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
     # An orchestrated run requires every rollout, so the run ends even after a rollout succeeded.
     runner_config.require_complete = True
@@ -2377,7 +2377,7 @@ async def test_rejected_sandbox_credentials_end_the_run_without_a_retry(runner_c
 
 
 async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):
-    from nemo_gym.rollouts import IncompleteEvaluationError
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
     runner_config.require_complete = True
     rejected = {

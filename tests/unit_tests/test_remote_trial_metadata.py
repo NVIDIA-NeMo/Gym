@@ -12,7 +12,8 @@ import pytest
 
 from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence, _remote_managed_reader_script
 from nemo_gym.orchestration.recovery import _managed_trial_metadata, select_managed_evidence
-from nemo_gym.rollouts import RolloutStore, RunManifest
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_managed_recovery_selection import collect, saved_bytes
 from tests.unit_tests.test_remote_managed_recovery import ProjectionConnection, config
 

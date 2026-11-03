@@ -16,7 +16,9 @@ from nemo_gym.rollout_reverification import (
     due_judge_failures,
     rejudge_saved_judge_failures,
 )
-from nemo_gym.rollouts import RolloutStore, RunManifest, logical_rollout_id, materialized_path_for
+from nemo_gym.rollouts.rollout_records import logical_rollout_id, materialized_path_for
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 
 
 ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}

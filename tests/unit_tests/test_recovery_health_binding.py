@@ -18,7 +18,7 @@ from nemo_gym.orchestration.recovery import (
     response_health,
     trial_health,
 )
-from nemo_gym.rollouts import run_health_checks
+from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 
 

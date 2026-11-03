@@ -3586,7 +3586,7 @@ def test_raw_responses_stream_capture_preserves_response_population(
     from fastapi.testclient import TestClient
 
     from nemo_gym.models.model_call_capture import CaptureStore
-    from nemo_gym.rollouts import read_model_call_records
+    from nemo_gym.rollouts.model_calls import read_model_call_records
     from tests.unit_tests.models.test_base_responses_api_model import _install_capture
 
     app = FastAPI()

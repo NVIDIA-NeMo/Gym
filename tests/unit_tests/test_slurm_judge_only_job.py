@@ -27,8 +27,9 @@ from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionR
 from nemo_gym.orchestration.recovery import JUDGE_JOB_JOURNAL_NAME, RecoveryAction
 from nemo_gym.orchestration.submit import inspect_recovery, recover
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.rollouts import RolloutStore, RunManifest
 from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_eval_recovery_gate import scored
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index  # noqa: F401 - autouse fixture

@@ -17,7 +17,9 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.rollouts import RolloutStore, RunManifest, logical_rollout_id
+from nemo_gym.rollouts.rollout_records import logical_rollout_id
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.server_runtime.episode_types import FailureEvent, FailureReport
 
 
@@ -195,7 +197,7 @@ async def test_failed_agent_outcome_through_environment_and_collection(tmp_path,
         SingleAgentTurnLegacyEnvironmentServerConfig,
     )
     from nemo_gym.failure_transport import FailureHeader, observe_reply
-    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from tests.single_agent_turn_helpers import _Client, _environment_server, _request, _Response
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
     from tests.unit_tests.test_saved_generation_admission import response
@@ -261,7 +263,7 @@ async def test_failed_agent_outcome_through_environment_and_collection(tmp_path,
         monkeypatch.setattr(
             "nemo_gym.rollouts.rollout_collection.get_global_config_dict", lambda: client.global_config_dict
         )
-        from nemo_gym.rollouts import IncompleteEvaluationError
+        from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
         with pytest.raises(IncompleteEvaluationError):
             await RolloutCollectionHelper().run_from_config(config)

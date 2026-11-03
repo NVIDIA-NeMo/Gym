@@ -16,7 +16,8 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.rollouts import RolloutStore, RunManifest
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
 from tests.unit_tests.test_eval_resubmit import _handle, _provider_failures, _resumable_run, _sbatch_env
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index

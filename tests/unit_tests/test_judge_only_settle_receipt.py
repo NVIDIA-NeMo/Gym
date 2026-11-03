@@ -16,8 +16,9 @@ from nemo_gym.rollout_reverification import (
     due_judge_failures,
     read_settle_receipt,
 )
-from nemo_gym.rollouts import RolloutStore, materialized_path_for
 from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
+from nemo_gym.rollouts.rollout_records import materialized_path_for
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_reverify_saved_results import ANSWER, _run, _selected, ungraded, verify_transport_masked
 from tests.unit_tests.test_reverify_saved_results import verifier as verifier  # noqa: F401 - fixture
 

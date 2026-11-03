@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollouts import RunManifest
 from nemo_gym.rollouts.rollout_recovery import (
+    RunManifest,
     _configuration_identity,
     _digest,
     _is_semantic,
