@@ -44,11 +44,15 @@ from environment_servers.bird_interact.app import (
     BirdInteractResponse,
 )
 from environment_servers.bird_interact.grading import (
+    Grade,
     PostgresDatabase,
     QueryResult,
     SQLiteDatabase,
+    TestCaseHelpers,
     grade,
+    grade_by_test_cases,
     main,
+    passes_test_cases,
     remove_comments,
     remove_distinct,
     remove_round,
@@ -413,6 +417,51 @@ class TestGrading:
         assert graded == {"solution_error": "The ground-truth SQL failed: no such column: nope"}
 
 
+class TestTestCases:
+    """A management phase's test cases, run as the ADK runs them: in order, until one raises."""
+
+    def test_each_test_case_gets_the_submission_the_solution_the_database_and_the_connection(self) -> None:
+        seen: list[tuple] = []
+        code = (
+            "def test_case(pred_sqls, sol_sqls, db_name, conn):\n    seen.append((pred_sqls, sol_sqls, db_name, conn))"
+        )
+
+        assert passes_test_cases([code, code], {"seen": seen}, ["SELECT 1"], ["SELECT 2"], "shop", "connection")
+        assert seen == [(["SELECT 1"], ["SELECT 2"], "shop", "connection")] * 2
+
+    @pytest.mark.parametrize("failing", ["assert False, 'wrong'", "raise ValueError('broken')"])
+    def test_the_first_test_case_that_raises_fails_the_phase_and_the_rest_do_not_run(self, failing: str) -> None:
+        ran: list[int] = []
+        record = "def test_case(*args):\n    ran.append(1)"
+
+        assert not passes_test_cases([f"def test_case(*args):\n    {failing}", record], {"ran": ran}, [], [], "", None)
+        assert ran == []
+
+    def test_a_top_level_import_is_not_visible_to_the_test_case(self) -> None:
+        # The ADK runs the code with separate globals and locals, so its functions see only the helpers.
+        top_level = "import json\n\ndef test_case(*args):\n    json.dumps(1)"
+        inside = "def test_case(*args):\n    import json\n    json.dumps(1)"
+
+        assert not passes_test_cases([top_level], {}, [], [], "", None)
+        assert passes_test_cases([inside], {}, [], [], "", None)
+
+    def test_code_without_a_test_case_passes_and_its_output_goes_to_standard_error(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert passes_test_cases(["print('checked')"], {}, [], [], "", None)
+        captured = capsys.readouterr()
+        assert (captured.out, captured.err) == ("", "checked\n")
+
+    def test_the_sql_rewrites_take_and_return_lists(self) -> None:
+        namespace = TestCaseHelpers(timeout_seconds=5).namespace(pred_query_result=[(1,)])
+        sql = ["SELECT DISTINCT ROUND(amount, 1) -- note\n"]
+
+        rewritten = namespace["remove_round"](namespace["remove_distinct"](namespace["remove_comments"](sql)))
+
+        assert rewritten == ["SELECT amount"]
+        assert namespace["pred_query_result"] == [(1,)]
+
+
 class _TypedRows:
     """A database whose submission and solution return fixed rows, typed as PostgreSQL's driver types them."""
 
@@ -479,6 +528,50 @@ class TestPostgresGrading:
         ]
         assert executed["preview"] == ["(2.5, '2024-01-02', 'x')"]
 
+    def test_the_runner_grades_by_test_cases_when_the_request_has_them(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        graded: list[tuple] = []
+
+        def by_test_cases(
+            database: PostgresDatabase,
+            predicted_sql: str,
+            solution_sql: list[str],
+            test_cases: list[str],
+            *,
+            timeout_seconds: float,
+            apply_if_passed: bool,
+        ) -> Grade:
+            graded.append((database.name, predicted_sql, solution_sql, test_cases, apply_if_passed))
+            return Grade(passed=False, execution_error="relation missing")
+
+        monkeypatch.setattr("environment_servers.bird_interact.grading.grade_by_test_cases", by_test_cases)
+        request = {
+            "predicted_sql": "DELETE FROM sales",
+            "solution_sql": ["DELETE FROM sales WHERE amount > 1"],
+            "ordered": False,
+            "test_cases": ["def test_case(*args): pass"],
+            "timeout_seconds": 5,
+            "apply_if_passed": True,
+        }
+
+        def command(engine: str, database: str) -> None:
+            request_path = tmp_path / "grade.json"
+            request_path.write_text(json.dumps(request | {"engine": engine, "database": database}))
+            main(["grade", str(request_path)])
+
+        command("postgresql", "shop_template")
+        assert json.loads(capsys.readouterr().out) == {
+            "passed": False,
+            "execution_error": "relation missing",
+            "timed_out": False,
+        }
+        assert graded == [
+            ("shop_template", "DELETE FROM sales", request["solution_sql"], request["test_cases"], True),
+        ]
+        with pytest.raises(SystemExit, match="PostgreSQL only"):
+            command("sqlite", str(tmp_path / "episode.sqlite"))
+
 
 _POSTGRES = shutil.which("initdb") and shutil.which("pg_ctl")
 
@@ -503,12 +596,17 @@ class TestPostgresDatabase:
         )
         monkeypatch.setenv("PGHOST", str(socket))
         monkeypatch.setenv("PGUSER", "bird")
-        with psycopg2.connect(dbname="postgres") as connection:
-            connection.autocommit = True
-            connection.cursor().execute("CREATE DATABASE shop_template")
-        with psycopg2.connect(dbname="shop_template") as connection, connection.cursor() as cursor:
+        # Not `with connection`: since psycopg2 2.9 it opens a transaction, where CREATE DATABASE cannot run.
+        connection = psycopg2.connect(dbname="postgres")
+        connection.autocommit = True
+        connection.cursor().execute("CREATE DATABASE shop_template")
+        connection.close()
+        connection = psycopg2.connect(dbname="shop_template")
+        with connection, connection.cursor() as cursor:
             cursor.execute("CREATE TABLE sales (amount numeric, sold date)")
             cursor.execute("INSERT INTO sales VALUES (1.005, '2024-01-02'), (2.5, '2024-01-03')")
+        # A database with a session open cannot be copied, and test-case grading copies it.
+        connection.close()
         yield PostgresDatabase("shop_template")
         subprocess.run(["pg_ctl", "stop", "--pgdata", data, "--mode", "immediate"], capture_output=True)
 
@@ -533,6 +631,58 @@ class TestPostgresDatabase:
         predicted = "SELECT ROUND(amount, 2), sold::timestamp FROM sales ORDER BY amount DESC"
         assert grade(database, predicted, solution, ordered=False, timeout_seconds=5).passed
         assert not grade(database, predicted, solution, ordered=True, timeout_seconds=5).passed
+
+    def test_test_cases_see_the_submission_s_writes_on_a_copy_that_is_dropped(
+        self, database: PostgresDatabase
+    ) -> None:
+        three_sales = (
+            "def test_case(pred_sqls, sol_sqls, db_name, conn):\n"
+            "    rows, error, timed_out = execute_queries(['SELECT COUNT(*) FROM sales'], db_name, conn)\n"
+            "    assert rows == [(3,)], rows\n"
+        )
+        insert = "INSERT INTO sales VALUES (4, '2024-01-04')"
+
+        def count() -> list[tuple] | None:
+            (result,) = database.run(["SELECT COUNT(*) FROM sales"], timeout_seconds=5)
+            return result.rows
+
+        passed = grade_by_test_cases(database, insert, [insert], [three_sales], timeout_seconds=5)
+        failed = grade_by_test_cases(database, "DELETE FROM sales", [insert], [three_sales], timeout_seconds=5)
+        assert (passed.passed, failed.passed, count()) == (True, False, [(2,)])
+
+        applied = grade_by_test_cases(
+            database, insert, [insert], [three_sales], timeout_seconds=5, apply_if_passed=True
+        )
+        assert (applied.passed, count()) == (True, [(3,)])
+        (copies,) = database.run(
+            ["SELECT COUNT(*) FROM pg_database WHERE datname LIKE 'bird_interact%'"], timeout_seconds=5
+        )
+        assert copies.rows == [(0,)]
+
+    def test_test_cases_call_the_adk_helpers_on_the_copy(self, database: PostgresDatabase) -> None:
+        helpers = (
+            "def test_case(pred_sqls, sol_sqls, db_name, conn):\n"
+            "    assert pred_query_result == [(2,)]\n"
+            "    assert ex_base(pred_sqls, sol_sqls, db_name, conn) == 1\n"
+            "    assert ex_base(['SELECT 1'], sol_sqls, db_name, conn) == 0\n"
+            "    assert ex_base(['SELECT amount FROM sales ORDER BY amount DESC'],\n"
+            "                   ['SELECT amount FROM sales ORDER BY amount'], db_name, conn, {'order': True}) == 0\n"
+            "    rows, error, timed_out = execute_queries('SELECT nope', db_name)\n"
+            "    assert rows is None and 'nope' in error and not timed_out\n"
+            "    assert execute_queries(['SELECT pg_sleep(5)'], db_name, conn) == (None, None, True)\n"
+        )
+        count = "SELECT COUNT(*) FROM sales"
+
+        assert grade_by_test_cases(database, count, [count], [helpers], timeout_seconds=0.5).passed
+
+    def test_a_submission_that_fails_or_times_out_runs_no_test_case(self, database: PostgresDatabase) -> None:
+        never = "def test_case(*args):\n    raise AssertionError('ran')"
+
+        broken = grade_by_test_cases(database, "SELECT nope FROM sales", ["SELECT 1"], [never], timeout_seconds=5)
+        slow = grade_by_test_cases(database, "SELECT pg_sleep(5)", ["SELECT 1"], [never], timeout_seconds=0.2)
+
+        assert "nope" in broken.execution_error and not broken.passed
+        assert (slow.passed, slow.timed_out) == (False, True)
 
 
 class TestSimulator:
@@ -1039,6 +1189,26 @@ class TestAgentSession:
         assert client.agent_calls[0]["path"] == "/ng-rollout/bookshop_1-0/training-token-capture/v1/responses"
 
 
+def _answer_for_the_image_server(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict, float]]:
+    """Answer each runner command as passing, for the image's PostgreSQL server that the tests do not have. Return
+    each command with its request and its time limit, as the server sends them."""
+    commands: list[tuple[str, dict, float]] = []
+    exec_in_sandbox = AsyncSandbox.exec
+
+    async def exec(self: AsyncSandbox, command: str, **kwargs: Any) -> SandboxExecResult:
+        argv = command.split()
+        if len(argv) != 4 or not argv[1].endswith("grading.py"):
+            return await exec_in_sandbox(self, command, **kwargs)
+        request_path = Path(argv[3])
+        commands.append((argv[2], json.loads(request_path.read_text()), kwargs["timeout_s"]))
+        request_path.unlink()
+        reply = {"setup": {}, "grade": {"passed": True, "execution_error": None, "timed_out": False}}[argv[2]]
+        return SandboxExecResult(stdout=json.dumps(reply), stderr="", return_code=0)
+
+    monkeypatch.setattr(AsyncSandbox, "exec", exec)
+    return commands
+
+
 class TestPostgreSQL:
     """Lite and Full: each task's database is in the sandbox image, and the runner uses the image's server."""
 
@@ -1049,21 +1219,7 @@ class TestPostgreSQL:
     async def test_the_episode_runs_on_the_task_database_in_the_image(
         self, sandbox_workspace: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        requests: list[tuple[str, dict]] = []
-        exec_in_sandbox = AsyncSandbox.exec
-
-        async def exec(self: AsyncSandbox, command: str, **kwargs: Any) -> SandboxExecResult:
-            # The runner needs the image's server, so this test answers for it and keeps each request.
-            argv = command.split()
-            if len(argv) != 4 or not argv[1].endswith("grading.py"):
-                return await exec_in_sandbox(self, command, **kwargs)
-            request_path = Path(argv[3])
-            requests.append((argv[2], json.loads(request_path.read_text())))
-            request_path.unlink()
-            reply = {"setup": {}, "grade": {"passed": True, "execution_error": None, "timed_out": False}}[argv[2]]
-            return SandboxExecResult(stdout=json.dumps(reply), stderr="", return_code=0)
-
-        monkeypatch.setattr(AsyncSandbox, "exec", exec)
+        requests = _answer_for_the_image_server(monkeypatch)
         server, client = _server(
             turns=[_ask_then_submit("What counts as a bestseller?", "SELECT 1")],
             user=[LABELED_BESTSELLERS, TEN_COPIES],
@@ -1075,7 +1231,7 @@ class TestPostgreSQL:
 
         assert response.failure is None, response.failure
         assert (response.result.stop_reason, response.result.reward) == ("solved", 0.7)
-        assert [(command, request["engine"], request["database"]) for command, request in requests] == [
+        assert [(command, request["engine"], request["database"]) for command, request, _ in requests] == [
             ("setup", "postgresql", "bookshop_template"),
             ("grade", "postgresql", "bookshop_template"),
         ]
@@ -1084,6 +1240,30 @@ class TestPostgreSQL:
         assert requests[1][1]["solution_sql"] == [CORRECT_1] and requests[1][1]["apply_if_passed"] is False
         system = client.agent_inputs[0]["input"][0]["content"]
         assert system.startswith("You are a data scientist with great PostgreSQL writing ability.")
+
+    async def test_a_management_phase_is_graded_by_its_test_cases_with_time_for_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requests = _answer_for_the_image_server(monkeypatch)
+        server, _ = _server(
+            turns=[_submit("CREATE TABLE note (x)"), _submit(PHASE_2_OF_3)],
+            database_engine="postgresql",
+            sandbox_config={"image": "bird-interact-postgres:lite"},
+        )
+        test_case = "def test_case(pred_sqls, sol_sqls, db_name, conn): pass"
+
+        response = await _run(server, "bookshop_3", category="Management", test_cases=[test_case])
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == pytest.approx(1.0)
+        (phase_1, phase_1_limit), (phase_2, phase_2_limit) = [
+            (request, limit) for command, request, limit in requests if command == "grade"
+        ]
+        # Phase 1 is a management phase, and its follow-up a query.
+        assert (phase_1["test_cases"], phase_1["apply_if_passed"]) == ([test_case], True)
+        assert phase_2["test_cases"] == []
+        # One test case has time for one query more than the default test case's two.
+        assert phase_1_limit - phase_2_limit == pytest.approx(server.config.sql_timeout_seconds)
 
 
 class TestDatabaseSandbox:
