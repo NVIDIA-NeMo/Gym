@@ -53,7 +53,7 @@ gym env init --resources-server my_server
 Subclass it and declare **one top-level float field per objective** — don't leave the subclass empty. Aggregate metrics computes a stat for every top-level numeric field, but does not descend into nested dicts, so a key inside `reward_components` alone won't appear in your metrics.
 
 ```python
-from nemo_gym.base_resources_server import BaseMultiRewardVerifyResponse
+from nemo_gym.server_runtime import BaseMultiRewardVerifyResponse
 
 
 class MultiRewardResponse(BaseMultiRewardVerifyResponse):
@@ -88,7 +88,7 @@ from typing import Any, Dict
 
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseVerifyRequest
+from nemo_gym.server_runtime import BaseVerifyRequest
 
 
 class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):

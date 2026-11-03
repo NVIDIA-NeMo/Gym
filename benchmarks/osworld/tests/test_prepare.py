@@ -25,7 +25,7 @@ from benchmarks.osworld.prepare import (
     write_task_shard,
     write_vm_snapshot_manifest,
 )
-from nemo_gym.global_config import GlobalConfigDictParser
+from nemo_gym.config import GlobalConfigDictParser
 
 
 def test_prepare_validates_committed_example() -> None:

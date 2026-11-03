@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.chemcotbench.app import (
     ChemCoTBenchResourcesServer,
     ChemCoTBenchResourcesServerConfig,

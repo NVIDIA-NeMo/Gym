@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import ClientResponseError
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_models.openai_model import app
 from responses_api_models.openai_model.provider_refusals import provider_refusal
 

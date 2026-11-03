@@ -132,7 +132,7 @@ async def test_hosts_reject_injection_before_execution(hosts, monkeypatch):
 async def test_explicit_root_sets_sdk_uid_even_when_daemon_is_nonroot(monkeypatch, user, expected_uid):
     from nemo_gym.sandbox.providers.opensandbox import provider as provider_module
 
-    async def run(command, *, opts):
+    async def run(command, *, opts, handlers=None):
         assert command == "id -u"
         return SimpleNamespace(
             logs=SimpleNamespace(stdout=[SimpleNamespace(text=str(getattr(opts, "uid", 1000)))], stderr=[]),
