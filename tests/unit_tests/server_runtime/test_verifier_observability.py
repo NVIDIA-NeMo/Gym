@@ -270,7 +270,7 @@ async def test_direct_model_requests_inside_verify_inherit_owner(tmp_path, monke
     transport = AsyncMock()
     monkeypatch.setattr("nemo_gym.client.server_client.request", transport)
     client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0},
+        registry_server_config={"host": "localhost", "port": 0},
         global_config_dict=OmegaConf.create(
             {
                 "observability_enabled": True,
@@ -583,7 +583,7 @@ async def test_a_verify_that_asks_a_model_saves_no_grading_record(monkeypatch, r
     transport = AsyncMock()
     monkeypatch.setattr("nemo_gym.client.server_client.request", transport)
     client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0},
+        registry_server_config={"host": "localhost", "port": 0},
         global_config_dict=OmegaConf.create(
             {
                 "observability_enabled": True,

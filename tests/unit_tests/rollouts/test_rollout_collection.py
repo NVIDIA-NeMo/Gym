@@ -205,7 +205,7 @@ def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     get_global_config_dict = MagicMock(return_value={})
     monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", get_global_config_dict)
     # Collector-only tests replace dispatch, but still supply the running
-    # configuration used by the manifest. No head-server HTTP is needed here.
+    # configuration used by the manifest. No registry-server HTTP is needed here.
     client = SimpleNamespace(
         global_config_dict=OmegaConf.create(
             {
@@ -2132,7 +2132,9 @@ class TestRolloutCollection:
         """Framework callers can prevent replaying a /run after uncertain delivery."""
         config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
         config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
-        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        client = ServerClient(
+            registry_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config
+        )
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
         )
@@ -2169,7 +2171,9 @@ class TestRolloutCollection:
         """
         config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
         config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
-        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        client = ServerClient(
+            registry_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config
+        )
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
         )
@@ -2239,7 +2243,9 @@ class TestRolloutCollection:
         config.my_environment_server.environment_servers.legacy_agent.update(
             {"host": "127.0.0.1", "port": server.sockets[0].getsockname()[1]}
         )
-        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        client = ServerClient(
+            registry_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config
+        )
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
         )
@@ -7351,7 +7357,7 @@ class TestRolloutCollection:
     async def test_opted_in_helper_reuses_its_client_across_run_examples_and_aggregation(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Every head-server lookup on an opted-in helper goes through the one cached client."""
+        """Every registry-server lookup on an opted-in helper goes through the one cached client."""
         rows = [
             {TASK_INDEX_KEY_NAME: task_index, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"}
             for task_index in range(2)
@@ -8341,7 +8347,7 @@ class TestRunExamplesAclose:
                     await asyncio.sleep(0.01)
             port = server.servers[0].sockets[0].getsockname()[1]
             server_client = ServerClient(
-                head_server_config=BaseServerConfig(host="127.0.0.1", port=port),
+                registry_server_config=BaseServerConfig(host="127.0.0.1", port=port),
                 global_config_dict=OmegaConf.create(
                     {
                         "my_agent": {"responses_api_agents": {"impl": {}}},
@@ -10260,10 +10266,10 @@ class TestRolloutAggregationHelper:
             "env_a": [(0, 0, 1.0), (1, 0, 1.0)]
         }
 
-    async def test_a_run_with_nothing_to_score_does_not_need_the_head_server(
+    async def test_a_run_with_nothing_to_score_does_not_need_the_registry_server(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Only scoring reaches the head server, so a shard whose every rollout failed still reports coverage."""
+        """Only scoring reaches the registry server, so a shard whose every rollout failed still reports coverage."""
         shard = tmp_path / "rollouts.jsonl"
         shard.write_bytes(b"")
         # A sidecar written before rows were stamped with their server.
@@ -10272,10 +10278,10 @@ class TestRolloutAggregationHelper:
             self._rollout(0, "agent_a", **{NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS}),
         )
 
-        def no_head_server(*args, **kwargs):
-            raise RuntimeError("Could not connect to the head server")
+        def no_registry_server(*args, **kwargs):
+            raise RuntimeError("Could not connect to the registry server")
 
-        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", no_head_server)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", no_registry_server)
         config = RolloutAggregationConfig(
             input_glob=str(shard), output_jsonl_fpath=str(tmp_path / "merged.jsonl"), disable_health_check=True
         )
@@ -11069,7 +11075,7 @@ class TestTaskSourcePreprocess:
         )
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return mock_client
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -12311,7 +12317,7 @@ class TestEnvironmentServerRouting:
         mock_client.global_config_dict = _environment_server_config()
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return mock_client
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -14601,7 +14607,7 @@ class TestEnrichRunResult:
         global_config = {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict=global_config)
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -14826,7 +14832,7 @@ class TestRunRecordWriter:
         row = TestEnrichRunResult._row()
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict=global_config)
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -14892,7 +14898,7 @@ class TestRunRecordWriter:
         keys: list[str] = []
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict=global_config)
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -14920,7 +14926,7 @@ class TestRunRecordWriter:
         _RunRecordWriter(tmp_path, "s").write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict={})
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -14946,7 +14952,7 @@ class TestRunRecordWriter:
         dispatched: list[dict] = []
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict={})
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -15077,7 +15083,7 @@ class TestRunRecordWriter:
         row = {key: value for key, value in TestEnrichRunResult._row().items() if key not in missing}
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict={})
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -15131,7 +15137,7 @@ class TestRunRecordWriter:
         failure = {NG_FAILURE_CLASS_KEY: "agent_request_failed", "_ng_failure_message": "connection refused"}
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict={})
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -15179,7 +15185,7 @@ class TestRunRecordWriter:
         existing.write_bytes(b'{"reward": 1.0}\n')
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict={})
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -15204,7 +15210,7 @@ class TestRunRecordWriter:
         dispatched: list[dict] = []
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return SimpleNamespace(global_config_dict={})
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -15589,7 +15595,7 @@ async def test_a_shard_records_only_the_model_calls_of_its_own_dispatch(tmp_path
     calls = iter(["step_1 call", "step_2 call"])
 
     class Helper(RolloutCollectionHelper):
-        def setup_server_client(self, head_server_config=None):
+        def setup_server_client(self, registry_server_config=None):
             return SimpleNamespace(global_config_dict=global_config)
 
         def _run_examples_with_metadata(self, examples, *args, **kwargs):

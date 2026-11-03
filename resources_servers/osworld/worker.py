@@ -4,7 +4,7 @@
 
 SSH may bootstrap this process, but every container lifecycle operation after
 startup is performed through this authenticated HTTP API. The daemon registers
-its dynamically selected port with Gym's head server and renews a TTL lease.
+its dynamically selected port with Gym's registry server and renews a TTL lease.
 """
 
 from __future__ import annotations

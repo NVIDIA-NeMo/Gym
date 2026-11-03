@@ -53,10 +53,10 @@ from nemo_gym.config.config_types import (
     ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
-    HeadServerConfigMalformedError,
     InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
+    RegistryServerConfigMalformedError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
@@ -104,15 +104,17 @@ NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
 DEFAULT_HOST_KEY_NAME = "default_host"
-HEAD_SERVER_KEY_NAME = "head_server"
+REGISTRY_SERVER_KEY_NAME = "registry_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
+# "Head" in these two names is the parent `gym` process, not the registry server: they carry pins from the parent,
+# such as its exact Ray version, into every server venv.
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
 # With `use_absolute_ip`, the server types (`responses_api_models`, ...) that get the resolved address; every other
-# server and the head server stay on loopback. Unset or null: every server, the head included.
+# server and the registry server stay on loopback. Unset or null: every server, the registry server included.
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
@@ -166,7 +168,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
     DEFAULT_HOST_KEY_NAME,
-    HEAD_SERVER_KEY_NAME,
+    REGISTRY_SERVER_KEY_NAME,
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
@@ -346,7 +348,7 @@ POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
 POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 POLICY_MODEL_KEY_NAME = "policy_model"
 
-DEFAULT_HEAD_SERVER_PORT = 11000
+DEFAULT_REGISTRY_SERVER_PORT = 11000
 
 
 # HuggingFace
@@ -664,7 +666,7 @@ Duplicate config paths:
     def raise_on_no_server_instances(self, global_config_dict: DictConfig) -> None:
         """Fail fast if a run has no server instances to start.
 
-        Without this, `gym env start` with an empty/omitted `config_paths` starts the head server and Ray
+        Without this, `gym env start` with an empty/omitted `config_paths` starts the registry server and Ray
         and then hangs with nothing to run. We catch it before Ray initialises with an actionable
         message instead.
         """
@@ -1723,7 +1725,7 @@ Found global config dict yaml:
                     f"{address_hint}"
                 )
         # `absolute_ip_server_types` scopes the resolved address to the servers a sandbox must reach (a Harbor run
-        # names the model server): the head server, whose unauthenticated config endpoint returns the merged
+        # names the model server): the registry server, whose unauthenticated config endpoint returns the merged
         # config, and every other server stay on loopback as without `use_absolute_ip`. An explicit
         # `default_host` is the broader opt-in and applies to every server, as does an unset list.
         host_by_server_type: dict[str, str] = {}
@@ -1748,21 +1750,21 @@ Found global config dict yaml:
         # Only an absent or null block means "all defaults"; any other non-mapping (incl. false, 0, "" and []) is
         # malformed. `host` is not read here: it may reference a server host that validate_and_populate_defaults
         # fills in below.
-        head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME)
-        if head_server is None:
-            head_server = {}
-        elif not isinstance(head_server, Mapping):
-            raise HeadServerConfigMalformedError(
-                f"""'{HEAD_SERVER_KEY_NAME}' must be a mapping of `host` and `port`. Got: {head_server!r}.
+        registry_server = global_config_dict.get(REGISTRY_SERVER_KEY_NAME)
+        if registry_server is None:
+            registry_server = {}
+        elif not isinstance(registry_server, Mapping):
+            raise RegistryServerConfigMalformedError(
+                f"""'{REGISTRY_SERVER_KEY_NAME}' must be a mapping of `host` and `port`. Got: {registry_server!r}.
 Set the keys individually, in a config or as overrides, e.g.:
-  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+  ++{REGISTRY_SERVER_KEY_NAME}.host=127.0.0.1 ++{REGISTRY_SERVER_KEY_NAME}.port={DEFAULT_REGISTRY_SERVER_PORT}"""
             )
 
         # The port is coerced so a quoted `port: "11000"` still keeps it away from the allocator. A port that does
         # not coerce is left to the full check below, which reports it together with any `host` problem.
         try:
             initial_disallowed_ports = [
-                TypeAdapter(int).validate_python(head_server.get("port", DEFAULT_HEAD_SERVER_PORT))
+                TypeAdapter(int).validate_python(registry_server.get("port", DEFAULT_REGISTRY_SERVER_PORT))
             ]
         except ValidationError:
             initial_disallowed_ports = []
@@ -1784,27 +1786,28 @@ Set the keys individually, in a config or as overrides, e.g.:
         )
 
         with open_dict(global_config_dict):
-            # Head server defaults, filled per key so a config may pin just one.
-            head_server.setdefault("host", default_host)
-            head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
-            global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
+            # Registry server defaults, filled per key so a config may pin just one.
+            registry_server.setdefault("host", default_host)
+            registry_server.setdefault("port", DEFAULT_REGISTRY_SERVER_PORT)
+            global_config_dict[REGISTRY_SERVER_KEY_NAME] = registry_server
 
         # Validated here, still in the config parse, rather than where the block is next built into a
-        # BaseServerConfig (ServerClient.load_head_server_config, after Ray is up for `gym env start`):
+        # BaseServerConfig (ServerClient.load_registry_server_config, after Ray is up for `gym env start`):
         # BaseServerConfig is not a CLI config, so its pydantic error would otherwise escape `main()` as a raw
         # traceback (#2686). Not earlier: a `host` that references another server's host only resolves once
         # validate_and_populate_defaults has filled that host in.
         # Validate-only: the block is left as written, so `gym env resolve` prints what the user configured.
         try:
-            BaseServerConfig.model_validate(head_server)
+            BaseServerConfig.model_validate(registry_server)
         except ValidationError as e:
             problems = "; ".join(
-                f"{'.'.join([HEAD_SERVER_KEY_NAME, *map(str, error['loc'])])} ({error['msg']})" for error in e.errors()
+                f"{'.'.join([REGISTRY_SERVER_KEY_NAME, *map(str, error['loc'])])} ({error['msg']})"
+                for error in e.errors()
             )
-            raise HeadServerConfigMalformedError(
-                f"""'{HEAD_SERVER_KEY_NAME}' is invalid: {problems}.
-`{HEAD_SERVER_KEY_NAME}.host` must be a hostname or IP; `{HEAD_SERVER_KEY_NAME}.port` and, if set, `{HEAD_SERVER_KEY_NAME}.num_workers` must be integers. Set them in a config or as overrides, e.g.:
-  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+            raise RegistryServerConfigMalformedError(
+                f"""'{REGISTRY_SERVER_KEY_NAME}' is invalid: {problems}.
+`{REGISTRY_SERVER_KEY_NAME}.host` must be a hostname or IP; `{REGISTRY_SERVER_KEY_NAME}.port` and, if set, `{REGISTRY_SERVER_KEY_NAME}.num_workers` must be integers. Set them in a config or as overrides, e.g.:
+  ++{REGISTRY_SERVER_KEY_NAME}.host=127.0.0.1 ++{REGISTRY_SERVER_KEY_NAME}.port={DEFAULT_REGISTRY_SERVER_PORT}"""
             ) from e
 
         with open_dict(global_config_dict):
@@ -2506,7 +2509,8 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     """
 
 
-# Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
+# Serves the names this module had before a rename (token_id_capture to token_capture, the head server to the
+# registry server), with a warning.
 from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
 
 

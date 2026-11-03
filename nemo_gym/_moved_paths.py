@@ -214,7 +214,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.config.config_types",
             "0.8.0",
             """
-            BaseServerConfig HeadServerUnreachableError ROLLOUT_PATH_PREFIX TOKEN_CAPTURE_PATH_SEGMENT
+            BaseServerConfig ROLLOUT_PATH_PREFIX TOKEN_CAPTURE_PATH_SEGMENT
             TRACE_CONTEXT_PATH_SEGMENT
             """,
         ),
@@ -222,7 +222,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.config.global_config",
             "0.8.0",
             """
-            GlobalConfigDictParser GlobalConfigDictParserConfig HEAD_SERVER_KEY_NAME maybe_get_global_config_dict
+            GlobalConfigDictParser GlobalConfigDictParserConfig maybe_get_global_config_dict
             NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME OBSERVABILITY_ENABLED_KEY_NAME RAY_HEAD_NODE_ADDRESS_KEY_NAME
             """,
         ),
@@ -255,7 +255,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.server_runtime.registry_server",
             "0.8.0",
             """
-            DEFAULT_HEAD_SERVER_PORT HeadServer PrivateAttr ServerInstanceDisplayConfig
+            PrivateAttr ServerInstanceDisplayConfig
             """,
         ),
         **_names(
@@ -691,7 +691,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.config.global_config",
             "0.8.0",
             """
-            DRY_RUN_KEY_NAME HEAD_SERVER_KEY_NAME MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME
+            DRY_RUN_KEY_NAME MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME
             NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
             SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
             """,
@@ -717,7 +717,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             entrypoint_ray_enabled initialize_ray ray_is_installed
             """,
         ),
-        **_names("nemo_gym.server_runtime.registry_server", "0.8.0", "HeadServer ServerInstanceDisplayConfig"),
+        **_names("nemo_gym.server_runtime.registry_server", "0.8.0", "ServerInstanceDisplayConfig"),
         **_names("nemo_gym.telemetry.config", "0.8.0", "MemoryProfilingConfig"),
         **_names(
             "nemo_gym.telemetry.memory",
@@ -800,6 +800,47 @@ _RENAMED_TOKEN_CAPTURE_NAMES: dict[str, dict[str, MovedPath]] = {
 for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
     _listed = MOVED_NAMES.setdefault(_module, {})
     assert not set(_listed) & set(_renamed), f"{_module} lists a renamed token capture name twice"
+    _listed.update(_renamed)
+
+# Names renamed with the head server (head server -> registry server), at each old module path that defined or
+# imported them. Kept apart, like the token capture renames above.
+_REGISTRY_SERVER_CLASS = MovedPath(new="nemo_gym.server_runtime.registry_server:RegistryServer", since="0.8.0")
+_REGISTRY_SERVER_KEY = MovedPath(new="nemo_gym.config.global_config:REGISTRY_SERVER_KEY_NAME", since="0.8.0")
+_REGISTRY_SERVER_PORT = MovedPath(
+    new="nemo_gym.server_runtime.registry_server:DEFAULT_REGISTRY_SERVER_PORT", since="0.8.0"
+)
+_REGISTRY_SERVER_UNREACHABLE = MovedPath(
+    new="nemo_gym.config.config_types:RegistryServerUnreachableError", since="0.8.0"
+)
+_REGISTRY_SERVER_CONFIG_MALFORMED = MovedPath(
+    new="nemo_gym.config.config_types:RegistryServerConfigMalformedError", since="0.8.0"
+)
+_RENAMED_REGISTRY_SERVER_NAMES: dict[str, dict[str, MovedPath]] = {
+    "nemo_gym.server_utils": {
+        "DEFAULT_HEAD_SERVER_PORT": _REGISTRY_SERVER_PORT,
+        "HEAD_SERVER_KEY_NAME": _REGISTRY_SERVER_KEY,
+        "HeadServer": _REGISTRY_SERVER_CLASS,
+        "HeadServerUnreachableError": _REGISTRY_SERVER_UNREACHABLE,
+    },
+    "nemo_gym.cli.env": {
+        "HEAD_SERVER_KEY_NAME": _REGISTRY_SERVER_KEY,
+        "HeadServer": _REGISTRY_SERVER_CLASS,
+    },
+    "nemo_gym.config_types": {
+        "HeadServerConfigMalformedError": _REGISTRY_SERVER_CONFIG_MALFORMED,
+        "HeadServerUnreachableError": _REGISTRY_SERVER_UNREACHABLE,
+    },
+    "nemo_gym.global_config": {
+        "DEFAULT_HEAD_SERVER_PORT": MovedPath(
+            new="nemo_gym.config.global_config:DEFAULT_REGISTRY_SERVER_PORT", since="0.8.0"
+        ),
+        "HEAD_SERVER_KEY_NAME": _REGISTRY_SERVER_KEY,
+        "HeadServerConfigMalformedError": _REGISTRY_SERVER_CONFIG_MALFORMED,
+    },
+}
+for _module, _renamed in _RENAMED_REGISTRY_SERVER_NAMES.items():
+    _listed = MOVED_NAMES.setdefault(_module, {})
+    assert not set(_listed) & set(_renamed), f"{_module} lists a renamed registry server name twice"
     _listed.update(_renamed)
 
 

@@ -104,24 +104,24 @@ config_paths:
   - resources_servers/weather/config.yaml
 ```
 
-### Malformed `head_server` Values
+### Malformed `registry_server` Values
 
 ```
-nemo_gym.config.config_types.HeadServerConfigMalformedError: 'head_server' is invalid: head_server.port (Input should be a valid integer, unable to parse string as an integer).
-`head_server.host` must be a hostname or IP; `head_server.port` and, if set, `head_server.num_workers` must be integers. Set them in a config or as overrides, e.g.:
-  ++head_server.host=127.0.0.1 ++head_server.port=11000
+nemo_gym.config.config_types.RegistryServerConfigMalformedError: 'registry_server' is invalid: registry_server.port (Input should be a valid integer, unable to parse string as an integer).
+`registry_server.host` must be a hostname or IP; `registry_server.port` and, if set, `registry_server.num_workers` must be integers. Set them in a config or as overrides, e.g.:
+  ++registry_server.host=127.0.0.1 ++registry_server.port=11000
 ```
 
-**When**: A `head_server` field has the wrong type — typically a `++head_server.port=` override that is not an
+**When**: A `registry_server` field has the wrong type — typically a `++registry_server.port=` override that is not an
 integer, or an explicit `host: null` — or the whole block was given as something other than a mapping
-(`++head_server=foo`, `++head_server=false`, `'++head_server=[]'`), which reports
-`'head_server' must be a mapping ...` instead. Either key may be omitted (Gym fills the default), as may the whole
+(`++registry_server=foo`, `++registry_server=false`, `'++registry_server=[]'`), which reports
+`'registry_server' must be a mapping ...` instead. Either key may be omitted (Gym fills the default), as may the whole
 block, but a value that is present must be well-typed.
 
 **Fix**: Give `host` a hostname or IP and `port` an integer, in the config or on the command line:
 
 ```yaml
-head_server:
+registry_server:
   host: 127.0.0.1
   port: 11000
 ```
@@ -339,36 +339,36 @@ If the server's entrypoint can't be loaded in the environment `gym` runs in, for
 
 Errors where the config is valid but an endpoint it names cannot be reached.
 
-### Head Server Unreachable
+### Registry Server Unreachable
 
 ```
-Error: Could not connect to the head server at http://127.0.0.1:11000. Is the head server running?
+Error: Could not connect to the registry server at http://127.0.0.1:11000. Is the registry server running?
 Start it with: `gym env start`. If it is already running on a different host or port, pass
-`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it.
+`++registry_server.host=<host>` / `++registry_server.port=<port>` so this command can find it.
 ```
 
 **When**: `gym eval run --no-serve` collects against servers that are already running, and found nothing
-listening at the head server address in its config. Either no `gym env start` is running, or it was started
-with a different head server address than this command is using. That address is `head_server.host` /
-`head_server.port` (default `127.0.0.1:11000`). When `head_server.host` is not set, an explicit
+listening at the registry server address in its config. Either no `gym env start` is running, or it was started
+with a different registry server address than this command is using. That address is `registry_server.host` /
+`registry_server.port` (default `127.0.0.1:11000`). When `registry_server.host` is not set, an explicit
 `default_host` takes precedence. If neither host setting is supplied,
 [`use_absolute_ip`](/reference/configuration#multi-node-configuration) selects the machine's resolved IP
 address when `true`, or `127.0.0.1` when `false`. A `gym env start` run with different host settings can
 therefore listen on a different address than the collecting command expects.
 
-**Fix**: Check which head server address `gym env start` used (from its config and overrides), then run
+**Fix**: Check which registry server address `gym env start` used (from its config and overrides), then run
 `gym env status` with matching overrides before concluding that nothing is running. `gym env status` only
-queries the head server address in its own config, so servers running on another host or port also show
+queries the registry server address in its own config, so servers running on another host or port also show
 `No NeMo Gym servers found running.`
 
 ```bash
-gym env status "++head_server.port=<port>"
+gym env status "++registry_server.port=<port>"
 ```
 
 If status lists your servers, pass the same overrides to the collecting command:
 
 ```bash
-gym eval run --no-serve "++head_server.port=<port>" ...
+gym eval run --no-serve "++registry_server.port=<port>" ...
 ```
 
 If status finds no servers at the matching address either, start them with `gym env start` (in another
@@ -378,13 +378,13 @@ terminal or the background) and retry.
 
 Gym stops waiting when its managed servers have not become ready within `server_spinup_timeout_seconds` (default 600). The error names the server instances still waiting. This bound also catches a multi-worker Uvicorn manager that remains alive while repeatedly replacing workers that fail during application construction.
 
-The budget starts when Gym begins polling its servers for readiness, which happens after it has launched them and its head server is answering. Head-server startup does not count against it. The budget covers whatever each server still has to do before it opens its port. That includes installing the server's dependencies and, for a locally launched model such as `local_vllm_model`, downloading and loading the model weights: that server waits for its inference engine before the Gym port opens. `model_endpoint_readiness_timeout_seconds` is a separate, later check of the model endpoints named in the config, so raising it does not help at this stage.
+The budget starts when Gym begins polling its servers for readiness, which happens after it has launched them and its registry server is answering. Registry server startup does not count against it. The budget covers whatever each server still has to do before it opens its port. That includes installing the server's dependencies and, for a locally launched model such as `local_vllm_model`, downloading and loading the model weights: that server waits for its inference engine before the Gym port opens. `model_endpoint_readiness_timeout_seconds` is a separate, later check of the model endpoints named in the config, so raising it does not help at this stage.
 
 Raise the value for servers with legitimately long initialization with `++server_spinup_timeout_seconds=<seconds>`, or set it to `0` to preserve an unbounded wait while debugging. The value must be a number of seconds; anything else is reported as a configuration error before any server starts. A deterministic startup exception should be fixed rather than hidden behind a larger timeout.
 
 ### Server Shutdown
 
-Managed servers run in separate process sessions. On shutdown, Gym sends each server group one SIGINT and waits within one shared `server_shutdown_timeout_seconds` grace period (default `1`). Set it to finite nonnegative seconds; numeric strings are accepted, and `0` requests immediate escalation. Invalid values fail before any server starts. After the grace expires, Gym sends SIGKILL to the remaining groups and uses one additional bounded reap interval. Descendants remain part of the owned group even if the launching shell exits first. The HTTP sidecar stays alive until the servers stop, with its own shutdown grace; telemetry and head-server teardown also fall outside the managed-server grace.
+Managed servers run in separate process sessions. On shutdown, Gym sends each server group one SIGINT and waits within one shared `server_shutdown_timeout_seconds` grace period (default `1`). Set it to finite nonnegative seconds; numeric strings are accepted, and `0` requests immediate escalation. Invalid values fail before any server starts. After the grace expires, Gym sends SIGKILL to the remaining groups and uses one additional bounded reap interval. Descendants remain part of the owned group even if the launching shell exits first. The HTTP sidecar stays alive until the servers stop, with its own shutdown grace; telemetry and registry-server teardown also fall outside the managed-server grace.
 
 Agent servers use their lifespan shutdown to close remaining sessions concurrently. One `session_close_timeout_seconds` budget bounds the whole drain, including incomplete setup and cleanup already in progress. This field still bounds individual close phases during normal operation. Its base default is `60` seconds; adapters may keep their own defaults, including `30` for Hermes and Stirrup. A timeout cancels pending cleanup and reports unconfirmed session IDs. Unconfirmed cleanup retains its handle and has no successful close receipt; process exit does not establish that a remote sandbox stopped, so its owner and provider TTL remain responsible after forced termination.
 

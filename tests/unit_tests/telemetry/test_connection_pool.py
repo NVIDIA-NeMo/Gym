@@ -200,7 +200,7 @@ async def test_server_client_labels_samples_with_the_destination_server(collecte
 
     async with _lazy_client(monkeypatch, aggregate_limit=1), _serve(blocked) as url:
         server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=1),
             global_config_dict=DictConfig(
                 {"my_judge": {"resources_servers": {"test": {"host": "127.0.0.1", "port": urlsplit(url).port}}}}
             ),

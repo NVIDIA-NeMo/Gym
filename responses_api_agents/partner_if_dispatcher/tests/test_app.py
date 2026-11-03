@@ -27,7 +27,7 @@ def server(upstream=None):
     harnesses = ("text", "tools", "harbor", "swe")
     routes = {f"task-{h}": {"type": "environment_servers", "name": f"env-{h}"} for h in harnesses}
     client = _Client(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create(
             {
                 f"env-{h}": {
@@ -316,7 +316,7 @@ def test_example_config_runs_each_partner_if_example_in_its_own_environment():
     dispatcher = module.PartnerIFDispatcher(
         config=module.PartnerIFDispatcherConfig.model_validate(settings),
         server_client=ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=11000), global_config_dict=config
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=11000), global_config_dict=config
         ),
     )
     assert dispatcher._execution_agents == {

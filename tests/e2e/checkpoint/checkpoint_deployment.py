@@ -221,7 +221,7 @@ class Deployment:
             "model_endpoint_readiness_timeout_seconds": 60,
             "results_dir": str(self.work_dir / "results"),
             "cache_dir": str(self.work_dir / "cache"),
-            "head_server": {"host": "127.0.0.1", "port": free_port()},
+            "registry_server": {"host": "127.0.0.1", "port": free_port()},
             "checkpoint": {"enabled": True, "control_auth_token": TOKEN},
             # Log every request with its status, not only errors, so a failure can be traced in the logs.
             "uvicorn_logging_show_200_ok": True,
@@ -523,7 +523,7 @@ class Deployment:
 
     def server_client(self) -> ServerClient:
         return ServerClient(
-            head_server_config=BaseServerConfig(**self.config["head_server"]),
+            registry_server_config=BaseServerConfig(**self.config["registry_server"]),
             global_config_dict=OmegaConf.create(self.config),
         )
 

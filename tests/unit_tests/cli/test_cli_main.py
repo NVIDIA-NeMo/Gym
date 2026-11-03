@@ -684,20 +684,20 @@ class TestFriendlyValidationError:
             main()
 
     # #2686: BaseServerConfig is not a CLI config, so the router keeps re-raising its ValidationError (test above).
-    # The parser therefore reports a bad head_server value as a ConfigError at the source, which every command
+    # The parser therefore reports a bad registry_server value as a ConfigError at the source, which every command
     # turns into a single `Error:` line and exit 1 before any server (or Ray) starts.
 
-    def _run_real_cli_with_a_malformed_head_server(
+    def _run_real_cli_with_a_malformed_registry_server(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, argv: list[str]
     ) -> str:
-        """Drive the real router + config parse for `gym <argv> ++head_server.port=notanint`; return stdout."""
+        """Drive the real router + config parse for `gym <argv> ++registry_server.port=notanint`; return stdout."""
         monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the message
         # env.yaml is read from cwd before the install root, so an empty one shadows a developer's own.
         (tmp_path / "env.yaml").write_text("")
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
-        monkeypatch.setattr(sys, "argv", ["gym", *argv, "++head_server.port=notanint"])
+        monkeypatch.setattr(sys, "argv", ["gym", *argv, "++registry_server.port=notanint"])
 
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -705,7 +705,7 @@ class TestFriendlyValidationError:
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "Error:" in captured.out
-        assert "head_server.port" in captured.out
+        assert "registry_server.port" in captured.out
         assert "Traceback" not in captured.out + captured.err
         return captured.out
 
@@ -718,33 +718,33 @@ class TestFriendlyValidationError:
         ],
         ids=["env-validate", "env-resolve", "eval-run-no-serve"],
     )
-    def test_malformed_head_server_override_is_a_config_error_not_a_traceback(
+    def test_malformed_registry_server_override_is_a_config_error_not_a_traceback(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, argv: list[str]
     ) -> None:
-        # A real row, so that without the fix `eval run` gets past its input checks to the head-server lookup.
+        # A real row, so that without the fix `eval run` gets past its input checks to the registry-server lookup.
         (tmp_path / "in.jsonl").write_text(
             json.dumps({"responses_create_params": {"input": [{"role": "user", "content": "hi"}]}}) + "\n"
         )
 
-        out = self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, argv)
+        out = self._run_real_cli_with_a_malformed_registry_server(monkeypatch, tmp_path, capsys, argv)
 
         assert "Config is valid" not in out
 
-    def test_malformed_head_server_is_rejected_before_any_server_starts(
+    def test_malformed_registry_server_is_rejected_before_any_server_starts(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
     ) -> None:
-        # The issue's headline: `gym env start` used to initialise Ray and spawn the head server, then die on the
-        # bad value inside HeadServer.run_webserver. `run` now fails in its config parse, before RunHelper exists.
+        # The issue's headline: `gym env start` used to initialise Ray and spawn the registry server, then die on the
+        # bad value inside RegistryServer.run_webserver. `run` now fails in its config parse, before RunHelper exists.
         import nemo_gym.cli.env as cli_env
 
         class _NoServerMayStart:
             def __init__(self, *args, **kwargs) -> None:
-                raise AssertionError("RunHelper must not be built for a malformed head_server")
+                raise AssertionError("RunHelper must not be built for a malformed registry_server")
 
         monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
         monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
 
-        self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
+        self._run_real_cli_with_a_malformed_registry_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
     # #4710: the `gym dataset` entrypoints wear @exit_cleanly_on_config_error and the prompt loader raises
     # ConfigErrors, so a mistyped path or a broken prompt file is one `Error:` line and exit 1, not a traceback.

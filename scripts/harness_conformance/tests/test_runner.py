@@ -278,7 +278,9 @@ def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_
         {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
         12,
     )
-    server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
+    server_client = ServerClient(
+        registry_server_config=config["registry_server"], global_config_dict=OmegaConf.create(config)
+    )
     header = server_client.assistant_message_header("policy_model")
     assert header is not None
     probe = Probe(SCENARIO[scenario_name], tmp_path)

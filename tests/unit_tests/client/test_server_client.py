@@ -46,7 +46,7 @@ from nemo_gym.client.server_client import (
     ConnectionError,
     ServerClient,
 )
-from nemo_gym.config.config_types import BaseServerConfig, ConfigError, HeadServerUnreachableError
+from nemo_gym.config.config_types import BaseServerConfig, ConfigError, RegistryServerUnreachableError
 from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
 )
@@ -64,7 +64,7 @@ def test_model_header_comes_from_its_harness_property(monkeypatch, header):
     monkeypatch.setitem(sys.modules, harness.__name__, harness)
     monkeypatch.setitem(sys.modules, plain.__name__, plain)
     client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0},
+        registry_server_config={"host": "localhost", "port": 0},
         global_config_dict=OmegaConf.create(
             {
                 "first": {
@@ -108,17 +108,17 @@ def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
             }
         }
     client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0}, global_config_dict=OmegaConf.create(config)
+        registry_server_config={"host": "localhost", "port": 0}, global_config_dict=OmegaConf.create(config)
     )
     with raises(ValueError, match="different assistant headers"):
         client.assistant_message_header("policy")
 
 
 class TestServerClient:
-    def test_ServerClient_load_head_server_config(self, monkeypatch: MonkeyPatch) -> None:
+    def test_ServerClient_load_registry_server_config(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
             {
-                "head_server": {
+                "registry_server": {
                     "host": "",
                     "port": 0,
                 }
@@ -127,15 +127,15 @@ class TestServerClient:
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
         monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
-        actual_config = ServerClient.load_head_server_config()
+        actual_config = ServerClient.load_registry_server_config()
         assert actual_config.host == ""
         assert actual_config.port == 0
 
     def test_ServerClient_load_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
-        """Fetch the config from the head server when no config was injected."""
+        """Fetch the config from the registry server when no config was injected."""
         global_config_dict = DictConfig(
             {
-                "head_server": {
+                "registry_server": {
                     "host": "",
                     "port": 0,
                 }
@@ -160,7 +160,7 @@ class TestServerClient:
     def test_ServerClient_uses_loopback_for_wildcard_bind_hosts(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
             {
-                "head_server": {
+                "registry_server": {
                     "host": "0.0.0.0",
                     "port": 11000,
                 }
@@ -171,7 +171,7 @@ class TestServerClient:
             "get_global_config_dict",
             MagicMock(return_value=global_config_dict),
         )
-        response = MagicMock(content=b'"head_server: {}"')
+        response = MagicMock(content=b'"registry_server: {}"')
         requests_get = MagicMock(return_value=response)
         monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", requests_get)
 
@@ -189,7 +189,7 @@ class TestServerClient:
         """Do not treat an unrelated process-local config as the server config."""
         global_config_dict = DictConfig(
             {
-                "head_server": {"host": "", "port": 0},
+                "registry_server": {"host": "", "port": 0},
                 "my_server": {"a": {"b": {"host": "x", "port": 1}}},
             }
         )
@@ -197,7 +197,7 @@ class TestServerClient:
         monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
 
         # `gym eval run --no-serve` initializes a partial local config.
-        # It must still fetch the full config from the running head server.
+        # It must still fetch the full config from the running registry server.
         monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
@@ -211,12 +211,12 @@ class TestServerClient:
 
     def test_ServerClient_load_from_global_config_fast_path_via_env(self, monkeypatch: MonkeyPatch) -> None:
         """Use the config injected into a Gym-launched server process."""
-        global_config_dict = DictConfig({"head_server": {"host": "", "port": 0}})
+        global_config_dict = DictConfig({"registry_server": {"host": "", "port": 0}})
         get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
         monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
 
         monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
-        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "head_server: {host: '', port: 0}")
+        monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "registry_server: {host: '', port: 0}")
 
         def boom(*args, **kwargs):
             raise AssertionError("requests.get should not be called on the fast path")
@@ -229,7 +229,7 @@ class TestServerClient:
     def test_ServerClient_load_from_global_config_propogate_ConnectionError(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
             {
-                "head_server": {
+                "registry_server": {
                     "host": "",
                     "port": 0,
                 }
@@ -249,9 +249,11 @@ class TestServerClient:
         with raises(ValueError):
             ServerClient.load_from_global_config()
 
-    def _nothing_listening_on_the_head_server(self, monkeypatch: MonkeyPatch, host: str, port: int) -> ConnectionError:
-        """Make `load_from_global_config` take the fetch path and have the head server refuse the connection."""
-        global_config_dict = DictConfig({"head_server": {"host": host, "port": port}})
+    def _nothing_listening_on_the_registry_server(
+        self, monkeypatch: MonkeyPatch, host: str, port: int
+    ) -> ConnectionError:
+        """Make `load_from_global_config` take the fetch path and have the registry server refuse the connection."""
+        global_config_dict = DictConfig({"registry_server": {"host": host, "port": port}})
         monkeypatch.setattr(
             nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value=global_config_dict)
         )
@@ -261,15 +263,15 @@ class TestServerClient:
         monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", MagicMock(side_effect=refused))
         return refused
 
-    def test_ServerClient_load_from_global_config_unreachable_head_server_is_a_ConfigError(
+    def test_ServerClient_load_from_global_config_unreachable_registry_server_is_a_ConfigError(
         self, monkeypatch: MonkeyPatch
     ) -> None:
-        # An unreachable head server is a user mistake (nothing started, or the wrong port), not a bug:
+        # An unreachable registry server is a user mistake (nothing started, or the wrong port), not a bug:
         # it must be a ConfigError so `exit_cleanly_on_config_error` prints the message instead of a
         # traceback (#2687), and still a ValueError for callers that already catch that.
-        refused = self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+        refused = self._nothing_listening_on_the_registry_server(monkeypatch, host="127.0.0.1", port=11000)
 
-        with raises(HeadServerUnreachableError) as exc_info:
+        with raises(RegistryServerUnreachableError) as exc_info:
             ServerClient.load_from_global_config()
 
         assert isinstance(exc_info.value, ConfigError)
@@ -277,33 +279,33 @@ class TestServerClient:
         # The low-level cause is not lost, just kept off the user-facing message.
         assert exc_info.value.__cause__ is refused
 
-    def test_ServerClient_load_from_global_config_unreachable_head_server_message_is_actionable(
+    def test_ServerClient_load_from_global_config_unreachable_registry_server_message_is_actionable(
         self, monkeypatch: MonkeyPatch
     ) -> None:
         # Same wording as `gym env status`: name the address that was tried, then the fix for each of
         # the two likely causes (nothing running -> `gym env start`; running elsewhere -> override).
-        self._nothing_listening_on_the_head_server(monkeypatch, host="10.0.0.5", port=9500)
+        self._nothing_listening_on_the_registry_server(monkeypatch, host="10.0.0.5", port=9500)
 
-        with raises(HeadServerUnreachableError) as exc_info:
+        with raises(RegistryServerUnreachableError) as exc_info:
             ServerClient.load_from_global_config()
 
         message = str(exc_info.value)
-        assert message.startswith("Could not connect to the head server at http://10.0.0.5:9500.")
-        assert "Is the head server running? Start it with: `gym env start`." in message
-        assert "`++head_server.host=<host>` / `++head_server.port=<port>`" in message
+        assert message.startswith("Could not connect to the registry server at http://10.0.0.5:9500.")
+        assert "Is the registry server running? Start it with: `gym env start`." in message
+        assert "`++registry_server.host=<host>` / `++registry_server.port=<port>`" in message
 
-    def test_ServerClient_load_from_global_config_unreachable_head_server_logs_the_cause_at_debug(
+    def test_ServerClient_load_from_global_config_unreachable_registry_server_logs_the_cause_at_debug(
         self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
     ) -> None:
         # A proxy or name-resolution failure is also a requests ConnectionError, and the CLI prints the
         # ConfigError without its cause, so the real reason must still reach `--verbose` (DEBUG) output.
-        self._nothing_listening_on_the_head_server(monkeypatch, host="127.0.0.1", port=11000)
+        self._nothing_listening_on_the_registry_server(monkeypatch, host="127.0.0.1", port=11000)
         proxy_error = ProxyError("Tunnel connection failed: 407 Proxy Authentication Required")
         monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", MagicMock(side_effect=proxy_error))
 
         with (
             caplog.at_level(logging.DEBUG, logger="nemo_gym.client.server_client"),
-            raises(HeadServerUnreachableError),
+            raises(RegistryServerUnreachableError),
         ):
             ServerClient.load_from_global_config()
 
@@ -314,7 +316,7 @@ class TestServerClient:
 
     async def test_ServerClient_get_post_sanity(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="abcdef", port=12345),
+            registry_server_config=BaseServerConfig(host="abcdef", port=12345),
             global_config_dict=DictConfig(
                 {
                     "my_server": {
@@ -349,7 +351,7 @@ class TestServerClient:
 
     async def test_ServerClient_preserves_external_capture_url(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="head", port=12345),
+            registry_server_config=BaseServerConfig(host="head", port=12345),
             global_config_dict=DictConfig(
                 {"policy_model": {"responses_api_models": {"vllm_model": {"host": "plain-host", "port": 54321}}}}
             ),
@@ -381,7 +383,7 @@ class TestServerClient:
     async def test_ServerClient_request_uses_base_url_table(self, monkeypatch: MonkeyPatch) -> None:
         """Resolve each server's base URL once."""
         server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="head", port=11000),
+            registry_server_config=BaseServerConfig(host="head", port=11000),
             global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
         )
 
@@ -414,7 +416,7 @@ class TestServerClient:
         self, monkeypatch: MonkeyPatch, url_path: str, bound: dict, reads_body: bool
     ) -> None:
         server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="abcdef", port=12345),
+            registry_server_config=BaseServerConfig(host="abcdef", port=12345),
             global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
         )
         response = MagicMock(read=AsyncMock())
@@ -427,7 +429,7 @@ class TestServerClient:
     async def test_ServerClient_post_encodes_replayed_output_logprobs(self, monkeypatch: MonkeyPatch) -> None:
         """A request body that replays assistant output with logprobs is sent as JSON with the logprobs intact."""
         server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="head", port=11000),
+            registry_server_config=BaseServerConfig(host="head", port=11000),
             global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
         )
         aiohttp_client_mock = MagicMock()

@@ -117,7 +117,9 @@ async def seed_through_hle(
 
     # Every adapter resolves its provider's config only after it accepts the seed, to create its own sandbox.
     monkeypatch.setattr(module, "resolve_provider_config", resolve_provider_config)
-    client = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=11000), global_config_dict=config)
+    client = ServerClient(
+        registry_server_config=BaseServerConfig(host="127.0.0.1", port=11000), global_config_dict=config
+    )
     harness = agent_class(config=config_class.model_validate(server_config(config, agent_name)), server_client=client)
     environment = SingleAgentTurnLegacyEnvironmentServer(
         config=SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(server_config(config, HLE_ENVIRONMENT)),

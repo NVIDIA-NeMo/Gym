@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The head server: the registry every Gym server and client asks for the run's config and server addresses."""
+"""The registry server: the registry every Gym server and client asks for the run's config and server addresses."""
 
 from pathlib import Path
 from threading import Thread
@@ -37,10 +37,10 @@ from nemo_gym.server_runtime.base_server import BaseServer, UvicornBacklogConfig
 from nemo_gym.telemetry.observer import observe_app_event_loop
 
 
-DEFAULT_HEAD_SERVER_PORT = 11000
+DEFAULT_REGISTRY_SERVER_PORT = 11000
 
 
-class HeadServer(BaseServer):
+class RegistryServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
     _ready: bool = PrivateAttr(default=False)
@@ -83,14 +83,14 @@ class HeadServer(BaseServer):
         self._cached_yaml = None
 
     @classmethod
-    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:
-        config = ServerClient.load_head_server_config()
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "RegistryServer"]:
+        config = ServerClient.load_registry_server_config()
         server = cls(config=config)
         global_config_dict = get_global_config_dict()
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
 
         app = server.setup_webserver()
-        # The head server runs on its own thread and event loop inside the supervisor process.
+        # The registry server runs on its own thread and event loop inside the supervisor process.
         observe_app_event_loop(app, "head_server")
 
         config = uvicorn.Config(

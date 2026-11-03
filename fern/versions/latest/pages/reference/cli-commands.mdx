@@ -1313,8 +1313,8 @@ ATIF input requires a `stateless` resources server and rejects `--force`, `--res
 # Recompute rewards with an updated verifier config (no model server needed)
 gym eval reverify \
     --config my_resources_server.yaml \
-    "++head_server.host=127.0.0.1" \
-    "++head_server.port=9500" \
+    "++registry_server.host=127.0.0.1" \
+    "++registry_server.port=9500" \
     --inputs results/rollouts_materialized_inputs.jsonl \
     --rollouts results/rollouts.jsonl \
     --output results/rollouts_reverified.jsonl

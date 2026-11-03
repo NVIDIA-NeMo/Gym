@@ -48,10 +48,10 @@ class StatusCommand:
         """Find all running NeMo Gym server processes"""
 
         try:
-            head_server_config = ServerClient.load_head_server_config()
-            head_url = f"http://{head_server_config.host}:{head_server_config.port}"
+            registry_server_config = ServerClient.load_registry_server_config()
+            registry_url = f"http://{registry_server_config.host}:{registry_server_config.port}"
 
-            response = requests.get(f"{head_url}/server_instances", timeout=5)
+            response = requests.get(f"{registry_url}/server_instances", timeout=5)
             response.raise_for_status()
             instances = response.json()
 
@@ -79,7 +79,8 @@ class StatusCommand:
 
         except (requests.RequestException, ConnectionError) as e:
             logger.warning(
-                "Could not connect to head server: %s. Is the head server running? Start it with: `gym env start`",
+                "Could not connect to registry server: %s. Is the registry server running? "
+                "Start it with: `gym env start`",
                 e,
             )
             return []

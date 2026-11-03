@@ -161,7 +161,7 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
         }
     )
     server_client = ServerClient(
-        head_server_config=BaseServerConfig(host="head.test", port=80),
+        registry_server_config=BaseServerConfig(host="head.test", port=80),
         global_config_dict=config,
     )
     resources = _JudgeResourcesServer(
@@ -345,7 +345,7 @@ def test_model_server_exposes_current_rollout_id_to_its_own_handler() -> None:
     though every correlated call already carries the id in its URL prefix.
     """
     server_client = ServerClient(
-        head_server_config=BaseServerConfig(host="head.test", port=80),
+        registry_server_config=BaseServerConfig(host="head.test", port=80),
         global_config_dict=OmegaConf.create({}),
     )
     model = _EchoRolloutIdModel(

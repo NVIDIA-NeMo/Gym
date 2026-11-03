@@ -2320,7 +2320,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         agent.config.verify_after_agent_error = True
         sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
     config.policy_model = {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}
-    transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
+    transport = ServerClient(registry_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent.server_client = transport
     environment = SingleAgentTurnLegacyEnvironmentServer(
         config=SingleAgentTurnLegacyEnvironmentServerConfig(

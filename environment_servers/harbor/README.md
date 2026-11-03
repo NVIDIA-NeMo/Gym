@@ -838,12 +838,12 @@ past a one or two CPU limit and thrash or get OOM-killed, and the hints are the 
 hints, not limits: the cgroup limit stays the provider's, and a variable the task declares itself, in
 `[environment].env`, in its image's `ENV` or in the verifier environment's `env`, wins on a key clash.
 
-Servers bind loopback (`127.0.0.1`) by default, the head server with its `/global_config_dict_yaml` endpoint
+Servers bind loopback (`127.0.0.1`) by default, the registry server with its `/global_config_dict_yaml` endpoint
 included. A harness that calls the model server from inside the task sandbox (`calls_model_from_sandbox = True`
 on its agent class, or `sandbox_model_base_url` in its config) cannot reach loopback there, so
 `gym eval run <target> --agent <harness>` sets `use_absolute_ip: true` together with
 `absolute_ip_server_types: [responses_api_models]` in the generated run config: only the model server
-advertises the node's resolved address; the head server, the agent server and this environment server stay on
+advertises the node's resolved address; the registry server, the agent server and this environment server stay on
 loopback exactly as on a run without a sandboxed harness. The oracle (`gym dataset validate`), Terminus 2 and
 mini-SWE run their commands in the sandbox but call the model from the host, so nothing moves for them. A
 deployment that needs more servers reachable sets `absolute_ip_server_types` (or `default_host`, which applies

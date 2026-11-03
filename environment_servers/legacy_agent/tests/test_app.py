@@ -58,7 +58,7 @@ def _config(**limits: float) -> LegacyAgentEnvironmentServerConfig:
 
 def _app(*responses: _Upstream) -> tuple[TestClient, _Client]:
     client = _Client(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({}),
         calls=[],
         responses=list(responses),
@@ -140,7 +140,7 @@ class _SlowClient(_Client):
 
 def _slow_server(delay: float, **limits: float) -> tuple[LegacyAgentEnvironmentServer, _SlowClient]:
     client = _SlowClient(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({}),
         calls=[],
         responses=[],
@@ -202,7 +202,7 @@ def test_a_timeout_the_agent_call_raises_itself_is_not_an_episode_timeout() -> N
             raise TimeoutError("agent connection timed out")
 
     client = _TimingOutClient(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({}),
         calls=[],
         responses=[],
@@ -244,7 +244,7 @@ async def test_deadline_includes_response_body_read() -> None:
             return self.body
 
     client = _Client(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({}),
         calls=[],
         responses=[SlowBody(b'{"reward": 1.0}')],

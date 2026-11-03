@@ -446,7 +446,7 @@ class TestRunHelperDryRunSpinup:
         server_client = MagicMock()
         server_client.poll_for_status.return_value = "success"
         server_client_cls = MagicMock(return_value=server_client)
-        server_client_cls.load_head_server_config.return_value = MagicMock()
+        server_client_cls.load_registry_server_config.return_value = MagicMock()
         config = OmegaConf.create(
             {
                 "example": {
@@ -470,7 +470,7 @@ class TestRunHelperDryRunSpinup:
         monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", MagicMock())
         monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "ServerClient", server_client_cls)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.orchestration.server_supervisor.RegistryServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
         )
@@ -547,7 +547,7 @@ class TestRunHelperLaunchEnvironment:
         monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", MagicMock())
         mock_head_instance = MagicMock()
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.orchestration.server_supervisor.RegistryServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), mock_head_instance)),
         )
@@ -595,7 +595,7 @@ class TestRunHelperH2PingSidecar:
         monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "init_telemetry", MagicMock())
         monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", MagicMock())
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.orchestration.server_supervisor.RegistryServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
         )
@@ -658,7 +658,7 @@ class TestRunHelperH2PingSidecar:
         assert "http://127.0.0.1:1250/v1" in extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]
 
         runner.poll = RunHelper.poll.__get__(runner)
-        runner._head_server_thread = MagicMock(is_alive=lambda: True)
+        runner._registry_server_thread = MagicMock(is_alive=lambda: True)
         runner.poll()
         manager.check.assert_called_once()
 
@@ -721,7 +721,7 @@ class TestRunHelperRayStartup:
         initialize_ray = MagicMock()
         monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "initialize_ray", initialize_ray)
         monkeypatch.setattr(
-            nemo_gym.orchestration.server_supervisor.HeadServer,
+            nemo_gym.orchestration.server_supervisor.RegistryServer,
             "run_webserver",
             MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
         )
@@ -781,12 +781,12 @@ class TestRunHelperRayStartup:
 class TestRunHelperServerReadiness:
     def test_marks_head_ready_only_after_servers_and_model_endpoints(self) -> None:
         runner = RunHelper()
-        runner._head_server_instance = MagicMock()
+        runner._registry_server_instance = MagicMock()
         events = []
         runner.wait_for_spinup = MagicMock(side_effect=lambda: events.append("servers"))
         runner._start_memory_profiler = MagicMock(side_effect=lambda: events.append("memory"))
         runner.wait_for_model_endpoints = MagicMock(side_effect=lambda _config: events.append("models"))
-        runner._head_server_instance.mark_ready.side_effect = lambda: events.append("head")
+        runner._registry_server_instance.mark_ready.side_effect = lambda: events.append("head")
         config = OmegaConf.create({})
 
         runner.wait_for_server_readiness(config)
@@ -826,15 +826,15 @@ class TestRunHelperServerReadiness:
         from fastapi.testclient import TestClient
 
         from nemo_gym.config.config_types import BaseServerConfig
-        from nemo_gym.server_runtime.registry_server import HeadServer
+        from nemo_gym.server_runtime.registry_server import RegistryServer
 
         runner = RunHelper()
-        runner._head_server_instance = HeadServer(config=BaseServerConfig(host="", port=0))
+        runner._registry_server_instance = RegistryServer(config=BaseServerConfig(host="", port=0))
         runner.wait_for_spinup = MagicMock()
         runner.wait_for_model_endpoints = MagicMock()
         getattr(runner, failing_method).side_effect = RuntimeError("readiness failed")
 
-        with TestClient(runner._head_server_instance.setup_webserver()) as client:
+        with TestClient(runner._registry_server_instance.setup_webserver()) as client:
             with raises(RuntimeError, match="readiness failed"):
                 runner.wait_for_server_readiness(OmegaConf.create({}))
 
@@ -880,7 +880,7 @@ class TestRunHelperServerReadiness:
         runner = RunHelper()
         runner._server_spinup_timeout_seconds = 1.0
         runner._server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=0),
             global_config_dict=OmegaConf.create(servers),
         )
         runner._server_instance_display_configs = [
@@ -1003,7 +1003,7 @@ class TestRunHelperStartUnwind:
         initialize_ray.assert_not_called()
         run_command.assert_not_called()
         assert runner._processes == {}
-        assert runner._head_server is None
+        assert runner._registry_server is None
 
     def test_failure_after_spawning_stops_the_spawned_server_with_real_shutdown(self) -> None:
         runner = RunHelper()
@@ -1031,8 +1031,8 @@ class TestRunHelperShutdownReap:
     def _make_runner_with_processes(self, processes: dict) -> RunHelper:
         runner = RunHelper()
         runner._processes = processes
-        runner._head_server = MagicMock()
-        runner._head_server_thread = MagicMock()
+        runner._registry_server = MagicMock()
+        runner._registry_server_thread = MagicMock()
         return runner
 
     def test_kill_is_followed_by_reap_wait(self) -> None:
@@ -1106,19 +1106,19 @@ class TestRunHelperShutdownReap:
         process = MagicMock()
         process.wait.return_value = 0
         runner = self._make_runner_with_processes({"server": process})
-        head_server_thread = runner._head_server_thread
+        registry_server_thread = runner._registry_server_thread
 
         runner.shutdown()
         runner.shutdown()
 
         process.send_signal.assert_called_once()
-        head_server_thread.join.assert_called_once_with()
-        assert runner._head_server is None
+        registry_server_thread.join.assert_called_once_with()
+        assert runner._registry_server is None
 
-    def test_shutdown_before_head_server_started(self) -> None:
+    def test_shutdown_before_registry_server_started(self) -> None:
         runner = RunHelper()
         runner._processes = {}
-        runner._head_server = None
+        runner._registry_server = None
 
         runner.shutdown()
 

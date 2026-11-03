@@ -99,7 +99,7 @@ class StressDeployment:
             "dry_run": False,
             "use_absolute_ip": False,
             "skip_venv_if_present": True,
-            "head_server": {"host": "127.0.0.1", "port": _free_port()},
+            "registry_server": {"host": "127.0.0.1", "port": _free_port()},
             "policy_model": _server(
                 "responses_api_models",
                 "vllm_model",

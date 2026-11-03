@@ -51,7 +51,7 @@ load-bearing:
 network namespace — the same class of harness breakout as mounting the Docker socket.
 
 Only `policy_model` binds `0.0.0.0`, because on Linux Docker Engine a `127.0.0.1` bind is not
-visible from the bridge gateway. The resources server, agent and head server stay on loopback,
+visible from the bridge gateway. The resources server, agent and registry server stay on loopback,
 since grader credentials live in those processes.
 
 > **Exposure:** `0.0.0.0` publishes the model server on *every* host interface, not just the

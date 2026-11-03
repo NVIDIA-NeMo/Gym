@@ -500,7 +500,7 @@ class OSWorldSessionManager:
             return
 
         def fetch() -> list[dict[str, Any]]:
-            head = ServerClient.load_head_server_config()
+            head = ServerClient.load_registry_server_config()
             headers = {}
             token = self.config.registration_token()
             if token:

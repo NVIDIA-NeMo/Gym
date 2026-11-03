@@ -180,8 +180,8 @@ python3 -c \
   --model-url "http://127.0.0.1:${VLLM_PORT}/v1" \
   --model-api-key "$MODEL_API_KEY" \
   --model "$MODEL" \
-  "++head_server.host=127.0.0.1" \
-  "++head_server.port=$HEAD_PORT" \
+  "++registry_server.host=127.0.0.1" \
+  "++registry_server.port=$HEAD_PORT" \
   "+nemo_gym_log_dir=$RESULTS_DIR/component-logs" \
   > "$RESULTS_DIR/gym.log" 2>&1 &
 GYM_PID=$!

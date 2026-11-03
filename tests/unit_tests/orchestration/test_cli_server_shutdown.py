@@ -22,7 +22,7 @@ from nemo_gym.orchestration.server_venv import run_command
 def _runner(processes, grace=0.1):
     runner = server_supervisor.RunHelper()
     runner._processes = processes
-    runner._head_server = None
+    runner._registry_server = None
     runner._server_shutdown_timeout_seconds = grace
     return runner
 

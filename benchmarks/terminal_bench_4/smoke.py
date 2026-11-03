@@ -133,7 +133,7 @@ async def main(args):
         values.update({"name": name, "host": host, "port": ports[name]})
     config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
     global_config._GLOBAL_CONFIG_DICT = config
-    client = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=config)
+    client = ServerClient(registry_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=config)
     http = http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     resource = TerminalBench4ResourcesServer(
         config=TerminalBench4Config.model_validate(OmegaConf.to_container(resource_config, resolve=True)),

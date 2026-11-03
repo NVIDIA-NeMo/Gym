@@ -52,7 +52,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, extra: dict) -> tuple[ServerClient,
         "env": {"resources_servers": {"example": {"host": "resources", "port": 2}}},
     } | extra
     client = ServerClient(
-        head_server_config=BaseServerConfig(host="head", port=0),
+        registry_server_config=BaseServerConfig(host="head", port=0),
         global_config_dict=DictConfig(config),
     )
     request_mock = AsyncMock(return_value="response")
@@ -97,7 +97,7 @@ def test_a_bad_checkpoint_block_fails_when_the_client_is_built_not_on_every_requ
 
     with pytest.raises(ValueError, match="control_auth_token is required"):
         ServerClient(
-            head_server_config=BaseServerConfig(host="head", port=1),
+            registry_server_config=BaseServerConfig(host="head", port=1),
             global_config_dict=OmegaConf.create({"checkpoint": {"enabled": True}}),
         )
 

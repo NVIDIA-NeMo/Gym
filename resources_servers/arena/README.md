@@ -50,7 +50,7 @@ gym eval run \
     ++reuse_existing_data_preparation=true
 ```
 
-Replace the output path as needed. Use `--limit 3` for a smoke test. For concurrent runs, add a distinct `++head_server.port=<port>` to each command.
+Replace the output path as needed. Use `--limit 3` for a smoke test. For concurrent runs, add a distinct `++registry_server.port=<port>` to each command.
 
 ## Validation data
 

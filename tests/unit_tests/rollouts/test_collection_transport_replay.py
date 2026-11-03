@@ -76,7 +76,7 @@ async def test_persisted_collection_reruns_a_possibly_delivered_episode_that_sav
             }
         )
         client = ServerClient(
-            head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config
+            registry_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config
         )
         assert not client.checkpoint_enabled()  # Default configuration; no checkpoint override.
         monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
@@ -151,7 +151,7 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
     config_dict = OmegaConf.create(
         {"environment": {"environment_servers": {"single_agent_turn": {"host": "127.0.0.1", "port": port}}}}
     )
-    client = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config_dict)
+    client = ServerClient(registry_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config_dict)
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
     source = tmp_path / "input.jsonl"
     source.write_text(_request().task.model_dump_json() + "\n")

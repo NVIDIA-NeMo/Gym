@@ -52,7 +52,7 @@ from nemo_gym.server_runtime.base_server import (
     UvicornProxyHeadersConfig,
 )
 from nemo_gym.server_runtime.ray_support import DictConfig, initialize_ray
-from nemo_gym.server_runtime.registry_server import HeadServer
+from nemo_gym.server_runtime.registry_server import RegistryServer
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.server_runtime.request_handling.errors import _log_validation_exception, _validation_exception_handler
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
@@ -84,16 +84,16 @@ class TestServerUtils:
         assert 0 == actual_config.port
         assert "my entrypoint" == actual_config.entrypoint
 
-    def test_HeadServer_setup_webserver_sanity(self) -> None:
-        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
-        head_server.setup_webserver()
+    def test_RegistryServer_setup_webserver_sanity(self) -> None:
+        registry_server = RegistryServer(config=BaseServerConfig(host="", port=0))
+        registry_server.setup_webserver()
 
-    def test_HeadServer_health_reports_readiness_without_changing_liveness(self) -> None:
+    def test_RegistryServer_health_reports_readiness_without_changing_liveness(self) -> None:
         from fastapi.testclient import TestClient
 
-        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        registry_server = RegistryServer(config=BaseServerConfig(host="", port=0))
 
-        with TestClient(head_server.setup_webserver()) as client:
+        with TestClient(registry_server.setup_webserver()) as client:
             for path in ("/", "/livez"):
                 response = client.get(path)
                 assert response.status_code == 200
@@ -104,14 +104,14 @@ class TestServerUtils:
                 assert response.status_code == 503
                 assert response.json() == {"status": "starting"}
 
-            head_server.mark_ready()
+            registry_server.mark_ready()
 
             for path in ("/health", "/healthz", "/readyz"):
                 response = client.get(path)
                 assert response.status_code == 200
                 assert response.json() == {"status": "ok"}
 
-    async def test_HeadServer_global_config_dict_yaml(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_RegistryServer_global_config_dict_yaml(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig({"a": 2})
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
@@ -119,12 +119,12 @@ class TestServerUtils:
             nemo_gym.server_runtime.registry_server, "get_global_config_dict", get_global_config_dict_mock
         )
 
-        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
-        resp = await head_server.global_config_dict_yaml()
+        registry_server = RegistryServer(config=BaseServerConfig(host="", port=0))
+        resp = await registry_server.global_config_dict_yaml()
 
         assert "a: 2\n" == resp
 
-    async def test_HeadServer_global_config_dict_yaml_caches(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_RegistryServer_global_config_dict_yaml_caches(self, monkeypatch: MonkeyPatch) -> None:
         """Serialize the global config once until the cache is cleared."""
         global_config_dict = DictConfig({"a": 2})
         get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
@@ -135,15 +135,15 @@ class TestServerUtils:
         to_yaml_mock = MagicMock(wraps=OmegaConf.to_yaml)
         monkeypatch.setattr(nemo_gym.server_runtime.registry_server.OmegaConf, "to_yaml", to_yaml_mock)
 
-        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
-        first = await head_server.global_config_dict_yaml()
-        second = await head_server.global_config_dict_yaml()
+        registry_server = RegistryServer(config=BaseServerConfig(host="", port=0))
+        first = await registry_server.global_config_dict_yaml()
+        second = await registry_server.global_config_dict_yaml()
 
         assert first is second
         assert to_yaml_mock.call_count == 1
 
-        head_server.invalidate_global_config_dict_yaml_cache()
-        third = await head_server.global_config_dict_yaml()
+        registry_server.invalidate_global_config_dict_yaml_cache()
+        third = await registry_server.global_config_dict_yaml()
         assert third == first
         assert to_yaml_mock.call_count == 2
 
@@ -303,7 +303,7 @@ class TestServerUtils:
         server = TestSimpleServer(
             config=BaseRunServerInstanceConfig(name="my_server", host="", port=0, entrypoint=""),
             server_client=ServerClient(
-                head_server_config=BaseServerConfig(host="", port=0),
+                registry_server_config=BaseServerConfig(host="", port=0),
                 global_config_dict=DictConfig({}),
             ),
         )
@@ -1220,10 +1220,10 @@ class TestRunWebserverProxyKwargs:
             nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=global_config)
         )
         server_client = ServerClient(
-            head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
+            registry_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
         )
         server_client_mock = MagicMock(return_value=server_client)
-        server_client_mock.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
+        server_client_mock.load_registry_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
         monkeypatch.setattr(nemo_gym.server_runtime.base_server, "ServerClient", server_client_mock)
         monkeypatch.setattr(
             nemo_gym.server_runtime.base_server,
@@ -1472,14 +1472,14 @@ class TestRunWebserverProxyKwargs:
         assert self.uvicorn_kwargs == {}
 
 
-class TestHeadServerProxyKwargs:
-    """The independently launched head server must use the same proxy-header policy."""
+class TestRegistryServerProxyKwargs:
+    """The independently launched registry server must use the same proxy-header policy."""
 
     @staticmethod
     def _capture_uvicorn_kwargs(monkeypatch: MonkeyPatch, config_dict: dict) -> dict:
         monkeypatch.setattr(
             ServerClient,
-            "load_head_server_config",
+            "load_registry_server_config",
             MagicMock(return_value=BaseServerConfig(host="127.0.0.1", port=11000)),
         )
         monkeypatch.setattr(
@@ -1500,7 +1500,7 @@ class TestHeadServerProxyKwargs:
         )
         monkeypatch.setattr(nemo_gym.server_runtime.registry_server, "Thread", MagicMock(return_value=MagicMock()))
 
-        HeadServer.run_webserver()
+        RegistryServer.run_webserver()
         return captured
 
     def test_proxy_headers_are_disabled_by_default(self, monkeypatch: MonkeyPatch) -> None:

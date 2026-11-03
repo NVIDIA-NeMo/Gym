@@ -434,7 +434,7 @@ def make_client(implementation: str = "test") -> FakeAgentClient:
         {"agent": {"responses_api_agents": {implementation: {"host": "agent", "port": 8001, "entrypoint": "app.py"}}}}
     )
     return FakeAgentClient(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=global_config,
         calls=[],
         turn_hooks=[],

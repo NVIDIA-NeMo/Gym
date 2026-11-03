@@ -571,7 +571,7 @@ repr(e): {repr(e)}"""
             startup.mark("init_ray")
 
         server_client = ServerClient(
-            head_server_config=ServerClient.load_head_server_config(),
+            registry_server_config=ServerClient.load_registry_server_config(),
             global_config_dict=global_config_dict,
         )
         server = cls(config=server_config, server_client=server_client)

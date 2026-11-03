@@ -140,7 +140,7 @@ async def _episode(monkeypatch, statuses: list[int], *, via_http: bool = False):
                 "agent": {"responses_api_agents": {"test": {"host": "127.0.0.1", "port": servers[0][2]}}},
             }
             client = ServerClient(
-                head_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+                registry_server_config=BaseServerConfig(host="127.0.0.1", port=1),
                 global_config_dict=OmegaConf.create(config),
             )
             environment = SingleAgentTurnEnvironmentServer(

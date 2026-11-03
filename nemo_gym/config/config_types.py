@@ -162,8 +162,9 @@ class MalformedConfigPathsError(ConfigError, ValueError):
     """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
 
 
-class HeadServerConfigMalformedError(ConfigError, ValueError):
-    """`head_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
+class RegistryServerConfigMalformedError(ConfigError, ValueError):
+    """`registry_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a
+    `++registry_server.port=` override)."""
 
 
 class NoServerInstancesError(ConfigError, ValueError):
@@ -227,9 +228,10 @@ class UnsupportedAgentOverrideError(ConfigError, ValueError):
     """A command line override configures an agent that no instance ends up running."""
 
 
-class HeadServerUnreachableError(ConfigError, ValueError):
-    """Nothing answered at the configured head server address, so the merged config could not be fetched
-    from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
+class RegistryServerUnreachableError(ConfigError, ValueError):
+    """Nothing answered at the configured registry server address, so the merged config could not be fetched
+    from it (the registry server is not running, or `registry_server.host` / `registry_server.port` point
+    elsewhere)."""
 
 
 class PromptConfigMalformedError(ConfigError, ValueError):
@@ -1046,3 +1048,10 @@ TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
 # A burst of new connections at Gym's concurrency then waits in the queue rather than on TCP retransmission backoff.
 # The kernel caps it at net.core.somaxconn.
 DEFAULT_UVICORN_BACKLOG = 16384
+
+
+# Serves the names this module had before the head server was renamed the registry server, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

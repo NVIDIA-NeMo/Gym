@@ -1057,7 +1057,7 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
     f.server.register_protocol_routes(routes)
     verify_route = next(r.endpoint for r in routes.routes if getattr(r, "path", None) == "/verify")
     client = ServerClient(
-        head_server_config=BaseServerConfig(host="localhost", port=3),
+        registry_server_config=BaseServerConfig(host="localhost", port=3),
         global_config_dict=OmegaConf.create({"observability_enabled": True, "tb4": {"resources_servers": {}}}),
     )
     monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: "http://tb4")
@@ -1286,7 +1286,7 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     f.server.register_protocol_routes(routes)
     verify_route = next(r.endpoint for r in routes.routes if getattr(r, "path", None) == "/verify")
     client = ServerClient(
-        head_server_config=BaseServerConfig(host="localhost", port=3),
+        registry_server_config=BaseServerConfig(host="localhost", port=3),
         global_config_dict=OmegaConf.create({"observability_enabled": True, "tb4": {"resources_servers": {}}}),
     )
     monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: "http://tb4")

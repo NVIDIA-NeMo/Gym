@@ -694,7 +694,7 @@ def _lifecycle_server() -> tuple[UserSimEnvironmentServer, _Client]:
         }
     )
     client = _Client(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=global_config,
         calls=[],
         responses=[],

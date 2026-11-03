@@ -116,6 +116,18 @@ server_id:                    # Your unique name for this server
       # ... additional fields vary by server type
 ```
 
+### Registry Server Address (`registry_server`)
+
+`gym env start` runs a registry server, which every Gym server and client asks for the run's merged configuration and server addresses. Set its address with the top-level `registry_server` block; each key is optional:
+
+```yaml
+registry_server:
+  host: 127.0.0.1   # Default: `default_host`, else 127.0.0.1
+  port: 11000       # Default: 11000
+```
+
+Before nemo_gym 0.8.0 this block was named `head_server`. A config that still sets `head_server` behaves the same and logs a deprecation warning, until nemo_gym 0.10.0 removes the old name. Setting both `head_server` and `registry_server` to different values is an error.
+
 ### HTTP Connection Pool
 
 Gym uses one shared aiohttp connection pool per process. Each top-level limit is a budget for
@@ -180,7 +192,7 @@ without collecting these metrics.
 ### Listen Backlog
 
 `uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them.
-It applies to the head server, every agent, model, environment, and resources server, and the private sockets that
+It applies to the registry server, every agent, model, environment, and resources server, and the private sockets that
 the workers of a multi-worker server use to forward requests to each other. The default is 16384:
 
 ```yaml
@@ -209,7 +221,7 @@ uvicorn_forwarded_allow_ips:
   - 10.20.0.0/24
 ```
 
-Both settings apply to the Gym head server and the Agent, Model, and Resources servers. Enabling proxy headers without
+Both settings apply to the Gym registry server and the Agent, Model, and Resources servers. Enabling proxy headers without
 a non-empty allowlist fails at startup. Wildcards and all-address CIDRs such as `0.0.0.0/0` and `::/0` are rejected.
 
 <Warning>
@@ -345,8 +357,8 @@ wandb_api_key: your-wandb-key
 - **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
 - **Effect:** When `default_host` is unset, resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost. If lookup fails or returns a loopback or unspecified address, configuration fails with guidance to set a reachable address.
 - **Explicit address:** `default_host` takes precedence over automatic lookup, whether `use_absolute_ip` is `true` or `false`. For example, `+default_host=192.0.2.20` selects that address without consulting hostname lookup. A server's own `host` setting still takes precedence over this shared default.
-- **Scoping:** `absolute_ip_server_types` (a list of server types: `responses_api_models`, `responses_api_agents`, `resources_servers`, `environment_servers`) limits the resolved address to those types. Every other server, and the head server whose `/global_config_dict_yaml` endpoint returns the merged configuration, keeps `127.0.0.1`; a server's own `host` still wins. Unset or `null` (the default) moves every server, the head included, as before. The list only scopes the resolved address: an explicit `default_host` applies to every server regardless.
-- **Harbor runs:** `gym eval run <target> --agent <agent>` sets `use_absolute_ip: true` and `absolute_ip_server_types: [responses_api_models]` by default when the harness declares that it calls the model from inside the sandbox (`calls_model_from_sandbox = True` on its agent class, read from the agent's entrypoint source) or its configuration sets `sandbox_model_base_url`: the model server advertises the node's address, the head server, the agent server and the environment server stay on loopback. An explicit config file or command-line setting can override either default (`++absolute_ip_server_types=null` exposes every server). Oracle validation and host-side harnesses do not enable it.
+- **Scoping:** `absolute_ip_server_types` (a list of server types: `responses_api_models`, `responses_api_agents`, `resources_servers`, `environment_servers`) limits the resolved address to those types. Every other server, and the registry server whose `/global_config_dict_yaml` endpoint returns the merged configuration, keeps `127.0.0.1`; a server's own `host` still wins. Unset or `null` (the default) moves every server, the registry server included, as before. The list only scopes the resolved address: an explicit `default_host` applies to every server regardless.
+- **Harbor runs:** `gym eval run <target> --agent <agent>` sets `use_absolute_ip: true` and `absolute_ip_server_types: [responses_api_models]` by default when the harness declares that it calls the model from inside the sandbox (`calls_model_from_sandbox = True` on its agent class, read from the agent's entrypoint source) or its configuration sets `sandbox_model_base_url`: the model server advertises the node's address, the registry server, the agent server and the environment server stay on loopback. An explicit config file or command-line setting can override either default (`++absolute_ip_server_types=null` exposes every server). Oracle validation and host-side harnesses do not enable it.
 
 **`sidecar`** — Optional block that starts a local HTTP/2 PING proxy so requests to NVCF endpoints survive the 340 second idle limit.
 

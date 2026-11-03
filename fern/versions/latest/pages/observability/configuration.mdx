@@ -59,7 +59,7 @@ The supervisor samples host used, available, and total memory plus every server 
 
 ### Event Loop and Process Metrics
 
-Whenever metrics are exported, every server process, the head server inside the process that runs `gym env start` or `gym eval run`, and the rollout driver report how busy their event loop is, how long garbage collection pauses them, their CPU, memory, threads, and open file descriptors, and how many requests they are handling. Use them to find a server whose event loop is the bottleneck. See [Event Loop and Process Metrics](/main/observability/metrics#event-loop-and-process-metrics) for each metric.
+Whenever metrics are exported, every server process, the registry server inside the process that runs `gym env start` or `gym eval run`, and the rollout driver report how busy their event loop is, how long garbage collection pauses them, their CPU, memory, threads, and open file descriptors, and how many requests they are handling. Use them to find a server whose event loop is the bottleneck. See [Event Loop and Process Metrics](/main/observability/metrics#event-loop-and-process-metrics) for each metric.
 
 Their cost stays off the request path: a request updates a few integers, and the exporter's thread reads the totals when it exports. The event-loop task count is the exception, because counting walks every task on the loop, which takes about a millisecond per sample at 16,000 tasks. It is off by default:
 

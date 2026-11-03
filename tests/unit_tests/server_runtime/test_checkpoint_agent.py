@@ -1366,7 +1366,7 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
         }
     )
     episode_client = _EpisodeClient(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=global_config,
         resources=resources,
         agent=agent,
@@ -1394,7 +1394,7 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
         ),
     )
     control_client = InProcessClient(
-        head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config, apps=apps
+        registry_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config, apps=apps
     )
 
     async with resources:

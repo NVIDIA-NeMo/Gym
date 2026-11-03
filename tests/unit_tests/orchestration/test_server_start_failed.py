@@ -11,7 +11,7 @@ import pytest
 from omegaconf import OmegaConf
 
 import nemo_gym.orchestration.server_supervisor as env_module
-from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME, NEMO_GYM_LOG_DIR_KEY_NAME, UV_CACHE_DIR_KEY_NAME
+from nemo_gym.config.global_config import NEMO_GYM_LOG_DIR_KEY_NAME, REGISTRY_SERVER_KEY_NAME, UV_CACHE_DIR_KEY_NAME
 from nemo_gym.core.failure_kinds import FAILURE_KINDS, SERVER_START_FAILED
 from nemo_gym.orchestration.server_supervisor import RunHelper, ServerStartFailedError, _bind_errno
 
@@ -37,7 +37,7 @@ def _exited_server(stderr: str) -> MagicMock:
 def _polling_runner(*, ready: bool) -> RunHelper:
     runner = RunHelper()
     runner._servers_ready = ready
-    runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
+    runner._registry_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
     runner._h2_ping_sidecar = None
     runner._processes = {"judge_model": _exited_server(BIND_ERROR)}
     return runner
@@ -79,7 +79,7 @@ def test_a_real_server_that_cannot_bind_an_occupied_port_reports_eaddrinuse(tmp_
         port = taken.getsockname()[1]
         runner = RunHelper()
         runner._servers_ready = False
-        runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
+        runner._registry_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
         runner._h2_ping_sidecar = None
         runner._processes = {}
         runner._output_tails = {}
@@ -108,7 +108,7 @@ def taken_port(monkeypatch: pytest.MonkeyPatch) -> dict:
     config = OmegaConf.create(
         {
             "judge_model": {"responses_api_models": {"judge": {"port": 21001}}},
-            HEAD_SERVER_KEY_NAME: {"port": 11000},
+            REGISTRY_SERVER_KEY_NAME: {"port": 11000},
             "port_range_low": 20000,
             "port_range_high": 20100,
         }
@@ -147,7 +147,7 @@ def test_a_port_taken_at_startup_is_retried_once_on_a_fresh_port(taken_port: dic
 
     assert ports == [21001, 20007]
     runner.shutdown.assert_called_once()
-    # The fresh port avoids every port the servers and the head server already use.
+    # The fresh port avoids every port the servers and the registry server already use.
     assert set(taken_port["picked"][0]["disallowed_ports"]) == {21001, 11000}
 
 
@@ -186,15 +186,15 @@ def test_a_taken_port_is_not_retried_after_the_sidecar_rewrote_the_model_urls(ta
     assert ports == [21001]
 
 
-def test_a_head_server_that_died_ends_the_wait_with_a_typed_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_registry_server_that_died_ends_the_wait_with_a_typed_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = RunHelper()
     runner._server_client = MagicMock(poll_for_status=MagicMock(return_value="connection_error"))
-    runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=False))
+    runner._registry_server_thread = MagicMock(is_alive=MagicMock(return_value=False))
     monkeypatch.setattr(
-        env_module, "sleep", lambda seconds: pytest.fail("the wait went on after the head server died")
+        env_module, "sleep", lambda seconds: pytest.fail("the wait went on after the registry server died")
     )
 
     with pytest.raises(ServerStartFailedError) as raised:
-        runner._wait_for_head_server()
+        runner._wait_for_registry_server()
 
-    assert (raised.value.server_name, raised.value.errno) == (HEAD_SERVER_KEY_NAME, None)
+    assert (raised.value.server_name, raised.value.errno) == (REGISTRY_SERVER_KEY_NAME, None)

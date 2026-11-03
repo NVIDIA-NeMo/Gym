@@ -1352,7 +1352,7 @@ class TestResultsRowsCarryTheDatasetDigest:
         }
 
         class Helper(RolloutCollectionHelper):
-            def setup_server_client(self, head_server_config=None):
+            def setup_server_client(self, registry_server_config=None):
                 return mock_client
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):

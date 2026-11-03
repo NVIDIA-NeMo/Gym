@@ -174,7 +174,7 @@ class Deployment:
             apps[kind] = app
             global_config[kind] = {server_types[kind]: {kind: {}}}
         self.client = InProcessClient(
-            head_server_config=BaseServerConfig(host="head", port=1),
+            registry_server_config=BaseServerConfig(host="head", port=1),
             global_config_dict=OmegaConf.create(global_config),
             apps=apps,
         )

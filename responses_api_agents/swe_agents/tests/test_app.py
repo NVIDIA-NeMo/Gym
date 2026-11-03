@@ -1339,7 +1339,7 @@ class TestOpenCodeHarnessProcessor:
 
     @pytest.fixture
     def _stub_model_server_lookup(self, monkeypatch):
-        """Stub get_first_server_config_dict so we don't need a live gym head server."""
+        """Stub get_first_server_config_dict so we don't need a live gym registry server."""
 
         def _fake(_global, name):
             assert name == "test_model"

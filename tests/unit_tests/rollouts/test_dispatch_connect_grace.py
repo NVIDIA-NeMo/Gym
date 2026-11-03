@@ -45,7 +45,9 @@ def _config(tmp_path, monkeypatch, port: int, **overrides) -> RolloutCollectionC
     global_config = OmegaConf.create(
         {"environment": {"environment_servers": {"single_agent_turn": {"host": "127.0.0.1", "port": port}}}}
     )
-    client = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config)
+    client = ServerClient(
+        registry_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config
+    )
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
     source = tmp_path / "input.jsonl"
     source.write_text(_request().task.model_dump_json() + "\n")
