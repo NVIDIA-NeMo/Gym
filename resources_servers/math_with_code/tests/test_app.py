@@ -12,13 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import multiprocessing
+import threading
 import time
 from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
 from app import (
+    ExecutePythonRequest,
     PythonExecutorResourcesServer,
     PythonExecutorResourcesServerConfig,
     _answers_match,
@@ -29,9 +32,13 @@ from app import (
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    ResourcesSessionLostError,
+)
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
@@ -197,6 +204,41 @@ class _UnstoppableHandle:
 
 
 class TestResourcesSessions:
+    async def test_tool_waiting_for_close_does_not_create_a_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        stopped, finish_close = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        real_cleanup = PythonExecutorResourcesServer._cleanup_session
+
+        def delayed_cleanup(server, session_id):
+            real_cleanup(server, session_id)
+            loop.call_soon_threadsafe(stopped.set)
+            assert finish_close.wait(timeout=5)
+
+        worker_factory = MagicMock()
+        worker_factory.return_value.exec.return_value = ("", "", "1")
+        monkeypatch.setattr(PythonExecutorResourcesServer, "_cleanup_session", delayed_cleanup)
+        monkeypatch.setattr("app._SessionHandle", worker_factory)
+        close = asyncio.create_task(
+            server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+        )
+        await asyncio.wait_for(stopped.wait(), timeout=5)
+        call = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1")))
+        try:
+            await asyncio.sleep(0)
+            worker_factory.assert_not_called()
+            finish_close.set()
+            await close
+            with pytest.raises(ResourcesSessionLostError):
+                await call
+            assert server._sessions == {}
+        finally:
+            finish_close.set()
+            await asyncio.gather(close, call, return_exceptions=True)
+
     def test_session_contract(self) -> None:
         server, app = _session_server()
 

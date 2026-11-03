@@ -212,14 +212,19 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
 
     async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
         sid = request.session[SESSION_ID_KEY]
-        if self._fence.closed_episode(sid) is not None:
-            raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
         loop = asyncio.get_running_loop()
+        # Close removes the worker in a thread before marking the fence. Serialize publication with that whole
+        # operation, so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
+        async with self._fence.locked(sid):
+            if self._fence.closed_episode(sid) is not None:
+                raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
+            try:
+                if sid not in self._sessions:
+                    self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
+                handle = self._sessions[sid]
+            except Exception as e:
+                return ExecutePythonResponse(success=False, stdout="", stderr="", error_message=str(e))
         try:
-            if sid not in self._sessions:
-                self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
-            handle = self._sessions[sid]
-
             stdout, stderr, result = await loop.run_in_executor(
                 None,
                 handle.exec,
