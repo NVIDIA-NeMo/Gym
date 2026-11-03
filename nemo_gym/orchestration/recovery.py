@@ -2463,13 +2463,17 @@ def _operator_continuation(
     *,
     configured_retries: int | None,
     max_walltime_s: float | None,
+    extend_retries: int = 0,
 ) -> RecoveryDecision:
     """Decide again under the operator's explicit budget, or keep the stop when continuing could be unsafe.
 
     The caller has checked that the scheduler answered and shows no live or pending job of the run. It fills only
     unreadable counters: an unknown spent-retry count so that ``operator.retries`` retries remain under the cap, an
     unknown used walltime with zero, so the walltime cap is fresh for this continuation, and an unknown extension with
-    zero. A readable counter keeps its value. Saved rows are classified as for any decision and never changed.
+    zero. A readable counter keeps its value. When the spent-retry count is readable, an explicit ``extend_retries``
+    (``--extend-retries``) is what it is on any recovery: that many more infra retries, recorded as the run's retry
+    extension in the continuation's writes and journal. Saved rows are classified as for any decision and never
+    changed.
     """
 
     def stop(why: str) -> RecoveryDecision:
@@ -2490,8 +2494,17 @@ def _operator_continuation(
         extension = 0
         unknown.append("infra_retry_extension")
         writes[INFRA_RETRY_EXTENSION_FILE] = {"previous": "unknown", "value": 0}
+    readable_retries = states.get("infra_retries") in ("absent", "ok")
+    extended = extend_retries if readable_retries else 0
+    if extended:
+        # The spent count is known, so N cannot fill it: it raises the cap, as --extend-retries does elsewhere.
+        writes[INFRA_RETRY_EXTENSION_FILE] = {
+            "previous": "unknown" if "infra_retry_extension" in unknown else extension,
+            "value": extension + extended,
+        }
+        extension += extended
     cap = configured_retries + extension
-    if states.get("infra_retries") in ("absent", "ok"):
+    if readable_retries:
         used = int(collected.infra_retries_used or 0)
     else:
         used = max(cap - operator.retries, 0)
@@ -2516,8 +2529,10 @@ def _operator_continuation(
     remaining = max(cap - used, 0)
     summary = (
         f"{OPERATOR_CONTINUATION} by {operator.user} ({operator.reason}): {remaining} infra "
-        f"retr{'y' if remaining == 1 else 'ies'} remain and the walltime cap is {operator.max_walltime}; it fills "
-        f"{', '.join(sorted(writes)) or 'no counter'} and keeps every readable counter"
+        f"retr{'y' if remaining == 1 else 'ies'} remain"
+        + (f" ({extended} more recorded as the run's retry extension)" if extended else "")
+        + f" and the walltime cap is {operator.max_walltime}; it fills "
+        f"{', '.join(sorted(writes)) or 'no counter'} and keeps every other readable counter"
     )
     if decision.action != RecoveryAction.RESUBMIT:
         return decision.model_copy(update={"reason": f"{decision.reason}; {summary}, but nothing is resubmitted"})
@@ -2529,6 +2544,7 @@ def _operator_continuation(
             "infra_retries_remaining": remaining,
             "infra_retries_requested": operator.retries,
             "max_walltime": operator.max_walltime,
+            **({"infra_retry_extension_added": extended} if extended else {}),
         },
         "unknown": unknown,
         "accounting_unknown_reason": collected.accounting_unknown_reason,
@@ -2783,6 +2799,7 @@ def _decide_from_collected(
                 operator_budget,
                 configured_retries=configured,
                 max_walltime_s=max_walltime_s,
+                extend_retries=extend_retries,
             )
     # The cap note explains an infra-cap decision (a resubmit, or the stored budget is used); a stop for the
     # identities' own states (exhausted, terminal, masked) does not depend on it.

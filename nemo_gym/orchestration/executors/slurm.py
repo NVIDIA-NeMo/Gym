@@ -2371,7 +2371,8 @@ class SlurmExecutor(BaseExecutor):
         """The locked steps of an operator continuation: fill the counters it names, replace the unknown marker and
         journal the continuation with its epoch before sbatch, so a queued continuation always has its epoch.
 
-        Each file is kept aside first and put back unless the job is queued; a readable counter is never named.
+        Each file is kept aside first and put back unless the job is queued. A readable counter is never named, except
+        the retry extension an explicit ``--extend-retries`` raises when the spent count is readable.
         """
         writes = continuation.get("writes") or {}
         if not set(writes) <= {INFRA_RETRIES_FILE, ACCUMULATED_WALLTIME_FILE, INFRA_RETRY_EXTENSION_FILE} or any(
