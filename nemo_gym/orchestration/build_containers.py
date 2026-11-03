@@ -306,6 +306,7 @@ class BuildContainerHelper(BaseModel):
 
     async def _run(self) -> None:
         self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.config.log_file.unlink(missing_ok=True)
         self.config.output_container_fpath.parent.mkdir(parents=True, exist_ok=True)
 
         command_output = await _run_command(
