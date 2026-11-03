@@ -94,7 +94,6 @@ from nemo_gym.rollouts import (
     NG_ENVIRONMENT_SERVER_KEY,
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
-    NG_TRAJECTORY_KEY,
     DispatchLatencyTracker,
     RolloutCollectionHelper,
     clear_model_call_captures_for_rollouts,
@@ -117,6 +116,7 @@ from nemo_gym.rollouts.rollout_collection import (
     _record_rollout_outcome,
 )
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
+from nemo_gym.trajectory import NG_TRAJECTORY_KEY
 from nemo_gym.utils import (
     aggregation_sources_path_for,
     failures_path_for,
