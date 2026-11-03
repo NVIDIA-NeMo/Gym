@@ -31,6 +31,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     DRIVER_FAILURE_NAME,
     EXPORT_RECEIPT_MISSING,
     EXPORT_RECEIPT_MISSING_REASON,
+    GUARDED_DRIVER_FAILURE_KINDS,
     INCOMPLETE_MARKER_NAME,
     NO_ELIGIBLE_RETRY,
     NO_ELIGIBLE_RETRY_EXIT,
@@ -1589,10 +1590,7 @@ def test_a_segment_with_nothing_eligible_for_retry_ends_its_own_chain(tmp_path, 
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-@pytest.mark.parametrize(
-    "kind",
-    ["provider_credentials_rejected", "collection_resume_refused", "server_spinup_timeout", "driver_install_failed"],
-)
+@pytest.mark.parametrize("kind", GUARDED_DRIVER_FAILURE_KINDS)
 def test_a_driver_that_exits_76_with_a_typed_failure_leaves_the_stop_to_its_follow_up(tmp_path, monkeypatch, kind):
     # The follow-up's prologue turns the kind into its own stop and remedy, so the segment keeps its queued jobs.
     _segment_finishing_the_run(tmp_path, monkeypatch)
@@ -1611,6 +1609,14 @@ def test_a_driver_that_exits_76_with_a_typed_failure_leaves_the_stop_to_its_foll
     assert NO_ELIGIBLE_RETRY_REASON not in result.stdout
     assert _scancel_calls(tmp_path) == []
     assert _chain_end_entries(tmp_path) == []
+
+
+def test_every_kind_whose_follow_up_is_kept_on_exit_76_has_a_stop_in_the_next_prologue():
+    # The epilogue keeps the follow-up for these kinds because its prologue stops on each; a kind without a case
+    # there would start the run again instead.
+    prologue = render_resume_prologue(ResumeConfig())
+    for kind in GUARDED_DRIVER_FAILURE_KINDS:
+        assert f"\n        {kind})\n" in prologue, kind
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
