@@ -1,4 +1,4 @@
 -e nemo-gym[dev] @ ../../
-liteparse
+liteparse==2.5.0
 datasets
 huggingface_hub
