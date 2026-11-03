@@ -497,6 +497,18 @@ class TestLiteLLMModelServer:
         assert body["object"] == "response"
         assert body["output"][0]["content"][0]["text"] == "Hello!"
 
+    async def test_systemone_is_not_forwarded_to_the_proxy(self) -> None:
+        """A LiteLLM proxy has no decision route, so the server answers 501 instead of passing the call through."""
+        server = _make_server()
+        app = server.setup_webserver()
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_systemone = AsyncMock()
+
+        with TestClient(app) as client:
+            resp = client.post("/v1/systemone", json={"state": "s", "questions": {"q": {"type": "noul"}}})
+        assert resp.status_code == 501
+        server._client.create_systemone.assert_not_awaited()
+
     async def test_responses_chat_completion_format(self) -> None:
         """Server normalizes chat.completion format from LiteLLM (e.g. Opus via Azure)."""
         server = _make_server()
