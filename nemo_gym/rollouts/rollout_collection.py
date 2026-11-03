@@ -141,6 +141,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     IncompleteEvaluationError,
     RunManifest,
     _digest,
+    agent_phase_oom,
     atomic_write_json,
     config_identity_path_for,
     has_only_intentional_gaps,
@@ -5277,6 +5278,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)
+                    if isinstance(result, dict) and result.get(NG_FAILURE_CLASS_KEY) is not None:
+                        # A failed rollout whose agent's own sandbox was killed for memory during the agent's
+                        # command is the model's result: a final zero, never retried.
+                        reply_report = FailureHeader.decode(getattr(res, "headers", None))
+                        if reply_report is not None and agent_phase_oom(reply_report.events):
+                            result = {**result, NG_TERMINAL_KEY: True, NG_FAILURE_COUNTS_AS_ZERO_KEY: True}
                     if (typed_outcomes or validate_results) and _materialized_taskset(row) is not None:
                         stage = "result"
                         result = _native_episode_record(row, result)
@@ -5338,6 +5345,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
                     failure = _agent_request_failure_row(e, status)
+                    failure_report = _collection_failure_report(
+                        e, failure[NG_FAILURE_CLASS_KEY], getattr(e, "headers", None) or getattr(res, "headers", None)
+                    )
+                    if agent_phase_oom(failure_report.events):
+                        # The agent's own sandbox was killed for memory during the agent's command: the model's
+                        # result, a final zero that is never retried.
+                        failure[NG_TERMINAL_KEY] = True
+                        failure[NG_FAILURE_COUNTS_AS_ZERO_KEY] = True
                     if (
                         (typed_outcomes or validate_results)
                         and isinstance(e, (InvalidRolloutResult, orjson.JSONDecodeError))
@@ -5345,7 +5360,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     ):
                         failure[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure[NG_TERMINAL_KEY] = True
-                    failure_row = failure
                     failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes or unrouted else failure
                     if (
                         isinstance(failed_outcome, RolloutFailureRecord)
@@ -5364,11 +5378,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
-                        failure_report=_collection_failure_report(
-                            e,
-                            failure_row[NG_FAILURE_CLASS_KEY],
-                            getattr(e, "headers", None) or getattr(res, "headers", None),
-                        ),
+                        failure_report=failure_report,
                         run_error=None if route_failures_to_sidecar else e,
                     )
                 finally:
