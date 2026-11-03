@@ -7,22 +7,26 @@ The database is SQLite or PostgreSQL. A SQLite database is a file that ``setup``
 PostgreSQL database is ``<db>_template`` in the server of the sandbox's image (``benchmarks/bird_interact`` builds it),
 which ``setup`` starts; the sandbox is the episode's own, so the database is too.
 
-Grading is an independent implementation of the BIRD-Interact ADK's default test case, which grades every query task.
-A submission runs as the ADK runs it, in order on one database state: the submitted SQL as written, which shows
-whether it runs; then the submitted SQL and the solution's, each with its comments, ``DISTINCT`` words and
+Grading is an independent implementation of the BIRD-Interact ADK's two graders. The default test case grades every
+query phase. A submission runs as the ADK runs it, in order on one database state: the submitted SQL as written, which
+shows whether it runs; then the submitted SQL and the solution's, each with its comments, ``DISTINCT`` words and
 ``ROUND(...)`` calls removed. Their results are compared: values normalized (floats and decimals to two places,
 decimals half-up, dates and timestamps to ``YYYY-MM-DD``, JSON values and arrays to sorted JSON), rows in order when
 ``conditions.order`` is set and as sets otherwise. An empty result on either side fails, and so does a value that
 cannot be normalized, such as an array of decimals or dates, as in the ADK.
 
+A management phase (PostgreSQL only) is graded by its own test cases: Python code from the ground truth that inspects
+the database after the submission ran (``grade_by_test_cases``).
+
 Nothing that grading or an exploratory query runs stays in the database: SQLite runs it on a scratch copy, PostgreSQL
-in a transaction that it rolls back. Only ``setup`` and a passing phase 1 write the database: as in the ADK, phase 1's
-SQL is applied once it passes, so phase 2 sees what it changed.
+in a transaction that it rolls back, or on a copy of the database that it drops. Only ``setup`` and a passing phase 1
+write the database: as in the ADK, phase 1's SQL is applied once it passes, so phase 2 sees what it changed.
 
 The Environment Server uploads this file to the episode's sandbox and runs ``python3 grading.py <command> <request>``
 (see ``main``), so it imports only the standard library, and ``psycopg2`` for PostgreSQL, which the image provides.
 """
 
+import contextlib
 import datetime
 import json
 import re
@@ -32,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -50,6 +54,9 @@ _DECIMAL_STEP = Decimal(1).scaleb(-_FLOAT_PLACES)
 MAX_RESULT_ROWS = 10_000
 # Rows returned to the agent by an exploratory query.
 MAX_PREVIEW_ROWS = 20
+# The copy of the episode's database that a management phase is graded on. The sandbox is the episode's own, so one
+# name serves; it is short, because PostgreSQL truncates a name longer than 63 bytes.
+TEST_CASE_DATABASE = "bird_interact_test_cases"
 
 
 @dataclass(frozen=True)
@@ -126,6 +133,14 @@ def normalize_sql(sql: str) -> str:
 
 def _returns_rows(sql: str) -> bool:
     return sql.strip().lower().startswith(("select", "with"))
+
+
+def _fetch_rows(cursor: Any, script: str) -> list[tuple] | None:
+    """The rows of a PostgreSQL script's last statement, as the ADK keeps them: at most ``MAX_RESULT_ROWS`` when the
+    script starts with ``SELECT`` or ``WITH``, all of them otherwise, and none when the statement returns no rows."""
+    if _returns_rows(script):
+        return cursor.fetchmany(MAX_RESULT_ROWS + 1)[:MAX_RESULT_ROWS]
+    return cursor.fetchall() if cursor.description is not None else None
 
 
 def _round_nested(value: object) -> object:
@@ -252,11 +267,7 @@ class PostgresDatabase:
                 for script in scripts:
                     try:
                         cursor.execute(script)
-                        if _returns_rows(script):
-                            rows = cursor.fetchmany(MAX_RESULT_ROWS + 1)[:MAX_RESULT_ROWS]
-                        else:
-                            rows = cursor.fetchall() if cursor.description is not None else None
-                        results.append(QueryResult(rows=rows))
+                        results.append(QueryResult(rows=_fetch_rows(cursor, script)))
                     except psycopg2.errors.QueryCanceled:
                         message = f"Query timed out after {timeout_seconds} seconds"
                         results.append(QueryResult(rows=None, error=message, timed_out=True))
@@ -271,6 +282,159 @@ class PostgresDatabase:
                 connection.rollback()
             connection.close()
         return results
+
+    @contextlib.contextmanager
+    def copy(self, name: str) -> Iterator["PostgresDatabase"]:
+        """A copy of this database, named ``name``, that the caller may change. It is dropped on exit."""
+        import psycopg2
+        from psycopg2 import sql
+
+        drop = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
+        create = sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(sql.Identifier(name), sql.Identifier(self.name))
+        connection = psycopg2.connect(dbname="postgres")
+        # CREATE DATABASE and DROP DATABASE cannot run in a transaction.
+        connection.autocommit = True
+        try:
+            with connection.cursor() as cursor:
+                # A copy that a crashed command left.
+                cursor.execute(drop)
+                cursor.execute(create)
+            try:
+                yield PostgresDatabase(name)
+            finally:
+                with connection.cursor() as cursor:
+                    cursor.execute(drop)
+        finally:
+            connection.close()
+
+
+class TestCaseHelpers:
+    """The names that the ADK gives a test case's code, run on the database that the test cases inspect.
+
+    ``execute_queries`` runs as the ADK's does: each query in its own transaction, committed, under a statement
+    timeout; it stops at the first query that fails. The comparison of ``ex_base`` is the default test case's. The
+    ``remove_*`` rewrites take and return lists of SQL. The connections that ``execute_queries`` opens, when a test
+    case passes none, close with the helpers.
+    """
+
+    # Not a pytest test class, although its name starts with "Test".
+    __test__ = False
+
+    def __init__(self, *, timeout_seconds: float) -> None:
+        self._timeout_ms = max(1, int(timeout_seconds * 1000))
+        self._connections: list[Any] = []
+
+    def connect(self, database: str) -> Any:
+        import psycopg2
+
+        connection = psycopg2.connect(dbname=database)
+        self._connections.append(connection)
+        return connection
+
+    def close(self) -> None:
+        for connection in self._connections:
+            connection.close()
+
+    def execute_queries(
+        self, queries: str | Sequence[str], db_name: str, conn: Any = None
+    ) -> tuple[list[tuple] | None, str | None, bool]:
+        """Return the rows of the last query, an error, and whether a query timed out."""
+        import psycopg2
+
+        if isinstance(queries, str):
+            queries = [queries]
+        if not queries:
+            return None, None, False
+        if conn is None:
+            conn = self.connect(db_name)
+        rows = None
+        for query in queries:
+            if not query or not query.strip():
+                continue
+            try:
+                rows = self._perform(conn, query)
+            except psycopg2.errors.QueryCanceled:
+                return None, None, True
+            except Exception as error:
+                return None, str(error), False
+        return rows, None, False
+
+    def _perform(self, connection: Any, query: str) -> list[tuple] | None:
+        cursor = connection.cursor()
+        try:
+            cursor.execute("SET statement_timeout = %s", (self._timeout_ms,))
+            cursor.execute(query)
+            connection.commit()
+            return _fetch_rows(cursor, query)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    def ex_base(
+        self,
+        pred_sqls: Sequence[str],
+        sol_sqls: Sequence[str],
+        db_name: str,
+        conn: Any,
+        conditions: dict[str, Any] | None = None,
+    ) -> int:
+        """1 when the two lists of queries return the same rows, by the default test case's comparison; else 0."""
+        if not pred_sqls or not sol_sqls:
+            return 0
+        predicted, predicted_error, predicted_timed_out = self.execute_queries(pred_sqls, db_name, conn)
+        solution, solution_error, solution_timed_out = self.execute_queries(sol_sqls, db_name, conn)
+        if predicted_error or predicted_timed_out or solution_error or solution_timed_out:
+            return 0
+        predicted, solution = _normalize_rows(predicted or []), _normalize_rows(solution or [])
+        if not predicted or not solution:
+            return 0
+        if conditions and conditions.get("order", False):
+            return int(predicted == solution)
+        return int(set(predicted) == set(solution))
+
+    def namespace(self, pred_query_result: list[tuple] | None) -> dict[str, Any]:
+        """The globals of the test cases' code. ``pred_query_result`` holds the rows the submission returned."""
+        return {
+            "execute_queries": self.execute_queries,
+            "ex_base": self.ex_base,
+            "remove_distinct": lambda sqls: [remove_distinct(sql) for sql in sqls],
+            "remove_comments": lambda sqls: [remove_comments(sql) for sql in sqls],
+            "remove_round": lambda sqls: [remove_round(sql) for sql in sqls],
+            "pred_query_result": pred_query_result,
+        }
+
+
+def passes_test_cases(
+    test_cases: Sequence[str],
+    namespace: dict[str, Any],
+    pred_sqls: list[str],
+    sol_sqls: list[str],
+    db_name: str,
+    conn: Any,
+) -> bool:
+    """Run each test case's ``test_case(pred_sqls, sol_sqls, db_name, conn)`` in order, as the ADK runs them.
+
+    A test case that raises anything, an ``AssertionError`` or another error, fails the phase, and the rest do not
+    run. As in the ADK, the code runs with ``namespace`` as its globals and its own dictionary as its locals, so its
+    functions see the helpers but not the code's other top-level names, such as an import. Code that defines no
+    ``test_case`` passes. Whatever the code prints goes to standard error, so the command's JSON result stays alone
+    on standard output.
+    """
+    with contextlib.redirect_stdout(sys.stderr):
+        for code in test_cases:
+            if not isinstance(code, str):
+                continue
+            names: dict[str, Any] = {}
+            try:
+                exec(code, namespace, names)
+                test_case = names.get("test_case")
+                if callable(test_case):
+                    test_case(pred_sqls, sol_sqls, db_name, conn)
+            except Exception:
+                return False
+    return True
 
 
 def _apply_setup(database: Database, request: dict[str, Any]) -> None:
@@ -343,6 +507,40 @@ def grade(
     return Grade(passed=passed)
 
 
+def grade_by_test_cases(
+    database: PostgresDatabase,
+    predicted_sql: str,
+    solution_sql: Sequence[str],
+    test_cases: Sequence[str],
+    *,
+    timeout_seconds: float,
+    apply_if_passed: bool = False,
+) -> Grade:
+    """Grade a management phase by its test cases, as the ADK does, on a copy of ``database``.
+
+    The submission runs first, and its writes stay, so the test cases see them; then each test case runs (see
+    ``passes_test_cases``). The copy is dropped afterwards, so ``database`` changes only when a passing submission is
+    applied, with ``apply_if_passed``.
+    """
+    with database.copy(TEST_CASE_DATABASE) as scratch:
+        helpers = TestCaseHelpers(timeout_seconds=timeout_seconds)
+        try:
+            connection = helpers.connect(scratch.name)
+            predicted = [predicted_sql]
+            rows, error, timed_out = helpers.execute_queries(predicted, scratch.name, connection)
+            if error:
+                return Grade(passed=False, execution_error=error)
+            if timed_out:
+                return Grade(passed=False, timed_out=True)
+            namespace = helpers.namespace(rows)
+            passed = passes_test_cases(test_cases, namespace, predicted, list(solution_sql), scratch.name, connection)
+        finally:
+            helpers.close()
+    if passed and apply_if_passed:
+        database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
+    return Grade(passed=passed)
+
+
 def main(argv: list[str]) -> None:
     """Run ``setup``, ``execute`` or ``grade`` with the JSON request in the file ``argv[1]`` and print a JSON result.
 
@@ -372,14 +570,26 @@ def main(argv: list[str]) -> None:
         }
     elif command == "grade":
         try:
-            outcome = grade(
-                database,
-                request["predicted_sql"],
-                request["solution_sql"],
-                ordered=request["ordered"],
-                timeout_seconds=request["timeout_seconds"],
-                apply_if_passed=request.get("apply_if_passed", False),
-            )
+            if request.get("test_cases"):
+                if not isinstance(database, PostgresDatabase):
+                    raise SystemExit("Test cases run on PostgreSQL only")
+                outcome = grade_by_test_cases(
+                    database,
+                    request["predicted_sql"],
+                    request["solution_sql"],
+                    request["test_cases"],
+                    timeout_seconds=request["timeout_seconds"],
+                    apply_if_passed=request.get("apply_if_passed", False),
+                )
+            else:
+                outcome = grade(
+                    database,
+                    request["predicted_sql"],
+                    request["solution_sql"],
+                    ordered=request["ordered"],
+                    timeout_seconds=request["timeout_seconds"],
+                    apply_if_passed=request.get("apply_if_passed", False),
+                )
             result = {
                 "passed": outcome.passed,
                 "execution_error": outcome.execution_error,

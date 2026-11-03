@@ -65,37 +65,30 @@ class TestSelectTasks:
         }
         assert not left_out
 
-    def test_rows_the_server_cannot_grade_are_left_out_with_their_reason(self) -> None:
-        management_follow_up = _row("management_follow_up")
-        management_follow_up["follow_up"]["category"] = "Management"
-        rows = [
-            _row("no_truth"),
-            _row("management", "Management"),
-            management_follow_up,
-            _row("follow_up_without_truth"),
-        ]
-        truth = {
-            "management": _truth("management", test_cases=(CUSTOM_TEST,)),
-            "management_follow_up": _truth("management_follow_up", follow_up_test_cases=(CUSTOM_TEST,)),
-            "follow_up_without_truth": _truth("follow_up_without_truth", follow_up=False),
-        }
+    def test_rows_without_their_ground_truth_are_left_out(self) -> None:
+        rows = [_row("no_truth"), _row("follow_up_without_truth")]
+        truth = {"follow_up_without_truth": _truth("follow_up_without_truth", follow_up=False)}
 
         kept, left_out = bird_prepare.select_tasks(rows, truth)
 
         assert kept == []
-        assert left_out == {"no ground truth": 2, "custom test cases": 2}
+        assert left_out == {"no ground truth": 2}
 
-    def test_a_query_is_kept_whatever_its_test_cases_and_a_management_task_without_them_too(self) -> None:
-        # BIRD-Interact grades a query by comparing its result with the solution's, so its test cases do not count.
-        rows = [_row("query"), _row("management", "Management")]
+    def test_query_and_management_tasks_are_kept_with_their_test_cases(self) -> None:
+        management_follow_up = _row("management_follow_up")
+        management_follow_up["follow_up"]["category"] = "Management"
+        rows = [_row("query"), _row("management", "Management"), management_follow_up]
         truth = {
             "query": _truth("query", test_cases=(CUSTOM_TEST,), follow_up_test_cases=(CUSTOM_TEST,)),
-            "management": _truth("management"),
+            "management": _truth("management", test_cases=(CUSTOM_TEST,)),
+            "management_follow_up": _truth("management_follow_up", follow_up_test_cases=(CUSTOM_TEST,)),
         }
 
         kept, left_out = bird_prepare.select_tasks(rows, truth)
 
-        assert [row["instance_id"] for row in kept] == ["query", "management"]
+        assert [row["instance_id"] for row in kept] == ["query", "management", "management_follow_up"]
+        assert kept[1]["test_cases"] == [CUSTOM_TEST]
+        assert kept[2]["follow_up"]["test_cases"] == [CUSTOM_TEST]
         assert not left_out
 
 
