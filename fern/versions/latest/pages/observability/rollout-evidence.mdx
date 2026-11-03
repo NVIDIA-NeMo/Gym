@@ -183,3 +183,43 @@ example even though semantic turns are unavailable. Token totals include only ob
 Collection adds measured wall-clock latency when available. `ng_perf` is absent when observability
 is disabled or no valid trajectory invocation exists. Aggregate metrics include `perf_summary`
 when rollouts contain `ng_perf`.
+
+
+## Run Provenance
+
+Before dispatching rollouts, collection writes `<output-stem>_provenance.json` next to the
+other run artifacts. For `rollouts.jsonl`, inspect it with:
+
+```bash
+cat results/my-run/rollouts_provenance.json
+```
+
+The record includes configured model and served-model names, known checkpoint identifiers,
+dataset identifiers, a SHA-256 of the exact materialized-input bytes, prompt/template hashes,
+explicit sampling settings and seeds, configured judge models and judge-prompt versions, and
+the running Gym version and commit. Unknown values are null or absent from the corresponding
+settings map. Prompt text and request metadata from the input rows are fingerprinted, not copied.
+
+`resolved_config` holds the whole resolved Gym configuration, so two results can be compared
+setting by setting. Secret-shaped keys (tokens, keys, headers, passwords, cookies) are masked as
+`****`, as in configurations exported to W&B and MLflow; every value under an `env` block is masked;
+and credentials and query strings are removed from URL-like values.
+
+`gym eval submit` also stores an allowlisted configuration snapshot under `provenance` in its
+submission record; its resolved configuration is the file written beside the submission manifest. Materialized inputs are not yet available at submission time, so their
+hash is null there; the per-run artifact records the actual inputs once materialized.
+Provenance does not change rollout records, verifier rewards or aggregate scores.
+
+Provenance is best-effort reporting. If configuration or input bytes cannot be read, the run
+continues and writes `status: "unavailable"` plus the error type, without the error's potentially
+private values. Storage errors are logged without interrupting collection. A submission snapshot
+failure stores an empty provenance object while preserving the queued job's index and manifest.
+
+The materialized-input hash covers every byte, read in 1 MiB chunks. Row-derived dataset identifiers
+and sampling profiles decode at most the first 100 physical JSONL lines; `input_sampling_rows` and
+`input_sampling_row_limit` record this bound. Configured identifiers and sampling settings are also
+recorded. Boolean values are excluded from numeric sampling settings. Identifier sanitization strips
+credentials both from URLs and from leading userinfo without a URL scheme, including token-only
+forms such as `token@github.com/org/repo`. Malformed sampling metadata is skipped per row:
+`input_sampling_rows_skipped` counts these rows while the complete input hash and other metadata
+remain available.

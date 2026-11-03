@@ -418,3 +418,61 @@ def test_a_record_written_before_gym_commit_still_loads():
 
     assert record.gym_commit is None
     assert record.schema_version == SCHEMA_VERSION
+
+
+def test_persist_includes_safe_submission_provenance(tmp_path, monkeypatch):
+    from nemo_gym.orchestration import jobs
+    from nemo_gym.package_info import __version__
+
+    class _Executor(BaseExecutor):
+        def run(self, config, *, dry_run: bool = False):
+            raise NotImplementedError
+
+        def resubmit(self, record, benchmark):
+            raise NotImplementedError
+
+    monkeypatch.setattr(jobs, "local_index_dir", lambda: tmp_path / "index")
+    config = _submit_config(tmp_path)
+    config.driver.benchmarks["gsm8k"].run.update({"policy_model_name": "policy", "policy_api_key": "secret"})
+    record = _record()
+    written = {}
+    _Executor().persist(record, config, lambda path, text, **_: written.__setitem__(path, text))
+    loaded = jobs.SubmissionRecord.load(json.loads(written[Path(record.run_dir) / jobs.MANIFEST_NAME]))
+    assert loaded.provenance["gym_version"] == __version__
+    assert loaded.provenance["materialized_inputs_sha256"] is None
+    assert loaded.provenance["models"] == {"driver.benchmarks.gsm8k.run": {"policy_model_name": "policy"}}
+    assert "secret" not in json.dumps(loaded.provenance)
+    # The resolved config is stored once, beside the manifest, not again inside the record.
+    assert "resolved_config" not in loaded.provenance
+    assert (
+        json.loads((tmp_path / "index" / f"{record.gym_job_id}.json").read_text())["provenance"] == loaded.provenance
+    )
+
+
+def test_old_submission_record_defaults_provenance() -> None:
+    payload = _record().model_dump(exclude={"provenance"})
+    assert SubmissionRecord.load(payload).provenance == {}
+
+
+def test_review_provenance_error_does_not_lose_a_queued_submission(tmp_path, monkeypatch, caplog):
+    from nemo_gym.orchestration import jobs
+
+    class Executor(BaseExecutor):
+        def run(self, config, *, dry_run=False):
+            raise NotImplementedError
+
+        def resubmit(self, record, benchmark):
+            raise NotImplementedError
+
+    def broken(*args, **kwargs):
+        raise ValueError("secret")
+
+    monkeypatch.setattr("nemo_gym.provenance.build_provenance", broken)
+    monkeypatch.setattr(jobs, "local_index_dir", lambda: tmp_path / "index")
+    record = _record()
+    written = {}
+    Executor().persist(record, _submit_config(tmp_path), lambda path, text, **_: written.__setitem__(path, text))
+    assert json.loads((tmp_path / "index" / f"{record.gym_job_id}.json").read_text())["provenance"] == {}
+    assert json.loads(written[Path(record.run_dir) / jobs.MANIFEST_NAME])["provenance"] == {}
+    assert "ValueError" in caplog.text
+    assert "secret" not in caplog.text
