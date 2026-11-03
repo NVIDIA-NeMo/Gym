@@ -182,3 +182,9 @@ def test_a_judge_failure_resume_leaves_to_recovery_is_counted_and_named(tmp_path
     assert coverage["stopped_not_retried"] == 1 and coverage["retryable"] == 1
     # It is one of the final failures resume does not run again, now named apart from terminal ones.
     assert coverage["failed_final"] == 1 and coverage["failed_not_final"] == 1
+
+
+@pytest.mark.parametrize("failure_class", ["judge_failed", "judge_invalid", "judge_unparseable"])
+def test_every_judge_failure_is_left_to_verification_recovery(failure_class):
+    # The registered judge_unparseable is a judge failure too: its answer is judged again, never regenerated.
+    assert has_unclassified_execution_failure(_route_failure_row(_ng_failure_class=failure_class))

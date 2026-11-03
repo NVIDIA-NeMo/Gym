@@ -184,6 +184,11 @@ def is_registered(name: str) -> bool:
     return name in FAILURE_KINDS
 
 
+JUDGE_FAILURE_KINDS = ("judge_failed", "judge_invalid", JUDGE_UNPARSEABLE)
+"""The judge failures whose saved answer is judged again, never regenerated: a failed judge call, a verdict that did not
+parse (``judge_unparseable``), and collection's own legacy class for an invalid judge response (``judge_invalid``)."""
+
+
 def is_namespaced(name: str) -> bool:
     """Whether ``name`` is an environment's own ``<server>:<kind>`` extension."""
     return bool(_NAMESPACED_PATTERN.fullmatch(name))

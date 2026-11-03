@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.core.failure_kinds import JUDGE_FAILURE_KINDS
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
@@ -120,7 +121,7 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     A request that was possibly delivered permits a fresh run only while the row keeps no full or partial
     response: then no saved answer can be duplicated or replaced.
     """
-    if matches_failure_class(row, {"judge_failed", "judge_invalid"}):
+    if matches_failure_class(row, JUDGE_FAILURE_KINDS):
         return True  # Verification recovery may reuse an answer; it never reruns the agent.
     record = row.get("_ng_failure_record")
     failure = record.get("failure") if isinstance(record, Mapping) else None
