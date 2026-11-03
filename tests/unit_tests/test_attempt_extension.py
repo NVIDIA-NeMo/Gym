@@ -254,7 +254,7 @@ def _judge_exhausted(job):
 
 
 def test_a_rollout_whose_attempts_went_to_judge_failures_keeps_its_cap(tmp_path):
-    from nemo_gym.rollout_reverification import due_judge_failures
+    from nemo_gym.eval.rollout_reverification import due_judge_failures
 
     output = _judge_exhausted(tmp_path)
     assert _decide(tmp_path).counts == {"exhausted": 1}

@@ -20,14 +20,14 @@ replacement, both are run on the same tasks and this report is the gate. It join
 task, classifies every task as identical, flipped, masked or missing, and prints the losing
 side's verifier output for every flip. Rows from either path are accepted, and masked failures
 from the failures sidecar are folded back in. The package re-exports the public names so that
-nemo_gym.cli.dev and the tests import them from nemo_gym.rollout_compare unchanged.
+nemo_gym.cli.dev and the tests import them from nemo_gym.eval.rollout_compare unchanged.
 """
 
-from nemo_gym.rollout_compare.command import RolloutCompareConfig, run_compare
-from nemo_gym.rollout_compare.compare import compare_rollouts
-from nemo_gym.rollout_compare.join import detect_task_key, group_by_task, task_id_of, tasksets_of
-from nemo_gym.rollout_compare.report import render_report, summary_dict, tail_lines, verifier_output
-from nemo_gym.rollout_compare.rows import (
+from nemo_gym.eval.rollout_compare.command import RolloutCompareConfig, run_compare
+from nemo_gym.eval.rollout_compare.compare import compare_rollouts
+from nemo_gym.eval.rollout_compare.join import detect_task_key, group_by_task, task_id_of, tasksets_of
+from nemo_gym.eval.rollout_compare.report import render_report, summary_dict, tail_lines, verifier_output
+from nemo_gym.eval.rollout_compare.rows import (
     agent_error,
     current_failures,
     load_rollouts,
@@ -35,7 +35,7 @@ from nemo_gym.rollout_compare.rows import (
     measured_failure_kind,
     summarize_side,
 )
-from nemo_gym.rollout_compare.schema import CompareInputError, CompareResult, TaskComparison, TaskSide
+from nemo_gym.eval.rollout_compare.schema import CompareInputError, CompareResult, TaskComparison, TaskSide
 
 
 __all__ = [

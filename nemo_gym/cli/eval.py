@@ -121,7 +121,7 @@ from nemo_gym.data.tasks.harbor.validation_report import (
     summarize_validation,
 )
 from nemo_gym.discovery import read_config_metadata
-from nemo_gym.eval_plan import (
+from nemo_gym.eval.eval_plan import (
     PlanBenchmark,
     PlanGym,
     build_eval_plan,
@@ -1176,7 +1176,7 @@ def _rejudge_saved_judge_failures(
     grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
     """
-    from nemo_gym.rollout_reverification import rejudge_saved_judge_failures
+    from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
     # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
@@ -1299,7 +1299,7 @@ def _refresh_settled_source(
 def _settled_source_state(output: Path) -> tuple[dict[str, Any] | None, int | None]:
     """The settled run's coverage and how many saved answers a later pass would still grade again, for the receipt;
     None for what cannot be read."""
-    from nemo_gym.rollout_reverification import due_judge_failures
+    from nemo_gym.eval.rollout_reverification import due_judge_failures
     from nemo_gym.rollouts import RolloutStore
 
     try:
@@ -1325,7 +1325,7 @@ def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], c
     happened. A pass that fails (the source changed while the job was queued, a verifier that cannot be reached)
     leaves a failed receipt naming the error, with the saved answers as they were, and the error is raised as before.
     """
-    from nemo_gym.rollout_reverification import RolloutReverificationHelper, write_settle_receipt
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper, write_settle_receipt
 
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     helper = RolloutReverificationHelper()
@@ -1486,7 +1486,7 @@ def export_run() -> None:  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reverify_rollouts():  # pragma: no cover
-    from nemo_gym.rollout_reverification import RolloutReverificationConfig
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 
     rh = RunHelper()
     rh.start(None)
@@ -1573,9 +1573,9 @@ Repeat-level metrics: {repeat_level_metrics_fpath}""")
 
 @exit_cleanly_on_config_error
 def compare() -> None:  # pragma: no cover
-    from nemo_gym.comparison.report import render_key_metrics_tables, summary_lines
-    from nemo_gym.comparison.runner import invoked_command, run_comparison
-    from nemo_gym.comparison.schema import ComparisonConfig
+    from nemo_gym.eval.comparison.report import render_key_metrics_tables, summary_lines
+    from nemo_gym.eval.comparison.runner import invoked_command, run_comparison
+    from nemo_gym.eval.comparison.schema import ComparisonConfig
 
     config = ComparisonConfig.model_validate(get_global_config_dict())
 

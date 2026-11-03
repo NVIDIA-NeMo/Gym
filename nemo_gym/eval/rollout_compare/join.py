@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from nemo_gym.rollout_compare.schema import _T, SIDECAR_FLAG, TASK_KEY_CANDIDATES, CompareInputError
+from nemo_gym.eval.rollout_compare.schema import _T, SIDECAR_FLAG, TASK_KEY_CANDIDATES, CompareInputError
 
 
 def _lookup(row: dict[str, Any], dotted: str) -> Any:
