@@ -6,6 +6,7 @@ import asyncio
 import fnmatch
 import json
 import os
+import re
 import runpy
 import shlex
 import shutil
@@ -38,6 +39,68 @@ from nemo_gym.orchestration.build_containers import (
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK = Path("benchmarks/nemotron_3.5_super")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_status", [0, 1])
+async def test_interrupt_cancels_owned_srun_before_removing_image(tmp_path, monkeypatch, cancel_status):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    srun = bin_dir / "srun"
+    srun.write_text(
+        f"#!{sys.executable}\n"
+        "import signal, sys, time\n"
+        "from pathlib import Path\n"
+        "def terminate(*args):\n"
+        "    Path('terminated').touch()\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, terminate)\n"
+        "name = next(a.split('=', 1)[1] for a in sys.argv if a.startswith('--job-name='))\n"
+        "Path('submitted').write_text(name)\n"
+        "while True: time.sleep(0.01)\n"
+    )
+    srun.chmod(0o755)
+    scancel = bin_dir / "scancel"
+    scancel.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "assert Path('output.sqsh').exists(), 'Image was removed before cancellation'\n"
+        "assert Path('terminated').exists(), 'srun did not get a chance to terminate'\n"
+        "Path('cancelled').write_text(json.dumps(sys.argv[1:]))\n"
+        f"sys.exit({cancel_status})\n"
+    )
+    scancel.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setattr(build_containers.BaseBuilder, "_preflight_check_git_repo", AsyncMock(return_value="a" * 40))
+    config = BuildContainerConfig(
+        input_container_fpath=tmp_path / "base.sqsh",
+        output_container_fpath=tmp_path / "output.sqsh",
+        slurm={"clusters": "test-cluster"},
+        flashinfer=FlashInferConfig(repo="repo", branch="dev", cpus_per_task=1, invalidate_modules=[]),
+    )
+    config.input_container_fpath.write_text("base")
+    task = asyncio.create_task(BuildContainerHelper(config=config).run())
+    try:
+        async with asyncio.timeout(15):
+            while not (tmp_path / "submitted").exists():
+                if task.done():
+                    await task
+                await asyncio.sleep(0.01)
+            task.cancel()  # asyncio.run translates the first Ctrl-C to task cancellation.
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        name = (tmp_path / "submitted").read_text()
+        assert re.fullmatch(r"build-flashinfer-[0-9a-f]{32}", name)
+        assert json.loads((tmp_path / "cancelled").read_text()) == ["--name", name, "--clusters", "test-cluster"]
+        assert not config.output_container_fpath.exists()
+        assert config.input_container_fpath.read_text() == "base"
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
 
 @pytest.fixture
@@ -875,6 +938,7 @@ sys.exit(7 if outcome == "failure" else 0)
                 "NUM_DECODE_NODES": 2,
                 "ENABLE_MOONCAKE": True,
                 "SLURM_COMMENT": '{"reason":"test warmup"}',
+                "SBATCH_TIMELIMIT": "00:30:00",
                 "TEST_LITERAL": "a value $(touch INJECTED) `touch ALSO_INJECTED`",
                 "TEST_OUTCOME": outcome,
                 "CAPTURE_DIR": str(tmp_path),

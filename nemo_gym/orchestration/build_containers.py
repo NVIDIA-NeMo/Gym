@@ -11,11 +11,12 @@ from contextlib import contextmanager
 from os import killpg
 from pathlib import Path
 from shlex import join, quote, split
-from signal import SIGKILL
+from signal import SIGKILL, SIGTERM
 from tempfile import TemporaryDirectory
 from textwrap import dedent
 from time import perf_counter
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
@@ -164,13 +165,21 @@ async def _run_command(command: str, log_fpath: Path) -> CommandOutput:
                 log_file.write(line + "\n")
 
             returncode = await process.wait()
-        except:
+        except BaseException:
+            # Let srun forward termination to its remote tasks and release its
+            # allocation. SIGKILL alone strands those tasks on the cluster.
             try:
-                killpg(process.pid, SIGKILL)
+                killpg(process.pid, SIGTERM)
             except ProcessLookupError:
                 pass  # Already exited.
-
-            await process.communicate()
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=10)
+            except TimeoutError:
+                try:
+                    killpg(process.pid, SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.communicate()
             raise
 
     return CommandOutput(
@@ -766,11 +775,8 @@ class BuildContainerHelper(BaseModel):
             )
 
     async def _clean_on_failure(self) -> None:
-        command_output = await _run_command(
-            command=join(["rm", "-f", "--", str(self.config.output_container_fpath)]),
-            log_fpath=self.config.log_file,
-        )
-        assert command_output.returncode == 0
+        self.config.output_container_fpath.unlink(missing_ok=True)
+        print(f"Removed incomplete output container: {self.config.output_container_fpath}", flush=True)
 
     async def _run_single_srun(
         self,
@@ -780,6 +786,10 @@ class BuildContainerHelper(BaseModel):
     ) -> CommandOutput:
         env_vars = builder_env_vars.copy()
         srun_slurm_vars = self.config.slurm | builder_srun_slurm_vars
+        # A unique name identifies even a pending allocation, before a job ID
+        # or remote task is available. Never cancel unrelated builds by name.
+        job_name = f"{srun_slurm_vars.get('job-name', 'build-container')}-{uuid4().hex}"
+        srun_slurm_vars["job-name"] = job_name
 
         env_vars_str = " \\\n".join(f"{k}={quote(v)}" for k, v in env_vars.items())
         srun_slurm_vars_strs = []
@@ -797,7 +807,19 @@ srun \\
     {srun_slurm_vars_str} \\
     {builder_command_str}"""
 
-        return await _run_command(srun_command_str, self.config.log_file)
+        try:
+            return await _run_command(srun_command_str, self.config.log_file)
+        except BaseException:
+            cancel = ["scancel", "--name", job_name]
+            if clusters := srun_slurm_vars.get("clusters"):
+                cancel.extend(["--clusters", str(clusters)])
+            try:
+                result = await _run_command(join(cancel), self.config.log_file)
+                if result.returncode:
+                    print(f"Could not cancel build job {job_name}; see {self.config.log_file}", flush=True)
+            except Exception as exc:
+                print(f"Could not cancel build job {job_name}: {exc}", flush=True)
+            raise
 
 
 def main() -> None:
