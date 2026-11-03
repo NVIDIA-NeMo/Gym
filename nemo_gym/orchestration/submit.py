@@ -258,8 +258,8 @@ def _recover(
     inventory) queues the run again as a fresh run with the explicit, longer ``max_walltime``, and without one names
     the command; ``stop`` dispatches nothing and says why. Every outcome carries the acceptance gate task entry:
     per-rollout health is judged against ``max_unhealthy_fraction`` and reported in its warnings; response/trial
-    health is evaluated separately, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` is
-    unchanged.
+    health is evaluated separately, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` still
+    starts a fresh retry and walltime budget.
     """
     if score_key is not None and (
         not isinstance(score_key, list)

@@ -278,10 +278,11 @@ def render_driver_entrypoint(
     next segment. It replaces the EXIT trap, so it cannot be combined with `cleanup`.
 
     `private_uv` gives the install its own uv binary inside its temporary directory (a copy of a working `uv`, else
-    a fresh install there) keeps uv's cache on the host's local disk, in this user's own directory only, and gives the install its own
-    managed Pythons. Concurrent installs on
-    other hosts replace the shared `~/.local/bin/uv` and cache entries on a network home, and a uv running from those
-    files then dies with SIGBUS.
+    a fresh install there), keeps uv's cache on the host's local disk in this user's own directory only, and gives
+    the install its own managed Pythons. Concurrent installs on other hosts replace the shared `~/.local/bin/uv` and
+    cache entries on a network home, and a uv running from those files then dies with SIGBUS.
+
+    `cleanup` removes the temporary checkout (`$GYM_SRC`) through an EXIT trap when the step exits.
 
     `export_tail` (see `render_export_tail`) takes the place of `exec "$@"`, so the exports run in the same step and
     container as the run, where `gym` is installed.

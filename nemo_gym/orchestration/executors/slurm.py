@@ -1595,8 +1595,8 @@ class SlurmExecutor(BaseExecutor):
         and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the launcher's
         reader placement, with ``judge_qos`` or a QOS derived for it), or, for a run that serves its judge on a node
         pool of its own, on that saved pool with those services started and the run's QOS, for the run's segment
-        walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``. Either way the job settles through ``gym eval reverify --judge-failed-only
-        --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
+        walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``. Either way the job
+        settles through ``gym eval reverify --judge-failed-only --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -2253,7 +2253,8 @@ class SlurmExecutor(BaseExecutor):
                 else []
             )
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
-            # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
+            # The job itself resets the run's retry and attempt state when it starts, unless the resubmit keeps its
+            # budget (see RESUBMIT_ENV and KEEP_BUDGET_ENV).
             results = _parse_sbatch_results(
                 output := conn.run(
                     exports
