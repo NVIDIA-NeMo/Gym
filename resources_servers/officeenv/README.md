@@ -17,7 +17,7 @@ pins the release it runs.
 `requirements.txt` pins a release tag:
 
 ```
-officeenv @ git+ssh://git@gitlab-master.nvidia.com:12051/dmolinari/officeenv.git@v1.10.0
+officeenv @ git+ssh://git@gitlab-master.nvidia.com:12051/post-training/officeenv.git@v1.10.0
 ```
 
 OfficeEnv is not published yet, so building this server's venv needs SSH read access to that
