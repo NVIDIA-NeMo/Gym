@@ -27,15 +27,22 @@ def _ended(reason: str, detail: str) -> Exception:
 
 
 @pytest.mark.parametrize(
-    "error, reason, cause, container",
+    "error, reason, cause, container, reported",
     [
         (
             _ended("OOMKilled", f"Pod {POD} container sandbox exited with code 137 (OOMKilled)"),
             "OOMKilled",
             "oom",
             "agent",
+            "sandbox",
         ),
-        (_ended("Error", f"Pod {POD} container sandbox exited with code 143 (Error)"), "Error", "unknown", "agent"),
+        (
+            _ended("Error", f"Pod {POD} container sandbox exited with code 143 (Error)"),
+            "Error",
+            "unknown",
+            "agent",
+            "sandbox",
+        ),
         (
             _ended(
                 "Evicted",
@@ -45,30 +52,36 @@ def _ended(reason: str, detail: str) -> Exception:
             "Evicted",
             "storage",
             "unknown",
+            None,
         ),
         (
             _ended("Evicted", f"Pod {POD} entered Failed phase (Evicted): The node was low on resource: memory."),
             "Evicted",
             "evicted",
             "unknown",
+            None,
         ),
         (
             _ended("OOMKilled", f"Pod {POD} container execd exited with code 137 (OOMKilled)"),
             "OOMKilled",
             "oom",
             "sidecar",
+            "execd",
         ),
         (
             _ended("OOMKilled", f"Pod {POD} init container setup exited with code 137 (OOMKilled)"),
             "OOMKilled",
             "oom",
             "init",
+            "setup",
         ),
     ],
 )
-def test_an_ended_sandbox_is_read_from_the_providers_own_report(error, reason, cause, container) -> None:
+def test_an_ended_sandbox_is_read_from_the_providers_own_report(error, reason, cause, container, reported) -> None:
     ended = ended_sandbox(error, execution_id="exec-1")
     assert (ended.cause, ended.container) == (cause, container)
+    # The container's name is carried as the provider reported it: an observed fact, not the reading above.
+    assert ended.details.container == reported
     # The event carries the provider's reason code as reported, the ids and the provider; no inferred cause.
     assert ended.details.provider_status_reason == reason
     assert (ended.details.sandbox_id, ended.details.execution_id, ended.details.provider) == (
@@ -86,6 +99,7 @@ def test_gyms_own_notice_after_a_backend_loss_is_read_too() -> None:
     )
     ended = ended_sandbox(error, sandbox_id="box-1")
     assert (ended.cause, ended.container, ended.details.provider_status_reason) == ("oom", "agent", "OOMKilled")
+    assert ended.details.container == "sandbox"
     assert ended.details.sandbox_id == "box-1"  # the caller's id wins over the reported one
 
 
@@ -117,6 +131,47 @@ def test_the_event_kind_follows_the_reason_and_the_event_fits_one_header() -> No
     # A long provider report stays out of the event (its reason code is short), so the report is never omitted.
     report = failure_report_for(evicted)
     assert len(json.dumps(report.model_dump(mode="json"))) < FailureHeader.MAX_BYTES
+    assert FailureHeader.decode(FailureHeader.encode(report)) == report
+
+
+@pytest.mark.parametrize(
+    "container_line, kind, container",
+    [
+        (f"Pod {POD} container sandbox exited with code 137 (OOMKilled)", "provider_oom_killed", "sandbox"),
+        # A helper container's memory kill is not the agent's own: infrastructure, retried.
+        (f"Pod {POD} container execd exited with code 137 (OOMKilled)", "provider_unavailable", "execd"),
+        (f"Pod {POD} init container setup exited with code 137 (OOMKilled)", "provider_unavailable", "setup"),
+    ],
+    ids=["agent", "sidecar", "init"],
+)
+def test_only_a_memory_kill_of_the_agents_own_container_is_an_oom_event(container_line, kind, container) -> None:
+    event = sandbox_failure_event(_ended("OOMKilled", container_line), stage="agent")
+    assert event.failure_kind == kind
+    assert event.details.container == container
+    assert event.details.provider_status_reason == "OOMKilled"
+
+
+def test_gyms_own_notice_names_no_container_and_stays_an_oom_event() -> None:
+    error = RuntimeError(
+        "Sandbox was OOM-killed. OpenSandbox status: state='Failed', reason='OOMKilled', message='the backend was "
+        f"lost'; sandbox_id='{SANDBOX}'"
+    )
+    event = sandbox_failure_event(error, stage="agent")
+    assert event.failure_kind == "provider_oom_killed"
+    assert event.details.container is None
+
+
+def test_a_longest_reported_event_fits_one_header() -> None:
+    # Every reported text at its longest: the details bound each to 128 characters, so the event is never omitted.
+    long_name = "c" * 300
+    error = _ended("OOMKilled", f"Pod {POD} container {long_name} exited with code 137 (OOMKilled)")
+    event = sandbox_failure_event(
+        error, stage="agent", sandbox_id="b" * 300, execution_id="e" * 300, provider="p" * 200, operation="o" * 100
+    )
+    assert event.details.container.startswith("c" * 100) and len(event.details.container) < 160  # bounded
+    report = failure_report_for(event)
+    [value] = FailureHeader.encode(report).values()
+    assert len(value) < FailureHeader.MAX_BYTES and '"omitted":true' not in value
     assert FailureHeader.decode(FailureHeader.encode(report)) == report
 
 

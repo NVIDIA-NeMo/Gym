@@ -110,8 +110,10 @@ def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     container was OOM-killed or evicted), Gym's ``SandboxCreateError`` and ``SandboxBackendUnreachableError``, and a
     timeout or dropped connection while the episode runs (to the sandbox or to the resources server). Runner output
     never decides it, and a runner that exits on a signal stays a runner failure: the agent's own commands can send it.
-    The provider's typed report decides an OOM kill (``provider_oom_killed``); without one, messages naming an OOM
-    kill still do (records and providers that predate the typed report); the rest are ``provider_unavailable``.
+    The provider's typed report decides an OOM kill (``provider_oom_killed``, only when it is the agent's own
+    container that was killed: a helper container's kill is ``provider_unavailable``); without one, messages naming
+    an OOM kill still do (records and providers that predate the typed report); the rest are
+    ``provider_unavailable``.
     """
     names = {cls.__name__ for cls in type(exc).__mro__}
     infra = (
@@ -122,9 +124,9 @@ def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     if not infra:
         return None
     ended = ended_sandbox(exc)
-    if ended is not None and ended.cause == "oom":
-        return failure_kinds.PROVIDER_OOM_KILLED
-    if ended is None and any(marker in str(exc) for marker in _OOM_MARKERS):
+    if ended is not None:
+        return ended.failure_kind
+    if any(marker in str(exc) for marker in _OOM_MARKERS):
         return failure_kinds.PROVIDER_OOM_KILLED
     return failure_kinds.PROVIDER_UNAVAILABLE
 

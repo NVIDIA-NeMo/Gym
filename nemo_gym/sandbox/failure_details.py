@@ -14,9 +14,11 @@ and Gym's provider adds its own notice after losing the exec backend (``Sandbox 
 state=..., reason=..., message=...; sandbox_id=...``). Only these reports name a reason: an exit status 137 without one
 names none.
 
-The failure event carries what ``SandboxFailureDetails`` holds: the ids, the provider and the provider's reason code as
-reported. The report also names the container that ended and whether an eviction was for storage; ``EndedSandbox``
-keeps those two readings beside the details for the caller that decides the kind.
+The failure event carries what ``SandboxFailureDetails`` holds: the ids, the provider, the provider's reason code and
+the container it names, as reported. ``EndedSandbox`` reads two more facts from the report beside the details: which
+kind of container ended and whether an eviction was for storage. They decide the kind: a memory kill is
+``provider_oom_killed`` only when the agent's own container (or none, for Gym's notice) ended; a helper container's
+kill is infrastructure.
 """
 
 import re
@@ -53,13 +55,21 @@ class EndedSandbox:
 
     ``details`` is what the failure event carries. ``cause`` reads the provider's reason (``OOMKilled`` is ``oom``;
     ``Evicted`` is ``storage`` when the report names exceeded storage, else ``evicted``; any other reason is
-    ``unknown``) and ``container`` the container the report names (the user container is ``agent``, an init
-    container ``init``, any other ``sidecar``; a pod-level eviction names none).
+    ``unknown``) and ``container`` the kind of container the report names (the user container is ``agent``, an init
+    container ``init``, any other ``sidecar``; a report that names none, such as a pod-level eviction or Gym's own
+    notice, is ``unknown``).
     """
 
     details: SandboxFailureDetails
     cause: Literal["oom", "evicted", "storage", "unknown"]
     container: Literal["agent", "sidecar", "init", "unknown"]
+
+    @property
+    def failure_kind(self) -> str:
+        """``provider_oom_killed`` exactly when the provider reported a memory kill of the agent's own container (or
+        named none); any other ending, including a helper container's memory kill, is ``provider_unavailable``."""
+        oom = self.cause == "oom" and self.container in ("agent", "unknown")
+        return PROVIDER_OOM_KILLED if oom else PROVIDER_UNAVAILABLE
 
 
 def provider_report(error: BaseException) -> str:
@@ -110,6 +120,8 @@ def ended_sandbox(
             provider=provider or "opensandbox",
             # The provider's reason code as reported: short, so a whole event stays inside one failure header.
             provider_status_reason=bounded_text(reason, 128) if reason else None,
+            # The container's name as the provider reported it; short, for the same reason.
+            container=bounded_text(exited["name"], 128) if exited else None,
         ),
         cause=cause,
         container=container,
@@ -128,8 +140,9 @@ def sandbox_failure_event(
     """The ``sandbox`` failure ``error`` reports, with ``error`` as its cause; None when ``error`` reports no
     provider-ended sandbox.
 
-    The kind follows the provider's reason: ``provider_oom_killed`` exactly when it reported a memory kill, else
-    ``provider_unavailable``. ``stage`` says when it ended (``seed``, ``agent``, ``verification``). Producers observe
+    The kind follows the provider's report (``EndedSandbox.failure_kind``): ``provider_oom_killed`` exactly when it
+    reported a memory kill of the agent's own container, else ``provider_unavailable``; a helper container's
+    memory kill is infrastructure. ``stage`` says when it ended (``seed``, ``agent``, ``verification``). Producers observe
     it beside the failure they already report, so the reply, the kind and the retry decision stay theirs.
     """
     ended = ended_sandbox(error, provider=provider, sandbox_id=sandbox_id, execution_id=execution_id)
@@ -137,7 +150,7 @@ def sandbox_failure_event(
         return None
     event = NgFailureEvent(
         boundary=FailureBoundary.SANDBOX,
-        failure_kind=PROVIDER_OOM_KILLED if ended.cause == "oom" else PROVIDER_UNAVAILABLE,
+        failure_kind=ended.failure_kind,
         failure_reason=f"The provider ended the sandbox ({ended.details.provider_status_reason or 'no reason given'})"
         + (f" during the {stage} stage" if stage else ""),
         http_status=error_to_http_status(error),
