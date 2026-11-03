@@ -6299,6 +6299,116 @@ class TestRolloutCollection:
         if redact_payloads:
             assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
 
+    @pytest.mark.parametrize("dialect", ["responses", "chat_completions"])
+    @pytest.mark.parametrize("redact_payloads", [False, True])
+    async def test_media_capture_survives_collection_and_disk_reload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dialect: str, redact_payloads: bool
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+        image = {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "high"}
+        tool_content = [{"type": "input_text", "text": "before"}, image, {"type": "input_text", "text": "after"}]
+        if dialect == "chat_completions":
+            image = {"type": "image_url", "image_url": {"url": image["image_url"], "detail": "high"}}
+        text_type = "text" if dialect == "chat_completions" else "input_text"
+        content = [{"type": text_type, "text": "before"}, image, {"type": text_type, "text": "after"}]
+        prompt = {"role": "user", "content": content}
+        tool_results = (
+            [
+                {"role": "tool", "tool_call_id": "image-tool", "content": "Read image file"},
+                {"role": "user", "content": content},
+            ]
+            if dialect == "chat_completions"
+            else [{"type": "function_call_output", "call_id": "image-tool", "output": content}]
+        )
+        key = "messages" if dialect == "chat_completions" else "input"
+        requests = [{key: [prompt]}, {key: [prompt, *tool_results]}]
+        input_path = tmp_path / "input.jsonl"
+        output_path = tmp_path / "rollouts.jsonl"
+        input_path.write_text('{"responses_create_params":{"input":[]},"agent_ref":{"name":"agent"}}\n')
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [row] = examples
+                for index, request in enumerate(requests):
+                    store.record(
+                        "0-0",
+                        {
+                            "model_call_id": f"media-{index}",
+                            "dialect": dialect,
+                            "request": request,
+                            "response": {},
+                        },
+                    )
+                result = {"response": {"usage": {}}}
+                if redact_payloads:
+                    result["ng_trajectory"] = {
+                        "schema_version": "1.0",
+                        "task_id": "0",
+                        "rollout_id": "0-0",
+                        "gaps": [{"code": "multimodal_history_redacted"}],
+                    }
+                else:
+                    result["ng_agent_observations"] = {
+                        "source": "media-test",
+                        "records": [
+                            {
+                                "kind": "agent_invocation",
+                                "invocation_id": "agent",
+                                "conversation": [
+                                    {
+                                        "type": "function_call",
+                                        "call_id": "image-tool",
+                                        "name": "read",
+                                        "arguments": '{"path":"image.png"}',
+                                    },
+                                    {"type": "function_call_output", "call_id": "image-tool", "output": tool_content},
+                                ],
+                            },
+                            {
+                                "kind": "tool_call",
+                                "invocation_id": "agent",
+                                "tool_call_id": "image-tool",
+                                "tool_name": "read",
+                                "status": "completed",
+                            },
+                        ],
+                    }
+                future = Future()
+                future.set_result(_CompletedRollout(row=row, result=result, rollout_latency_ms=None))
+                return [future]
+
+        await Helper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_path),
+                output_jsonl_fpath=str(output_path),
+                resume_from_cache=False,
+                disable_aggregation=True,
+                disable_health_check=True,
+            )
+        )
+        saved = orjson.loads(output_path.read_bytes())
+        calls = saved["ng_trajectory"]["model_calls"]
+        assert [call["model_call_id"] for call in calls] == ["media-0", "media-1"]
+        assert [call["request"] for call in calls] == ([None, None] if redact_payloads else requests)
+        # The capture attachment is a compact index, not a second payload authority.
+        assert all("request" not in call for call in saved["ng_model_call_capture"]["calls"])
+        if redact_payloads:
+            assert "data:image/png;base64," not in output_path.read_text()
+        else:
+            [tool] = saved["ng_trajectory"]["tool_calls"]
+            assert tool["tool_call_id"] == "image-tool" and tool["invocation_id"] == "agent"
+            assert [part["type"] for part in tool["output"]] == ["input_text", "input_image", "input_text"]
+            assert tool["output"][1]["image_url"] == tool_content[1]["image_url"]
+            assert tool["output"][1]["detail"] == "high"
+
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
