@@ -24,6 +24,11 @@ def resubmit_offset_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_name(output_fpath.stem + "_resubmit_offset")
 
 
+def attempt_extension_path_for(output_fpath: Path) -> Path:
+    """Where `gym eval resubmit --recover --extend-attempts N` records the attempts it added to every rollout's cap."""
+    return output_fpath.with_name(output_fpath.stem + "_attempt_extension")
+
+
 def materialized_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_materialized_inputs.jsonl`."""
     return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")

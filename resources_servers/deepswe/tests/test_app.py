@@ -401,7 +401,10 @@ async def test_long_verifier_diagnostic_is_bounded_and_keeps_the_patch(
     assert response.mask_sample is True
     assert response.model_patch == "golden patch\n"
     assert response.verifier_error == f"RuntimeError: {long_error}"
-    [event] = log.report.events.values()
+    # The verifier raised on every attempt: the two attempts run again were observed, the last one is the failure.
+    *attempts, event = sorted(log.report.events.values(), key=lambda e: e.attempt_id)
+    assert [e.operation for e in attempts] == ["verify", "verify"]
+    assert all(e.exception_type == "RuntimeError" for e in attempts)
     assert len(event.failure_reason) <= 2000
     assert event.failure_reason.startswith("RuntimeError: provider said: xxx")
     assert event.failure_reason.endswith("[truncated]")
@@ -496,3 +499,217 @@ def test_request_image_must_match_pinned_task_image(task_assets: Path) -> None:
 
     with pytest.raises(ValueError, match="does not match the pinned image"):
         _resolve_task(DeepSWEVerifyRequest.model_validate(_request() | {"image": image}), server._task_store)
+
+
+# --- Inconclusive verification is run again on a fresh sandbox, within a bound --------------------------------------
+
+
+NO_VERDICT = "Verifier did not produce /logs/verifier/reward.json"
+
+
+def _rollout_server(task_assets: Path, monkeypatch: MonkeyPatch, *, verifier_results, sandboxes=None, **overrides):
+    """A server past its agent phase: the committed patch is collected, and each verifier attempt gets a fresh sandbox
+    from ``sandboxes`` (or a new mock) and the next of ``verifier_results`` (a result or an exception)."""
+    config = _config(task_assets, golden=False).model_copy(update=overrides)
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
+    created = [agent_sandbox, *(sandboxes if sandboxes is not None else [AsyncMock() for _ in verifier_results])]
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=created))
+    monkeypatch.setattr(server, "_collect_model_patch", AsyncMock(return_value=b"agent patch\n"))
+    monkeypatch.setattr(server, "_run_verifier", AsyncMock(side_effect=list(verifier_results)))
+    return server, created
+
+
+async def _verify(server) -> tuple:
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    with RequestFailureLog.capture() as log:
+        response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+    return response, log
+
+
+def _inconclusive() -> VerifierResult:
+    return VerifierResult(evaluation_completed=False, reward=0.0, verifier_exit_code=1, verifier_error=NO_VERDICT)
+
+
+async def test_a_verifier_run_without_a_verdict_is_run_again_on_a_fresh_sandbox_and_the_verdict_counts(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, created = _rollout_server(
+        task_assets,
+        monkeypatch,
+        verifier_results=[_inconclusive(), VerifierResult(evaluation_completed=True, reward=1.0)],
+    )
+
+    response, log = await _verify(server)
+
+    assert (response.reward, response.evaluation_completed, response.mask_sample) == (1.0, True, False)
+    assert response.failure_kind is None and response.failure_reason is None
+    assert response.verification_attempts == 2 and response.inconclusive_attempts == [NO_VERDICT]
+    # Each attempt verifies the same collected patch on its own fresh sandbox, and every sandbox is stopped.
+    assert [call.args[2] for call in server._run_verifier.await_args_list] == [b"agent patch\n", b"agent patch\n"]
+    assert [call.args[0] for call in server._run_verifier.await_args_list] == created[1:]
+    for sandbox in created:
+        sandbox.stop.assert_awaited_once()
+    assert response.model_patch == "agent patch\n"
+    # The attempt run again is observed as its own failure; the verdict stands and the row reports no failure.
+    [attempt] = log.report.events.values()
+    assert (attempt.failure_kind, attempt.operation, attempt.failure_reason, attempt.stage) == (
+        VERIFIER_ERROR,
+        "verify",
+        "Verification produced no conclusive verdict",
+        "verification",
+    )
+    assert attempt.attempt_id == f"{attempt.operation_id}:1"
+
+
+async def test_a_verifier_that_never_produces_a_verdict_keeps_the_masked_outcome_after_the_bound(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, created = _rollout_server(task_assets, monkeypatch, verifier_results=[_inconclusive()] * 3)
+
+    response, log = await _verify(server)
+
+    assert server._run_verifier.await_count == 3 and len(created) == 4
+    assert (response.reward, response.evaluation_completed, response.mask_sample) == (0.0, False, True)
+    assert response.failure_kind == VERIFIER_ERROR and response.failure_reason == NO_VERDICT
+    assert response.verification_attempts == 3 and response.inconclusive_attempts == [NO_VERDICT, NO_VERDICT]
+    assert response.model_patch == "agent patch\n"
+    # Two attempts were run again and observed as such; the last one is the row's failure, with its attempt id.
+    first, second, final = sorted(log.report.events.values(), key=lambda e: e.attempt_id)
+    assert [e.failure_reason for e in (first, second)] == ["Verification produced no conclusive verdict"] * 2
+    assert (final.failure_kind, final.operation, final.failure_reason) == (VERIFIER_ERROR, "verify", NO_VERDICT)
+    assert [e.attempt_id for e in (first, second, final)] == [f"{final.operation_id}:{n}" for n in (1, 2, 3)]
+    for sandbox in created:
+        sandbox.stop.assert_awaited_once()
+
+
+async def test_a_conclusive_failing_verdict_is_not_run_again(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, created = _rollout_server(
+        task_assets, monkeypatch, verifier_results=[VerifierResult(evaluation_completed=True, reward=0.0)]
+    )
+    response, _ = await _verify(server)
+    assert server._run_verifier.await_count == 1 and len(created) == 2
+    assert (response.reward, response.evaluation_completed, response.mask_sample) == (0.0, True, False)
+    assert response.verification_attempts == 1 and response.inconclusive_attempts == []
+
+
+async def test_a_verifier_sandbox_that_fails_to_start_or_run_is_tried_again(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    # The first verifier sandbox is refused by the provider before it exists; the second runs the verifier.
+    verifier_sandbox = AsyncMock()
+    server, _ = _rollout_server(
+        task_assets,
+        monkeypatch,
+        verifier_results=[VerifierResult(evaluation_completed=True, reward=1.0)],
+        sandboxes=[RuntimeError("provider refused the sandbox"), verifier_sandbox],
+    )
+    response, log = await _verify(server)
+    assert response.reward == 1.0 and response.evaluation_completed is True
+    assert response.verification_attempts == 2
+    assert response.inconclusive_attempts == ["RuntimeError: provider refused the sandbox"]
+    verifier_sandbox.stop.assert_awaited_once()
+    # Only an exception before a sandbox was assigned names allocation as the failing operation.
+    [attempt] = log.report.events.values()
+    assert (attempt.failure_kind, attempt.operation, attempt.failure_reason, attempt.exception_type) == (
+        VERIFIER_ERROR,
+        "verify.sandbox.allocate",
+        "Verifier sandbox allocation failed",
+        "RuntimeError",
+    )
+    assert attempt.attempt_id == f"{attempt.operation_id}:1"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Verifier reward.json is missing its reward field",
+        "Verifier returned non-binary reward: 2",
+        "Invalid verifier reward.json: Expecting value",
+        "Verifier timed out after 1800 seconds",
+    ],
+)
+async def test_a_malformed_verdict_or_a_timeout_is_not_run_again(
+    task_assets: Path, monkeypatch: MonkeyPatch, error: str
+) -> None:
+    server, created = _rollout_server(
+        task_assets,
+        monkeypatch,
+        verifier_results=[
+            VerifierResult(evaluation_completed=False, reward=0.0, verifier_exit_code=0, verifier_error=error)
+        ],
+    )
+    response, log = await _verify(server)
+    assert server._run_verifier.await_count == 1 and len(created) == 2
+    assert (
+        response.mask_sample is True and response.failure_kind == VERIFIER_ERROR and response.failure_reason == error
+    )
+    assert response.verification_attempts == 1 and response.inconclusive_attempts == []
+    assert len(log.report.events) == 1
+
+
+async def test_the_retry_bound_is_configurable_and_zero_keeps_a_single_attempt(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, created = _rollout_server(
+        task_assets, monkeypatch, verifier_results=[_inconclusive()], inconclusive_verification_retries=0
+    )
+    response, _ = await _verify(server)
+    assert server._run_verifier.await_count == 1 and len(created) == 2
+    assert response.verification_attempts == 1 and response.failure_reason == NO_VERDICT
+
+
+@pytest.mark.parametrize("intact", [True, False], ids=["intact", "digest-mismatch"])
+async def test_a_saved_patch_is_reverified_on_a_fresh_sandbox_without_its_agent_session(
+    task_assets: Path, monkeypatch: MonkeyPatch, intact: bool
+) -> None:
+    import hashlib
+
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    verifier_sandbox = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=verifier_sandbox))
+    collect_model_patch = AsyncMock()
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    run_verifier = AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1.0))
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {}
+    patch = "saved patch\n"
+    digest = hashlib.sha256(patch.encode("utf-8")).hexdigest() if intact else "0" * 64
+    body = _request() | {"saved_model_patch": patch, "saved_model_patch_sha256": digest}
+
+    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(body))
+
+    collect_model_patch.assert_not_awaited()
+    dumped = response.model_dump()
+    assert "saved_model_patch" not in dumped
+    if intact:
+        assert response.evaluation_completed is True and response.reward == 1.0
+        assert response.replayed_saved_patch is True
+        assert response.model_patch == patch and response.model_patch_sha256 == digest
+        verifier_sandbox.stop.assert_awaited_once()
+    else:
+        assert response.evaluation_completed is False and response.mask_sample is True
+        assert response.failure_kind == "session_lost"
+        assert response.replayed_saved_patch is False
+        run_verifier.assert_not_awaited()
+
+
+async def test_without_a_saved_patch_a_missing_agent_session_is_still_lost(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock())
+    request = MagicMock()
+    request.session = {}
+    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+    assert response.failure_kind == "session_lost" and response.replayed_saved_patch is False

@@ -18,9 +18,11 @@ import contextlib
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import warnings
 from pathlib import Path
@@ -30,6 +32,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
+from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
 from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
@@ -749,6 +752,110 @@ def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
     assert out.index('export PATH="$HOME/.local/bin:$PATH"') < out.index("uv venv --seed .venv")
 
 
+def _run_private_uv_entrypoint(
+    tmp_path: Path, *, shared_uv: str, tmpdir: Path | None = None
+) -> tuple[str, Path, Path]:
+    """Run a private-uv reader entrypoint with stub git, uv and curl; return its report, the shared uv and curl log."""
+    home, tools = tmp_path / "home", tmp_path / "tools"
+    (home / ".local/bin").mkdir(parents=True)
+    tools.mkdir()
+    # `uv venv` records the interpreter preference it ran with, which decides whether a Python on PATH may be used.
+    fake_uv = (
+        '#!/bin/bash\ncase "$1" in --version) echo "uv 0.0.0";; venv) mkdir -p .venv/bin; : > .venv/bin/activate; '
+        'printf %s "${UV_PYTHON_PREFERENCE:-unset}" > .venv/python-preference;; esac\n'
+    )
+    shared = home / ".local/bin/uv"
+    if shared_uv != "missing":
+        shared.write_text(fake_uv if shared_uv == "working" else "#!/bin/bash\nexit 1\n")
+        shared.chmod(0o755)
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    curl_log = tmp_path / "curl.log"
+    # Like uv's installer: the target is UV_UNMANAGED_INSTALL, else UV_INSTALL_DIR, and only an install that is not
+    # unmanaged writes the user-level receipt.
+    installer = (
+        'dir="${UV_UNMANAGED_INSTALL:-${UV_INSTALL_DIR:-$HOME/.local/bin}}"; mkdir -p "$dir"; printf %s '
+        + shlex.quote(fake_uv)
+        + ' > "$dir/uv"; chmod +x "$dir/uv"; if [ -z "${UV_UNMANAGED_INSTALL:-}" ]; then '
+        'mkdir -p "$HOME/.config/uv"; echo "{\\"install_prefix\\":\\"$dir\\"}" > "$HOME/.config/uv/uv-receipt.json"; fi'
+    )
+    (tools / "curl").write_text(
+        f"#!/bin/bash\necho called >> {shlex.quote(str(curl_log))}\necho {shlex.quote(installer)}\n"
+    )
+    for tool in ("git", "curl"):
+        (tools / tool).chmod(0o755)
+    report = (
+        'echo "UV=$(command -v uv) CACHE=$UV_CACHE_DIR PYTHONS=$UV_PYTHON_INSTALL_DIR SRC=$GYM_SRC '
+        'VENV_PREFERENCE=$(cat .venv/python-preference)"'
+    )
+    out = render_driver_entrypoint(
+        "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
+    )
+    env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"} | ({"TMPDIR": str(tmpdir)} if tmpdir else {})
+    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=True)
+    return result.stdout, shared, curl_log
+
+
+@pytest.mark.parametrize("shared_uv", ["working", "broken", "missing"])
+def test_a_private_uv_entrypoint_runs_its_own_uv_and_cache(tmp_path: Path, shared_uv: str) -> None:
+    # Concurrent readers on other hosts replace the shared uv binary and cache on a network home; a uv
+    # running from those files dies with SIGBUS, so each reader runs a private copy with a host-local cache.
+    stdout, shared, curl_log = _run_private_uv_entrypoint(tmp_path, shared_uv=shared_uv)
+
+    fields = dict(part.split("=", 1) for part in stdout.split())
+    assert fields["UV"] == f"{fields['SRC']}/uv-bin/uv"
+    assert fields["CACHE"] == f"/tmp/gym-uv-cache-{os.getuid()}"
+    # Managed Pythons are never shared: each read installs its own under its temporary directory.
+    assert fields["PYTHONS"] == f"{fields['SRC']}/uv-python"
+    # ... and its venv is built on one of them only: a compatible Python on PATH (`~/.local/bin` stays on it) is
+    # never selected in its place.
+    assert fields["VENV_PREFERENCE"] == "only-managed"
+    assert fields["SRC"].startswith("/tmp/gym-install-")
+    # A working uv is copied, not reinstalled over the shared one; a broken or missing one is replaced by an
+    # install into the private dir, and the shared file is left as it was.
+    assert curl_log.exists() is (shared_uv != "working")
+    assert shared.exists() is (shared_uv != "missing")
+    if shared_uv == "broken":
+        assert shared.read_text() == "#!/bin/bash\nexit 1\n"
+    # The disposable install is unmanaged: no user-level receipt points at a directory deleted after the read.
+    assert not (shared.parents[2] / ".config/uv/uv-receipt.json").exists()
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs a real uv to select the interpreter")
+def test_a_private_uv_reader_never_bases_its_venv_on_a_shared_python_on_path(tmp_path: Path) -> None:
+    # A compatible interpreter linked in the shared `~/.local/bin` is what a real uv selects first unless only
+    # managed Pythons are allowed. Downloads are disabled here, so the read must fail rather than build its venv
+    # on that shared interpreter.
+    home, tools = tmp_path / "home", tmp_path / "tools"
+    (home / ".local/bin").mkdir(parents=True)
+    tools.mkdir()
+    shutil.copy(shutil.which("uv"), home / ".local/bin/uv")
+    shared_python = home / ".local/bin" / f"python{sys.version_info[0]}.{sys.version_info[1]}"
+    shared_python.symlink_to(Path(sys.executable).resolve())
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    (tools / "git").chmod(0o755)
+    report = "python -c 'import sys; print(\"BASE=\" + sys.base_prefix)'"
+    out = render_driver_entrypoint(
+        "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
+    )
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "TMPDIR": str(tmp_path),
+        "UV_PYTHON_DOWNLOADS": "never",
+    }
+    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, timeout=120)
+
+    assert "BASE=" not in result.stdout, result.stdout
+    assert f"interpreter at: {home}" not in result.stderr, result.stderr
+    assert result.returncode != 0
+    assert "managed installations" in result.stderr, result.stderr
+
+
+def test_the_driver_entrypoint_keeps_the_shared_uv_install() -> None:
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "UV_CACHE_DIR" not in out and "uv-bin" not in out
+
+
 def test_render_driver_entrypoint_installs_git_if_missing():
     # The driver container (e.g. a minimal python image) may not bundle git.
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
@@ -942,8 +1049,10 @@ def test_build_sbatch_script_resumable_adds_prologue_and_resume_flag(bench_dir):
     assert "# --- Auto-resume chain ---" in script
     assert '_this_script="$OUTPUT_DIR/job.sh"' in script
     assert "_gym_accumulated >= 36000" in script
-    assert "-gt 5" in script
+    assert "_gym_max_retries=5" in script
     assert "+resume_from_cache=True" in script
+    # Right after the driver step, which it reads the status of, the job ends its own chain when the run is complete.
+    assert "\n_gym_run_driver\n" + render_resume_epilogue() + "\n" in script
 
 
 def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_dir):
@@ -951,6 +1060,7 @@ def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_d
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "Auto-resume chain" not in script
+    assert render_resume_epilogue() not in script
     # Only a resubmit (see test_eval_resubmit.py) turns resume on for a run that is not resumable.
     assert "\n    +resume_from_cache=True" not in script
 
@@ -1685,7 +1795,7 @@ def test_build_sbatch_script_vllm_service_backend_omits_ray_prelude(submit_confi
 # Fixtures
 # ---------------------------------------------------------------------------
 
-from nemo_gym.orchestration.api import NodePool, SlurmComputeConfig, VllmServiceConfig
+from nemo_gym.orchestration.api import SlurmComputeConfig, VllmServiceConfig
 
 
 @pytest.fixture
@@ -2987,3 +3097,37 @@ def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged
     assert service_steps and driver_steps
     assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
     assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps + collector_steps)
+
+
+@pytest.mark.parametrize("planted", ["symlink", "group-writable"])
+def test_a_private_uv_entrypoint_never_uses_a_shared_cache_dir_it_does_not_own_privately(
+    tmp_path: Path, planted: str
+) -> None:
+    # A predictable shared name could be created first by another user; then the reader would run a planted
+    # Python or install from a planted cache entry. It keeps its cache in its own temporary directory instead.
+    shared_tmp, elsewhere = tmp_path / "shared-tmp", tmp_path / "elsewhere"
+    shared_tmp.mkdir()
+    elsewhere.mkdir()
+    cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
+    if planted == "symlink":
+        cache.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        cache.mkdir()
+        cache.chmod(0o775)
+
+    stdout, _, _ = _run_private_uv_entrypoint(tmp_path, shared_uv="working", tmpdir=shared_tmp)
+
+    fields = dict(part.split("=", 1) for part in stdout.split())
+    assert fields["CACHE"] == f"{fields['SRC']}/uv-cache"
+    assert not any(elsewhere.iterdir())
+
+
+def test_a_private_uv_entrypoint_creates_its_shared_cache_dir_private(tmp_path: Path) -> None:
+    shared_tmp = tmp_path / "shared-tmp"
+    shared_tmp.mkdir()
+
+    stdout, _, _ = _run_private_uv_entrypoint(tmp_path, shared_uv="working", tmpdir=shared_tmp)
+
+    cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
+    assert dict(part.split("=", 1) for part in stdout.split())["CACHE"] == str(cache)
+    assert cache.stat().st_mode & 0o777 == 0o700
