@@ -680,15 +680,18 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 max_iter=self.config.max_iter,
             )
             status, error = "completed", None
+            deadline = asyncio.timeout(instruction.timeout)
             try:
-                async with asyncio.timeout(instruction.timeout):
+                async with deadline:
                     await crew.akickoff()
-            except TimeoutError:
-                # The time budget ran out: the partial work is graded, as for a harness that hits its own limit.
-                status = "incomplete"
-                episode.gaps.append(ObservationGap(code="agent_run_timeout", invocation_id=episode.invocation_id))
             except Exception as raised:
-                status, error = "failed", raised
+                if isinstance(raised, TimeoutError) and deadline.expired():
+                    # The time budget ran out: the partial work is graded, as for a harness at its own limit.
+                    status = "incomplete"
+                    episode.gaps.append(ObservationGap(code="agent_run_timeout", invocation_id=episode.invocation_id))
+                else:
+                    # Including a model request that timed out, which CrewAI raises as it is.
+                    status, error = "failed", raised
             finally:
                 episode.crew_run.cancel()
             if episode.infrastructure_error is not None:

@@ -3,6 +3,8 @@
 """The shell tool's runner, on the local sandbox provider: real bash processes in a temporary directory."""
 
 import asyncio
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,10 @@ import pytest
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, resolve_provider_config
 from responses_api_agents.crewai_agent import sandbox_shell
 from responses_api_agents.crewai_agent.sandbox_shell import SandboxShell, ShellRunnerError
+
+
+# Killing a process group is reliable on Linux; macOS's bash 3.2 sometimes leaves a subshell of a killed group running.
+_LINUX_PROCESS_GROUPS = pytest.mark.skipif(sys.platform != "linux", reason="Linux process-group kills")
 
 
 @pytest.fixture
@@ -43,6 +49,25 @@ async def test_a_command_runs_in_a_fresh_bash_in_the_task_directory(shell):
     assert result.for_model(1).endswith("[exit code: 3]")
 
 
+async def test_the_runner_adds_nothing_to_output_from_a_provider_that_merges_stderr(shell, monkeypatch):
+    exec_command = shell.sandbox.exec
+
+    # OpenSandbox returns a command's stderr within its output, as this wrapper does.
+    async def merged(command, **options):
+        result = await exec_command(command, **options)
+        return replace(result, stdout=(result.stdout or "") + (result.stderr or ""), stderr="")
+
+    monkeypatch.setattr(shell.sandbox, "exec", merged)
+
+    finished = await asyncio.wait_for(shell.run("echo done"), 10)
+    killed = await asyncio.wait_for(shell.run("echo begun; exec sleep 5"), 10)
+
+    # Job control reports the killed watchdog, or the killed command, only on the runner's stderr.
+    assert finished.output == "done\n"
+    assert killed.timed_out and killed.output == "begun\n"
+
+
+@_LINUX_PROCESS_GROUPS
 async def test_the_deadline_kills_the_commands_whole_process_group(shell):
     workdir = Path(shell.workdir)
     started = asyncio.get_running_loop().time()
@@ -75,6 +100,7 @@ async def test_long_output_keeps_its_head_and_tail(shell):
     assert len(result.output) < 1100
 
 
+@_LINUX_PROCESS_GROUPS
 async def test_release_kills_a_running_command_and_removes_the_session_files(shell):
     shell.timeout_seconds = 60
     session_dir = Path(shell.session_dir)

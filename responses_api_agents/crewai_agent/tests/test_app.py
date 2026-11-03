@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import os
+import sys
 import threading
 import time
 from http.cookies import SimpleCookie
@@ -327,6 +328,8 @@ def test_close_before_an_activation_reports_the_missing_evidence_and_releases_th
     assert list((tmp_path / "sessions").iterdir()) == []
 
 
+# Killing a process group is reliable on Linux; macOS's bash 3.2 sometimes leaves a subshell of a killed group running.
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux process-group kills")
 def test_close_stops_a_running_crew_and_kills_its_command(root, tmp_path):
     model = _Model(_completion(None, ("shell", {"command": "sleep 3; touch late.txt"}), id="chatcmpl-1"))
     activation: dict[str, Any] = {}
@@ -386,6 +389,20 @@ def test_a_rejected_model_request_fails_the_activation_with_its_status(root):
         "status_code": 400,
     }
     assert closed["agent_observations"]["records"][0]["status"] == "failed"
+
+
+def test_a_model_request_that_times_out_fails_the_activation_instead_of_ending_it_early(root):
+    async def timed_out() -> _Reply:
+        raise TimeoutError("model request timed out")
+
+    model = _Model(timed_out)
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        response = _respond(client)
+
+    # Not the crew's own deadline, which would grade the partial work as incomplete.
+    assert response.json()["status"] == "failed"
+    assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
 
 
 def test_a_transient_model_status_is_retried(root):

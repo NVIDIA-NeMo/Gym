@@ -32,6 +32,8 @@ command_pid=$!
 echo "$command_pid" >"$4"
 (sleep "$2"; : >"$4.timeout"; kill -KILL -- "-$command_pid") </dev/null >/dev/null 2>&1 &
 watchdog_pid=$!
+# Job control reports each killed job on stderr, which some providers merge into the output the model sees.
+exec 2>/dev/null
 wait "$command_pid"
 status=$?
 kill -KILL -- "-$watchdog_pid" 2>/dev/null
