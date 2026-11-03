@@ -1,22 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Multi-day workflow environment with simulated time.
+"""Synthetic workflow tasks on the AutomationBench app simulator: single-day, multi-day and multi-turn.
 
-Tasks run against the AutomationBench app simulator (its world state, API routes and assertion checks) with a clock
-the agent controls. A `wait` tool moves the clock forward and applies the task's dated events in time order. Every
-successful state-changing `api_fetch` call is logged with the simulated time, so a task can grade when the agent
-acted, not only what the world holds at the end. Two assertion types use that log:
+Tasks run against the AutomationBench app simulator (its world state, API routes and assertion checks). They come from
+the dataset, not from the benchmark. Each row turns features on through keys in its `info`:
 
-- `acted_on_day` (`record`, `day`, optional `body_contains`): the first write whose URL names `record` happened on
-  `day` (YYYY-MM-DD).
-- `not_acted` (`record`): no write named `record`. It is a guardrail.
+- Single-day: `initial_state` and `assertions` only.
+- Multi-day (`period_end`, `events`, `wait_tool_description`, `wait_until_description`): a `wait` tool moves a
+  per-rollout clock forward and applies the dated events in time order. Successful writes are logged with the
+  simulated time, so two more assertion types can grade when the agent acted: `acted_on_day` (`record`, `day`,
+  optional `body_contains`: the first write whose URL names `record` happened on `day`) and `not_acted` (`record`: no
+  write named it; a guardrail).
+- Multi-turn (`user_card`): when the agent ends a turn without tool calls, a simulated requester answers from its
+  private notes. The requester is an OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`) that
+  sees only the visible conversation. It answers at most `max_user_turns` times and replies DONE when it has nothing
+  to add.
+- Requester-owned apps (`requester_services`): those apps leave the agent's connected services, and the requester
+  operates them itself with `api_search` and `api_fetch` when the agent asks, then reports back.
 
-The reward is the guardrail-gated share of objectives over the world assertions plus these day assertions. Tasks
-come from the dataset, not from the benchmark. The `wait` tool's description and the description of its `until`
-parameter come from each task (`info.wait_tool_description`, `info.wait_until_description`), so the dataset owns all
-text the policy reads.
+The reward is the guardrail-gated share of objectives over the world and day assertions. With
+`unavailable_call_break`, a call to a tool the agent was not given, or to a service not connected for it, also breaks
+a guardrail (reward 0). A requester call that still fails after `requester_max_tries` ends the episode and sets the
+`requester_failed` metric, so training can mask the rollout instead of learning from it.
+
+The dataset owns all text the policy reads: the `wait` tool's text comes from each row, and the requester's replies
+come from the requester model.
 """
 
+import asyncio
 import copy
 import json
 import re
@@ -30,6 +41,45 @@ from automationbench.tools.api.fetch import api_fetch as upstream_api_fetch
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DAY_ASSERTIONS = {"acted_on_day", "not_acted"}
+OUT_OF_SCOPE = re.compile(r'"code": 401, "message": "No (\w+) account is connected')
+THINK = re.compile(r"<think>.*?</think>", re.S)
+REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
+
+# Instructions to the requester model only. The policy sees the requester's replies, never this text.
+REQUESTER_SYSTEM = """You play the person who sent a work request to an assistant that operates business apps for you.
+Your request, word for word:
+{request}
+
+Your private notes (facts you know but did not write in the request):
+{card}
+
+Reply to the assistant's latest message as that person, in one to three plain sentences.
+- If it asks something your notes answer, give that answer exactly as your notes state it.
+- If it asks something your notes do not cover, say you do not know and that it should use its judgment. Then add
+  every one of your notes that the assistant has not mentioned yet, since the work needs them.
+- Never invent facts beyond the request and the notes.
+- If the assistant says the work is done, or asks nothing and needs nothing from you, reply with exactly: DONE"""
+ACTING_REQUESTER_SYSTEM = """You are a person who sent a work request to an AI assistant that operates business apps for
+you. You are not the assistant. Every message you receive comes from that assistant, and you answer it as the person.
+
+Your request, word for word:
+{request}
+
+Your private notes (facts you know but did not write in the request):
+{card}
+
+These apps are yours, and only you can use them: {services}. The assistant cannot reach them. You use them yourself
+through the api_search tool (find the endpoint) and the api_fetch tool (call it). What they hold (ids and names):
+{records}
+- When the assistant's latest message asks you to do or look up something in your apps, do it now with the tools,
+  using the exact values the assistant gave (names, dates, amounts, recipients, wording). Do only what it asked. If
+  it left out a value you need, do not guess: ask for it.
+- Then reply as the person, in one to three plain sentences: what you did, or what you saw.
+- If it asks you to do something in any other app, tell it to do that part itself.
+- If it asks something your notes answer, give that answer exactly as your notes state it. If your notes do not cover
+  it, say you do not know and that it should use its judgment.
+- Never invent facts beyond the request, the notes and what your apps show.
+- If the assistant says the work is done, or asks nothing and needs nothing from you, reply with exactly: DONE"""
 
 
 def _time(value) -> datetime:
@@ -41,6 +91,17 @@ def _time(value) -> datetime:
 def _as_json_text(value) -> str:
     # The api_fetch schema declares params and body as JSON objects, upstream's fetch takes JSON strings.
     return value if isinstance(value, str) else json.dumps(value or {})
+
+
+def _text(content) -> str:
+    """Visible text of a message: list content joined, reasoning dropped."""
+    if isinstance(content, list):
+        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return THINK.sub("", content or "").split("</think>")[-1].strip()
+
+
+def _get(msg, key):
+    return msg.get(key) if isinstance(msg, dict) else getattr(msg, key, None)
 
 
 def apply_patch(world: WorldState, patch: dict) -> None:
@@ -121,16 +182,20 @@ def day_check(log: list[dict], assertion: dict) -> bool:
 def headline(initial_state: dict, world: WorldState, log: list[dict], assertions: list[dict]) -> float:
     """Guardrail-gated share of objectives over world and day assertions.
 
-    A world assertion already true before the agent acts is a guardrail, and so is every `not_acted`. A broken
-    guardrail scores the task 0.
+    Same split as AutomationBench's headline: an assertion with `scored: false` or `excluded: true` is skipped, one
+    already true before the agent acts is a guardrail unless `excluded: false` forces it to score. Every `not_acted`
+    is a guardrail. A broken guardrail scores the task 0.
     """
     initial = WorldState(**copy.deepcopy(initial_state))
     passed = total = 0
     for a in assertions:
+        if a.get("scored") is False or a.get("excluded") is True:
+            continue
         if a["type"] in DAY_ASSERTIONS:
             result, guardrail = day_check(log, a), a["type"] == "not_acted"
         else:
-            result, guardrail = AssertionRegistry.check(world, a), AssertionRegistry.check(initial, a)
+            result = AssertionRegistry.check(world, a)
+            guardrail = AssertionRegistry.check(initial, a) and a.get("excluded") is not False
         if guardrail:
             if not result:
                 return 0.0
@@ -146,7 +211,7 @@ def replay(info: dict, calls: list[dict]) -> float:
     Useful to check that a task is solvable (a reference plan scores 1) before training on it.
     """
     world = WorldState(**copy.deepcopy(info["initial_state"]))
-    clock = Clock(world, copy.deepcopy(info.get("events", [])), info["period_end"])
+    clock = Clock(world, copy.deepcopy(info.get("events", [])), info.get("period_end") or world.meta.current_time)
     for call in calls:
         if "wait" in call:
             clock.wait(call["wait"])
@@ -155,42 +220,255 @@ def replay(info: dict, calls: list[dict]) -> float:
     return headline(info["initial_state"], world, clock.log, info["assertions"])
 
 
-def load_environment(tasks_path: str, max_turns: int = 80, **kwargs):
-    """Build the environment over the Gym rows in `tasks_path` (`responses_create_params.input` and `info`)."""
+def requester_tool(world: WorldState, services: list[str], name: str, arguments: str) -> str:
+    """Run one requester tool call: api_search, or api_fetch with only the requester's own services connected."""
+    from automationbench.tools.api import api_search
+
+    try:
+        args = json.loads(arguments or "{}")
+        if name == "api_search":
+            return api_search(str(args.get("query", "")), int(args.get("top_k") or 5))
+        if name != "api_fetch":
+            return json.dumps({"error": f"no tool named {name}"})
+        saved, world.meta.allowed_services = world.meta.allowed_services, list(services)
+        try:
+            return upstream_api_fetch(
+                world, str(args.get("method", "GET")), str(args.get("url", "")), args.get("params"), args.get("body")
+            )
+        finally:
+            world.meta.allowed_services = saved
+    except Exception as e:  # noqa: BLE001  the requester sees the error the way the agent would
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def own_records(world: WorldState, services: list[str], budget: int = 4000) -> str:
+    """The requester's index of its own apps: per collection the ids and names of up to 30 records, else a count."""
+
+    def label(record: dict) -> str:
+        return next((str(record[k]) for k in ("title", "name", "subject", "email") if record.get(k)), "")
+
+    lines = []
+    for service in services:
+        for name, items in getattr(world, service).model_dump(mode="json").items():
+            if not isinstance(items, list) or not items:
+                continue
+            if len(items) > 30 or not isinstance(items[0], dict):
+                lines.append(f"{service}.{name}: {len(items)} records")
+                continue
+            lines.append(f"{service}.{name}: " + "; ".join(f"{x.get('id')} ({label(x)})" for x in items))
+    text = "\n".join(lines) or "(nothing)"
+    return text if len(text) <= budget else text[:budget] + " ..."
+
+
+async def reward(state, **kwargs) -> float:
+    """The headline over world and day assertions, 0 after a broken unavailable-call guardrail."""
+    if state.get("violation"):
+        return 0.0
+    return headline(state["initial_state"], state["world"], state["clock"].log, state["info"]["assertions"])
+
+
+class RequesterUnavailable(RuntimeError):
+    """The requester endpoint gave no usable answer within its tries."""
+
+
+def _state_metric(key: str):
+    def metric(state, **kwargs) -> float:
+        return float(state.get(key, 0))
+
+    metric.__name__ = key
+    return metric
+
+
+METRICS = (
+    "user_turns",
+    "requester_failed",
+    "empty_turn",
+    "unknown_tool_calls",
+    "out_of_scope_calls",
+    "requester_service_calls",
+    "requester_tool_calls",
+    "violation",
+)
+
+
+def load_environment(
+    tasks_path: str,
+    max_turns: int = 80,
+    requester_base_url: str | None = None,
+    requester_model: str | None = None,
+    requester_body: dict | None = None,
+    max_user_turns: int = 3,
+    max_requester_tool_calls: int = 8,
+    requester_max_tries: int = 4,
+    unavailable_call_break: bool = False,
+    **kwargs,
+):
+    """Build the environment over the Gym rows in `tasks_path` (`responses_create_params.input` and `info`).
+
+    `requester_base_url` and `requester_model` name the OpenAI-compatible chat endpoint that plays the requester on
+    multi-turn rows (`user_card` or `requester_services`). Rows without those keys never call it. `requester_body` is
+    merged into every requester request (for example `{"chat_template_kwargs": {"thinking": false}}`).
+    """
     import verifiers as vf
     from automationbench_env import AutomationBenchEnv
     from datasets import Dataset
 
-    class TimeEnv(AutomationBenchEnv):
+    class ABSynthEnv(AutomationBenchEnv):
         async def setup_state(self, state, **setup_kwargs):
             state = await super().setup_state(state, **setup_kwargs)
             info = state["info"]
-            state["clock"] = Clock(state["world"], copy.deepcopy(info.get("events", [])), info["period_end"])
-            until = {"type": "string", "description": info["wait_until_description"]}
-            wait_tool = vf.Tool(
-                name="wait",
-                description=info["wait_tool_description"],
-                parameters={"type": "object", "properties": {"until": until}, "required": ["until"]},
-            )
-            state["tool_defs"] = [*state["tool_defs"], wait_tool]
+            end = info.get("period_end") or state["world"].meta.current_time.isoformat()
+            state["clock"] = Clock(state["world"], copy.deepcopy(info.get("events", [])), end)
+            if info.get("period_end"):
+                until = {"type": "string", "description": info["wait_until_description"]}
+                wait_tool = vf.Tool(
+                    name="wait",
+                    description=info["wait_tool_description"],
+                    parameters={"type": "object", "properties": {"until": until}, "required": ["until"]},
+                )
+                state["tool_defs"] = [*state["tool_defs"], wait_tool]
+            own = set(info.get("requester_services") or [])
+            if own:
+                meta = state["world"].meta
+                meta.allowed_services = [s for s in meta.allowed_services or [] if s not in own]
             return state
 
+        def _unavailable(self, state, key: str) -> None:
+            state[key] = state.get(key, 0) + 1
+            if unavailable_call_break:
+                state["violation"] = 1
+
         def update_tool_args(self, tool_name, tool_args, messages, state, **update_kwargs):
+            if tool_name not in {t.name for t in state["tool_defs"]}:
+                self._unavailable(state, "unknown_tool_calls")
             args = super().update_tool_args(tool_name, tool_args, messages, state, **update_kwargs)
             if tool_name in ("wait", "api_fetch"):
                 args.pop("world", None)
                 args["clock"] = state["clock"]
             return args
 
+        async def env_response(self, messages, state, **response_kwargs):
+            reply = state.pop("pending_user_reply", None)
+            if reply is not None:
+                return [{"role": "user", "content": reply}]
+            out = await super().env_response(messages, state, **response_kwargs)
+            own = set(state["info"].get("requester_services") or [])
+            for m in out:
+                hit = OUT_OF_SCOPE.search(str(_get(m, "content") or ""))
+                if hit:
+                    self._unavailable(state, "out_of_scope_calls")
+                    state["requester_service_calls"] = state.get("requester_service_calls", 0) + (hit.group(1) in own)
+            return out
+
+        @vf.stop
+        async def no_tools_called(self, state) -> bool:
+            """The agent ended its turn: on multi-turn rows let the requester answer, and stop when it has nothing to add."""
+            if not await super().no_tools_called(state):
+                return False
+            info = state["info"]
+            if not (info.get("user_card") or info.get("requester_services")):
+                return True
+            if not _text(_get(state["trajectory"][-1]["completion"][-1], "content")):
+                # A turn with neither text nor tool call ends the episode: a reply to it would make the next model
+                # request invalid (an assistant message with no content and no tool calls).
+                state["empty_turn"] = 1
+                return True
+            if state.get("user_turns", 0) >= max_user_turns:
+                return True
+            try:
+                reply = await (self._acting_reply(state) if info.get("requester_services") else self._reply(state))
+            except RequesterUnavailable as e:
+                state["requester_failed"] = 1
+                print(f"[ab_synth] requester unavailable, episode ends unscored: {str(e)[:200]}", flush=True)
+                return True
+            if not reply or reply.rstrip(".").upper() == "DONE":
+                return True
+            state["user_turns"] = state.get("user_turns", 0) + 1
+            state["pending_user_reply"] = reply
+            return False
+
+        def _conversation(self, state, system: str, **fields) -> list[dict]:
+            """The requester's view: its instructions, then the visible conversation (no reasoning, no tool traffic)."""
+            prompt = list(state["prompt"])
+            first = next(i for i, m in enumerate(prompt) if _get(m, "role") == "user")
+            msgs = [
+                {"role": "system", "content": system.format(request=_text(_get(prompt[first], "content")), **fields)}
+            ]
+            last = state["trajectory"][-1]
+            for m in prompt[first + 1 :] + list(last["prompt"])[len(prompt) :] + list(last["completion"]):
+                role, text = _get(m, "role"), _text(_get(m, "content"))
+                if role in ("assistant", "user") and text:
+                    msgs.append({"role": "user" if role == "assistant" else "assistant", "content": text})
+            return msgs
+
+        async def _chat(self, messages: list[dict], **body) -> dict:
+            """One requester call through Gym's shared aiohttp client, retried, raising RequesterUnavailable after the
+            last try. A reply cut at max_tokens or with neither text nor tool calls counts as a failed try."""
+            from nemo_gym.client.http_client import request
+
+            if not (requester_base_url and requester_model):
+                raise RequesterUnavailable("requester_base_url and requester_model are not set")
+            url = requester_base_url.rstrip("/") + "/chat/completions"
+            error = None
+            for attempt in range(requester_max_tries):
+                if attempt:
+                    await asyncio.sleep(min(60, 5 * 3**attempt))
+                try:
+                    payload = {"model": requester_model, "messages": messages, **(requester_body or {}), **body}
+                    response = await request("POST", url, json=payload)
+                    response.raise_for_status()
+                    choice = (await response.json())["choices"][0]
+                    message = choice["message"]
+                    if choice.get("finish_reason") != "length" and (
+                        _text(message.get("content")) or message.get("tool_calls")
+                    ):
+                        return message
+                    error = f"no usable answer (finish_reason={choice.get('finish_reason')})"
+                except Exception as e:  # noqa: BLE001  retried, then reported as RequesterUnavailable
+                    error = f"{type(e).__name__}: {e}"
+            raise RequesterUnavailable(error)
+
+        async def _reply(self, state) -> str:
+            card = state["info"]["user_card"]
+            message = await self._chat(
+                self._conversation(state, REQUESTER_SYSTEM, card=card), temperature=0.7, max_tokens=400
+            )
+            return _text(message.get("content"))
+
+        async def _acting_reply(self, state) -> str:
+            """The requester does what the agent asked in its own apps, then replies."""
+            info, world = state["info"], state["world"]
+            services = info["requester_services"]
+            msgs = self._conversation(
+                state,
+                ACTING_REQUESTER_SYSTEM,
+                card=info.get("user_card") or "(none)",
+                services=", ".join(services),
+                records=own_records(world, services),
+            )
+            tools = [t for t in self._all_oai_tools if t["function"]["name"] in ("api_search", "api_fetch")]
+            for n in range(max_requester_tool_calls + 1):
+                choice = "auto" if n < max_requester_tool_calls else "none"
+                message = await self._chat(msgs, temperature=0.7, max_tokens=8192, tools=tools, tool_choice=choice)
+                if not message.get("tool_calls"):
+                    return _text(message.get("content"))
+                msgs.append(
+                    {"role": "assistant", "content": message.get("content") or "", "tool_calls": message["tool_calls"]}
+                )
+                for call in message["tool_calls"]:
+                    fn = call["function"]
+                    result = requester_tool(world, services, fn["name"], fn.get("arguments"))
+                    msgs.append(
+                        {"role": "tool", "tool_call_id": call["id"], "content": result[:REQUESTER_RESULT_CHARS]}
+                    )
+                    state["requester_tool_calls"] = state.get("requester_tool_calls", 0) + 1
+            return ""
+
     def wait(until: str, clock: Clock) -> str:
         return clock.wait(until)
 
     def api_fetch(method: str, url: str, params=None, body=None, clock: Clock = None) -> str:
         return clock.fetch(method, url, params, body)
-
-    async def day_headline(state, **score_kwargs) -> float:
-        info = state["info"]
-        return headline(state["initial_state"], state["world"], state["clock"].log, info["assertions"])
 
     with open(tasks_path) as f:
         rows = [json.loads(line) for line in f if line.strip()]
@@ -205,9 +483,10 @@ def load_environment(tasks_path: str, max_turns: int = 80, **kwargs):
             for i, r in enumerate(rows)
         ]
     )
-    env = TimeEnv(
+    funcs = [reward, *(_state_metric(k) for k in METRICS)]
+    env = ABSynthEnv(
         dataset=dataset,
-        rubric=vf.Rubric(funcs=[day_headline], weights=[1.0]),
+        rubric=vf.Rubric(funcs=funcs, weights=[1.0] + [0.0] * len(METRICS)),
         max_turns=max_turns,
         toolset="api",
         **kwargs,
