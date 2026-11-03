@@ -132,15 +132,88 @@ def _own_clone(tmp_path, origin_url):
     return clone
 
 
-def test_a_pinned_commit_the_own_clone_has_from_the_repo_needs_no_network(repo, tmp_path, monkeypatch):
+def _unreachable(*args, **kwargs):
+    raise git_ref._NetworkCheckError("Could not list the repo: timed out")
+
+
+def test_after_every_attempt_failed_a_commit_the_freshly_pruned_own_clone_has_is_accepted(
+    repo, tmp_path, monkeypatch, caplog, _no_waits_and_no_own_clone
+):
     monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", _own_clone(tmp_path, repo.url))
-
-    def no_network(*args, **kwargs):
-        raise AssertionError("the network check ran")
-
-    monkeypatch.setattr(git_ref, "_ref_exists", no_network)
+    monkeypatch.setattr(git_ref, "_ref_exists", _unreachable)
 
     validate_gym_install_ref(_config(repo.url + "/", repo.head))
+
+    assert _no_waits_and_no_own_clone == [10, 30, 60]
+    assert "Local fallback used" in caplog.text
+
+
+def test_a_commit_only_in_a_stale_remote_tracking_ref_is_rejected_after_the_prune(
+    repo, tmp_path, monkeypatch, _no_waits_and_no_own_clone
+):
+    def origin(*args):
+        subprocess.run(["git", "-C", repo.url, *args], check=True, capture_output=True)
+
+    origin("checkout", "-q", "-b", "gone")
+    origin("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "gone")
+    gone = subprocess.run(
+        ["git", "-C", repo.url, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    clone = _own_clone(tmp_path, repo.url)
+    origin("checkout", "-q", "--detach", repo.head)
+    origin("branch", "-D", "gone")
+    monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", clone)
+    monkeypatch.setattr(git_ref, "_ref_exists", _unreachable)
+    stale = subprocess.run(
+        ["git", "-C", str(clone), "for-each-ref", "--contains", gone, "refs/remotes"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "refs/remotes/origin/gone" in stale  # the clone's ref is stale before the check runs
+
+    with pytest.raises(ValueError, match="network check"):
+        validate_gym_install_ref(_config(repo.url, gone))
+
+
+def test_no_local_fallback_when_the_prune_fetch_fails(repo, tmp_path, monkeypatch):
+    clone = _own_clone(tmp_path, repo.url)
+    subprocess.run(["git", "-C", str(clone), "remote", "set-url", "origin", str(tmp_path / "moved")], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "remote.origin.pushurl", repo.url], check=True)
+    monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", clone)
+
+    # The fetch URL no longer matches the repo, and the repo is unreachable: nothing vouches for the commit.
+    monkeypatch.setattr(git_ref, "_ref_exists", _unreachable)
+    with pytest.raises(ValueError, match="network check"):
+        validate_gym_install_ref(_config(repo.url, repo.head))
+
+
+def test_a_reachable_repo_decides_even_when_the_own_clone_holds_a_stale_remote_branch(repo, tmp_path, monkeypatch):
+    # The clone still has origin/gone after the branch, and its only commit, left the repo: the repo's answer counts.
+    def origin(*args):
+        subprocess.run(["git", "-C", repo.url, *args], check=True, capture_output=True)
+
+    origin("checkout", "-q", "-b", "gone")
+    origin("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "gone")
+    gone = subprocess.run(
+        ["git", "-C", repo.url, "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    clone = _own_clone(tmp_path, repo.url)
+    origin("checkout", "-q", "--detach", repo.head)
+    origin("branch", "-D", "gone")
+    origin("reflog", "expire", "--expire=now", "--all")
+    origin("gc", "-q", "--prune=now")
+    monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", clone)
+    stale = subprocess.run(
+        ["git", "-C", str(clone), "for-each-ref", "--contains", gone, "refs/remotes"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "refs/remotes/origin/gone" in stale  # the clone still holds the deleted branch
+
+    with pytest.raises(ValueError, match="not found"):
+        validate_gym_install_ref(_config(repo.url, gone))
 
 
 def test_an_unpushed_local_commit_is_still_checked_over_the_network(repo, tmp_path, monkeypatch):
