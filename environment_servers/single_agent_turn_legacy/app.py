@@ -22,10 +22,10 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
     EpisodeId,
+    FailureReportRow,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.data import materialize_task
-from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.server_runtime import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,

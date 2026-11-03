@@ -51,6 +51,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.core.episode import TaskId
+from nemo_gym.core.episode_types import is_materialized_task_row
 from nemo_gym.data.dataset_metrics import (
     DatasetMetricHook,
     DatasetMetricsHookError,
@@ -70,7 +71,6 @@ from nemo_gym.data.task_data import (
 )
 from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
-from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 
 
 def _ref_name(ref: Any) -> Optional[str]:

@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agents import SandboxSession, is_harness_termination_failure
+from nemo_gym.core import NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.kilocode_agent.sandbox import KiloSandboxSession
 from responses_api_agents.kilocode_agent.tests.test_sandbox import seed
 

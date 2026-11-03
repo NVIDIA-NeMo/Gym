@@ -22,8 +22,13 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.core import VERIFIER_ERROR, current_verifier_invocation_id
-from nemo_gym.failure_transport import observe_failure
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
 from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
@@ -33,12 +38,10 @@ from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    FailureBoundary,
     ReverifyMode,
     SimpleResourcesServer,
     observe_programmatic_grading,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.bird_sql.eval_utils import execute_and_compare
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 

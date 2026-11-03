@@ -904,9 +904,9 @@ layers = [
     # telemetry/
     "nemo_gym.telemetry",
     # core/
-    "nemo_gym.core : nemo_gym.failure_transport : nemo_gym.server_runtime.episode_types : nemo_gym.typed_exceptions",
+    "nemo_gym.core",
     # utils/
-    "nemo_gym.utils : nemo_gym.exception_inspection",
+    "nemo_gym.utils",
     # config/
     "nemo_gym.config",
 ]

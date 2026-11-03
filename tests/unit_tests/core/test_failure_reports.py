@@ -13,17 +13,7 @@ from pydantic import ValidationError
 
 from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
 from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.failure_transport import (
-    FailureHeader,
-    FailureReportRow,
-    RequestFailureLog,
-    observe_failure,
-    observe_reply,
-    reply_failure_report,
-)
-from nemo_gym.rollouts.rollout_collection import _episode_record
-from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
-from nemo_gym.server_runtime.episode_types import (
+from nemo_gym.core.episode_types import (
     BaseEpisodeResponse,
     EpisodeFailure,
     FailureBoundary,
@@ -31,12 +21,22 @@ from nemo_gym.server_runtime.episode_types import (
     FailureReport,
     SandboxFailureDetails,
 )
-from nemo_gym.typed_exceptions import (
+from nemo_gym.core.failure_transport import (
+    FailureHeader,
+    FailureReportRow,
+    RequestFailureLog,
+    observe_failure,
+    observe_reply,
+    reply_failure_report,
+)
+from nemo_gym.core.typed_exceptions import (
     NgFailureEvent,
     failure_report_for,
     rebuild_failure,
     sdk_error_details,
 )
+from nemo_gym.rollouts.rollout_collection import _episode_record
+from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
 from nemo_gym.verification.judge import judge_call_failed
 
 
@@ -189,7 +189,7 @@ def test_the_request_log_forwards_a_recovered_attempt_without_a_failure_id() -> 
 def test_the_request_log_keeps_a_bounded_sample_and_counts_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
     """A retry loop can fail without end: the log keeps the first events, counts the rest, and never re-checks
     the whole history on each insert."""
-    import nemo_gym.server_runtime.episode_types as episode_types
+    import nemo_gym.core.episode_types as episode_types
 
     checked: list[int] = []
     validate = episode_types.validate_failure_event_map
@@ -407,7 +407,7 @@ async def test_selected_judge_details_and_http_error_identity_survive_observatio
     from aiohttp.test_utils import TestServer
 
     from nemo_gym.client.http_client import raise_for_status
-    from nemo_gym.typed_exceptions import agent_route_failure
+    from nemo_gym.core.typed_exceptions import agent_route_failure
     from nemo_gym.verification.judge import _judge_error
 
     sdk = aiohttp.ClientResponseError(

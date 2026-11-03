@@ -36,6 +36,7 @@ from nemo_gym.core.failure_kinds import (
     DRIVER_INSTALL_FAILED,
     PROVIDER_CREDENTIALS_REJECTED,
     SERVER_SPINUP_TIMEOUT,
+    SERVER_START_FAILED,
 )
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
@@ -51,6 +52,9 @@ _JOB_SCRIPT_NAME = "job.sh"
 PROLOGUE_MARKER = "# --- Auto-resume chain ---"
 JOB_CHAIN_NAME = ".gym_job_chain"
 RETRY_FILE_NAME = ".gym_infra_retries"
+# Written by a segment that restarted the run fresh after a server failed to start before any rollout was saved,
+# named by that segment's job id: the next segment restarts it no more, so one such restart is the bound.
+FRESH_RESTART_MARKER_NAME = ".gym_fresh_restart"
 # Written only by `gym eval resubmit --recover --extend-retries`: infra retries added to the configured cap.
 RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"
 # Capability of the generated script: it reads the recorded extension.
@@ -99,6 +103,9 @@ PROVISIONAL_MARKER_PREFIX = "Continuation "
 # The words of the line a sentinel writes when its follow-up was cancelled before it started and the parent did
 # not finish the run: the chain stopped there, and the line says why.
 CANCELLED_FOLLOWUP_MARKER = "was cancelled before it started"
+# The scheduler answered the follow-up's sbatch with a refusal (a QOS submit limit, an invalid account): nothing was
+# queued, and the accounting is known. The chain stops; `gym eval resubmit --recover` continues it.
+FOLLOW_UP_SUBMISSION_REFUSED = "follow_up_submission_refused"
 # Why the chain ends after a segment that timed out before Gym wrote the task inventory.
 PRE_INVENTORY_REASON = "the segment ended before the task inventory was written; nothing can be resumed"
 # Where a resumed segment records how many progress rows the Store held when it started (one file per job id).
@@ -510,6 +517,7 @@ if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
 fi
 _gym_needs_retry=0
 _gym_stop_reason=""
+_gym_fresh_restart=""
 
 if [[ "$_prev_slurm_job_id" != "" ]]; then
     _accounting=""
@@ -579,6 +587,20 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {resume_refused_reason}" ;;
         {provider_credentials_rejected})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {credentials_rejected_reason}" ;;
+        {server_start_failed})
+            # A server that did not start (its port taken, for instance) before the run saved anything: there is
+            # nothing to resume, and the failure is the infrastructure's, so the segment starts the run again fresh,
+            # once, as an infra retry. A run with saved rollouts keeps the saved-evidence path below.
+            if [[ "$_prev_state" == FAILED && ! -e "$OUTPUT_DIR/artifacts/rollouts_manifest.json" ]]; then
+                _gym_run_dir="${{OUTPUT_DIR%/*}}"
+                if [[ -e "$OUTPUT_DIR/{fresh_restart_marker_name}.$_prev_slurm_job_id" ]] || (( _retries >= _gym_max_retries )); then
+                    _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {server_start_failed} on job $_prev_slurm_job_id before any rollout was saved; fresh restart exhausted; resubmit fresh: gym eval resubmit ${{_gym_run_dir##*/}} ${{OUTPUT_DIR##*/}}"
+                fi
+                _gym_stop_reason=""
+                _gym_needs_retry=1
+                _gym_fresh_restart=1
+                echo "Previous job $_prev_slurm_job_id ended $_prev_state: {server_start_failed} before any rollout was saved; restarting the run fresh as an infra retry."
+            fi ;;
     esac
     # A segment that timed out before Gym wrote the task inventory saved nothing to resume, and the next one would
     # repeat the same startup under the same walltime: the chain ends and names the fresh restart instead.
@@ -684,6 +706,9 @@ fi
 if [[ "$_gym_needs_retry" == 1 ]]; then
     _retries=$((_retries + 1))
     echo "$_retries" > "$_retry_file" || _gym_stop_incomplete "Cannot preserve the spent retry."
+    if [[ -n "$_gym_fresh_restart" ]]; then
+        : > "$OUTPUT_DIR/{fresh_restart_marker_name}.$SLURM_JOB_ID" || _gym_stop_incomplete "Cannot record the fresh restart."
+    fi
     echo "Infra retry $_retries/$_gym_max_retries..."
 fi
 
@@ -721,6 +746,14 @@ if ! _gym_claim_followup; then
         _gym_stop_accounting_unknown "The existing follow-up claim has no unique observed pending job; it may already have run."
     fi
 fi
+# Whether sbatch's reply is the scheduler's definite refusal (an invalid request, a policy or limit it violates, a
+# resource or dependency that is not available), with no sign that the request or its reply was lost on the way. Any
+# other error leaves the submission's outcome unknown: the job may exist.
+_gym_submission_refused() {{
+    [[ "$1" == *"sbatch: error:"* ]] || return 1
+    grep -qiE 'invalid|violates|policy|limit|not available|dependency|qos|account' <<< "$1" || return 1
+    ! grep -qiE 'timed out|time out|socket|unable to contact|connection|communication|zero bytes|try again|temporarily|broken pipe|not connected|unreachable|no route|resolve|standby|i/o error' <<< "$1"
+}}
 if [[ $_gym_queue_followup == 1 ]]; then
     # kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
     if _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
@@ -743,9 +776,19 @@ if [[ $_gym_queue_followup == 1 ]]; then
             echo "{accounting_unknown_prefix} Follow-up submission returned no unique job identity." > "$_incomplete_file"
         fi
     else
-        # The current allocation can finish, but a successor must not erase this uncertainty or reset budgets.
-        echo "{accounting_unknown_prefix} Follow-up submission may have succeeded without an observed reply." > "$_incomplete_file"
-        echo "WARNING: Failed to submit auto-resume follow-up. Inspect the complete queue and terminal accounting; automatic continuation is stopped."
+        _gym_submit_rc=$?
+        if _gym_submission_refused "$_next_output"; then
+            # An observed refusal queued nothing: the accounting is known, and the chain stops here without a requeue.
+            # Its claim names no job, so it goes, or a later reader would take it for an unobserved follow-up.
+            rm -f "$_guard_marker"
+            _gym_refusal=$(grep -m 3 'sbatch: error:' <<< "$_next_output" | paste -sd ' ' - | cut -c1-300)
+            echo "{follow_up_submission_refused}: sbatch exited $_gym_submit_rc: $_gym_refusal" > "$_incomplete_file"
+            echo "WARNING: The scheduler refused the auto-resume follow-up (sbatch exited $_gym_submit_rc: $_gym_refusal). Automatic continuation is stopped; this allocation still runs. Once the scheduler accepts the job, continue with gym eval resubmit --recover."
+        else
+            # The current allocation can finish, but a successor must not erase this uncertainty or reset budgets.
+            echo "{accounting_unknown_prefix} Follow-up submission may have succeeded without an observed reply." > "$_incomplete_file"
+            echo "WARNING: Failed to submit auto-resume follow-up (sbatch exited $_gym_submit_rc: $(paste -sd ' ' - <<< "$_next_output" | cut -c1-300)). Inspect the complete queue and terminal accounting; automatic continuation is stopped."
+        fi
     fi
 fi
 """
@@ -790,7 +833,7 @@ _EPILOGUE_TEMPLATE = """\
 # --- A job that finishes the run ends its own chain ---
 _gym_driver_rc=$?
 _gym_end_own_chain() {{
-    local _rc=$1 _ended=run_complete _role _file _id _result _cancelled="" _kind=""
+    local _rc=$1 _ended=run_complete _role _file _id _result _cancelled="" _kind="" _superseded=""
     # A failure kind the follow-up's prologue turns into its own stop and remedy (its guard): that job keeps its
     # follow-up. Any other kind, or none, gets no stop from the follow-up.
     _file="$OUTPUT_DIR/{driver_failure_name}.$SLURM_JOB_ID"
@@ -812,8 +855,12 @@ _gym_end_own_chain() {{
     elif [[ $_rc != 0 ]] || ! _gym_run_complete; then
         return $_rc
     # This job COMPLETEs: Slurm would cancel its afternotok follow-up, and the follow-up's sentinel would then start on
-    # a full allocation only to write the record below and exit. A deliberate stop already in the marker stays.
-    elif [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+    # a full allocation only to write the record below and exit. A stop the chain recorded earlier (a refused
+    # follow-up, unknown accounting, a cap) described a run with rollouts missing; the complete run supersedes it.
+    else
+        if [[ -s "$_incomplete_file" ]] && ! grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+            _superseded=$(head -n 1 "$_incomplete_file" 2>/dev/null | cut -c1-300)
+        fi
         if _gym_export_required && ! _gym_receipt_current; then
             _ended={export_receipt_missing}
             echo "{export_receipt_missing_reason}" > "$_incomplete_file"
@@ -821,9 +868,11 @@ _gym_end_own_chain() {{
         else
             rm -f "$_incomplete_file"
             echo "Run complete: the Store covers all $_gym_complete_rollouts expected rollouts and $_gym_export_note; job $SLURM_JOB_ID ends the chain with nothing to recover."
+            if [[ -n "$_superseded" ]]; then
+                _ended=run_complete_stop_superseded
+                echo "The chain's earlier stop no longer applies: $_superseded"
+            fi
         fi
-    else
-        _ended=run_complete_stop_kept
     fi
     # The sentinel first: once its follow-up is gone, its afterany dependency is met and it could start.
     for _role in sentinel follow_up; do
@@ -917,6 +966,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         accounting_unknown_prefix=ACCOUNTING_UNKNOWN_PREFIX,
         provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
         cancelled_followup_marker=CANCELLED_FOLLOWUP_MARKER,
+        follow_up_submission_refused=FOLLOW_UP_SUBMISSION_REFUSED,
         allocation_accounting_marker=ALLOCATION_ACCOUNTING_MARKER,
         runtime_admission_marker=(
             RUNTIME_ADMISSION_MARKER if admission_command != "false" else "# No installed-runtime continuation reader"
@@ -938,6 +988,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         rows_at_start_name=ROWS_AT_START_NAME,
         no_progress_segment_reason=NO_PROGRESS_SEGMENT_REASON,
         # The job dir is <output_path>/<gym_job_id>/<benchmark>: the command names both from the directory it runs in.
+        server_start_failed=SERVER_START_FAILED,
+        fresh_restart_marker_name=FRESH_RESTART_MARKER_NAME,
         fresh_restart_command=fresh_restart_command("${_gym_run_dir##*/}", "${OUTPUT_DIR##*/}"),
         driver_failure_name=DRIVER_FAILURE_NAME,
         server_spinup_timeout=SERVER_SPINUP_TIMEOUT,

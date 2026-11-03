@@ -32,12 +32,12 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
-from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI
+from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
-from nemo_gym.client.openai_client import MAX_NUM_TRIES
 from nemo_gym.core import (
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
+    FailureHeader,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -46,8 +46,8 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
+    failure_report_for,
 )
-from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
@@ -79,7 +79,6 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
     token_capture_config,
 )
-from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 

@@ -15,8 +15,9 @@ import pytest
 from aiohttp import ClientPayloadError
 
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.core.failure_transport import FailureReportRow
+from nemo_gym.core.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for
 from nemo_gym.eval.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
-from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
     CollectedEvidence,
@@ -30,7 +31,6 @@ from nemo_gym.orchestration.recovery import (
 from nemo_gym.rollouts.rollout_records import logical_rollout_id, rejudge_predecessor_id
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for
 from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, scored
 
 

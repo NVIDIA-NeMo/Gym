@@ -512,7 +512,8 @@ class TestExtractTextNoStrip:
 )
 def test_only_explicit_judge_verdict_marks_grading(text, expected, parsed):
     from nemo_gym.trajectory import ModelCallRef
-    from nemo_gym.verification.judge import JudgeGrading, _judge_grading
+    from nemo_gym.verification import JudgeGrading
+    from nemo_gym.verification.judge import _judge_grading
 
     grading = JudgeGrading(dependencies=[ModelCallRef(model_call_id="judge-response")])
     token = _judge_grading.set(grading)

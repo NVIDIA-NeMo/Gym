@@ -9,8 +9,8 @@ from aiohttp import ClientPayloadError, ClientResponseError, ServerDisconnectedE
 
 from nemo_gym.agents.utils import verify_call
 from nemo_gym.agents.utils.verify_call import VERIFY_CALL_MAX_ATTEMPTS, verify_with_transport_retry
-from nemo_gym.failure_transport import RequestFailureLog
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.core.failure_transport import RequestFailureLog
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.verification.judge import JUDGE_CALL_MAX_ATTEMPTS
 
 
