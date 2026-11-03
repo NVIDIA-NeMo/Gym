@@ -685,6 +685,9 @@ exclude = [
     "logs",
     "logs.*",
     "responses_api_agents/opencode_sandboxed_agent/results",
+    "responses_api_agents/opencode_sandboxed_agent/results.*",
+    "resources_servers/swebench/logs",
+    "resources_servers/swebench/logs.*",
     # SWE harnesses also create mutable runtime trees inside package directories.
     "responses_api_agents.swe_agents.results",
     "responses_api_agents.swe_agents.results.*",
