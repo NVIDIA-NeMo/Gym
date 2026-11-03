@@ -587,17 +587,20 @@ def _transcript_tokens(record: dict[str, Any]) -> tuple[int, int, bool]:
     return prompt or 0, completion or 0, prompt is not None and completion is not None
 
 
-def _rollout_missing_agent_turns(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _rollout_missing_agent_turns(
+    record: dict[str, Any], trajectory: dict[str, Any], subject: dict[str, int | str]
+) -> list[Finding]:
     steps = _agent_steps(trajectory)
     if any(step.has_model_activity for step in steps):
         return []
-    return [
-        Finding(
-            check="rollout_missing_agent_turns",
-            subject=subject,
-            detail={"reason": "no agent turn with model activity"},
-        )
-    ]
+    detail: dict[str, Any] = {"reason": "no agent turn with model activity"}
+    # A sandbox the provider ended for exceeding a resource limit explains the missing turns. The finding stays: the
+    # detail only says the absence was expected.
+    limit = record.get("sandbox_resource_limit")
+    resource = limit.get("resource") if isinstance(limit, dict) else None
+    if isinstance(resource, str) and resource:
+        detail["expected_absence"] = f"sandbox_resource_limit:{resource}"
+    return [Finding(check="rollout_missing_agent_turns", subject=subject, detail=detail)]
 
 
 def _agent_turn_hollow(
@@ -949,7 +952,7 @@ _ROLLOUT_CHECKS: dict[
     "record_unreadable": lambda record, trajectory, bindings, subject: [],
     "rollout_duplicate_identity": lambda record, trajectory, bindings, subject: [],
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
-        trajectory, subject
+        record, trajectory, subject
     ),
     "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
         _rollout_ended_on_failed_model_call(trajectory, subject)

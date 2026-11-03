@@ -4033,3 +4033,32 @@ def test_tool_call_failed_leaves_the_verdict_to_the_finding_only(tmp_path: Path)
     [digest] = result.rollouts
     assert [finding.check for finding in digest.findings] == ["tool_call_failed"]
     assert digest.verdict == "unhealthy"
+
+
+def _missing_turns_finding(tmp_path: Path, **record_updates):
+    record = _record(0, 0, include_turn=False)
+    record.update(record_updates)
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [])]), workers=1).rollouts
+    [finding] = [item for item in digest.findings if item.check == "rollout_missing_agent_turns"]
+    return finding
+
+
+def test_missing_agent_turns_names_the_resource_limit_that_ended_the_sandbox(tmp_path: Path) -> None:
+    limit = {"resource": "storage", "detail": "Pod entered Failed phase (Evicted)"}
+
+    finding = _missing_turns_finding(tmp_path, sandbox_resource_limit=limit)
+
+    # Still reported: the detail only says why the absence was expected.
+    assert finding.detail == {
+        "reason": "no agent turn with model activity",
+        "expected_absence": "sandbox_resource_limit:storage",
+    }
+
+
+@pytest.mark.parametrize("limit", [None, {}, {"detail": "no resource"}, {"resource": ""}, "storage"])
+def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(tmp_path: Path, limit) -> None:
+    updates = {} if limit is None else {"sandbox_resource_limit": limit}
+
+    finding = _missing_turns_finding(tmp_path, **updates)
+
+    assert finding.detail == {"reason": "no agent turn with model activity"}
