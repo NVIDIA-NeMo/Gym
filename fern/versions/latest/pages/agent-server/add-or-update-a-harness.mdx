@@ -62,7 +62,7 @@ An adapter supplies the knowledge that is specific to the harness or framework:
 | `SimpleResponsesAPIAgent` | The HTTP endpoints, the [agent-session contract](#agent-server-and-environment-server), rollout URL helpers such as `base_url_for_run()`, `resolve_model_base_url()`, and `model_endpoint()`, and the partial-rollout checkpoint hooks. An adapter that does not declare `checkpoint_mode = "exported"` restarts unfinished rollouts from their input, and its checkpoint status reports `mode: restart_only` so a training framework can tell before any checkpoint. |
 | Model Server | Provider normalization, rollout-prefixed routing, [model-call capture](/main/model-server/model-call-capture), and [training-token capture](/main/tutorials/training-tutorials/external-agent-harnesses). |
 | `nemo_gym.sandbox` | Sandbox providers, `AsyncSandbox`, and text file transfer. |
-| `nemo_gym.agent_utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `agent_utils` section below. |
+| `nemo_gym.agents.utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `nemo_gym.agents.utils` section below. |
 | `nemo_gym.trajectory.trajectory_record` | The observation schemas. Rollout collection joins agent observations with captured model calls. |
 | Harness Conformance | Scripted probes and an evidence checker for trajectory evidence. |
 
@@ -176,7 +176,7 @@ The stop route ends a running harness exactly as at its time limit, so the episo
 
 `AgentSeedSessionRequest` carries `agent_session_id`, `episode_id`, `task_id`, `tool_accesses`, and an optional `sandbox_access`. `AgentCloseSessionResponse` returns `agent_observations`, an optional `trajectory` (the harness's own turns, which the Environment Server forwards as `ng_trajectory` on the result and on a failure row alike), and an optional `resources_cookies` jar.
 
-The base class in [`nemo_gym/base_responses_api_agent.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_agent.py) enforces the seed, cookie, and close rules below. The adapter implements the activation rules in `responses()`, as Hermes, Pi, Codex, OpenCode, and OpenClaw do. Every adapter must preserve all of them:
+The base class in [`nemo_gym/agents/base_responses_api_agent.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agents/base_responses_api_agent.py) enforces the seed, cookie, and close rules below. The adapter implements the activation rules in `responses()`, as Hermes, Pi, Codex, OpenCode, and OpenClaw do. Every adapter must preserve all of them:
 
 - **Idempotent seed.** A repeated seed with the same ID and an identical body returns the existing session. A different body for the same ID returns HTTP 409. Agent sessions require `num_workers: 1`, because session state lives in one process.
 - **Cookie binding.** Seed stores `agent_session_id` in the Agent Server's signed session cookie. Activation and close requests with a mismatched cookie return HTTP 409. After close, the cookie stays set, so a stale activation cannot fall back to the sessionless host path.
@@ -203,7 +203,7 @@ class SandboxAccess(BaseModel):
 ```python
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox import resolve_provider_config
-from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 
 connection = body.sandbox_access.connection
 provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
@@ -323,6 +323,8 @@ The episode timeout, `default_episode_timeout_seconds`, covers the whole episode
 
 Since [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902), `cleanup_timeout_seconds` bounds each cleanup callback, such as agent close or Resources Server close, rather than the whole final cleanup. Agent close bounds each of its sequential steps by `session_close_timeout_seconds`: cancelling staging, stopping the harness, collection, exec release, and session-file removal with disconnect (or the owned-sandbox stop). Keep about five times that value, plus any adapter-side wait, within `cleanup_timeout_seconds`. A close that the Environment Server cancels leaves the sandbox to its owner's teardown or the provider TTL.
 
+During agent-server shutdown, the base lifespan closes that worker's remaining sessions concurrently within one total `session_close_timeout_seconds` budget. It reuses the ordinary close operation, preserving checkpoint coordination and cached observations and cookies. Failed or timed-out cleanup keeps state for retry and is reported as unconfirmed. Configure the launcher's `server_shutdown_timeout_seconds` above this drain plus request-cancellation overhead; see [Server Shutdown](/main/troubleshooting/configuration#server-shutdown) for defaults and an aligned configuration.
+
 To run an adapter on a benchmark with an Environment Server, see [Run an integrated agent on a benchmark](/main/agent-server/integrate-existing-agents#run-an-integrated-agent-on-a-benchmark).
 
 ### Select an execution mode
@@ -342,9 +344,9 @@ The compatibility `/run` endpoint requires an explicit `resources_server` bindin
 
 When the Resources Server supplies a sandbox, propagate setup and connection failures. Never run the task on the host or in a different sandbox instead. Host execution is a separate mode that you select explicitly, and it does not isolate the task. Prepare the sandbox runtime during seed, and do not install an unused copy on the Agent Server host. An optional host path may install its runtime on first use instead of at server startup. If it does, document that first-call setup, share concurrent installation attempts, surface installation failures, and let a later call retry. Host tools that every path requires still install at server startup.
 
-## Build the adapter with `agent_utils`
+## Build the adapter with `nemo_gym.agents.utils`
 
-The [`nemo_gym/agent_utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/agent_utils) package implements the sandbox execution lifecycle that Hermes, Pi, Codex, OpenCode, and OpenClaw share. The adapter provides the harness-specific parts: runtime installation, input staging, the harness command, and output parsing. `agent_utils` launches, supervises, stops, and cleans up the harness process.
+The [`nemo_gym/agents/utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/agents/utils) package implements the sandbox execution lifecycle that Hermes, Pi, Codex, OpenCode, and OpenClaw share. The adapter provides the harness-specific parts: runtime installation, input staging, the harness command, and output parsing. `nemo_gym.agents.utils` launches, supervises, stops, and cleans up the harness process.
 
 ### Code layout
 
@@ -363,12 +365,12 @@ The shared modules have separate responsibilities. All of them run on the Agent 
 
 | Shared module | Responsibility |
 | --- | --- |
-| `agent_utils/sandbox_session.py` | `SandboxSession` owns the sandbox connection, the ownership flag, `workdir`, `session_dir`, the execution and finalization tasks, the termination receipt, artifacts, and retryable close state. It uploads the supervisor before launch. `SandboxCommand` carries the harness argv. `shell_assignments()` renders runner input as bash source. |
-| `agent_utils/supervisor_client.py` | Builds the launch and stop shell commands, defines control-file names and timeout budgets, validates termination receipts, and retires session directories safely. |
-| `agent_utils/process_supervisor.sh` | Runs inside the Linux sandbox and needs only bash, a readable `/proc`, a `sleep` that accepts fractions of a second, and `mv`. It leaves the provider's process group, enforces the harness deadline, stops the harness process group and, after a forced stop, the processes described under [Harness termination](#harness-termination), confirms that none still runs, and writes the termination receipt. The sandbox needs neither Gym nor Python. |
-| `agent_utils/harness_runner.sh` | Runs inside the sandbox with bash (built with programmable completion, for `compgen`), `dirname`, `sleep`, and, on bash older than 4.2, `date`. It sources the input that `shell_assignments()` wrote, applies the harness environment, runs the CLI with file-backed stdio, and optionally records each JSON line of stdout with the time it was seen. It exits with the CLI's status, with 125 when it fails before starting the CLI (including an `exit` in its setup code), or with 126 or 127 when the CLI could not be started. |
-| `agent_utils/sandbox_python.py` | `SandboxPythonRuntime` gives a Python harness a private runtime that needs no network, `uv`, or Python in the sandbox. On the Agent Server, it downloads a pinned python-build-standalone CPython for the sandbox's architecture and C library, checks its SHA-256, and installs the harness's requirements from wheels for that platform with `uv`, pinned to the versions in the agent environment. Only requirements given as direct URLs, such as a harness pinned to a commit, are built from source. Both archives are cached on the host under `sandbox_python` in Gym's `cache_dir`. In the sandbox, `install_python_runtime.sh` unpacks them under `/tmp`, checks the harness import, and publishes the runtime with an atomic rename, so concurrent seeds never see a partial runtime. Run the runtime's `python` with `-s`, because it is not a virtual environment and would otherwise import from the task's user site-packages. `is_installed()` reuses a runtime built from the same inputs. Hermes and Stirrup use it. |
-| `agent_utils/task_timeout.py` | `resolve_agent_timeout(metadata, ceiling=...)` returns the harness time budget: a task's positive `metadata.agent_timeout_sec`, which Harbor task rows carry, capped by the configured timeout. A missing or invalid value keeps the configured timeout. Hermes, Pi, Codex, OpenCode, and OpenClaw use it. |
+| `agents/utils/sandbox_session.py` | `SandboxSession` owns the sandbox connection, the ownership flag, `workdir`, `session_dir`, the execution and finalization tasks, the termination receipt, artifacts, and retryable close state. It uploads the supervisor before launch. `SandboxCommand` carries the harness argv. `shell_assignments()` renders runner input as bash source. |
+| `agents/utils/supervisor_client.py` | Builds the launch and stop shell commands, defines control-file names and timeout budgets, validates termination receipts, and retires session directories safely. |
+| `agents/utils/process_supervisor.sh` | Runs inside the Linux sandbox and needs only bash, a readable `/proc`, a `sleep` that accepts fractions of a second, and `mv`. It leaves the provider's process group, enforces the harness deadline, stops the harness process group and, after a forced stop, the processes described under [Harness termination](#harness-termination), confirms that none still runs, and writes the termination receipt. The sandbox needs neither Gym nor Python. |
+| `agents/utils/harness_runner.sh` | Runs inside the sandbox with bash (built with programmable completion, for `compgen`), `dirname`, `sleep`, and, on bash older than 4.2, `date`. It sources the input that `shell_assignments()` wrote, applies the harness environment, runs the CLI with file-backed stdio, and optionally records each JSON line of stdout with the time it was seen. It exits with the CLI's status, with 125 when it fails before starting the CLI (including an `exit` in its setup code), or with 126 or 127 when the CLI could not be started. |
+| `agents/utils/sandbox_python.py` | `SandboxPythonRuntime` gives a Python harness a private runtime that needs no network, `uv`, or Python in the sandbox. On the Agent Server, it downloads a pinned python-build-standalone CPython for the sandbox's architecture and C library, checks its SHA-256, and installs the harness's requirements from wheels for that platform with `uv`, pinned to the versions in the agent environment. Only requirements given as direct URLs, such as a harness pinned to a commit, are built from source. Both archives are cached on the host under `sandbox_python` in Gym's `cache_dir`. In the sandbox, `install_python_runtime.sh` unpacks them under `/tmp`, checks the harness import, and publishes the runtime with an atomic rename, so concurrent seeds never see a partial runtime. Run the runtime's `python` with `-s`, because it is not a virtual environment and would otherwise import from the task's user site-packages. `is_installed()` reuses a runtime built from the same inputs. Hermes and Stirrup use it. |
+| `agents/utils/task_timeout.py` | `resolve_agent_timeout(metadata, ceiling=...)` returns the harness time budget: a task's positive `metadata.agent_timeout_sec`, which Harbor task rows carry, capped by the configured timeout. A missing or invalid value keeps the configured timeout. Hermes, Pi, Codex, OpenCode, and OpenClaw use it. |
 | `sandbox/utils.py` | `upload_text()` and `read_text()` transfer UTF-8 text through `AsyncSandbox.upload()` and `download()`. Use those underlying APIs directly for binary files. |
 
 In the following diagram, dashed boxes are planned helpers that do not exist yet. Edges inside the Agent Server are Python calls unless labeled otherwise. Edges between processes are labeled with their protocol: HTTP/JSON, provider transport, subprocess and signals, or file I/O. A request without an agent session takes the host path.
@@ -381,9 +383,9 @@ flowchart TB
         APP["app.py: HTTP/JSON endpoints, mapping and dispatch"]
         LOCAL["Host harness: SDK or CLI"]
         ADAPTER["sandbox.py: harness-specific session and hooks"]
-        SESSION["agent_utils/sandbox_session.py: SandboxSession lifecycle"]
+        SESSION["agents/utils/sandbox_session.py: SandboxSession lifecycle"]
         INSTALL["harness_install.py: ensure runtime (planned)"]
-        CLIENT["agent_utils/supervisor_client.py: shell and file protocol"]
+        CLIENT["agents/utils/supervisor_client.py: shell and file protocol"]
         FILES["sandbox/utils.py: upload_text and read_text"]
         PROVIDER["AsyncSandbox / provider<br/>Examples: OpenSandbox HTTP(S)<br/>OpenShell gRPC<br/>Docker CLI / Local subprocess"]
         APP -->|"Python SDK / subprocess; no agent session"| LOCAL
@@ -544,7 +546,7 @@ All control files live under `session_dir`, and their names are defined in `supe
 | `cleanup.json` | The supervisor records here whether the harness process group terminated. If a stop wins the launch claim, the stop shell writes the same receipt shape with `return_code: null` and `timed_out: false`. |
 | `output.log` | The launch shell redirects supervisor and harness diagnostics here. Task output is a separate, adapter-owned artifact. |
 
-To migrate an adapter that launches the process supervisor itself, move launch, termination, collection, and release into `SandboxSession`. For Hermes, use the existing `hermes_agent` integration; `hermes_sandboxed_agent` is being deprecated and should not receive new integration work. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agent_utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
+To migrate an adapter that launches the process supervisor itself, move launch, termination, collection, and release into `SandboxSession`. For Hermes, use the existing `hermes_agent` integration; `hermes_sandboxed_agent` is being deprecated and should not receive new integration work. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agents.utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
 
 Out-of-tree adapters written for the Python supervisor also need these changes:
 
@@ -554,7 +556,7 @@ Out-of-tree adapters written for the Python supervisor also need these changes:
 
 ## Prepare the runtime during session setup
 
-Implement the [agent-session API](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_agent.py) on the supplied `SandboxAccess`:
+Implement the [agent-session API](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agents/base_responses_api_agent.py) on the supplied `SandboxAccess`:
 
 - Pin the harness version and the task image digest. Check the image's runtime, utilities, certificates, platform, and permissions.
 - Install the harness in the supplied sandbox during seed, before activation. Do not also install it on the Agent Server host unless the host path uses it. Check bootstrap dependencies, and keep failed commands, exit codes, and stderr.
@@ -582,7 +584,7 @@ Launch the harness with an absolute interpreter and an absolute script path unde
 
 The proposed shared installer must not depend on system package managers or root access. Not all existing adapter installers meet this goal yet. Until they migrate, document the supported images and any remaining prerequisites.
 
-For a Python harness, build the runtime on the Agent Server with [`SandboxPythonRuntime`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agent_utils/sandbox_python.py), as the [Hermes seed](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/sandbox.py) does. The sandbox needs x86_64 or aarch64 Linux with glibc 2.17 or newer or musl, `bash`, `tar` with gzip, and space under `/tmp`, but no network access. The Agent Server needs `uv` and access to the package index and the python-build-standalone releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply. Every dependency except a direct-URL requirement must publish a wheel for the sandbox's platform, so a harness's dependencies can narrow these platforms: Stirrup's need glibc 2.28 or newer and do not support musl.
+For a Python harness, build the runtime on the Agent Server with [`SandboxPythonRuntime`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agents/utils/sandbox_python.py), as the [Hermes seed](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/sandbox.py) does. The sandbox needs x86_64 or aarch64 Linux with glibc 2.17 or newer or musl, `bash`, `tar` with gzip, and space under `/tmp`, but no network access. The Agent Server needs `uv` and access to the package index and the python-build-standalone releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply. Every dependency except a direct-URL requirement must publish a wheel for the sandbox's platform, so a harness's dependencies can narrow these platforms: Stirrup's need glibc 2.28 or newer and do not support musl.
 
 <Note>
 The [shared installation proposal](https://github.com/NVIDIA-NeMo/Gym/pull/3961#issuecomment-6003983236) would add an Agent Server helper, `harness_install.py`, with `ensure_harness_installed(...)`. It would detect the platform, reuse or stage verified artifacts, run the adapter's installer at seed, and return the runtime location. Neither the helper nor its package location exists yet.
@@ -604,7 +606,7 @@ Point every model client in the harness at the rollout-prefixed Gym Model Server
 
 A call sent directly to an external provider is not captured. For training, Gym does not guess at missing calls: if a call's output reaches a later prompt but its chain cannot be proven, Gym sets `mask_sample: true` on the rollout. With `token_id_capture.max_mask_fraction` set, collection stops when too many rollouts are masked.
 
-Set the `x-session-id` header on every model request to the `invocation_id` of the `AgentInvocation` that the adapter returns for that run. A failed attempt, such as an HTTP 429 or 500 reply, has no response ID, so the adapter cannot reference it with a `ModelCallRef`. With model-call capture enabled, the Model Server records the header with each captured call (`_CLIENT_SESSION_HEADER` in [`nemo_gym/base_responses_api_model.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_model.py)), and rollout collection assigns each captured call to the invocation whose ID matches it (`join_agent_model_calls()` in [`nemo_gym/trajectory/trajectory_record.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/trajectory/trajectory_record.py)). Without the header, a failed attempt has no owner: collection records a `model_call_ownership_unavailable` gap, and [Harness Conformance](/main/observability/harness-conformance) fails `ownership.call_owner` and `ownership.gap`. Pi uses the episode's capture key as its invocation ID and sets the header to the same value in `_build_models_config()` in [`responses_api_agents/pi_agent/app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/pi_agent/app.py).
+Set the `x-session-id` header on every model request to the `invocation_id` of the `AgentInvocation` that the adapter returns for that run. A failed attempt, such as an HTTP 429 or 500 reply, has no response ID, so the adapter cannot reference it with a `ModelCallRef`. With model-call capture enabled, the Model Server records the header with each captured call (`_CLIENT_SESSION_HEADER` in [`nemo_gym/models/model_call_capture.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/models/model_call_capture.py)), and rollout collection assigns each captured call to the invocation whose ID matches it (`join_agent_model_calls()` in [`nemo_gym/trajectory/trajectory_record.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/trajectory/trajectory_record.py)). Without the header, a failed attempt has no owner: collection records a `model_call_ownership_unavailable` gap, and [Harness Conformance](/main/observability/harness-conformance) fails `ownership.call_owner` and `ownership.gap`. Pi uses the episode's capture key as its invocation ID and sets the header to the same value in `_build_models_config()` in [`responses_api_agents/pi_agent/app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/pi_agent/app.py).
 
 Send back the cookies that the Model Server returns on later calls of the same rollout, as `SimpleAgent` does. The vLLM Model Server keeps a rollout's calls on one backend endpoint by using the rollout ID, or the session cookie when no rollout ID is present. A call with neither starts a new session and can land on a different endpoint.
 

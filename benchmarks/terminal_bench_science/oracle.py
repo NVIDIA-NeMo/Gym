@@ -28,10 +28,9 @@ from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science import prepare as preparation
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.config import global_config
+from nemo_gym.config import BaseServerConfig, global_config
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, create_provider, resolve_provider_config
-from nemo_gym.server_utils import BaseServerConfig
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import (
     AgentTermination,

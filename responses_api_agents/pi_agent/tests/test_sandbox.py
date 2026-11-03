@@ -25,13 +25,16 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    parse_cleanup_receipt,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
@@ -564,8 +567,10 @@ async def test_sandbox_runtime_guards_reach_the_pi_invocation(setup):
     sandbox.stop.assert_not_awaited()
 
 
-async def test_mcp_grants_reach_pi_through_the_gym_extension(setup):
+@pytest.mark.parametrize("enable_tools", [True, False])
+async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools):
     agent, sandbox = setup
+    agent.config.enable_tools = enable_tools
     agent.config.sandbox_mcp_timeout_seconds = 120
     agent.config.finish_tool_names = ["finish"]
     body = seed_with_tools(
@@ -1035,9 +1040,13 @@ async def test_worker_diagnostics_never_override_exit_or_cleanup(setup, artifact
     sandbox.stop.assert_not_awaited()
 
 
-def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials(setup):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+@pytest.mark.parametrize("enable_tools", [True, False])
+def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials(setup, mode, enable_tools):
     agent, sandbox = setup
     agent.config.system_prompt = "config instruction"
+    agent.config.system_prompt_mode = mode
+    agent.config.enable_tools = enable_tools
     agent.config.models_config = {"providers": {"unrelated": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
@@ -1053,8 +1062,10 @@ def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials
         )
         assert response.status_code == 200, response.text
         payload = staged(sandbox)
+        assert ("--no-builtin-tools" in payload["command"]) is (not enable_tools)
+        assert (f"{sandbox.directory}/runtime-guards.mjs" in payload["command"]) is enable_tools
         assert payload["command"][-2:] == [
-            "--append-system-prompt",
+            "--system-prompt" if mode == "replace" else "--append-system-prompt",
             "config instruction\n\nrequest instruction\n\ninput instruction",
         ]
         assert payload["prompt"] == "task"
@@ -1093,10 +1104,12 @@ def test_close_retry_and_stale_activation_do_not_run_host_pi(setup):
         with patch.object(agent, "_run_pi", AsyncMock(side_effect=AssertionError("host Pi must not run"))):
             assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 409
+        sandbox.disconnect.assert_awaited_once()
         client.cookies.clear()
         replacement = seed().model_copy(update={"agent_session_id": "replacement-session"})
         assert client.post("/v1/agent_sessions", json=replacement.model_dump(mode="json")).status_code == 200
-    sandbox.disconnect.assert_awaited_once()
+    assert sandbox.disconnect.await_count == 2
+    assert all(record.state is None for record in agent._session_records.values())
 
 
 async def test_concurrent_closes_share_receipt(setup):
@@ -1346,10 +1359,9 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         SingleAgentTurnEnvironmentServer,
         SingleAgentTurnEnvironmentServerConfig,
     )
-    from nemo_gym.config import GlobalConfigDictParser
+    from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.server_runtime import SingleAgentTurnRequest
-    from nemo_gym.server_utils import BaseServerConfig
 
     agent, sandbox = setup
     root = Path(__file__).parents[3]
@@ -2179,7 +2191,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
         from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.trajectory.trajectory_record import join_agent_model_calls
+        from nemo_gym.trajectory import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"
@@ -2611,7 +2623,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     [("Request timed out.", "model_transport_error"), ("Unrecognized failure", "unknown")],
 )
 def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup

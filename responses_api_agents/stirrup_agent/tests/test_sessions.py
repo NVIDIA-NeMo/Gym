@@ -14,21 +14,19 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.agent_utils import sandbox_python
-from nemo_gym.agent_utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    SandboxPlatform,
+    SandboxPythonRuntime,
+    SandboxSession,
+    agent_tools,
+)
+from nemo_gym.agents.utils import sandbox_python
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.sandbox import (
-    AsyncSandbox,
-    DirectSandboxConnection,
-    SandboxAccess,
-    SandboxExecResult,
-    SandboxSpec,
-    agent_tools,
-)
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.stirrup_agent import app, sandbox
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig

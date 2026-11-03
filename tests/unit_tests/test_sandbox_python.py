@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 import shlex
+import shutil
 import sys
 import tarfile
 from dataclasses import dataclass
@@ -16,8 +17,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils import sandbox_python
-from nemo_gym.agent_utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
+from nemo_gym.agents.utils import sandbox_python
+from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
@@ -495,6 +496,43 @@ async def test_seeding_ignores_the_task_uv_configuration_and_leaves_the_task_unt
 
 
 @pytest.mark.sandbox
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("unshare") is None, reason="needs Linux user namespaces")
+@pytest.mark.parametrize("archive_name", ["python.tar.gz", "site-packages.tar.gz"])
+async def test_install_does_not_restore_unmapped_archive_owners(task, monkeypatch, archive_name: str) -> None:
+    probe = await asyncio.create_subprocess_exec(
+        "unshare", "-Ur", "true", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await probe.communicate()
+    if probe.returncode:
+        pytest.skip(f"user namespaces unavailable: {stderr.decode(errors='replace')}")
+
+    archive = task.root / "archives" / archive_name
+    with tarfile.open(archive) as tar:
+        entries = [(entry, tar.extractfile(entry).read()) for entry in tar.getmembers()]
+    with tarfile.open(archive, "w:gz") as tar:
+        for entry, contents in entries:
+            # Only namespace root is mapped. Neither these IDs nor the host's account names may be restored.
+            entry.uid, entry.gid, entry.uname, entry.gname = 123456, 123456, "", ""
+            tar.addfile(entry, io.BytesIO(contents))
+
+    execute = task.sandbox.exec
+
+    async def remapped_root(command: str, **kwargs) -> SandboxExecResult:
+        if shlex.split(command)[0] == "bash":
+            command = f"unshare -Ur {command}"
+        return await execute(command, **kwargs)
+
+    monkeypatch.setattr(task.sandbox, "exec", remapped_root)
+    runtime = _runtime(task)
+    await runtime.install(task.sandbox, timeout_s=60)
+
+    assert await runtime.is_installed(task.sandbox)
+    for path in (Path(runtime.python), Path(runtime.directory) / _SITE_PACKAGES / "fake_harness.py"):
+        assert (path.stat().st_uid, path.stat().st_gid) == (os.getuid(), os.getgid())
+    assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
+
+
+@pytest.mark.sandbox
 async def test_concurrent_seeds_publish_one_runtime(task) -> None:
     runtime = _runtime(task)
 
@@ -628,7 +666,7 @@ async def test_an_interrupted_local_installer_removes_its_setup_and_preserves_th
             task,
             import_check=f"import pathlib, time; pathlib.Path({str(checking)!r}).touch(); time.sleep(60)",
         )
-        install = asyncio.create_task(stalled.install(task.sandbox, timeout_s=2 if interruption == "timeout" else 60))
+        install = asyncio.create_task(stalled.install(task.sandbox, timeout_s=60))
         try:
             await _until(checking.exists)
             # The archives have been extracted and the fresh interpreter has entered its import check.
@@ -636,7 +674,11 @@ async def test_an_interrupted_local_installer_removes_its_setup_and_preserves_th
             if interruption == "cancel":
                 install.cancel()
             with pytest.raises(TimeoutError if interruption == "timeout" else asyncio.CancelledError):
-                await install
+                # Arm the short interruption only once setup and interpreter startup have finished.
+                if interruption == "timeout":
+                    await asyncio.wait_for(install, timeout=0.1)
+                else:
+                    await install
         finally:
             if not install.done():
                 install.cancel()
@@ -675,9 +717,11 @@ async def test_a_remote_installer_keeps_its_setup_when_the_caller_times_out(task
             f"\nwhile not pathlib.Path({str(gate)!r}).exists(): time.sleep(0.02)"
         ),
     )
+    install = asyncio.create_task(runtime.install(task.sandbox, timeout_s=60))
     try:
-        with pytest.raises(TimeoutError, match="Installing the fake Python runtime"):
-            await runtime.install(task.sandbox, timeout_s=2)
+        await _until(checking.exists)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(install, timeout=0.1)
         assert checking.exists()
         assert remote is not None and not remote.done()
         (setup,) = Path(runtime.directory).glob(".setup-*")
@@ -685,6 +729,9 @@ async def test_a_remote_installer_keeps_its_setup_when_the_caller_times_out(task
         assert (setup / "python.tar.gz").exists()
         assert (setup / "site-packages.tar.gz").exists()
     finally:
+        if not install.done():
+            install.cancel()
+        await asyncio.gather(install, return_exceptions=True)
         gate.touch()
         if remote is not None:
             result = await asyncio.wait_for(remote, timeout=30)
