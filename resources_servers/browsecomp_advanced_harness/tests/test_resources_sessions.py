@@ -95,6 +95,7 @@ def test_typed_sessions_follow_the_session_contract(tmp_path: Path, workspace: s
         holds_state=lambda resources_session_id: (
             resources_session_id in server._typed_sessions or resources_session_id in server._session_workspaces
         ),
+        verify_body=_verify_body("Answer: Paris Confidence: 90%"),
     )
     # Both closed sessions' workspaces are gone from disk, not only from the server's map.
     assert list(tmp_path.iterdir()) == []
@@ -181,7 +182,7 @@ def test_the_legacy_run_seed_and_verify_still_own_the_cookie_session(tmp_path: P
 
     verify = client.post("/verify", json=_verify_body("Answer: Paris Confidence: 90%"))
     assert verify.status_code == 200, verify.text
-    assert verify.json()["reward"] == 1.0
+    assert (verify.json()["reward"], verify.json()["mask_sample"]) == (1.0, False)
     assert server._session_workspaces == {}
     assert not (tmp_path / sid).exists()
     assert sid not in server._session_id_to_metrics
@@ -199,8 +200,8 @@ def test_verify_keeps_metrics_for_the_dump_at_shutdown(tmp_path: Path) -> None:
     assert "resources-session" in server._session_id_to_metrics
 
 
-def test_verify_after_close_still_grades_the_answer(tmp_path: Path) -> None:
-    """The reward depends only on the response and the task, not on the session's workspace, so no mask."""
+def test_verify_after_close_is_masked(tmp_path: Path) -> None:
+    """Masked like every server under the contract, although the answer alone would score 1."""
     server = _server(tmp_path, workspace="per_session")
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     assert client.post("/seed_session", json=_seed()).status_code == 200
@@ -209,6 +210,19 @@ def test_verify_after_close_still_grades_the_answer(tmp_path: Path) -> None:
     verify = client.post("/verify", json=_verify_body("Answer: Paris Confidence: 90%"))
 
     assert verify.status_code == 200, verify.text
-    assert verify.json()["reward"] == 1.0
-    assert "mask_sample" not in verify.json()
+    verified = verify.json()
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
+    assert verified["metrics"] == {"async_tavily_calls": []}
+    # The masked verify recreates neither the workspace nor a metrics entry.
     assert not (tmp_path / "resources-session").exists()
+    assert "resources-session" not in server._session_id_to_metrics
+
+
+def test_a_caller_that_never_seeds_is_still_graded(tmp_path: Path) -> None:
+    """A verify whose session the fence never closed, here one nobody seeded, is graded from the response."""
+    client = TestClient(_server(tmp_path, workspace="per_session").setup_webserver(), raise_server_exceptions=False)
+
+    verify = client.post("/verify", json=_verify_body("Answer: Paris Confidence: 90%"))
+
+    assert verify.status_code == 200, verify.text
+    assert (verify.json()["reward"], verify.json()["mask_sample"]) == (1.0, False)
