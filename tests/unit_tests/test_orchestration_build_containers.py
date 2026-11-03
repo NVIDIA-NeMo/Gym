@@ -404,7 +404,7 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
             raise RuntimeError("Command failed")
         container_config.output_container_fpath.write_text("warmup")
 
-    monkeypatch.setattr(BuildContainerHelper, "_run_warmup", warmup)
+    monkeypatch.setattr(BuildContainerHelper, "_warmup_container", warmup)
     helper = BuildContainerHelper(config=container_config)
     expected_stages = ["build-vllm", "build-flashinfer", "build-mooncake", "warmup"]
     if failed_stage:
@@ -711,7 +711,7 @@ def test_run_cli_uses_yaml_without_building(entrypoint, tmp_path, monkeypatch):
 
     build = AsyncMock(side_effect=AssertionError("Must not rebuild"))
     monkeypatch.setattr(BuildContainerHelper, "run", build)
-    monkeypatch.setattr(BuildContainerHelper, "run_container", capture)
+    monkeypatch.setattr(BuildContainerHelper, "_run_container", capture)
     args = ["--run", "--config", str(config), "++run.env.SBATCH_TIMELIMIT=02:00:00"]
     if entrypoint == "gym":
         monkeypatch.setattr(sys, "argv", ["gym", "build-containers", *args])
@@ -771,7 +771,7 @@ async def test_run_real_launcher_uses_yaml_and_preserves_image(tmp_path, monkeyp
     )
     config.output_container_fpath.write_bytes(b"built and warmed")
     config.log_file.write_text("existing build log\n")
-    launch = BuildContainerHelper(config=config).run_container()
+    launch = BuildContainerHelper(config=config)._run_container()
     if status:
         with pytest.raises(RuntimeError, match=f"returncode {status}"):
             await launch

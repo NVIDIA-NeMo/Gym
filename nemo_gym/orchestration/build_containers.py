@@ -613,44 +613,6 @@ class BuildContainerHelper(BaseModel):
         }
         return {env_var: str(self.config.slurm[key]) for key, env_var in mapping.items() if key in self.config.slurm}
 
-    async def run_container(self) -> None:
-        """Submit the YAML's run configuration without rebuilding or modifying the image."""
-        config = self.config.run
-        if config is None:
-            raise ValueError("Define run.env and run.args in the container config before using --run")
-        launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
-        if not launcher.is_file():
-            raise FileNotFoundError(f"Launcher not found: {launcher}. Run from the Gym checkout.")
-        if not self.config.output_container_fpath.is_file():
-            raise FileNotFoundError(f"Built image not found: {self.config.output_container_fpath}")
-        env = self._slurm_launcher_env()
-        env.update(
-            {key: str(int(value)) if isinstance(value, bool) else str(value) for key, value in config.env.items()}
-        )
-        env["CONTAINER"] = str(self.config.output_container_fpath)
-        if not env.get("EXPERIMENT_NAME"):
-            raise ValueError("Set run.env.EXPERIMENT_NAME for the evaluation run")
-        self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
-        Path("slurm-logs").mkdir(exist_ok=True)
-        command = join(
-            [
-                "env",
-                "-u",
-                "SAVE_WARMED_CONTAINER",
-                "-u",
-                "SBATCH_WAIT",
-                *(f"{key}={value}" for key, value in env.items()),
-                "bash",
-                str(launcher),
-                *config.args,
-            ]
-        )
-        result = await _run_command(command, self.config.log_file)
-        if result.returncode:
-            raise RuntimeError(
-                f"Evaluation submission failed with returncode {result.returncode}. See {self.config.log_file}"
-            )
-
     async def run(self) -> None:
         try:
             await self._run()
@@ -690,9 +652,9 @@ class BuildContainerHelper(BaseModel):
 
         if self.config.warmup is not None:
             print("Running warmup. Currently, the warmup logs aren't printed and need to be checked manually.")
-            await self._run_warmup()
+            await self._warmup_container()
 
-    async def _run_warmup(self) -> None:
+    async def _warmup_container(self) -> None:
         # TODO @bxyu-nvidia: Eventually this sbatch_external_vllm will migrate to Gym-native orchestration and we can just import the relevant thing
         launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
         if not launcher.is_file():
@@ -748,6 +710,44 @@ class BuildContainerHelper(BaseModel):
             warmed.replace(output)
         print(f"Saved warmed container: {output}")
 
+    async def _run_container(self) -> None:
+        """Submit the YAML's run configuration without rebuilding or modifying the image."""
+        config = self.config.run
+        if config is None:
+            raise ValueError("Define run.env and run.args in the container config before using --run")
+        launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
+        if not launcher.is_file():
+            raise FileNotFoundError(f"Launcher not found: {launcher}. Run from the Gym checkout.")
+        if not self.config.output_container_fpath.is_file():
+            raise FileNotFoundError(f"Built image not found: {self.config.output_container_fpath}")
+        env = self._slurm_launcher_env()
+        env.update(
+            {key: str(int(value)) if isinstance(value, bool) else str(value) for key, value in config.env.items()}
+        )
+        env["CONTAINER"] = str(self.config.output_container_fpath)
+        if not env.get("EXPERIMENT_NAME"):
+            raise ValueError("Set run.env.EXPERIMENT_NAME for the evaluation run")
+        self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
+        Path("slurm-logs").mkdir(exist_ok=True)
+        command = join(
+            [
+                "env",
+                "-u",
+                "SAVE_WARMED_CONTAINER",
+                "-u",
+                "SBATCH_WAIT",
+                *(f"{key}={value}" for key, value in env.items()),
+                "bash",
+                str(launcher),
+                *config.args,
+            ]
+        )
+        result = await _run_command(command, self.config.log_file)
+        if result.returncode:
+            raise RuntimeError(
+                f"Evaluation submission failed with returncode {result.returncode}. See {self.config.log_file}"
+            )
+
     async def _clean_on_failure(self) -> None:
         command_output = await _run_command(
             command=join(["rm", "-f", "--", str(self.config.output_container_fpath)]),
@@ -787,7 +787,7 @@ def main() -> None:
     """Run container build stages using Gym's resolved configuration."""
     global_config_dict = get_global_config_dict()
     bch = BuildContainerHelper(config=BuildContainerConfig.model_validate(global_config_dict))
-    asyncio.run(bch.run_container() if bch.config.run_only else bch.run())
+    asyncio.run(bch._run_container() if bch.config.run_only else bch.run())
 
 
 if __name__ == "__main__":
