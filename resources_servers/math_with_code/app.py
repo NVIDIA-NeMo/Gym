@@ -70,6 +70,10 @@ class ExecutePythonResponse(BaseModel):
 
 def _session_worker(child_conn, max_execution_time: int):
     """Runs forever in its own process, keeping globals between calls."""
+    # A forked worker inherits the server's Python handlers, such as uvicorn's SIGTERM handler, which would turn
+    # _SessionHandle.close's terminate() into a no-op and leave only SIGKILL after the joins time out.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     exec_globals = {
         "__builtins__": {
             "print": print,
@@ -245,13 +249,13 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
             )
         if self._fence.closed_episode(sid) is not None:
             # The session closed while this call ran, so stop the worker the call may have started.
-            await asyncio.to_thread(self._cleanup_session, sid)
+            await self._cleanup_session(sid)
             raise ResourcesSessionLostError(f"math_with_code session {sid} closed during the call")
         return response
 
     async def end_session(self, request: Request) -> ExecutePythonResponse:
         session_id = request.session[SESSION_ID_KEY]
-        await asyncio.to_thread(self._cleanup_session, session_id)
+        await self._cleanup_session(session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")
 
     async def seed_session(
@@ -294,7 +298,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
             if identity is not None and identity[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             # Verify has already stopped a verified episode's worker, so this finds none.
-            await asyncio.to_thread(self._cleanup_session, resources_session_id)
+            await self._cleanup_session(resources_session_id)
             self._session_episodes.pop(resources_session_id, None)
             self._fence.mark_closed(resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
@@ -348,16 +352,17 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
             )
         finally:
             try:
-                await asyncio.to_thread(self._cleanup_session, session_id)
+                await self._cleanup_session(session_id)
             except RuntimeError:
                 # The score stands; the worker stays registered, so /close_session retries and reports it.
                 logger.exception("Could not stop the Python worker of session %s", session_id)
 
-    def _cleanup_session(self, session_id: str) -> None:
+    async def _cleanup_session(self, session_id: str) -> None:
         """Stop the session's worker process; one that survives stays registered, so a later cleanup retries it."""
         handle = self._sessions.get(session_id)
         if handle is not None:
-            handle.close()
+            # Only the blocking join runs in a thread; the registry is read and changed on the event loop.
+            await asyncio.to_thread(handle.close)
             # A concurrent cleanup may already have dropped it, and a later call may have started another.
             if self._sessions.get(session_id) is handle:
                 del self._sessions[session_id]

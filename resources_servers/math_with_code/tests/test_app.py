@@ -14,7 +14,7 @@
 # limitations under the License.
 import asyncio
 import multiprocessing
-import threading
+import signal
 import time
 from typing import Any, Dict
 from unittest.mock import MagicMock
@@ -39,7 +39,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSessionLostError,
 )
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 
 
 class TestApp:
@@ -209,14 +209,13 @@ class TestResourcesSessions:
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
         await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
-        stopped, finish_close = asyncio.Event(), threading.Event()
-        loop = asyncio.get_running_loop()
+        stopped, finish_close = asyncio.Event(), asyncio.Event()
         real_cleanup = PythonExecutorResourcesServer._cleanup_session
 
-        def delayed_cleanup(server, session_id):
-            real_cleanup(server, session_id)
-            loop.call_soon_threadsafe(stopped.set)
-            assert finish_close.wait(timeout=5)
+        async def delayed_cleanup(server, session_id):
+            await real_cleanup(server, session_id)
+            stopped.set()
+            await asyncio.wait_for(finish_close.wait(), timeout=5)
 
         worker_factory = MagicMock()
         worker_factory.return_value.exec.return_value = ("", "", "1")
@@ -278,6 +277,25 @@ class TestResourcesSessions:
 
         assert not handle._proc.is_alive()
         assert time.monotonic() - started < 10
+
+    def test_forked_worker_does_not_keep_the_servers_sigterm_handler(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Under uvicorn the server has a Python SIGTERM handler, which a forked worker would inherit.
+        monkeypatch.setattr("app.multiprocessing", multiprocessing.get_context("fork"))
+        previous = signal.signal(signal.SIGTERM, lambda signum, frame: None)
+        try:
+            handle = _SessionHandle(max_execution_time=60)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        handle._conn.send({"cmd": "exec", "code": "import time\ntime.sleep(60)"})
+        time.sleep(0.5)
+
+        started = time.monotonic()
+        handle.close()
+
+        assert not handle._proc.is_alive()
+        # join(1) for the close message, then terminate() ends it at once; only SIGKILL would take 5 s more.
+        assert time.monotonic() - started < 3
+        assert handle._proc.exitcode == -signal.SIGTERM
 
     def test_worker_that_outlives_sigkill_raises(self) -> None:
         handle = _SessionHandle(max_execution_time=10)
