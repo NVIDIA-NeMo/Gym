@@ -3551,6 +3551,151 @@ def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
     assert merged[0]["parent_session_id"] == "recorded_root"
 
 
+########################################
+# Agent error classification and masking
+########################################
+
+
+class TestAgentErrorMasking:
+    # The OpenHands local runtime raises this when its action-execution server process exits; the
+    # controller records it as the episode error.
+    RUNTIME_DIED_ERROR = (
+        "RetryError[<Future at 0x7f3a1c2d4e50 state=finished raised RuntimeError>]: Server process died"
+    )
+
+    def test_classify_agent_error(self) -> None:
+        assert swe_app._classify_agent_error(None) is None
+        assert swe_app._classify_agent_error("Agent reached maximum iteration in headless mode") == "max_iteration"
+        assert swe_app._classify_agent_error("ContextWindowExceededError") == "context_window"
+        assert swe_app._classify_agent_error("Agent got stuck in a loop") == "stuck_in_loop"
+        assert swe_app._classify_agent_error(self.RUNTIME_DIED_ERROR) == "runtime_died"
+        assert swe_app._classify_agent_error("AgentRuntimeDisconnectedError: Server process died") == "runtime_died"
+        assert swe_app._classify_agent_error("some other failure") == "other"
+
+    @staticmethod
+    async def _mask_sample_for(
+        monkeypatch, tmp_path: Path, persisted_metrics: dict, *, runtime_death_cause: str = "unknown"
+    ) -> bool:
+        """Run `_inner_responses` past the masking decision with the agent run stubbed out."""
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        params.metrics_fpath.write_text(json.dumps(persisted_metrics))
+        monkeypatch.setattr(
+            swe_app,
+            "runner_ray_remote",
+            MagicMock(remote=AsyncMock(return_value=swe_app.RunnerResult(None, runtime_death_cause))),
+        )
+        monkeypatch.setattr(
+            SWEBenchWrapper, "get_openhands_trajectory_from_completions", lambda self, *args: ([], [], 0, None)
+        )
+        response = await wrapper._inner_responses(params, MagicMock())
+        return json.loads(response.metadata["instance_config"])["mask_sample"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("runtime_death_cause", ["unknown", "pre_execution"])
+    async def test_runtime_death_mask_requires_provenance(self, monkeypatch, tmp_path, runtime_death_cause) -> None:
+        agent_error_kind = swe_app._classify_agent_error(self.RUNTIME_DIED_ERROR)
+        assert agent_error_kind == "runtime_died"
+        assert await self._mask_sample_for(
+            monkeypatch,
+            tmp_path,
+            {"agent_error_kind": agent_error_kind},
+            runtime_death_cause=runtime_death_cause,
+        ) is (runtime_death_cause == "pre_execution")
+
+    @pytest.mark.asyncio
+    async def test_genuine_agent_failure_is_not_masked(self, monkeypatch, tmp_path) -> None:
+        assert await self._mask_sample_for(monkeypatch, tmp_path, {"agent_error_kind": "other"}) is False
+        assert await self._mask_sample_for(monkeypatch, tmp_path, {"agent_error_kind": None}) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("run_time", [59.0, 60.0, 61.0])
+    @pytest.mark.parametrize("runtime_death_cause", ["unknown", "pre_execution"])
+    async def test_runtime_death_at_time_budget_is_not_an_infrastructure_error(
+        self, monkeypatch, tmp_path, run_time, runtime_death_cause
+    ) -> None:
+        params = _make_instance_config(str(tmp_path), debug=False, swebench_agent_timeout=60)
+        params.metrics_fpath.write_text("{}")
+        params.generation_apptainer_spinup_timestamp_fpath.write_text("100.0")
+        agent_output = tmp_path / "agent-output.json"
+        agent_output.write_text(
+            json.dumps(
+                {
+                    "instance_id": params.instance_id,
+                    "test_result": {"git_patch": ""},
+                    "metadata": {"llm_config": {"model": "test-model"}},
+                    "metrics": {},
+                    "error": self.RUNTIME_DIED_ERROR,
+                }
+            )
+        )
+        agent = RunOpenHandsAgent(config=params)
+        active_command = MagicMock(watchdog_stats={}, runtime_death_cause=runtime_death_cause)
+        clock = MagicMock()
+        clock.time.side_effect = [100.0, 100.0, 100.0 + run_time]
+        with (
+            patch.object(swe_app, "time", clock),
+            patch.object(agent, "_start_container_command", new_callable=AsyncMock, return_value=active_command),
+            patch.object(agent, "_finish_container_command", new_callable=AsyncMock, return_value=str(agent_output)),
+            patch.object(agent, "_openhands_dir_copy_from_host", return_value=str(agent_output)),
+            patch.object(agent, "_kill_active_command", new_callable=AsyncMock),
+        ):
+            await agent.process_single_datapoint()
+
+        metrics = SWEBenchMetrics.model_validate_json(params.metrics_fpath.read_text())
+        assert metrics.openhands_run_time == run_time
+        assert metrics.agent_error_kind == ("runtime_died" if run_time < 60 else "other")
+        assert await self._mask_sample_for(
+            monkeypatch, tmp_path, metrics.model_dump(), runtime_death_cause=agent.runtime_death_cause
+        ) is (runtime_death_cause == "pre_execution" and run_time < 60)
+
+    @pytest.mark.asyncio
+    async def test_failed_command_cannot_forge_runtime_eligibility(self, monkeypatch, tmp_path):
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.metrics_fpath.write_text(
+            json.dumps({"agent_error_kind": "runtime_died", "runtime_death_cause": "pre_execution"})
+        )
+        agent = RunOpenHandsAgent(config=params)
+        active = MagicMock(watchdog_stats={}, runtime_death_cause="unknown")
+        with (
+            patch.object(agent, "_start_container_command", new_callable=AsyncMock, return_value=active),
+            patch.object(
+                agent, "_finish_container_command", new_callable=AsyncMock, side_effect=RuntimeError("failed")
+            ),
+            patch.object(agent, "_openhands_dir_copy_from_host", return_value=None),
+            patch.object(agent, "_kill_active_command", new_callable=AsyncMock),
+        ):
+            assert await agent.process_single_datapoint() is None
+        assert agent.runtime_death_cause == "unknown"
+        assert (
+            await self._mask_sample_for(
+                monkeypatch,
+                tmp_path,
+                json.loads(params.metrics_fpath.read_text()),
+                runtime_death_cause=agent.runtime_death_cause,
+            )
+            is False
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("runtime_death_cause", ["unknown", "pre_execution"])
+    @pytest.mark.parametrize(
+        "failure", ["agent_timed_out", "eval_timed_out", "eval_launch_failed", "oom_killed", "eval_oom_killed"]
+    )
+    async def test_existing_failure_masks_are_preserved(
+        self, monkeypatch, tmp_path, runtime_death_cause, failure
+    ) -> None:
+        assert (
+            await self._mask_sample_for(
+                monkeypatch,
+                tmp_path,
+                {"agent_error_kind": "runtime_died", failure: True},
+                runtime_death_cause=runtime_death_cause,
+            )
+            is True
+        )
+
+
 class TestEvaluatorLaunchFailure:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("outcome", ["launch_failure", "post_start_failure", "failed_tests"])
@@ -3626,7 +3771,12 @@ class TestEvaluatorLaunchFailure:
         wrapper._sem = asyncio.Semaphore(1)
         wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
         processor = NVInternalDatasetProcessor(config=params)
-        with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=completed_report):
+        with patch.object(
+            swe_app.runner_ray_remote,
+            "remote",
+            new_callable=AsyncMock,
+            return_value=swe_app.RunnerResult(completed_report),
+        ):
             response = await wrapper._inner_responses(params, processor)
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=response):
             result = await wrapper.run(swe_app.BaseRunRequest(responses_create_params=params.body))
