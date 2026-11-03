@@ -29,6 +29,7 @@ from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, compo
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.utils.text import did_you_mean
+from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
 
 logger = logging.getLogger(__name__)
@@ -79,19 +80,6 @@ def dispatch(target: str, overrides: list[str]) -> None:
     sys.argv = [sys.argv[0], *overrides]
     func = getattr(importlib.import_module(module_path), func_name)
     func()
-
-
-def _hydra_quote(value: str) -> str:
-    """Single-quote `value` as a literal for Hydra's override grammar, so it parses back to the same string.
-
-    `json.dumps` is not that encoder: Hydra keeps `\\uXXXX`, `\\t` and a doubled backslash literally, so a Unicode
-    or backslash-containing filename would reach the command under another name. Hydra un-escapes a backslash
-    only when its run ends at a quote character, so only those runs (and the quote itself) are escaped here.
-    Everything else, Unicode included, is passed through unchanged.
-    """
-    escaped = re.sub(r"(\\*)(')", lambda m: m.group(1) * 2 + "\\'", value)
-    escaped = re.sub(r"(\\+)$", lambda m: m.group(1) * 2, escaped)
-    return f"'{escaped}'"
 
 
 def _value_flag(
@@ -709,7 +697,7 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
         # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
-        from nemo_gym.tasks.harbor.cli import run_target
+        from nemo_gym.cli.eval import run_target
 
         run_target(args, overrides)
         return
@@ -799,7 +787,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
     from nemo_gym.config.config_types import ConfigError
-    from nemo_gym.health.types import RunHealthLimits
+    from nemo_gym.rollouts.health.types import RunHealthLimits
 
     # A limit flag that is not given is absent from args, so the limit stays unset and keeps the run's persisted
     # value; `none` sets it to None, which removes it.
@@ -894,7 +882,7 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
-    from nemo_gym.tasks.harbor.scaffold import init_dataset
+    from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 
     try:
         folder = init_dataset(Path(args.root), args.name, image=args.image, parameterized=args.parameterized)
@@ -908,22 +896,22 @@ def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
-    from nemo_gym.tasks.harbor.cli import validate_target
+    from nemo_gym.cli.eval import validate_target
 
     validate_target(args, overrides)
 
 
 def _dataset_pull(args: argparse.Namespace, overrides: list[str]) -> None:
     """`gym dataset pull TARGET`: fetch a Harbor dataset into environments/harbor/ without preparing or running it."""
-    from nemo_gym.tasks.harbor.cli import pull_target
+    from nemo_gym.data.tasks.harbor.prepare import pull_target
 
     pull_target(args, overrides)
 
 
 def _dataset_publish(args: argparse.Namespace, overrides: list[str]) -> None:
     """`gym dataset publish --harbor TARGET --output DIR`: plain Harbor task folders, checked by Harbor's own loader."""
-    from nemo_gym.tasks.harbor.errors import HarborTaskError
-    from nemo_gym.tasks.harbor.publish import publish_harbor
+    from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+    from nemo_gym.data.tasks.harbor.publish import publish_harbor
 
     if not args.harbor:
         args._parser.error("`gym dataset publish` writes Harbor task folders: pass --harbor")
@@ -1679,6 +1667,12 @@ COMMANDS = {
                 metavar="PATH[,PATH...]",
             ),
             _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
+                "Baseline/candidate intervals remain the recorded 95%% intervals.",
+            ),
             _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
             _comma_list_flag(
                 "candidate-agents",

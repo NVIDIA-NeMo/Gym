@@ -166,6 +166,22 @@ The provider constructor accepts four optional config sections:
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
 
+### Closing a sandbox
+
+Sandbox deletion is idempotent. If a DELETE reply is lost, the provider can retry
+within `operations.retries`; a subsequent not-found response confirms that the
+sandbox is gone. All DELETE attempts and retry delays share one
+`operations.close_timeout_s` deadline. Permission failures and caller cancellation
+remain terminal. If termination fails or its deadline expires, the provider keeps
+the SDK handle available for the owner's retry and does not close its transport.
+This recovery does not change CREATE or command retry policies.
+
+After confirmed deletion, local SDK transport cleanup has its own existing
+`close_timeout_s` bound. Allow both phases, renewal shutdown and other workload
+cleanup inside the caller's outer deadline: a 12-second close setting allows up
+to 12 seconds for DELETE and another 12 seconds for transport cleanup, before
+other cleanup work. Increasing retries never extends the DELETE deadline.
+
 ## Image policy and setup commands
 
 Two blocks belong to the deployment, not to any task or server. `images.rewrites` is an ordered list of
@@ -229,7 +245,7 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 
 ## Network Policy
 
-`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.sandbox.agent_tools` builds one from endpoint URLs; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
+`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.agents.agent_tools` builds one from endpoint URLs; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
 
 ```yaml
 sandbox_spec:

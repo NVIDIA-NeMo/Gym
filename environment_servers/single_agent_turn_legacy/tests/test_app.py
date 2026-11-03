@@ -20,12 +20,9 @@ from environment_servers.single_agent_turn.app import (
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AgentServerRef, ResourcesServerRef
+from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import SingleAgentTurnRequest
-from nemo_gym.server_runtime.episode_types import MaterializedTask
-from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
-from nemo_gym.server_utils import BaseServerConfig, SimpleServer
+from nemo_gym.server_runtime import MaterializedTask, SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
 class _Cookie:
@@ -424,12 +421,10 @@ async def test_protocol_failure_metadata_survives_collection(
 ) -> None:
     from unittest.mock import AsyncMock
 
-    import nemo_gym.rollout_collection as collection
-    from nemo_gym.rollout_outcomes import RolloutFailureRecord
-    from nemo_gym.rollout_records import logical_rollout_id
-    from nemo_gym.rollout_store import RolloutStore
+    import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.rollouts import RolloutFailureRecord, RolloutStore, logical_rollout_id
     from nemo_gym.server_runtime import EpisodeFailure, SingleAgentTurnFailure, SingleAgentTurnResponse
-    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     environment, client = _environment_server()
     if legacy:

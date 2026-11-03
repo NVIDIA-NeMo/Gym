@@ -54,7 +54,7 @@ from nemo_gym.config.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
@@ -63,15 +63,15 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     matches_failure_class,
 )
-from nemo_gym.rollout_records import (
+from nemo_gym.rollouts.rollout_records import (
     coverage_path_for,
     journal_path_for,
     materialized_path_for,
     resolve_rollout_owner,
     resolve_rollout_path,
 )
-from nemo_gym.rollout_recovery import manifest_path_for
-from nemo_gym.rollout_store import raw_outcomes_are_selected
+from nemo_gym.rollouts.rollout_recovery import manifest_path_for
+from nemo_gym.rollouts.rollout_store import raw_outcomes_are_selected
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
