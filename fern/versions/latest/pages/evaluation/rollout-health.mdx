@@ -503,6 +503,18 @@ These choices favor completing verification and preserving evidence over failing
 have already completed. The report makes degraded execution and missing evidence visible rather than silently treating them as
 healthy.
 
+## Known gaps in failure classification
+
+These are known and to be fixed later; today they behave as described.
+
+- The harness agent reports the agent's own memory kill as a masked result that recovery retries.
+- Terminal-Bench 4 counts a sidecar or init-container memory kill as the agent's zero, because it does not
+  check which container was killed.
+- A memory kill whose report names no container is attributed to the agent.
+- A storage eviction is a model zero in Terminal-Bench 4 but an infrastructure retry in the OpenCode path.
+- Terminal-Bench 4 scores verifier timeouts and missing reward files as unmasked zeros (Harbor parity),
+  while DeepSWE masks and re-verifies them.
+
 ## Implementation Reference
 
 - [`TrajectoryRecord`, `TrajectoryTurn`, `AgentInvocation`, `ObservationGap`, and `ModelCallRef`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/trajectory/trajectory_record.py) define the standard evidence consumed by health checks.
