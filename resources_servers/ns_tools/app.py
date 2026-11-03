@@ -540,6 +540,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             self._fence.raise_if_closed(resources_session_id)
             if resources_session_id in self._verified_sessions:
                 raise ResourcesSessionConflictError("resources session has already been verified")
+            if resources_session_id not in self._session_episodes and (
+                resources_session_id in self._timing_by_session or resources_session_id in self._verification_metrics
+            ):
+                raise ResourcesSessionConflictError("resources_session_id already belongs to a cookie session")
             identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")

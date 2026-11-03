@@ -965,6 +965,34 @@ class TestResourcesSessions:
         assert tool_manager.cleaned_up == ["rs-1", "rs-1"]
         assert tool_manager.python_sessions == {}
 
+    @pytest.mark.parametrize("verified", [False, True])
+    def test_typed_seed_cannot_take_over_existing_cookie_state(self, verified: bool) -> None:
+        manager = FakePythonToolManager()
+        server, app = _session_server(manager)
+        client = TestClient(app)
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        [session_id] = manager.python_sessions
+        python_session = manager.python_sessions[session_id]
+        timings = server._timing_by_session[session_id]
+        if verified:
+            assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == 1
+        metrics = server._verification_metrics.get(session_id)
+
+        assert client.post("/seed_session", json=_seed(session_id)).status_code == 409
+        assert server._session_episodes == {}
+        if verified:
+            assert server._verification_metrics.get(session_id) is metrics
+            assert manager.python_sessions == {}
+        else:
+            assert manager.python_sessions[session_id] is python_session
+            assert server._timing_by_session[session_id] is timings
+            assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == (1 if verified else 2)
+
     def test_two_legacy_runs_reusing_a_cookie_keep_separate_verification_metrics(self) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
