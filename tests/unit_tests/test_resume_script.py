@@ -562,6 +562,34 @@ def test_failed_submission_uncertainty_survives_a_later_invocation(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_the_walltime_cap_stop_names_a_continuation_the_cli_accepts(tmp_path, monkeypatch):
+    import nemo_gym.orchestration.submit as submit_module
+    from nemo_gym.cli.main import main
+
+    _write_inventory(tmp_path)
+    (tmp_path / ".gym_accumulated_walltime").write_text("3590")
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), "TIMEOUT")
+    hint = re.search(r"continue with gym eval resubmit (--recover [^,]*),", result.stdout)
+    assert hint is not None, result.stdout
+    options = shlex.split(hint[1].replace("HH:MM:SS", "02:00:00").replace("TEXT", "longer"))
+
+    calls = []
+
+    def dispatched(*args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("stop after the arguments were accepted")
+
+    monkeypatch.setattr(submit_module, "recover", dispatched)
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "resubmit", "gym-job-1", "bench", *options])
+    with pytest.raises((RuntimeError, SystemExit)):
+        main()
+
+    # The hinted options parse and reach the recovery as given.
+    assert len(calls) == 1
+    assert (calls[0]["max_walltime"], calls[0]["walltime_reason"]) == ("02:00:00", "longer")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_chain_stopped_at_the_walltime_cap_exits_non_zero_and_marks_the_run_incomplete(tmp_path):
     _write_inventory(tmp_path)
     (tmp_path / ".gym_accumulated_walltime").write_text("3590")
@@ -572,7 +600,8 @@ def test_a_chain_stopped_at_the_walltime_cap_exits_non_zero_and_marks_the_run_in
     assert "REACHED_WORK" not in result.stdout
     assert (
         "walltime cap with rollouts missing; continue with gym eval resubmit --recover --max-walltime HH:MM:SS "
-        "above the cap: the retry and walltime budgets carry over." in result.stdout
+        "--walltime-reason TEXT, with HH:MM:SS above the cap: the retry and walltime budgets carry over."
+        in result.stdout
     )
     assert "resubmit to continue" not in result.stdout
     assert "walltime cap" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()

@@ -56,6 +56,7 @@ gym eval prepare              # prepare benchmark data and dump it to disk
 gym eval plan                 # write one benchmark's task list (stable ids, digests) to a plan file
 gym eval run                  # collate data, start servers, and collect rollouts
 gym eval submit               # submit a benchmark job to Slurm
+gym eval resubmit             # queue a submitted benchmark again, or recover it from its saved evidence
 gym eval aggregate            # merge sharded rollout results
 gym eval export               # export a finished run (default exporter: atif)
 gym eval status               # show saved run progress
@@ -979,6 +980,42 @@ gym eval submit --config submit.yaml --dry-run
 gym eval submit --config submit.yaml --resolve-only --json
 ```
 
+### `gym eval resubmit`
+
+Queue a benchmark of an earlier `gym eval submit` again. Without `--recover` the job starts with a fresh retry, walltime and per-rollout attempt allowance. With `--recover` it first decides one action from the run's saved evidence (resubmit, re-judge saved answers, nothing, or a typed stop) and keeps the spent budgets; see [Recover from saved evidence](/orchestration/how-to/resumable-runs#recover-from-saved-evidence). With `--recover` it prints one JSON line, and the exit status is 0 only when `gate_task.status` is `SUCCESS`, so `--inspect` exits 1 while work is planned.
+
+```bash
+gym eval resubmit GYM_JOB_ID BENCHMARK [options]
+```
+
+| Option | Description |
+| --- | --- |
+| `--recover` | Decide from the run's saved evidence first: do nothing when it is complete, re-judge saved answers when only judge failures remain, and queue only within the stored retry and walltime budgets. |
+| `--inspect` | With `--recover`: report the decision and the gates without dispatching anything. |
+| `--record PATH` | With `--inspect`: read a submission record (`gym-job.json`) without the local job index. |
+| `--run-dir PATH` | Restore a lost job-index entry from the run's `gym-job.json`; see [Job Records](/orchestration/job-records#restoring-a-lost-index-entry). Writes the index, also with `--inspect`. |
+| `--max-walltime HH:MM:SS`, `--walltime-reason TEXT` | With `--recover`: raise the run's Slurm walltime and chain cap, never below the recorded walltime; journaled in `walltime-extension-journal.jsonl`. Also queues the fresh restart of a run that ended before its task inventory was written. |
+| `--extend-retries N` | With `--recover`: add N infrastructure retries on top of the configured cap; the spent count is kept and the extension is journaled. |
+| `--extend-attempts N` | With `--recover`: add N (1 to 100) attempts per rollout on top of the saved `max_rollout_attempts`, so rollouts that used every attempt on infrastructure failures or allocation cuts run again; a rollout that ended with a model failure never does. Journaled. |
+| `--server-spinup-timeout-seconds N`, `--spinup-timeout-reason TEXT` | With `--recover`: raise how long the run's servers may take to become ready (0 for no limit; never lowered), the remedy for a `server_spinup_timeout` stop; journaled in `spinup-timeout-journal.jsonl`. |
+| `--allow-unsafe-resume`, `--unsafe-resume-reason TEXT` | With `--recover`: set `allow_unsafe_resume` on the queued job; the reason and user are recorded in `unsafe-resume-journal.jsonl`. |
+| `--repin COMMIT`, `--repin-reason TEXT` | With `--recover`: continue the run on this full Gym commit, which must be the Gym running the command; the job script and saved config are rendered again, the old files are kept, and saved rows and budgets stay. With `--inspect`, report that plan only. |
+| `--no-auto-repin` | With `--recover`: keep the run's Gym pin. A run pinned at another commit is planned with the installed Gym's rules; when that plan needs the installed revision to run, recovery refuses and names `--repin` instead of moving the run automatically. |
+| `--judge-partition NAME`, `--judge-qos NAME` | With `--recover`: the CPU partition and QOS of the judge-only job that re-judges a model-served run's saved answers, when neither the saved config nor `NEMO_GYM_REMOTE_READER_SRUN` names one. A run that serves its judge on a node pool of its own uses that pool instead. |
+| `--rerun-masked-without-artifact`, `--rerun-reason TEXT` | With `--recover`: run again the masked results that kept a saved answer but have neither a gradeable artifact nor a recorded grade. Each counts one failed attempt within its attempt cap; the identities and the reason are journaled beside the rollouts file. |
+| `--acknowledge-failed-judge-jobs`, `--acknowledge-reason TEXT` | With `--recover`: after the last two judge-only jobs ended without settling a saved answer, allow exactly one more; journaled in `judge-job-acknowledgement-journal.jsonl`. |
+| `--score-key JSON`, `--score-agent NAME`, `--score-environment NAME` | With `--recover`: the metric path in the aggregate (a JSON list) and the entry it is read from, by `agent_ref.name` and `_ng_environment_server`. Without them the score gate reports the score as unavailable. |
+| `--mlflow-run-id ID`, `--mlflow-status STATUS` | With `--recover`: an MLflow run and the terminal status you read from the server. They perform no export. |
+| `--max-unhealthy-fraction F` | With `--recover`: the per-rollout health criterion, reported in warnings; it does not change the verdict. |
+| `--max-response-failure-fraction F`, `--max-trial-failure-fraction F` | With `--recover`: reported under `criteria` with `applied: false`; they do not change the verdict. |
+| `--policy-timeout-counts-as-model true\|false` | With `--recover`: whether a policy-model response timeout is the model's fault (default `true`). |
+
+```bash
+gym eval resubmit "$GYM_JOB_ID" gpqa --recover --inspect \
+  --score-agent simple_agent --score-key '["agent_metrics", "mean/reward"]'
+gym eval resubmit "$GYM_JOB_ID" gpqa --recover --max-walltime 24:00:00 --walltime-reason "segments too short for the task"
+```
+
 ### `gym eval aggregate`
 
 Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. It also lists the shards in `<output stem>_sources.json`, which `gym eval health-check` reads for a merged `rollouts.jsonl`. The output may be a shard only when it is the only one, reached through its own directory rather than a file link from elsewhere, and then nothing is listed. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
@@ -1190,7 +1227,7 @@ Writes three files next to the rollouts, named from its stem:
 
 | File | Contents |
 | --- | --- |
-| `<rollouts>_reward_profiling.jsonl` | One row per task. |
+| `<rollouts>_reward_profiling.jsonl` | One row per task, including a task with no saved rollout (`num_rollouts: 0`, its `expected_num_rollouts` and `missing_num_rollouts`, and `reward_profile_completion_pct: 0.0`). |
 | `<rollouts>_agent_metrics.json` | One entry per agent. |
 | `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
 
