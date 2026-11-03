@@ -32,7 +32,7 @@ from nemo_gym.trajectory import TrajectoryRecord
     ],
 )
 @pytest.mark.parametrize("failed", [False, True])
-def test_native_trajectory_matches_collector_without_changing_harness_evidence(
+def test_materialized_task_trajectory_matches_collector_without_changing_harness_evidence(
     reverse_task_keys: bool, indices: dict[str, int | str], rollout_id: str, failed: bool
 ) -> None:
     task_id = {"taskset": "swe_together:full109", "task_id": "task-logical"}

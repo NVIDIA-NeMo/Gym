@@ -17,7 +17,7 @@ from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTu
 
 
 def _materialized_row() -> dict:
-    return materialize_task({"problem_id": "native-task", "prompt": "synthetic"}, taskset="test:tasks") | {
+    return materialize_task({"problem_id": "task-7", "prompt": "synthetic"}, taskset="test:tasks") | {
         TASK_INDEX_KEY_NAME: 7,
         ROLLOUT_INDEX_KEY_NAME: 2,
     }
@@ -26,12 +26,12 @@ def _materialized_row() -> dict:
 def test_materialized_task_keeps_matching_producer_and_turn_identity() -> None:
     row = _materialized_row() | {ROLLOUT_ID_KEY_NAME: "capture-physical", ATTEMPT_INDEX_KEY_NAME: 3}
     producer = TrajectoryRecord(
-        task_id="native-task",
+        task_id="task-7",
         rollout_id="capture-physical-a3",
         turns=[
             TrajectoryTurn(
                 invocation_id="root",
-                task_id="native-task",
+                task_id="task-7",
                 rollout_id="capture-physical-a3",
                 turn_no=1,
                 timestamp=1.0,
@@ -43,14 +43,14 @@ def test_materialized_task_keeps_matching_producer_and_turn_identity() -> None:
 
     trajectory = _build_trajectory_record(row, {"ng_trajectory": producer.model_dump(mode="json")})
 
-    assert (trajectory.task_id, trajectory.rollout_id) == ("native-task", "capture-physical-a3")
+    assert (trajectory.task_id, trajectory.rollout_id) == ("task-7", "capture-physical-a3")
     assert trajectory.turns == producer.turns
     assert "producer_trajectory_identity_mismatch" not in {gap.code for gap in trajectory.gaps}
 
 
 @pytest.mark.parametrize("attempt, expected", [(0, "7-2"), (2, "7-2-a2")])
 def test_materialized_identity_retains_index_based_rollout_attempt(attempt: int, expected: str) -> None:
-    assert _trajectory_identity(_materialized_row() | {ATTEMPT_INDEX_KEY_NAME: attempt}) == ("native-task", expected)
+    assert _trajectory_identity(_materialized_row() | {ATTEMPT_INDEX_KEY_NAME: attempt}) == ("task-7", expected)
 
 
 def test_explicit_semantic_identity_wins_before_materialized_task_validation() -> None:
@@ -65,7 +65,7 @@ def test_explicit_semantic_identity_wins_before_materialized_task_validation() -
 
 @pytest.mark.parametrize("identity", [{}, {"task_id": "partial"}, {"task_id": "", "rollout_id": "semantic"}])
 def test_incomplete_semantic_identity_falls_back_to_materialized_task(identity: dict) -> None:
-    assert _trajectory_identity(_materialized_row() | {"trajectory_identity": identity}) == ("native-task", "7-2")
+    assert _trajectory_identity(_materialized_row() | {"trajectory_identity": identity}) == ("task-7", "7-2")
 
 
 @pytest.mark.parametrize(
@@ -84,10 +84,10 @@ def test_legacy_identity_keeps_field_precedence_and_index_fallback(fields: dict,
 
 @pytest.mark.parametrize("task_input", [None, [], "malformed"])
 def test_materialized_identity_does_not_validate_task_input(task_input: object) -> None:
-    assert _trajectory_identity(_materialized_row() | {"task_input": task_input}) == ("native-task", "7-2")
+    assert _trajectory_identity(_materialized_row() | {"task_input": task_input}) == ("task-7", "7-2")
 
 
 @pytest.mark.parametrize("task_id", [{}, {"taskset": "test:tasks"}, {"taskset": "test:tasks", "task_id": ""}])
-def test_invalid_materialized_task_identity_uses_native_validation(task_id: dict) -> None:
+def test_invalid_materialized_task_identity_fails_validation(task_id: dict) -> None:
     with pytest.raises(ValidationError):
         _trajectory_identity(_materialized_row() | {"task_id": task_id})
