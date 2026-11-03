@@ -262,3 +262,29 @@ def test_a_client_lost_after_the_acknowledgement_still_leaves_the_epoch(tmp_path
     assert (collected.infra_retries_state, collected.walltime_state) == ("ok", "ok")
     later = inspect_recovery(*_handle(job_dir))
     assert UNKNOWN_BUDGET_REASON not in later.decision.reason
+
+
+def test_an_explicit_extension_raises_a_readable_spent_count_under_an_operator_continuation(tmp_path, slurm_bin):
+    """Spent retries readable and used up, walltime unknown: --extend-retries adds a retry instead of being lost."""
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _unknown_run(tmp_path, unreadable=(".gym_accumulated_walltime",))
+    (job_dir / ".gym_infra_retries").write_text("3\n")
+
+    stopped = recover(*_handle(job_dir), **BUDGET)
+    assert stopped.dispatched is None and "0 infra retries remain" in stopped.decision.reason, stopped.decision.reason
+
+    out = recover(*_handle(job_dir), extend_retries=1, **BUDGET)
+
+    assert out.dispatched == "resubmit", out.decision.reason
+    record = out.decision.operator_continuation
+    assert record["budget"]["infra_retries_remaining"] == 1
+    assert record["budget"]["infra_retry_extension_added"] == 1
+    assert record["writes"] == {
+        ".gym_accumulated_walltime": {"previous": "unknown", "value": 0},
+        RETRY_EXTENSION_NAME: {"previous": 0, "value": 1},
+    }
+    assert "(1 more recorded as the run's retry extension)" in out.decision.reason
+    # The spent count is kept; the extension is the journaled raise.
+    assert (job_dir / ".gym_infra_retries").read_text() == "3\n"
+    assert (job_dir / RETRY_EXTENSION_NAME).read_text() == "1\n"

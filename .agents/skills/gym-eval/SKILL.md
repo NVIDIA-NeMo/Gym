@@ -319,7 +319,7 @@ whose only open work is such rows inspects `reverify`, `PLANNED` and exits 1 unt
 it (any status but `SUCCESS` exits 1). Meanwhile evaluation health still counts the row as an
 evaluation-side fault ("judge N of M", the 2% limit is unchanged), `gate_task.scored_samples` leaves it out,
 `errors` lists the judge failure awaiting re-judgment, and the MLflow export waits for the run to complete. Run
-the same command without `--inspect`: the saved answer is judged again and the model is not called. A judge
+`gym eval resubmit <id> <benchmark> --recover` without `--inspect`: the saved answer is judged again and the model is not called. A judge
 served beside the policy still cannot be re-judged by a judge-only job (step 5). Report it with the health count. In the chain: only `PREEMPTED`,
 `NODE_FAIL` and `BOOT_FAIL` spend an infra retry, `TIMEOUT` continues, and `FAILED`,
 `OUT_OF_MEMORY`, `DEADLINE` and `CANCELLED` stop the chain; `--recover` is the way on, and it
@@ -352,8 +352,17 @@ Entries it does not name keep their defaults. Kinds must be registered (or `unkn
 with `invalid recovery_outcome_policy: <field>: <problem>`. The run saves the policy in its
 `resolved-config.yaml`, the chain's own continuations use it, and a change between the inspection
 and the dispatch refuses the resubmit, because the policy is a semantic setting. The CLI extends
-budgets and has no flag for the policy; a Python caller can pass `outcome_policy` to `recover(...)`,
-which replaces the config's section as a whole.
+budgets and has no flag for the policy (extending a budget is not choosing which failures are
+retriable); a Python caller can pass `outcome_policy` to `recover(...)`, which replaces the config's
+section as a whole:
+
+```python
+from nemo_gym.agents.agent_outcome import OutcomeAction
+from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+from nemo_gym.orchestration.submit import recover
+
+recover(job_id, benchmark, outcome_policy=RecoveryOutcomePolicyConfig(by_status_code={401: OutcomeAction.FAIL}))
+```
 
 Resubmit by hand after a cluster outage, a crashed server, an expired credential, or a budget stop.
 The chain's own stop text (in the driver log and `.gym_chain_incomplete`) and the inspection's
