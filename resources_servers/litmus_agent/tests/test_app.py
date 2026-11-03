@@ -14,6 +14,7 @@
 # limitations under the License.
 """Unit tests for the domain-agnostic litmus_agent resources server."""
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -905,6 +906,89 @@ class TestResourcesSessions:
         assert response.status_code == 404
         assert _LocalFakeProvider.instances[-1].closed == 1
         assert server._sessions == {}
+
+    async def test_close_waits_for_startup_and_retries_a_failed_stop(self, monkeypatch):
+        server = _make_sandbox_server()
+        started = asyncio.Event()
+        finish_start = asyncio.Event()
+        real_create = _LocalFakeProvider.create
+
+        async def delayed_create(provider, spec):
+            handle = await real_create(provider, spec)
+            provider.close_error = RuntimeError("sandbox API unavailable")
+            started.set()
+            await finish_start.wait()
+            return handle
+
+        monkeypatch.setattr(_LocalFakeProvider, "create", delayed_create)
+        seed = ResourcesSeedSessionRequest.model_validate(_seed("rs-1"))
+        await server.seed_session(_FakeRequest("rs-1"), seed)
+        tool_call = asyncio.create_task(_run_code(server, "rs-1", "print(1)"))
+        await started.wait()
+        close = asyncio.create_task(
+            server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+        )
+        await asyncio.sleep(0)
+        finish_start.set()
+        try:
+            with pytest.raises(RuntimeError, match="sandbox API unavailable"):
+                await close
+            assert server._fence.closed_episode("rs-1") is None
+            assert "rs-1" in server._sessions
+            provider = _LocalFakeProvider.instances[-1]
+            provider.close_error = None
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            assert provider.closed == 1
+            assert server._sessions == {}
+        finally:
+            await asyncio.gather(tool_call, return_exceptions=True)
+            _LocalFakeProvider.instances[-1].close_error = None
+            await server._shutdown_all_sessions()
+
+    async def test_close_releases_lock_after_failed_startup(self, monkeypatch):
+        server = _make_sandbox_server()
+
+        async def failed_create(provider, spec):
+            raise RuntimeError("sandbox startup failed")
+
+        monkeypatch.setattr(_LocalFakeProvider, "create", failed_create)
+        with pytest.raises(RuntimeError, match="sandbox startup failed"):
+            await _run_code(server, "rs-1", "print(1)")
+        await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+        assert server._session_locks == {}
+        assert server._sessions == {}
+
+    async def test_failed_startup_keeps_sandbox_until_stop_succeeds(self, monkeypatch):
+        server = _make_sandbox_server()
+        real_upload = _LocalFakeProvider.upload_file
+
+        async def failed_upload(provider, handle, source_path, target_path):
+            provider.close_error = RuntimeError("sandbox stop failed")
+            raise RuntimeError("driver upload failed")
+
+        monkeypatch.setattr(_LocalFakeProvider, "upload_file", failed_upload)
+        with pytest.raises(RuntimeError, match="sandbox stop failed"):
+            await _run_code(server, "rs-1", "print(1)")
+        pending = server._sessions["rs-1"]
+        assert not pending.ready
+        provider = _LocalFakeProvider.instances[-1]
+        providers_before = len(_LocalFakeProvider.instances)
+
+        # A tool retry must not replace the incomplete sandbox or execute a cell in it.
+        with pytest.raises(RuntimeError, match="sandbox stop failed"):
+            await _run_code(server, "rs-1", "print(2)")
+        assert server._sessions["rs-1"] is pending
+        assert len(_LocalFakeProvider.instances) == providers_before
+        assert pending.cells == []
+        with pytest.raises(RuntimeError, match="sandbox stop failed"):
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+        assert server._fence.closed_episode("rs-1") is None
+
+        provider.close_error = None
+        monkeypatch.setattr(_LocalFakeProvider, "upload_file", real_upload)
+        await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+        assert provider.closed == 1
+        assert server._sessions == {} and server._session_locks == {}
 
     def test_verify_then_close_stops_the_sandbox_once(self):
         server, client = _session_client()

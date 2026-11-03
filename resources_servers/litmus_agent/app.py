@@ -253,6 +253,7 @@ class _SandboxSession:
 
     sandbox: AsyncSandbox
     cells: List[str] = field(default_factory=list)
+    ready: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -690,10 +691,18 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
         async with lock:
             session = self._sessions.get(session_id)
+            if session is not None and not session.ready:
+                # Startup may have created a container before driver upload and its cleanup failed.
+                # Do not execute in that incomplete container or replace its last ownership record.
+                await session.sandbox.stop()
+                del self._sessions[session_id]
+                session = None
             if session is None:
-                sandbox = await AsyncSandbox(self.config.sandbox_provider, self._build_sandbox_spec()).start()
+                sandbox = AsyncSandbox(self.config.sandbox_provider, self._build_sandbox_spec())
                 session = _SandboxSession(sandbox=sandbox)
                 self._sessions[session_id] = session
+                await sandbox.start()
+                session.ready = True
         return session, lock
 
     async def execute_code(self, request: Request) -> PlainTextResponse:
@@ -713,7 +722,12 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             body = {}
         code = body.get("code", "") if isinstance(body, dict) else ""
 
-        session, lock = await self._acquire_session(session_id)
+        # Publish ownership before close can acknowledge cleanup. A post-exec check alone misses cancellation,
+        # execution failures, or a failed stop after a close that overtook sandbox startup.
+        async with self._fence.locked(session_id):
+            if self._fence.closed_episode(session_id) is not None:
+                raise ResourcesSessionLostError(f"litmus_agent session {session_id} is closed")
+            session, lock = await self._acquire_session(session_id)
         async with lock:
             result = await session.sandbox.exec(
                 f"python3 {_CODE_EXEC_DRIVER_PATH}",
@@ -740,8 +754,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             self._registry_lock = asyncio.Lock()
         async with self._registry_lock:
             session = self._sessions.get(session_id)
-        if session is None:
-            return
+            if session is None:
+                self._session_locks.pop(session_id, None)
+                return
         await session.sandbox.stop()
         async with self._registry_lock:
             # A concurrent cleanup may already have dropped it, and a later call may have started another.
