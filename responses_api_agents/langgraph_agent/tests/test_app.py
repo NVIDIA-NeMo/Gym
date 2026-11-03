@@ -19,15 +19,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.langgraph_agent.app import aggregate_response_usage, response_output_items
 from responses_api_agents.langgraph_agent.orchestrator_agent import (
     OrchestratorAgent,

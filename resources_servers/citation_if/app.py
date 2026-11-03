@@ -76,7 +76,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from scorer import TERMINAL_TOOL_RESPONSE, score_citation_if
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

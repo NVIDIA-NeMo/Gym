@@ -2862,7 +2862,7 @@ def test_a_prefill_decode_tier_still_cannot_set_server_per_node(tmp_path):
 
 
 def _run_job_script(
-    tmp_path, *, service: str, driver: str, name: str = "vllm_model", prelude: str = ""
+    tmp_path, *, service: str, driver: str, name: str = "vllm_model", prelude: str = "", exports: bool = False
 ) -> subprocess.CompletedProcess:
     """Run a rendered job.sh with a fake `srun` on PATH: the `name` service step runs `service`, the driver `driver`.
 
@@ -2873,7 +2873,7 @@ def _run_job_script(
             "services": {name: {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
             "compute": {"cluster": {"type": "slurm", "account": "acct"}},
             "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
-            "job": {"output_path": str(tmp_path)},
+            "job": {"output_path": str(tmp_path), **({"export": {"evalrdl": {}}} if exports else {})},
             "otel": {"enabled": False},
         }
     )
@@ -2923,6 +2923,78 @@ def test_the_driver_exit_code_stands_when_the_driver_finishes_first(tmp_path):
 
     assert result.returncode == 7
     assert "exited" not in result.stdout
+
+
+# What the export tail does once the evaluation has succeeded, as the fake driver step: it creates the marker.
+_EVALUATION_SUCCEEDED = 'sleep 0.3; : > "$GYM_EVAL_SUCCEEDED_MARKER"'
+
+
+def test_a_service_lost_after_the_evaluation_succeeded_does_not_end_the_exports(tmp_path):
+    # The evaluation is done at 0.3 s and the service dies at 1 s. The watch loop polls every 5 s, so the export has
+    # to run past that: it ends at 7.3 s, and only the second poll (at 5 s) finds the service gone.
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver=f"{_EVALUATION_SUCCEEDED}; trap 'echo driver got TERM; exit 143' TERM; sleep 7; exit 0",
+        exports=True,
+    )
+
+    assert result.returncode == 0
+    assert "driver got TERM" not in result.stdout
+    assert "while the driver was running" not in result.stdout
+    assert list(tmp_path.glob("eval.succeeded.*")) == [tmp_path / "eval.succeeded.1"]
+
+
+def test_the_status_of_the_driver_stands_when_a_service_is_lost_after_the_evaluation_succeeded(tmp_path):
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver=f"{_EVALUATION_SUCCEEDED}; sleep 7; exit 5",
+        exports=True,
+    )
+
+    # As above, the driver outlives the 5 s poll that finds the service gone; its own status is the job's.
+    assert result.returncode == 5
+
+
+def test_a_service_lost_before_the_evaluation_succeeded_still_ends_the_job_even_with_exports(tmp_path):
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+        exports=True,
+    )
+
+    assert result.returncode == 1
+    assert "service vllm_model exited (status 3) while the driver was running" in result.stdout
+    assert "driver got TERM" in result.stdout
+
+
+def test_the_marker_of_an_earlier_attempt_does_not_stop_the_supervision_of_this_one(tmp_path):
+    # An earlier attempt (job id 0) left its marker behind; this one is job 1.
+    (tmp_path / "eval.succeeded.0").write_text("")
+
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+        exports=True,
+    )
+
+    assert result.returncode == 1
+    assert "driver got TERM" in result.stdout
+
+
+def test_a_driver_without_exports_has_no_marker_and_is_supervised_as_before(tmp_path):
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+    )
+
+    assert result.returncode == 1
+    # No marker is defined or passed to the driver: the watcher only ever sees it unset.
+    assert "GYM_EVAL_SUCCEEDED_MARKER=" not in (tmp_path / "job.sh").read_text()
 
 
 # Puts the reviewer's race window in one place: the watch loop has just seen the driver alive, and both the driver

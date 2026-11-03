@@ -21,6 +21,7 @@ import logging
 import math
 import re
 import shlex
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -29,7 +30,18 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Literal, NoReturn
 from urllib.parse import urlsplit
 
-from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
+# Re-exported names keep their old import path (see tests/unit_tests/fixtures/import_surface.json).
+from nemo_gym.sandbox.attribution import (  # noqa: F401
+    ATTRIBUTION_KEY_PREFIX_RE,
+    DEFAULT_ATTRIBUTION_KEY_PREFIX,
+    METADATA_VALUE_RE,
+    RUN_KEY,
+    AttributionConfig,
+    log_attribution_once,
+    resolve_attribution,
+    resolve_run_id,
+    sanitize_label_value,
+)
 from nemo_gym.sandbox.providers.base import (
     ORPHAN_REAP_TIMEOUT_S,
     SandboxCreateError,
@@ -158,9 +170,7 @@ RETRYABLE_ERROR_MARKERS = (
     "timed out",
     "timeout",
 )
-METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 # Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/cluster/run).
-DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Per-attempt metadata key (under the attribution prefix): the only handle on a sandbox whose create
 # request never returned, so a timed-out attempt can find and delete what it started.
 CREATE_ATTEMPT_KEY = "create-attempt"
@@ -176,13 +186,17 @@ CREATE_BUDGET_SLACK_S = 30.0
 # attribute would repeat the warning on every create of a configuration that is below the sum.
 _BUDGET_WARNINGS: set[tuple[float, float, float]] = set()
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
-ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
 # Returned as stderr when a finished background command's output file was deleted,
 # so a caller that needed the output sees why it is empty.
 DELETED_OUTPUT_NOTE = (
     "OpenSandbox could not return this command's output: the output file was deleted, for example "
     "by a command that cleaned the temporary directory. The command's exit status is kept."
 )
+# execd times a command from its own start, not from the timestamps it reports, so a kill at
+# the deadline can measure a little under the timeout. The allowance is at most a tenth of the
+# timeout, so a short timeout still tells a command that died at once from one killed at it.
+EXEC_TIMEOUT_SLACK_S = 0.25
+EXEC_TIMEOUT_SLACK_FRACTION = 0.1
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
@@ -212,6 +226,18 @@ def _require_opensandbox_sdk() -> tuple[Any, Any, Any, Any, Any]:
         ) from e
 
     return Sandbox, ConnectionConfig, RunCommandOpts, PlatformSpec, Volume
+
+
+def _require_execution_handlers() -> Any:
+    try:
+        from opensandbox.models.execd import ExecutionHandlers
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "OpenSandbox SDK is required for the opensandbox sandbox provider. "
+            "Install nemo-gym[sandbox] in the runtime image before using "
+            "env.sandbox.provider.name=opensandbox."
+        ) from e
+    return ExecutionHandlers
 
 
 def _require_opensandbox_lifecycle_sdk() -> tuple[Any, Any]:
@@ -417,6 +443,54 @@ def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
     return 125, "sandbox", "Command ended without a final status: no exit code, error or completion event"
 
 
+def _killed_at_timeout(return_code: int, elapsed_s: float | None, timeout_s: int | float | None) -> bool:
+    """Whether execd killed the command at the timeout the provider passed it.
+
+    execd reports that kill like any other signal death, exit code -1 and "signal: killed",
+    with no timeout flag. Only the elapsed time tells it apart from a command killed before
+    its deadline, e.g. by the OOM killer or by itself. A zero timeout enforces none.
+    """
+    if not timeout_s or return_code != -1 or elapsed_s is None:
+        return False
+    timeout = float(timeout_s)
+    return elapsed_s >= timeout - min(EXEC_TIMEOUT_SLACK_S, EXEC_TIMEOUT_SLACK_FRACTION * timeout)
+
+
+class _ForegroundExecClock:
+    """How long a foreground command ran, from execd's ``init`` and ``error`` events.
+
+    execd stamps both events itself, so their gap leaves out submit retries, connection-pool
+    waits and request latency. Without both stamps, the times the two events reached the client
+    stand in.
+    """
+
+    def __init__(self) -> None:
+        self._init_ms: int | None = None
+        self._init_seen: float | None = None
+        self._error_seen: float | None = None
+
+    async def on_init(self, event: Any) -> None:
+        # A retried submit that reached execd starts a new execution, timed afresh.
+        self._init_ms = getattr(event, "timestamp", None)
+        self._init_seen = time.monotonic()
+        self._error_seen = None
+
+    async def on_error(self, event: Any) -> None:
+        self._error_seen = time.monotonic()
+
+    def elapsed_s(self, execution: Any) -> float | None:
+        error_ms = getattr(getattr(execution, "error", None), "timestamp", None)
+        if self._init_ms is not None and error_ms is not None:
+            return (error_ms - self._init_ms) / 1000
+        if self._init_seen is not None and self._error_seen is not None:
+            return self._error_seen - self._init_seen
+        return None
+
+
+def _timeout_note(timeout_s: int | float) -> str:
+    return f"Command timed out after {timeout_s:g}s; OpenSandbox execd killed it"
+
+
 def _log_create_retry(retry_state: Any) -> None:
     exception = retry_state.outcome.exception() if retry_state.outcome else None
     sleep_s = retry_state.next_action.sleep if retry_state.next_action else None
@@ -471,9 +545,7 @@ def _resource_map(resources: SandboxResources) -> dict[str, str]:
 
 
 def _metadata_value(value: Any) -> str:
-    normalized = METADATA_VALUE_RE.sub("_", str(value)).strip("._-")
-    normalized = normalized[:63].strip("._-")
-    return normalized or "metadata"
+    return sanitize_label_value(value)
 
 
 def _metadata_map(values: dict[str, Any]) -> dict[str, str]:
@@ -600,47 +672,8 @@ class OpenSandboxConnectionConfig:
             self.protocol = scheme
 
 
-@dataclass(frozen=True)
-class OpenSandboxAttributionConfig:
-    """Job attribution merged into every sandbox's metadata (Kubernetes labels on the sandbox).
-
-    OpenSandbox propagates sandbox metadata as Kubernetes labels on the sandbox resources, so
-    attribution is queryable both through the OpenSandbox list API and at the cluster level
-    (e.g. ``kubectl get pods -l nemo-gym.nvidia.com/team=my-team``). ``key_prefix`` namespaces
-    the label keys (Kubernetes prefixed-key convention); set it to ``""`` for bare
-    ``team`` / ``user`` / ``workload`` / ``cluster`` / ``run`` keys.
-
-    Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD``
-    environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
-    ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME``), then the OS login name for ``user`` (``root`` is
-    ignored) and the gym CLI's ``NEMO_GYM_CONFIG_PATH`` server instance name for ``workload``.
-    ``cluster`` names the cluster that creates the sandboxes; it defaults to ``SLURM_CLUSTER_NAME``,
-    then ``CLUSTER_NAME``. Fields that cannot be resolved are omitted. ``run`` scopes sandboxes to
-    one launch of the creating process (``NEMO_GYM_RUN_ID``, else generated per process and logged) so a run's
-    sandboxes can be listed and cleaned up exactly. Explicit ``SandboxSpec.metadata`` keys
-    always take precedence over attribution keys.
-    """
-
-    enabled: bool = True
-    team: str | None = None
-    user: str | None = None
-    workload: str | None = None
-    cluster: str | None = None
-    run: str | None = None
-    key_prefix: str = DEFAULT_ATTRIBUTION_KEY_PREFIX
-
-    def __post_init__(self) -> None:
-        normalized = self.key_prefix.strip()
-        if normalized and not normalized.endswith("/"):
-            normalized += "/"
-        if normalized and not ATTRIBUTION_KEY_PREFIX_RE.fullmatch(normalized[:-1]):
-            # Invalid prefixes would otherwise fail server-side at sandbox create with an
-            # opaque error; values are sanitized by the provider but keys pass through.
-            raise ValueError(
-                f"attribution key_prefix {self.key_prefix!r} must be a lowercase DNS subdomain "
-                "(Kubernetes label-key prefix), e.g. 'nemo-gym.nvidia.com/', or '' for bare keys"
-            )
-        object.__setattr__(self, "key_prefix", normalized)
+# Shared with the other providers that forward attribution as Kubernetes labels.
+OpenSandboxAttributionConfig = AttributionConfig
 
 
 @dataclass(frozen=True)
@@ -925,6 +958,11 @@ class OpenSandboxProvider:
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
+
+    def uploads_independent_of_execs(self) -> bool:
+        """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
+        ``max_connections`` running commands leave an upload none; a background command is polled and holds none."""
+        return self._operations.background_exec
 
     def pull_policy_options(self, policy: str) -> dict[str, Any]:
         """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a
@@ -1983,28 +2021,13 @@ class OpenSandboxProvider:
 
         raise OpenSandboxCreateError("OpenSandbox create retry loop did not run")
 
-    def _attribution_metadata(self) -> dict[str, str]:
-        if not self._attribution.enabled:
-            return {}
-        resolved = resolve_attribution(
-            team=self._attribution.team,
-            user=self._attribution.user,
-            workload=self._attribution.workload,
-            cluster=self._attribution.cluster,
-        )
-        resolved[RUN_KEY] = resolve_run_id(self._attribution.run)
-        prefix = self._attribution.key_prefix
-        metadata = {f"{prefix}{key}": value for key, value in resolved.items()}
-        log_attribution_once(metadata)
-        return metadata
-
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create one sandbox through the configured OpenSandbox path.
 
         Job attribution keys (``team`` / ``user`` / ``workload`` / ``cluster`` / ``run``) are merged into the
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
         """
-        spec = replace(spec, metadata={**self._attribution_metadata(), **spec.metadata})
+        spec = replace(spec, metadata={**self._attribution.metadata(), **spec.metadata})
         return await self._create_with_retries(_normalize_spec(spec))
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
@@ -2076,8 +2099,12 @@ class OpenSandboxProvider:
                     retries=effective_retries,
                 )
 
+            clock = _ForegroundExecClock()
+            handlers = _require_execution_handlers()(on_init=clock.on_init, on_error=clock.on_error)
             execution = await self._submit_command(
-                lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
+                lambda: handle.raw.commands.run(
+                    effective_command, opts=RunCommandOpts(**opts_kwargs), handlers=handlers
+                ),
                 operation="command run",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=sdk_timeout_s,
@@ -2090,6 +2117,9 @@ class OpenSandboxProvider:
             return_code, error_type, note = _execution_outcome(execution)
             if note is not None:
                 stderr_parts.append(note)
+            if _killed_at_timeout(return_code, clock.elapsed_s(execution), timeout_s):
+                stderr_parts.append(_timeout_note(timeout_s))
+                return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
             stderr = "\n".join(stderr_parts) or None
 
             return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
@@ -2181,8 +2211,17 @@ class OpenSandboxProvider:
         background_opts = dict(opts_kwargs)
         background_opts["background"] = True
 
+        loop = asyncio.get_running_loop()
+        submitted = loop.time()
+
+        def run_command() -> Awaitable[Any]:
+            # A retried submit never reached execd, so time the attempt that ran.
+            nonlocal submitted
+            submitted = loop.time()
+            return handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts))
+
         execution = await self._submit_command(
-            lambda: handle.raw.commands.run(command, opts=RunCommandOpts(**background_opts)),
+            run_command,
             operation="command run (background submit)",
             sandbox_id=handle.sandbox_id,
             timeout_s=sdk_timeout_s,
@@ -2192,7 +2231,6 @@ class OpenSandboxProvider:
         if not execution_id:
             raise RuntimeError("OpenSandbox background command did not return an execution id")
 
-        loop = asyncio.get_running_loop()
         # The server enforces the command timeout; leave the client headroom.
         deadline = (loop.time() + float(total_timeout_s) + 60.0) if total_timeout_s is not None else None
         poll_timeout_s = (
@@ -2232,6 +2270,7 @@ class OpenSandboxProvider:
                 if not hasattr(status, field):
                     raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
             if not status.running:
+                observed_finished = loop.time()
                 break
             if deadline is not None and loop.time() >= deadline:
                 raise TimeoutError(
@@ -2284,6 +2323,16 @@ class OpenSandboxProvider:
             error_type = "sandbox"
         else:
             return_code = 0
+        # execd's own timestamps time the command; the client's clock is the fallback.
+        started_at, finished_at = getattr(status, "started_at", None), getattr(status, "finished_at", None)
+        if started_at is not None and finished_at is not None:
+            elapsed_s = (finished_at - started_at).total_seconds()
+        else:
+            # Up to the status that showed it finished, so reading the logs does not count.
+            elapsed_s = observed_finished - submitted
+        if _killed_at_timeout(return_code, elapsed_s, total_timeout_s):
+            note = _timeout_note(total_timeout_s)
+            return SandboxExecResult(stdout, f"{stderr}\n{note}" if stderr else note, 124, error_type="timeout")
 
         return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 
@@ -2564,6 +2613,23 @@ class OpenSandboxProvider:
         """Terminate the sandbox and close local SDK resources."""
         renewal_error = await self._stop_renewal(handle.sandbox_id)
 
+        def terminal_delete_error(error: BaseException) -> bool:
+            # The SDK wraps transport failures, including PermissionError, in
+            # exceptions whose outer text can misleadingly look transient or missing.
+            seen: set[int] = set()
+            current: BaseException | None = error
+            while current is not None and id(current) not in seen:
+                seen.add(id(current))
+                if isinstance(current, (asyncio.CancelledError, PermissionError)) or _exception_status_code(
+                    current
+                ) in (
+                    401,
+                    403,
+                ):
+                    return True
+                current = current.__cause__
+            return False
+
         async def kill_ignore_missing() -> None:
             # Terminate is idempotent: not-found means the sandbox is already
             # gone (double-termination race, or a previous run's leftover).
@@ -2571,17 +2637,25 @@ class OpenSandboxProvider:
             try:
                 await handle.raw.kill()
             except Exception as e:
-                if not _is_missing_sandbox_delete_error(e):
+                if terminal_delete_error(e) or not _is_missing_sandbox_delete_error(e):
                     raise
                 LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
 
-        # If termination fails, keep the SDK handle usable for the owner's retry.
-        await self._await_sdk_operation(
-            kill_ignore_missing,
-            operation="kill",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=self._operations.close_timeout_s,
-        )
+        def retry_delete(error: BaseException) -> bool:
+            if terminal_delete_error(error):
+                return False
+            return isinstance(error, TimeoutError) or _is_retryable_sdk_operation_error(error)
+
+        # DELETE is idempotent, so a lost reply can be reconciled. Attempts and
+        # backoff share one budget; failure keeps the SDK handle usable for retry.
+        async with asyncio.timeout(self._operations.close_timeout_s):
+            await self._await_sdk_operation(
+                kill_ignore_missing,
+                operation="kill",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._operations.close_timeout_s,
+                is_retryable=retry_delete,
+            )
 
         close_error: Exception | None = None
         try:

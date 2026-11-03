@@ -154,3 +154,56 @@ def test_log_attribution_once_logs_only_once(
     matching = [record for record in caplog.records if "Sandbox attribution metadata" in record.getMessage()]
     assert len(matching) == 1
     assert "run-1" in matching[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("plain-value_1.0", "plain-value_1.0"),
+        ("has spaces/and:slashes", "has_spaces_and_slashes"),
+        ("--edge--", "edge"),
+        ("a" * 80, "a" * 63),
+        ("a" * 62 + "-b", "a" * 62),  # truncation must not leave a trailing separator
+        ("...", "metadata"),  # nothing valid left
+        ("", ""),  # an empty label value is valid
+        (12, "12"),
+    ],
+)
+def test_sanitize_label_value(value: object, expected: str) -> None:
+    assert attribution.sanitize_label_value(value) == expected
+
+
+@pytest.mark.parametrize("prefix", ["nemo-gym.nvidia.com", "nemo-gym.nvidia.com/"])
+def test_key_prefix_is_normalized_to_end_with_a_slash(prefix: str) -> None:
+    assert attribution.AttributionConfig(key_prefix=prefix).key_prefix == "nemo-gym.nvidia.com/"
+
+
+def test_empty_key_prefix_gives_bare_keys() -> None:
+    config = attribution.AttributionConfig(key_prefix="", run="r1")
+    assert config.metadata()["run"] == "r1"
+
+
+@pytest.mark.parametrize("prefix", ["Upper.Case/", "has space/", "-bad.example/"])
+def test_invalid_key_prefix_is_rejected(prefix: str) -> None:
+    with pytest.raises(ValueError, match="key_prefix"):
+        attribution.AttributionConfig(key_prefix=prefix)
+
+
+def test_metadata_when_enabled_prefixes_the_resolved_keys() -> None:
+    config = attribution.AttributionConfig(team="t", user="u", workload="w", run="r")
+    assert config.metadata() == {
+        "nemo-gym.nvidia.com/team": "t",
+        "nemo-gym.nvidia.com/user": "u",
+        "nemo-gym.nvidia.com/workload": "w",
+        "nemo-gym.nvidia.com/run": "r",
+    }
+
+
+def test_metadata_when_disabled_is_empty() -> None:
+    assert attribution.AttributionConfig(enabled=False, team="t").metadata() == {}
+
+
+def test_process_id_differs_from_the_run_id_and_is_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared")
+    assert attribution.resolve_process_id() == attribution.resolve_process_id()
+    assert attribution.resolve_process_id() != resolve_run_id()

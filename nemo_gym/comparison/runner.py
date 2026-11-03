@@ -25,8 +25,8 @@ from nemo_gym.comparison.diff import compare_runs
 from nemo_gym.comparison.loading import build_loaded_run, load_agg_metrics_file, resolve_agent_selections
 from nemo_gym.comparison.report import write_reports
 from nemo_gym.comparison.schema import ComparisonConfig, ComparisonResult
+from nemo_gym.config.secret_utils import hide_secrets_in_overrides
 from nemo_gym.package_info import __version__
-from nemo_gym.secret_utils import hide_secrets_in_overrides
 
 
 def invoked_command() -> str:
@@ -67,12 +67,13 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
         candidate_runs = [
             build_loaded_run(run_file, agent) for run_file, agent in zip(candidate_files, selection.candidate_agents)
         ]
-        comparisons.append(compare_runs(baseline_run, candidate_runs))
+        comparisons.append(compare_runs(baseline_run, candidate_runs, confidence_level=config.confidence_level))
 
     return ComparisonResult(
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         nemo_gym_version=__version__,
         command=command,
+        confidence_level=config.confidence_level,
         baseline=baseline_file,
         candidates=candidate_files,
         comparisons=comparisons,

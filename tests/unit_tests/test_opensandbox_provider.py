@@ -18,7 +18,7 @@ import builtins
 import gc
 import logging
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -111,7 +111,7 @@ async def test_session_execution_preserves_env_and_user(tmp_path, user):
     import os
     import shlex
 
-    from nemo_gym.sandbox import AsyncSandbox
+    from nemo_gym.sandbox.api import AsyncSandbox
 
     value = "spaces 'quotes' $HOME $(touch should-not-exist)\nsecond line"
     calls = []
@@ -1069,7 +1069,7 @@ async def test_exec_without_final_status_is_not_success(monkeypatch: pytest.Monk
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
-    async def run(_command: str, *, opts: FakeRunCommandOpts) -> Any:
+    async def run(_command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> Any:
         return SimpleNamespace(
             logs=SimpleNamespace(stdout=[SimpleNamespace(text="partial")], stderr=[]),
             error=None,
@@ -1107,7 +1107,7 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         def __init__(self) -> None:
             self.calls: list[tuple[str, FakeRunCommandOpts]] = []
 
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> Any:
             self.calls.append((command, opts))
             if "fail" in command:
                 return SimpleNamespace(
@@ -1306,6 +1306,257 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.log_calls == ["exec-42"]
 
 
+# execd reports the kill at a command's timeout like any signal death: exit code -1, "signal: killed".
+@pytest.mark.parametrize(
+    "exit_code,ran_s,timeout_s,expected",
+    [
+        (-1, 30.0, 30, (124, "timeout")),  # killed at its timeout
+        (-1, 1.0, 30, (-1, None)),  # killed before its deadline, e.g. by the OOM killer
+        (7, 30.0, 30, (7, None)),  # exited on its own at the deadline
+        (-1, 30.0, 0, (-1, None)),  # a zero timeout enforces none
+    ],
+)
+async def test_exec_background_reports_a_kill_at_the_timeout_as_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int, ran_s: float, timeout_s: int, expected: tuple
+) -> None:
+    started_at = datetime(2026, 10, 23, 17, 9, 8, 950131, tzinfo=timezone.utc)
+    error = "signal: killed" if exit_code == -1 else f"exit status {exit_code}"
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(
+                running=False,
+                exit_code=exit_code,
+                error=error,
+                started_at=started_at,
+                finished_at=started_at + timedelta(seconds=ran_s, microseconds=646),
+            )
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="partial output", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5}, probe={"command": None}, operations={"background_exec": True}
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-bg", "opensandbox", SimpleNamespace(commands=FakeCommands()))
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=timeout_s)
+
+    assert (result.return_code, result.error_type) == expected
+    assert result.stdout == "partial output"
+    if expected[1] == "timeout":
+        assert result.stderr == "signal: killed\nCommand timed out after 30s; OpenSandbox execd killed it"
+    else:
+        assert result.stderr == error
+
+
+def _background_provider(
+    monkeypatch: pytest.MonkeyPatch, commands: Any, **operations: Any
+) -> tuple[opensandbox_provider.OpenSandboxProvider, opensandbox_provider.SandboxHandle]:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={
+            "background_exec": True,
+            "background_poll_initial_s": 0.01,
+            "background_poll_interval_s": 0.02,
+            **operations,
+        },
+    )
+    return provider, opensandbox_provider.SandboxHandle(
+        "sandbox-bg", "opensandbox", SimpleNamespace(commands=commands)
+    )
+
+
+# Without execd's timestamps the client times a background command from the submit that ran to the status that
+# showed it finished. Submit retries before it and log reads after it are not the command's time.
+async def test_exec_background_without_timestamps_leaves_out_submit_retries_and_log_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        submits = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.submits += 1
+            if self.submits < 3:
+                await asyncio.sleep(0.15)
+                raise Backend502Error("Failed to run command. Status code: 502")
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(running=False, exit_code=-1, error="signal: killed")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            await asyncio.sleep(0.3)
+            return SimpleNamespace(content="partial output", cursor=None)
+
+    commands = FakeCommands()
+    provider, handle = _background_provider(monkeypatch, commands, retries=3, retry_delay_s=0.01)
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=0.25)
+
+    assert commands.submits == 3
+    assert (result.return_code, result.error_type) == (-1, None)
+    assert (result.stdout, result.stderr) == ("partial output", "signal: killed")
+
+
+async def test_exec_background_without_timestamps_reports_a_command_that_ran_to_its_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.submitted = asyncio.get_running_loop().time()
+            return SimpleNamespace(id="exec-42")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            running = asyncio.get_running_loop().time() - self.submitted < 0.3
+            return SimpleNamespace(running=running, exit_code=None if running else -1, error="signal: killed")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="partial output", cursor=None)
+
+    provider, handle = _background_provider(monkeypatch, FakeCommands())
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=0.25)
+
+    assert (result.return_code, result.error_type) == (124, "timeout")
+    assert result.stderr == "signal: killed\nCommand timed out after 0.25s; OpenSandbox execd killed it"
+
+
+# execd's init and error stamps (ms) for commands run with `timeout_s` on an OpenSandbox cell (2026-10-28).
+LIVE_INIT_MS = 1793227333925
+
+
+@pytest.mark.parametrize(
+    "command,exit_code,ran_ms,timeout_s,expected",
+    [
+        ("sleep 30", -1, 2999, 3, (124, "timeout")),
+        ("kill -9 $$", -1, 0, 3, (-1, None)),
+        ("sleep 1; kill -9 $$", -1, 1001, 3, (-1, None)),
+        ("exit 7", 7, 1, 3, (7, None)),
+        ("sleep 30", -1, 499, 0.5, (124, "timeout")),
+        ("kill -9 $$", -1, 0, 0.5, (-1, None)),
+        ("sleep 30", -1, 201, 0.2, (124, "timeout")),
+        ("kill -9 $$", -1, 1, 0.2, (-1, None)),
+        ("sleep 30", -1, 2999, None, (-1, None)),  # no timeout, so execd killed it for another reason
+    ],
+)
+@pytest.mark.parametrize("submit_delay_s", [0.0, 0.35])  # e.g. the transport waiting out a 429's Retry-After
+async def test_exec_times_a_command_with_execd_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    exit_code: int,
+    ran_ms: int,
+    timeout_s: float | None,
+    expected: tuple,
+    submit_delay_s: float,
+) -> None:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> Any:
+            await asyncio.sleep(submit_delay_s)
+            await handlers.on_init(SimpleNamespace(id="exec-1", timestamp=LIVE_INIT_MS))
+            error = SimpleNamespace(name="CommandExecError", value=str(exit_code), timestamp=LIVE_INIT_MS + ran_ms)
+            await handlers.on_error(error)
+            return SimpleNamespace(
+                logs=SimpleNamespace(stdout=[SimpleNamespace(text="partial output")], stderr=[]),
+                error=error,
+                exit_code=exit_code,
+                complete=None,
+            )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", SimpleNamespace(commands=FakeCommands()))
+
+    result = await provider.exec(handle, command, timeout_s=timeout_s)
+
+    assert (result.return_code, result.error_type) == expected
+    assert result.stdout == "partial output"
+    note = f"\nCommand timed out after {timeout_s:g}s; OpenSandbox execd killed it" if expected[1] == "timeout" else ""
+    assert result.stderr == f"CommandExecError: {exit_code}{note}"
+
+
+@pytest.mark.parametrize("ran_s,expected", [(0.25, (124, "timeout")), (0.0, (-1, None))])
+async def test_exec_without_execd_stamps_times_the_command_by_its_events(
+    monkeypatch: pytest.MonkeyPatch, ran_s: float, expected: tuple
+) -> None:
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> Any:
+            await asyncio.sleep(0.3)  # before execd started it
+            await handlers.on_init(SimpleNamespace(id="exec-1"))
+            await asyncio.sleep(ran_s)
+            error = SimpleNamespace(name="CommandExecError", value="-1")
+            await handlers.on_error(error)
+            return SimpleNamespace(
+                logs=SimpleNamespace(stdout=[], stderr=[]), error=error, exit_code=-1, complete=None
+            )
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", SimpleNamespace(commands=FakeCommands()))
+
+    result = await provider.exec(handle, "bash solve.sh", timeout_s=0.25)
+
+    assert (result.return_code, result.error_type) == expected
+
+
+@pytest.mark.parametrize(
+    "elapsed_s,timeout_s,expected",
+    [
+        (0.001, 0.1, False),  # died at once under a short timeout
+        (0.1, 0.1, True),
+        (0.095, 0.1, True),  # within a tenth of the timeout
+        (29.8, 30, True),
+        (29.7, 30, False),  # the allowance stays 0.25 s for long timeouts
+        (1.0, 30, False),
+    ],
+)
+def test_the_timeout_allowance_is_at_most_a_tenth_of_the_timeout(
+    elapsed_s: float, timeout_s: float, expected: bool
+) -> None:
+    assert opensandbox_provider._killed_at_timeout(-1, elapsed_s, timeout_s) is expected
+
+
 DELETED_OUTPUT_LOG_ERROR = (
     "Get command logs failed: error open combined output file for command exec-42: no such file or directory"
 )
@@ -1491,7 +1742,7 @@ async def test_exec_hard_cap_labels_genuinely_wedged_dispatch(monkeypatch: pytes
             self.kwargs = kwargs
 
     class FakeCommands:
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> Any:
             await asyncio.Event().wait()  # wedged: never returns
 
     class FakeRaw:
@@ -1778,6 +2029,282 @@ async def test_close_treats_missing_sandbox_as_terminated_without_retry(caplog: 
 
     assert kill_calls == 1
     assert any("already gone; treating terminate as success" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize("already_deleted", [False, True], ids=["deleted", "missing"])
+async def test_close_recovers_an_early_lost_delete_reply(already_deleted: bool) -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    missing = SandboxApiException("Sandbox sandbox-1 not found")
+    missing.status_code = 404
+    raw = SimpleNamespace(
+        kill=AsyncMock(side_effect=[TimeoutError("delete response lost"), missing if already_deleted else None]),
+        close=AsyncMock(),
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    await provider.close(handle)
+
+    assert raw.kill.await_count == 2
+    raw.close.assert_awaited_once_with()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("after_timeout", [False, True], ids=["first-attempt", "after-lost-reply"])
+@pytest.mark.parametrize("failure", ["permission", "unauthorized", "forbidden", "cancelled"])
+async def test_delete_recovery_keeps_permission_and_cancellation_terminal(failure: str, after_timeout: bool) -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    if failure == "permission":
+        error = PermissionError("Sandbox sandbox-1 not found or permission denied")
+    elif failure == "cancelled":
+        error = asyncio.CancelledError("connection reset")
+    else:
+        error = SandboxApiException("Sandbox sandbox-1 not found or permission denied")
+        error.status_code = 401 if failure == "unauthorized" else 403
+        error.__cause__ = ConnectionError("connection reset")
+    errors = ([TimeoutError("delete response lost")] if after_timeout else []) + [error, None]
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=errors), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(type(error)) as caught:
+        await provider.close(handle)
+
+    assert caught.value is error
+    assert raw.kill.await_count == 1 + after_timeout
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("after_timeout", [False, True], ids=["first-attempt", "after-lost-reply"])
+@pytest.mark.parametrize("failure", ["permission", "permission-not-found", "unauthorized", "forbidden", "cancelled"])
+async def test_delete_recovery_keeps_wrapped_terminal_errors(failure: str, after_timeout: bool) -> None:
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter  # noqa: PLC0415
+    from opensandbox.exceptions import SandboxApiException, SandboxInternalException  # noqa: PLC0415
+
+    if failure.startswith("permission"):
+        message = (
+            "Sandbox sandbox-1 not found or permission denied"
+            if failure.endswith("not-found")
+            else "permission denied"
+        )
+        error = ExceptionConverter.to_sandbox_exception(PermissionError(message))
+    else:
+        if failure == "cancelled":
+            cause = asyncio.CancelledError("connection reset")
+        else:
+            cause = SandboxApiException("permission denied", status_code=401 if failure == "unauthorized" else 403)
+        error = SandboxInternalException("Network connectivity error: Sandbox sandbox-1 not found", cause=cause)
+    raw = SimpleNamespace(
+        kill=AsyncMock(side_effect=([TimeoutError("delete response lost")] if after_timeout else []) + [error, None]),
+        close=AsyncMock(),
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(type(error)) as caught:
+        await provider.close(handle)
+
+    assert caught.value is error
+    assert raw.kill.await_count == 1 + after_timeout
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_delete_terminal_error_check_handles_cyclic_causes(terminal: bool) -> None:
+    error = ValueError("invalid delete")
+    cause = PermissionError("permission denied") if terminal else ValueError("invalid cause")
+    error.__cause__ = cause
+    cause.__cause__ = error
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=[error, None]), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(ValueError) as caught:
+        await provider.close(handle)
+
+    assert caught.value is error
+    raw.kill.assert_awaited_once_with()
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+async def test_delete_recovery_exhaustion_keeps_the_handle_available_for_owner_retry() -> None:
+    error = TimeoutError("delete response lost")
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=error), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(TimeoutError):
+        await provider.close(handle)
+
+    assert raw.kill.await_count == 3
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+    raw.kill.side_effect = None
+    await provider.close(handle)
+    assert raw.kill.await_count == 4
+    raw.close.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("after_timeout", [False, True], ids=["first-attempt", "after-lost-reply"])
+async def test_caller_cancellation_during_delete_is_not_retried(after_timeout: bool) -> None:
+    entered = asyncio.Event()
+    calls = 0
+
+    async def kill() -> None:
+        nonlocal calls
+        calls += 1
+        if after_timeout and calls == 1:
+            raise TimeoutError("delete response lost")
+        entered.set()
+        await asyncio.Event().wait()
+
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=kill), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+    task = asyncio.create_task(provider.close(handle))
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel("caller stopped cleanup")
+    with pytest.raises(asyncio.CancelledError, match="caller stopped cleanup"):
+        await task
+
+    assert raw.kill.await_count == 1 + after_timeout
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+async def test_delete_recovery_attempts_share_one_close_deadline() -> None:
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def kill() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("delete response lost")
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=kill), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0, "close_timeout_s": 0.1},
+        probe={"command": None},
+    )
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(provider.close(handle), 1)
+
+    assert entered.is_set() and cancelled.is_set()
+    assert raw.kill.await_count == 2
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("cancel_caller", [False, True], ids=["deadline", "caller-cancellation"])
+async def test_delete_recovery_backoff_shares_the_deadline_and_allows_cancellation(
+    monkeypatch: pytest.MonkeyPatch, cancel_caller: bool
+) -> None:
+    import tenacity
+
+    sleeping = asyncio.Event()
+    monkeypatch.setattr(tenacity, "wait_random_exponential", lambda **_: tenacity.wait_fixed(30))
+    original_log_retry = opensandbox_provider._log_operation_retry
+
+    def log_retry(*args: Any, **kwargs: Any) -> None:
+        sleeping.set()
+        original_log_retry(*args, **kwargs)
+
+    monkeypatch.setattr(opensandbox_provider, "_log_operation_retry", log_retry)
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=TimeoutError("delete response lost")), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "close_timeout_s": 30 if cancel_caller else 0.1},
+        probe={"command": None},
+    )
+    task = asyncio.create_task(provider.close(handle))
+    await asyncio.wait_for(sleeping.wait(), 1)
+    if cancel_caller:
+        task.cancel("caller stopped cleanup")
+    else:
+        done, _ = await asyncio.wait({task}, timeout=0.5)
+        if not done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert done, "DELETE deadline must interrupt retry backoff before the outer test guard"
+    with pytest.raises(asyncio.CancelledError if cancel_caller else TimeoutError):
+        await asyncio.wait_for(task, 1)
+
+    raw.kill.assert_awaited_once_with()
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+async def test_delete_recovery_does_not_spend_the_separate_transport_close_budget() -> None:
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def close() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    raw = SimpleNamespace(
+        kill=AsyncMock(side_effect=[TimeoutError("delete response lost"), None]), close=AsyncMock(side_effect=close)
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0, "close_timeout_s": 0.1},
+        probe={"command": None},
+    )
+
+    # Local transport cleanup is best effort after confirmed deletion; its own
+    # timeout must not be converted into an unconfirmed DELETE failure.
+    await asyncio.wait_for(provider.close(handle), 1)
+
+    assert entered.is_set() and cancelled.is_set()
+    assert raw.kill.await_count == 2
+    raw.close.assert_awaited_once_with()
+
+
+async def test_delete_timeout_recovery_does_not_enable_disabled_create_retries() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"retries": 0}, operations={"retries": 3}, probe={"command": None}
+    )
+    provider._create_once = AsyncMock(
+        side_effect=opensandbox_provider.OpenSandboxCreateTimeoutError("ambiguous create")
+    )
+
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+        await provider.create(SandboxSpec(image="task"))
+
+    provider._create_once.assert_awaited_once()
 
 
 async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None:
@@ -2446,7 +2973,7 @@ async def test_exec_retries_backend_connect_502_despite_zero_command_retries(
     calls = {"n": 0}
 
     class FakeCommands:
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> Any:
             calls["n"] += 1
             if calls["n"] < 3:
                 raise Backend502Error("Failed to run command. Status code: 502")
@@ -2491,7 +3018,7 @@ async def test_exec_persistent_502_raises_typed_backend_unreachable(
     calls = {"n": 0}
 
     class FakeCommands:
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> Any:
             calls["n"] += 1
             raise Backend502Error("Failed to run command. Status code: 502")
 
