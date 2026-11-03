@@ -1589,7 +1589,10 @@ def test_a_segment_with_nothing_eligible_for_retry_ends_its_own_chain(tmp_path, 
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-@pytest.mark.parametrize("kind", ["provider_credentials_rejected", "collection_resume_refused"])
+@pytest.mark.parametrize(
+    "kind",
+    ["provider_credentials_rejected", "collection_resume_refused", "server_spinup_timeout", "driver_install_failed"],
+)
 def test_a_driver_that_exits_76_with_a_typed_failure_leaves_the_stop_to_its_follow_up(tmp_path, monkeypatch, kind):
     # The follow-up's prologue turns the kind into its own stop and remedy, so the segment keeps its queued jobs.
     _segment_finishing_the_run(tmp_path, monkeypatch)
@@ -1608,6 +1611,26 @@ def test_a_driver_that_exits_76_with_a_typed_failure_leaves_the_stop_to_its_foll
     assert NO_ELIGIBLE_RETRY_REASON not in result.stdout
     assert _scancel_calls(tmp_path) == []
     assert _chain_end_entries(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_driver_that_exits_76_with_a_kind_no_guard_handles_still_ends_its_own_chain(tmp_path, monkeypatch):
+    # The follow-up's prologue writes no stop for this kind, so it would start the run again: the segment ends it.
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    failure = tmp_path / f"{DRIVER_FAILURE_NAME}.200"
+    result = _run_prologue(
+        tmp_path,
+        ResumeConfig(),
+        "TIMEOUT",
+        driver=f"echo server_start_failed > {shlex.quote(str(failure))}; ( exit {NO_ELIGIBLE_RETRY_EXIT} )",
+        sentinel_id="998",
+    )
+
+    assert result.returncode == NO_ELIGIBLE_RETRY_EXIT, result.stdout + result.stderr
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == NO_ELIGIBLE_RETRY_REASON + "\n"
+    assert _scancel_calls(tmp_path) == ["998", "999"]
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["ended"] == NO_ELIGIBLE_RETRY
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
