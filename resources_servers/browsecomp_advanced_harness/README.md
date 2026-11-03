@@ -25,6 +25,15 @@ judge_model_api_key: ""
 judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
 ```
 
+## Sessions
+
+Each rollout has its own session: the provider-call metrics that `/verify` reports and, with `workspace: per_session`, the disk workspace that `search` and `browse` write pages to and `bash_command` reads.
+
+- **Environment Server.** `/seed_session` takes a `ResourcesSeedSessionRequest` and keys the session by its `resources_session_id`. The seed is refused with 422 when `task_data` lacks the `question` and `ground_truth` that `/verify` needs, or, with a workspace, when the ID is not a plain directory name. `/close_session` removes the workspace and the metrics, and is idempotent. A close that cannot remove the workspace fails and keeps the session, so the caller can retry it. After a close, a seed for the same ID is refused with 409, and a tool call for it gets 404 (`session_lost`) instead of recreating the workspace. `/verify` of a closed session still grades the answer: the reward depends only on the response and the task.
+- **An agent's `/run`.** `/seed_session` takes the flat row and keys the session by the cookie. `/verify` removes the workspace, since this path sends no close.
+
+`/verify` drops the session's metrics after reporting them, unless `dump_session_id_to_metrics_on_exit` keeps them for the dump at shutdown.
+
 ## Running
 
 ```bash

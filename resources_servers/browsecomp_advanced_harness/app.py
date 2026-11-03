@@ -31,19 +31,33 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pocketshell import run as pocketshell_run
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
 from nemo_gym.client import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES, SESSION_ID_KEY, raise_for_status, request
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    EpisodeId,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
+)
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
 )
 from nemo_gym.verification import JudgeError, call_judge
@@ -216,6 +230,13 @@ class TavilySearchRunRequest(BaseRunRequest):
 
 class TavilySearchVerifyRequest(TavilySearchRunRequest, BaseVerifyRequest):
     pass
+
+
+class BrowsecompTaskData(BaseModel):
+    """The task fields /verify reads, checked when an Environment Server seeds the session."""
+
+    question: str
+    ground_truth: str
 
 
 class JudgeEvaluation(BaseModel):
@@ -879,6 +900,20 @@ class _PageWriter:
         return f"pages/{fname}"
 
 
+# A typed seed's resources_session_id names its workspace directory, so it must be one plain path component.
+_WORKSPACE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _remove_workspace(workspace: Path) -> None:
+    """Remove a session workspace, raising on any failure other than the directory already being gone."""
+
+    def ignore_missing(function, path, error: BaseException) -> None:
+        if not isinstance(error, FileNotFoundError):
+            raise error
+
+    shutil.rmtree(workspace, onexc=ignore_missing)
+
+
 # Judge retry backoff cap. The 2026-07-15 inference-api 529 outage outlasted the old
 # 10-attempt/30s-cap schedule (~2.9 min total) and falsely zeroed 25 samples in one
 # full-400 run; 15 attempts capped at 120s gives ~18 min of cumulative window.
@@ -916,6 +951,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
+    # Environment Server sessions by resources_session_id, with the episode and task each was seeded for.
+    _typed_sessions: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _fence: Optional[ResourcesSessionFence] = PrivateAttr(default=None)
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
 
@@ -957,6 +995,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
         self._exclude_domains = self._parse_exclude_domains()
         self._page_cache: dict[str, str] = {}
@@ -998,11 +1037,74 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
-        if self.config.workspace == "per_session":
-            sid = request.session[SESSION_ID_KEY]
-            self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
-        return BaseSeedSessionResponse()
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            # An agent's /run seeds with its row; the session is the cookie's, and /verify cleans it up.
+            if self.config.workspace == "per_session":
+                sid = request.session[SESSION_ID_KEY]
+                self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
+            return BaseSeedSessionResponse()
+
+        sid = body.resources_session_id
+        async with self._fence.locked(sid):
+            self._fence.raise_if_closed(sid)
+            identity = self._typed_sessions.get(sid)
+            if identity is None:
+                try:
+                    BrowsecompTaskData.model_validate(body.task_data)
+                except ValidationError as error:
+                    raise ResourcesSeedRejectedError(f"task_data is not a BrowseComp task: {error}") from error
+                if self.config.workspace == "per_session":
+                    if not _WORKSPACE_SESSION_ID_RE.fullmatch(sid):
+                        raise ResourcesSeedRejectedError(
+                            f"resources_session_id {sid!r} cannot name a workspace directory"
+                        )
+                    self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
+                self._typed_sessions[sid] = (body.episode_id, body.task_id)
+            elif identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+        # Tool calls and /verify find the session by the cookie. A served app's session router already names it
+        # resources_session_id; an app without one (a test's) does not.
+        request.session[SESSION_ID_KEY] = sid
+        return ResourcesSeedSessionResponse(resources_session_id=sid)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        # Sessions are keyed by resources_session_id, so a close without the seed's cookie releases the same one.
+        sid = body.resources_session_id
+        async with self._fence.locked(sid):
+            closed_episode = self._fence.closed_episode(sid)
+            if closed_episode is None:
+                identity = self._typed_sessions.get(sid)
+                if identity is not None and identity[0] != body.episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+                await self._release_session(sid)
+                self._typed_sessions.pop(sid, None)
+                self._fence.mark_closed(sid, body.episode_id)
+            elif closed_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+        return ResourcesCloseSessionResponse(resources_session_id=sid)
+
+    async def _release_session(self, sid: str) -> None:
+        """Remove the session's workspace and metrics. A failed removal raises and keeps the workspace for a retry."""
+        page_writer = self._session_workspaces.get(sid)
+        if page_writer is not None:
+            await asyncio.to_thread(_remove_workspace, page_writer.workspace)
+            self._session_workspaces.pop(sid, None)
+        self._release_metrics(sid)
+
+    def _release_metrics(self, sid: str) -> None:
+        # With the dump on, the entries are kept for it; otherwise one entry per rollout would accumulate.
+        if not self.config.dump_session_id_to_metrics_on_exit:
+            self._session_id_to_metrics.pop(sid, None)
+
+    def _open_session_id(self, request: Request) -> str:
+        """The request's session, refusing a closed one so a late tool call cannot recreate its workspace."""
+        sid = request.session[SESSION_ID_KEY]
+        if self._fence.closed_episode(sid) is not None:
+            raise ResourcesSessionLostError(f"Resources session {sid} is closed")
+        return sid
 
     def _get_page_writer(self, sid: str) -> Optional["_PageWriter"]:
         if self.config.workspace != "per_session":
@@ -1019,7 +1121,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             shutil.rmtree(pw.workspace, ignore_errors=True)
 
     async def bash_command(self, request: Request, body: BashCommandRequest) -> BashCommandResponse:
-        sid = request.session[SESSION_ID_KEY]
+        sid = self._open_session_id(request)
         page_writer = self._get_page_writer(sid)
         if page_writer is None:
             return BashCommandResponse(
@@ -1320,7 +1422,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return "\n".join(blocks)
 
     async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
-        sid = request.session[SESSION_ID_KEY]
+        sid = self._open_session_id(request)
         metrics = self._session_id_to_metrics[sid]
 
         if self.config.debug:
@@ -1359,7 +1461,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchResponse(results_string="\n\n".join(results))
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
-        metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        sid = self._open_session_id(request)
+        metrics = self._session_id_to_metrics[sid]
 
         if self.config.debug:
             print("\n\n browse urls: ", body.urls)
@@ -1423,7 +1526,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if not result_list:
             return BrowseResponse(results_string="No content extracted.")
 
-        page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
+        page_writer = self._get_page_writer(sid)
         if page_writer is not None:
             # terminal mode: write each page to disk, return metadata + preview.
             # Mirrors the reference harness tavily_extract (disk mode) formatting exactly.
@@ -1472,7 +1575,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         agent_num_tool_calls = getattr(body.response, "num_tool_calls", None)
         if agent_num_tool_calls is None:
             agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
-        session_metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
+        sid = request.session[SESSION_ID_KEY]
+        session_metrics = self._session_id_to_metrics[sid]
         num_provider_429s, num_provider_other_retries = _sum_provider_retry_counts(session_metrics)
         verify_response = TavilySearchVerifyResponse(
             **body.model_dump(),
@@ -1484,9 +1588,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             num_provider_other_retries=num_provider_other_retries,
         )
 
+        # The verify response carries the session's metrics, and an agent's /run sends no close, so release here.
+        self._release_metrics(sid)
         # terminal mode: clean up this session's disk workspace
         if self.config.workspace == "per_session":
-            self._cleanup_workspace(request.session[SESSION_ID_KEY])
+            self._cleanup_workspace(sid)
 
         if judge_error is not None:
             raise JudgeError(judge_error)
