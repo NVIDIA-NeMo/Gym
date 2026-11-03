@@ -41,10 +41,12 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
+    restrict_sandbox_network,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -299,6 +301,15 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     terminal_timeout: int = 180
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Hermes creates: `model_only` allows only the model server's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
+            "borrows one rejects any other value than `inherit`. Such a sandbox cannot install the runtime, so its "
+            "image must carry it (see README)."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     # Where uv builds for sandbox architectures other than the host's are cached.
@@ -500,27 +511,40 @@ class HermesAgent(SimpleResponsesAPIAgent):
             connection = body.sandbox_access.connection
             if not isinstance(connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("Hermes currently supports only direct sandbox connections")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "Hermes network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             provider_ref = connection.provider_config_ref
             workdir = body.sandbox_access.workdir
 
         provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
         # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
         # without use_absolute_ip) would make every model call fail and the episode score 0 unmasked.
-        assert_model_url_reachable_from_sandbox(
-            self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-            provider_name=next(iter(provider_config), None),
-        )
+        model_base_url = self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key)
+        assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
         provider = create_provider(provider_config)
         try:
             if owns_sandbox:
-                sandbox = AsyncSandbox(provider)
                 sandbox_config = self.config.sandbox_config.copy()
                 # Provider TTLs outlive this server; reserve ten minutes for setup/cleanup overhead.
                 sandbox_config.setdefault(
                     "ttl_s",
                     self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
                 )
-                await sandbox.start(SandboxSpec(**sandbox_config))
+                spec = restrict_sandbox_network(
+                    SandboxSpec(**sandbox_config),
+                    network_access=self.config.network_access,
+                    provider_name=provider.name,
+                    model_base_url=model_base_url,
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess)
+                    ],
+                )
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
             else:
                 sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
         except BaseException:

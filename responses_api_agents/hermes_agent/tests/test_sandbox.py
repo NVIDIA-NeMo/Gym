@@ -1486,6 +1486,74 @@ async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, 
     assert all(record.state is None for record in agent._session_records.values())
 
 
+def _owned_seed_with_search_grant(state) -> AgentSeedSessionRequest:
+    body = state.request.model_copy(deep=True)
+    body.sandbox_access = None
+    body.tool_accesses = [
+        {
+            "kind": "mcp",
+            "name": "episode_search_tools",
+            "required": False,
+            "connection": {"url": "http://resources.example:7000/mcp", "headers": {"x-session": "token"}},
+        }
+    ]
+    return AgentSeedSessionRequest.model_validate(body.model_dump(mode="json"))
+
+
+@pytest.mark.parametrize(
+    ("network_access", "allowed"),
+    [
+        ("inherit", None),
+        ("model_only", ["model"]),
+        ("model_and_tools", ["model", "resources.example"]),
+    ],
+)
+async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(
+    agent, state, monkeypatch, network_access, allowed
+):
+    import responses_api_agents.hermes_agent.app as module
+
+    agent.config.sandbox_provider = "runtime"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = network_access
+    sandbox = state.session.sandbox
+    monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    monkeypatch.setattr(
+        module, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    )
+
+    await agent.seed_agent_session(SimpleNamespace(session={}), _owned_seed_with_search_grant(state))
+
+    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+
+
+async def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(agent, state, monkeypatch):
+    import responses_api_agents.hermes_agent.app as module
+
+    agent.config.network_access = "model_only"
+    factory = MagicMock(return_value=state.session.sandbox)
+    factory.connect = AsyncMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    create_provider = MagicMock()
+    monkeypatch.setattr(module, "create_provider", create_provider)
+
+    with pytest.raises(HTTPException) as rejected:
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+
+    assert rejected.value.status_code == 422
+    assert "borrowed" in str(rejected.value.detail)
+    create_provider.assert_not_called()
+    factory.connect.assert_not_awaited()
+
+
 async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monkeypatch, caplog):
     import responses_api_agents.hermes_agent.app as module
 

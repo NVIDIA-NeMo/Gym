@@ -110,6 +110,7 @@ hermes_agent:
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
+| `network_access` | `inherit` | egress of an agent-owned sandbox: `inherit` (the provider's network), `model_only` (only the Model Server's host), or `model_and_tools` (also each MCP grant's host). OpenSandbox only; a session that borrows a sandbox rejects any other value than `inherit`. A restricted sandbox cannot install Hermes, so its image must bake the runtime in (see below) |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
 | `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
