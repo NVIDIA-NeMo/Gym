@@ -19,22 +19,20 @@ structured verdict and its head SHA.
 Package mappings use `# suggest:` entries consumed by the existing Suggest Reviewers workflow.
 The portable checker explicitly reads both standard rules and suggestion entries, in file order,
 and uses the last match for each changed file. GitHub itself ignores the suggestion comments.
-One member of any team on that line must approve: the specialist team and `frontier-evals` are alternatives.
-Different packages require their respective approvals; one Frontier Eval approval can cover every package.
-During rollout, a non-Frontier owner group is automatically satisfied while its live membership is
+One member of an owner team on that line must approve. Different packages require approval from
+their assigned teams; a reviewer belonging to several teams can satisfy each of their rules.
+During rollout, an owner group is automatically satisfied while its live membership is
 exactly Ananth (`ananthsub`, account ID `2382532`) and Yuya (`yaoyu-33`, account ID `54727607`).
 The checker reports `OPTIONAL` and records `optional_owners` without inventing an approval.
-Membership is checked separately for each owner team: the European `frontier-evals` roster never
-counts toward filling a US specialist group, and Frontier Eval itself never gets this exemption.
 Adding a third specialist member activates the normal approval requirement on the next check;
-approval from that specialist team or Frontier Eval then satisfies it. Empty groups, one-person
+approval from a member of that specialist team then satisfies it. Empty groups, one-person
 groups, and other two-person groups do not receive the exemption.
-Paths outside the package map retain a maintainer fallback with Frontier Eval as an alternative;
+Paths outside the package map retain a maintainer fallback;
 CI infrastructure and the existing BioNeMo overrides keep their dedicated owners.
 Seeded teams remain suggested even when their portable approval requirement is optional. Empty
 suggestion overrides before native CI entries suppress broad reviewer hints for those paths.
 Reviewer-only implementation hints are followed by standard entries preserving their existing
-maintainer/Frontier Eval approval fallback. CI and BioNeMo retain their native ownership rules.
+maintainer approval fallback. CI and BioNeMo retain their native ownership rules.
 The suggestion workflow only requests reviewers; the shared check determines approval requirements.
 Renames check old and new paths. The checker rejects
 truncated file lists, author approvals, and GitHub approvals for an older head. GitLab must reset
@@ -64,7 +62,7 @@ Deployment order:
    `nv-internal-main`, including approval, unapproval, and source-update events. Its payload is
    supplied through GitLab's `TRIGGER_PAYLOAD` file. Keep the trigger token outside the repository.
    Retry this trusted pipeline to refresh the verdict after a GitHub team membership change.
-3. Verify missing approval, specialist approval, Frontier Eval approval, approval removal, and a
+3. Verify missing approval, specialist approval, approval removal, and a
    source push on test PRs/MRs. Include fork PRs and renames.
 4. Require the GitHub `Package approvals` commit status, restricted to the configured bot App.
    Keep GitLab's successful-pipeline requirement enabled. Disable native code-owner approval

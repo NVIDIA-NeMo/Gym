@@ -50,37 +50,26 @@ def suggestion_policy(text: str) -> list[dict]:
 class RolloutTests(unittest.TestCase):
     """Activate each specialist requirement only after its initial roster changes."""
 
-    def test_initial_specialist_is_optional_despite_populated_frontier(self) -> None:
-        """The European team's size does not activate an unfilled US specialist team."""
+    def test_initial_specialist_is_optional(self) -> None:
+        """The initial specialist roster satisfies its rule without an approval."""
         specialist = "@NVIDIA-NeMo/gym_reviewers_agents"
-        frontier = "@NVIDIA-NeMo/frontier-evals"
-        matches = approvals.match_policy(
-            ["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist} {frontier}")
-        )
-        teams = {
-            specialist: initial_reviewers(),
-            frontier: [{"id": number, "login": f"fe-{number}"} for number in range(1000, 1014)],
-        }
+        matches = approvals.match_policy(["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist}"))
+        teams = {specialist: initial_reviewers()}
         result = approvals.evaluate(matches, teams, set())
         self.assertTrue(result["passed"])
         self.assertEqual(result["rules"][0]["optional_owners"], [specialist])
         self.assertEqual(result["rules"][0]["approved_by"], [])
 
-    def test_third_specialist_member_activates_either_team_approval(self) -> None:
-        """Filling the specialist team requires an actual US or European approval."""
+    def test_third_specialist_member_activates_team_approval(self) -> None:
+        """Filling the specialist team requires approval from one of its members."""
         specialist = "@NVIDIA-NeMo/gym_reviewers_agents"
-        frontier = "@NVIDIA-NeMo/frontier-evals"
-        matches = approvals.match_policy(
-            ["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist} {frontier}")
-        )
-        teams = {
-            specialist: initial_reviewers() + [{"id": 6000, "login": "specialist"}],
-            frontier: [{"id": 1000, "login": "european-reviewer"}],
-        }
+        matches = approvals.match_policy(["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist}"))
+        teams = {specialist: initial_reviewers() + [{"id": 6000, "login": "specialist"}]}
         missing = approvals.evaluate(matches, teams, set())
         self.assertFalse(missing["passed"])
         self.assertEqual(missing["rules"][0]["optional_owners"], [])
-        for approved in ({6000}, {1000}, {2382532}, {54727607}):
+        self.assertFalse(approvals.evaluate(matches, teams, {1000})["passed"])
+        for approved in ({6000}, {2382532}, {54727607}):
             with self.subTest(approved=approved):
                 self.assertTrue(approvals.evaluate(matches, teams, approved)["passed"])
 
@@ -98,25 +87,6 @@ class RolloutTests(unittest.TestCase):
         for roster in rosters:
             with self.subTest(roster=roster):
                 self.assertFalse(approvals.evaluate(matches, {owner: roster}, set())["passed"])
-
-    def test_frontier_itself_never_gets_the_initial_roster_exemption(self) -> None:
-        """Frontier Eval remains an actual reviewer even if its roster matches the pair."""
-        frontier = "@NVIDIA-NeMo/FRONTIER-EVALS"
-        matches = approvals.match_policy(["agents/file.py"], approvals.parse_policy(f"/agents/ {frontier}"))
-        teams = {frontier: initial_reviewers()}
-        self.assertFalse(approvals.evaluate(matches, teams, set())["passed"])
-        self.assertTrue(approvals.evaluate(matches, teams, {2382532})["passed"])
-
-    def test_frontier_exemption_cannot_bypass_a_populated_specialist(self) -> None:
-        """A filled US team still needs approval when the European alternative has only the pair."""
-        specialist = "@NVIDIA-NeMo/gym_reviewers_agents"
-        frontier = "@NVIDIA-NeMo/frontier-evals"
-        matches = approvals.match_policy(
-            ["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist} {frontier}")
-        )
-        teams = {specialist: [{"id": 6000, "login": "specialist"}], frontier: initial_reviewers()}
-        self.assertFalse(approvals.evaluate(matches, teams, set())["passed"])
-        self.assertTrue(approvals.evaluate(matches, teams, {54727607})["passed"])
 
     def test_optional_package_does_not_waive_another_owners_requirement(self) -> None:
         """A request touching optional code and required CI still needs the CI approval."""
@@ -148,14 +118,13 @@ class RolloutTests(unittest.TestCase):
 class PolicyTests(unittest.TestCase):
     """Verify path boundaries, precedence, and alternative approval semantics."""
 
-    def test_frontier_approval_satisfies_multiple_packages(self) -> None:
-        """One Frontier Eval reviewer can approve every changed package."""
-        rules = approvals.parse_policy("/a/ @org/a @org/frontier\n/b/ @org/b @org/frontier")
+    def test_multiple_packages_require_membership_in_each_team(self) -> None:
+        """One reviewer covers multiple packages only through their assigned teams."""
+        rules = approvals.parse_policy("/a/ @org/a\n/b/ @org/b")
         matches = approvals.match_policy(["a/file.py", "b/nested/file.py"], rules)
         teams = {
-            "@org/a": [{"id": 1, "login": "a"}],
-            "@org/b": [{"id": 2, "login": "b"}],
-            "@org/frontier": [{"id": 3, "login": "fe"}],
+            "@org/a": [{"id": 1, "login": "a"}, {"id": 3, "login": "shared"}],
+            "@org/b": [{"id": 2, "login": "b"}, {"id": 3, "login": "shared"}],
         }
         self.assertTrue(approvals.evaluate(matches, teams, {3})["passed"])
         self.assertFalse(approvals.evaluate(matches, teams, {1})["passed"])
@@ -213,15 +182,16 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 approvals.parse_policy(text)
 
-    def test_all_library_files_have_frontier_alternative(self) -> None:
-        """Every tracked package file retains the requested shared alternative."""
+    def test_all_library_files_have_one_assigned_team(self) -> None:
+        """Every package file keeps its specialist owner without a shared alternative."""
         paths = [str(path.relative_to(ROOT)) for path in (ROOT / "nemo_gym").rglob("*.py")]
         matches = approvals.match_policy(
             paths, approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text(), include_suggestions=True)
         )
         self.assertEqual({path for match in matches for path in match["files"]}, set(paths))
         for match in matches:
-            self.assertIn("@NVIDIA-NeMo/frontier-evals", match["owners"])
+            self.assertEqual(len(match["owners"]), 1)
+            self.assertRegex(match["owners"][0], r"^@NVIDIA-NeMo/gym_(architects|env_benchmarks|reviewers_[a-z_]+)$")
 
     def test_benchmark_fallback_and_bionemo_override(self) -> None:
         """Preserve coverage outside packages while retaining dedicated BioNeMo owners."""
@@ -232,7 +202,7 @@ class PolicyTests(unittest.TestCase):
         by_path = {path: match["owners"] for match in matches for path in match["files"]}
         self.assertEqual(
             by_path["benchmarks/new-benchmark/config.yaml"],
-            ["@NVIDIA-NeMo/gym_maintainers", "@NVIDIA-NeMo/frontier-evals"],
+            ["@NVIDIA-NeMo/gym_maintainers"],
         )
         self.assertEqual(
             by_path["benchmarks/larp/config.yaml"], ["@nvidia-nemo/gym_bionemo", "@nvidia-nemo/gym_maintainers"]
@@ -243,14 +213,14 @@ class SuggestionTests(unittest.TestCase):
     """Keep reviewer routing active independently of native and portable approval gates."""
 
     def test_package_hints_survive_native_owner_deduplication(self) -> None:
-        """The existing workflow must still request specialist and Frontier Eval teams."""
+        """The existing workflow must still request the assigned specialist team."""
         source = (ROOT / ".github/CODEOWNERS").read_text()
         paths = ["nemo_gym/agents/example.py"]
         native = approvals.match_policy(paths, approvals.parse_policy(source))
         suggested = approvals.match_policy(paths, suggestion_policy(source))
         native_owners = {owner for rule in native for owner in rule["owners"]}
         requested = {owner for rule in suggested for owner in rule["owners"]} - native_owners
-        self.assertEqual(requested, {"@NVIDIA-NeMo/gym_reviewers_agents", "@NVIDIA-NeMo/frontier-evals"})
+        self.assertEqual(requested, {"@NVIDIA-NeMo/gym_reviewers_agents"})
         self.assertEqual(native, [])
 
     def test_native_ci_owner_suppresses_fallback_suggestions(self) -> None:
@@ -267,7 +237,7 @@ class SuggestionTests(unittest.TestCase):
         paths = ["responses_api_models/example/app.py"]
         combined = approvals.match_policy(paths, approvals.parse_policy(source, include_suggestions=True))
         suggested = approvals.match_policy(paths, suggestion_policy(source))
-        self.assertEqual(combined[0]["owners"], ["@NVIDIA-NeMo/gym_maintainers", "@NVIDIA-NeMo/frontier-evals"])
+        self.assertEqual(combined[0]["owners"], ["@NVIDIA-NeMo/gym_maintainers"])
         self.assertEqual(suggested[0]["owners"], ["@NVIDIA-NeMo/gym_reviewers_model"])
         dependency = approvals.match_policy(
             ["responses_api_models/example/pyproject.toml"],
@@ -434,7 +404,7 @@ class ProviderTests(unittest.TestCase):
         """Real check orchestration stages and enforces package entries stored as suggestions."""
         roster = initial_reviewers()
         reviews = []
-        policy = ".github/ @NVIDIA-NeMo/automation\n# suggest: /agents/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals"
+        policy = ".github/ @NVIDIA-NeMo/automation\n# suggest: /agents/ @NVIDIA-NeMo/gym_reviewers_agents"
 
         def read(base, token, path):
             """Serve a stable request and live team membership to the actual checker."""
@@ -448,8 +418,6 @@ class ProviderTests(unittest.TestCase):
                 return encoded_file(policy)
             if "/teams/gym_reviewers_agents/" in path:
                 return roster
-            if "/teams/frontier-evals/" in path:
-                return [{"id": 1000, "login": "fe-reviewer"}]
             raise AssertionError(f"Unexpected API request: {path}")
 
         args = argparse.Namespace(provider="github", repository="NVIDIA-NeMo/Gym", number=1)
@@ -460,6 +428,8 @@ class ProviderTests(unittest.TestCase):
             roster.append({"id": 6000, "login": "specialist"})
             self.assertFalse(approvals.run_check(args)["passed"])
             reviews.append(review(1, 1000, "APPROVED"))
+            self.assertFalse(approvals.run_check(args)["passed"])
+            reviews.append(review(2, 6000, "APPROVED"))
             self.assertTrue(approvals.run_check(args)["passed"])
 
 

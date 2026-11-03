@@ -5,39 +5,38 @@
 # The portable check in scripts/ci/check-review-approvals.sh reads standard
 # rules AND `# suggest:` entries in file order; the last match wins.
 #
-# Each package lists its specialist team and frontier-evals as alternatives.
-# A non-Frontier team containing exactly Ananth and Yuya is automatically
-# satisfied by the portable check. Frontier Eval membership never activates
-# a specialist team's requirement; optional teams are still suggested.
+# Each package lists its specialist team. A team containing exactly
+# Ananth and Yuya is automatically satisfied by the portable check;
+# optional teams are still suggested.
 #
 # Membership is managed in GitHub Teams under gym_team. Keep specific rules
 # after broader ones. Standard CI and BioNeMo rules retain native ownership.
 
 # Maintainer fallback for the portable check and reviewer suggestions.
-# suggest: * @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+# suggest: * @NVIDIA-NeMo/gym_maintainers
 
 # Reviewer-only hints outside the package map. The following standard rule
-# preserves the maintainer/Frontier Eval approval fallback for each path.
+# preserves the maintainer approval fallback for each path.
 # suggest: /responses_api_agents/ @NVIDIA-NeMo/gym_env_benchmarks
-/responses_api_agents/ @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/responses_api_agents/ @NVIDIA-NeMo/gym_maintainers
 # suggest: /resources_servers/ @NVIDIA-NeMo/gym_env_benchmarks
-/resources_servers/ @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/resources_servers/ @NVIDIA-NeMo/gym_maintainers
 # suggest: /environment_servers/ @NVIDIA-NeMo/gym_env_benchmarks
-/environment_servers/ @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/environment_servers/ @NVIDIA-NeMo/gym_maintainers
 # suggest: /responses_api_models/ @NVIDIA-NeMo/gym_reviewers_model
-/responses_api_models/ @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/responses_api_models/ @NVIDIA-NeMo/gym_maintainers
 # suggest: /benchmarks/ @NVIDIA-NeMo/gym_env_benchmarks
-/benchmarks/ @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/benchmarks/ @NVIDIA-NeMo/gym_maintainers
 # suggest: /environments/ @NVIDIA-NeMo/gym_env_benchmarks
-/environments/ @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/environments/ @NVIDIA-NeMo/gym_maintainers
 # suggest: /fern/ @NVIDIA-NeMo/gym_leads
-/fern/ @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/fern/ @NVIDIA-NeMo/gym_maintainers
 # suggest: /Makefile @NVIDIA-NeMo/automation
-/Makefile @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/Makefile @NVIDIA-NeMo/gym_maintainers
 # suggest: /codecov.yml @NVIDIA-NeMo/automation
-/codecov.yml @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/codecov.yml @NVIDIA-NeMo/gym_maintainers
 # suggest: /.pre-commit-config.yaml @NVIDIA-NeMo/automation
-/.pre-commit-config.yaml @NVIDIA-NeMo/gym_maintainers @NVIDIA-NeMo/frontier-evals
+/.pre-commit-config.yaml @NVIDIA-NeMo/gym_maintainers
 
 # Native CI ownership. Empty suggestion overrides suppress the broad
 # suggestion fallback; GitHub already requests the native owners.
@@ -58,91 +57,91 @@ uv.lock @nvidia-nemo/automation
 
 # Package ownership, including current and proposed migration paths.
 # Shared package surface and compatibility modules.
-# suggest: /nemo_gym/ @NVIDIA-NeMo/gym_architects @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/ @NVIDIA-NeMo/gym_architects
 
 # Foundations
-# suggest: /nemo_gym/config/ @NVIDIA-NeMo/gym_reviewers_cli_config @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/utils/ @NVIDIA-NeMo/gym_architects @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/core/ @NVIDIA-NeMo/gym_architects @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/telemetry/ @NVIDIA-NeMo/gym_reviewers_telemetry @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/client/ @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/config/ @NVIDIA-NeMo/gym_reviewers_cli_config
+# suggest: /nemo_gym/utils/ @NVIDIA-NeMo/gym_architects
+# suggest: /nemo_gym/core/ @NVIDIA-NeMo/gym_architects
+# suggest: /nemo_gym/telemetry/ @NVIDIA-NeMo/gym_reviewers_telemetry
+# suggest: /nemo_gym/client/ @NVIDIA-NeMo/gym_reviewers_server_runtime
 
 # Building blocks
-# suggest: /nemo_gym/sandbox/ @NVIDIA-NeMo/gym_reviewers_sandbox @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/trajectory/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/verification/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/metrics/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/artifacts/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/sandbox/ @NVIDIA-NeMo/gym_reviewers_sandbox
+# suggest: /nemo_gym/trajectory/ @NVIDIA-NeMo/gym_reviewers_rollouts
+# suggest: /nemo_gym/verification/ @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/metrics/ @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /nemo_gym/artifacts/ @NVIDIA-NeMo/gym_reviewers_eval
 
 # Servers: models/ is the current spelling of the proposed model/ package.
-# suggest: /nemo_gym/server_runtime/ @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/models/ @NVIDIA-NeMo/gym_reviewers_model @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/model/ @NVIDIA-NeMo/gym_reviewers_model @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/agents/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/server_runtime/ @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/models/ @NVIDIA-NeMo/gym_reviewers_model
+# suggest: /nemo_gym/model/ @NVIDIA-NeMo/gym_reviewers_model
+# suggest: /nemo_gym/agents/ @NVIDIA-NeMo/gym_reviewers_agents
 
 # Model checkpoint hooks share ownership with server_runtime/_checkpoint/.
-# suggest: /nemo_gym/models/_checkpoint.py @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/models/_checkpoint_workers.py @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/model/_checkpoint.py @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/model/_checkpoint_workers.py @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/models/_checkpoint.py @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/models/_checkpoint_workers.py @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/model/_checkpoint.py @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/model/_checkpoint_workers.py @NVIDIA-NeMo/gym_reviewers_server_runtime
 
 # Running work
-# suggest: /nemo_gym/data/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/data/ @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts
+# suggest: /nemo_gym/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
+# suggest: /nemo_gym/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration
 
 # Tools
-# suggest: /nemo_gym/eval/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/environment/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/testing/ @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/testing/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/testing/agent_session_conformance.py @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/cli/ @NVIDIA-NeMo/gym_reviewers_cli_config @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/eval/ @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /nemo_gym/environment/ @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/testing/ @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/testing/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
+# suggest: /nemo_gym/testing/agent_session_conformance.py @NVIDIA-NeMo/gym_reviewers_agents
+# suggest: /nemo_gym/cli/ @NVIDIA-NeMo/gym_reviewers_cli_config
 
 # Current paths awaiting the eval/, environment/, and orchestration/ moves.
-# suggest: /nemo_gym/comparison/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/eval_plan.py @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/rollout_compare/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/rollout_reverification.py @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/agent_registry.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/benchmarks.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/deliverables.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/discovery.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/model_registry.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/registry.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/resources_server_registry.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/verifiers/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/h2_ping_sidecar/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/tools/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/cli/setup_command.py @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
-# suggest: /nemo_gym/cli_setup_command.py @NVIDIA-NeMo/gym_reviewers_cli_config @NVIDIA-NeMo/frontier-evals
+# suggest: /nemo_gym/comparison/ @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /nemo_gym/eval_plan.py @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /nemo_gym/rollout_compare/ @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /nemo_gym/rollout_reverification.py @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /nemo_gym/agent_registry.py @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/benchmarks.py @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/deliverables.py @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/discovery.py @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/model_registry.py @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/registry.py @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/resources_server_registry.py @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/verifiers/ @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /nemo_gym/h2_ping_sidecar/ @NVIDIA-NeMo/gym_reviewers_orchestration
+# suggest: /nemo_gym/tools/ @NVIDIA-NeMo/gym_reviewers_orchestration
+# suggest: /nemo_gym/cli/setup_command.py @NVIDIA-NeMo/gym_reviewers_orchestration
+# suggest: /nemo_gym/cli_setup_command.py @NVIDIA-NeMo/gym_reviewers_cli_config
 
 # Package tests in current and proposed layouts.
-# suggest: /tests/*/config/ @NVIDIA-NeMo/gym_reviewers_cli_config @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/utils/ @NVIDIA-NeMo/gym_architects @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/core/ @NVIDIA-NeMo/gym_architects @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/telemetry/ @NVIDIA-NeMo/gym_reviewers_telemetry @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/client/ @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/sandbox/ @NVIDIA-NeMo/gym_reviewers_sandbox @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/trajectory/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/verification/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/metrics/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/artifacts/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/server_runtime/ @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/models/ @NVIDIA-NeMo/gym_reviewers_model @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/model/ @NVIDIA-NeMo/gym_reviewers_model @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/agents/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/data/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/eval/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/environment/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/testing/ @NVIDIA-NeMo/gym_reviewers_server_runtime @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/testing/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
-# suggest: /tests/*/cli/ @NVIDIA-NeMo/gym_reviewers_cli_config @NVIDIA-NeMo/frontier-evals
+# suggest: /tests/*/config/ @NVIDIA-NeMo/gym_reviewers_cli_config
+# suggest: /tests/*/utils/ @NVIDIA-NeMo/gym_architects
+# suggest: /tests/*/core/ @NVIDIA-NeMo/gym_architects
+# suggest: /tests/*/telemetry/ @NVIDIA-NeMo/gym_reviewers_telemetry
+# suggest: /tests/*/client/ @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /tests/*/sandbox/ @NVIDIA-NeMo/gym_reviewers_sandbox
+# suggest: /tests/*/trajectory/ @NVIDIA-NeMo/gym_reviewers_rollouts
+# suggest: /tests/*/verification/ @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /tests/*/metrics/ @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /tests/*/artifacts/ @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /tests/*/server_runtime/ @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /tests/*/models/ @NVIDIA-NeMo/gym_reviewers_model
+# suggest: /tests/*/model/ @NVIDIA-NeMo/gym_reviewers_model
+# suggest: /tests/*/agents/ @NVIDIA-NeMo/gym_reviewers_agents
+# suggest: /tests/*/data/ @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /tests/*/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts
+# suggest: /tests/*/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
+# suggest: /tests/*/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration
+# suggest: /tests/*/eval/ @NVIDIA-NeMo/gym_reviewers_eval
+# suggest: /tests/*/environment/ @NVIDIA-NeMo/gym_env_benchmarks
+# suggest: /tests/*/testing/ @NVIDIA-NeMo/gym_reviewers_server_runtime
+# suggest: /tests/*/testing/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
+# suggest: /tests/*/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
+# suggest: /tests/*/cli/ @NVIDIA-NeMo/gym_reviewers_cli_config
 
 # BioNeMo overrides retain their dedicated approval owners.
 /benchmarks/larp* @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers

@@ -27,7 +27,6 @@ ReadJSON = Callable[[str], object]
 CODEOWNERS_PATH = ".github/CODEOWNERS"
 IDENTITIES_PATH = ".github/reviewer-identities.json"
 INITIAL_REVIEWER_IDS = frozenset({2382532, 54727607})
-FRONTIER_TEAM = "@nvidia-nemo/frontier-evals"
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -223,13 +222,11 @@ def gitlab_snapshot(read: ReadJSON, project: int, number: int) -> dict:
 
 
 def evaluate(matches: list[dict], teams: dict[str, list[dict]], approved: set[int]) -> dict:
-    """Require approval unless a non-Frontier owner still has only Ananth and Yuya."""
+    """Require approval unless an owner still has only Ananth and Yuya."""
     results = []
     for match in matches:
         optional_owners = [
-            owner
-            for owner in match["owners"]
-            if owner.lower() != FRONTIER_TEAM and {user["id"] for user in teams[owner]} == INITIAL_REVIEWER_IDS
+            owner for owner in match["owners"] if {user["id"] for user in teams[owner]} == INITIAL_REVIEWER_IDS
         ]
         members = {user["id"]: user["login"] for owner in match["owners"] for user in teams[owner]}
         satisfied = sorted(members[user_id] for user_id in approved & members.keys())
