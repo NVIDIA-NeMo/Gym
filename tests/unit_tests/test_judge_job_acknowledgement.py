@@ -22,7 +22,13 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.recovery import JUDGE_JOB_ACK_JOURNAL_NAME, RecoveryAction
+from nemo_gym.orchestration.recovery import (
+    ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
+    JUDGE_JOB_ACK_JOURNAL_NAME,
+    RecoveryAction,
+    failed_judge_jobs_blocking,
+    failed_judge_jobs_stop,
+)
 from nemo_gym.orchestration.submit import inspect_recovery, recover
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index  # noqa: F401 - autouse fixture
@@ -242,3 +248,15 @@ def test_the_command_passes_the_stripped_reason_to_recovery_and_inspect(monkeypa
     called = seen["inspect" if inspect_only else "recover"]
     assert called["acknowledge_failed_judge_jobs"] is True and called["acknowledge_reason"] == "why"
     capsys.readouterr()
+
+
+def test_a_blocking_job_without_an_id_cannot_be_acknowledged_and_the_stop_says_so():
+    # An acknowledgement names the jobs it covers, so a pair with an id-less job stays blocked and the stop offers no flag.
+    jobs = [{"state": "failed"}, {"state": "failed", "job_id": "12"}]
+
+    blocked = failed_judge_jobs_blocking(jobs, [{"job_ids": ["12"]}])
+
+    assert blocked == [None, "12"]
+    stop = failed_judge_jobs_stop(blocked, "reverification")
+    assert "(id unknown), 12" in stop and "cannot be acknowledged" in stop
+    assert ACKNOWLEDGE_JUDGE_JOBS_FLAGS not in stop
