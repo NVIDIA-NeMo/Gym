@@ -15,12 +15,17 @@
 """A verifier's sandbox lifecycle record is evidence of sandbox use, not a coverage condition.
 
 A trial whose grading is otherwise bound stays observed when its verifier recorded the sandboxes it used (outcome
-completed or unreported, teardown confirmed or not, the agent's sandbox included). Only a grading sandbox that
-reports a failure, or a malformed record, leaves the trial unobserved.
+completed or unreported, teardown confirmed, unconfirmed or failed, the agent's sandbox included). Only a grading
+sandbox that reports a failure, or a malformed record, leaves the trial unobserved.
 """
+
+from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+from nemo_gym.sandbox import SandboxSpec
+from nemo_gym.sandbox.api import AsyncSandbox
 from tests.unit_tests.test_evaluation_health import _run
 from tests.unit_tests.test_grading_artifacts import _observed, _ungraded
 
@@ -56,8 +61,26 @@ def _test_execution(row: dict) -> None:
         [_sandbox("verifier", outcome="completed", exit_code=1)],
         [_sandbox("verifier", teardown_confirmed=False)],
         [_sandbox("agent", outcome="timeout"), _sandbox("verifier")],
+        # As the producer records a close or a client release that failed after the grading.
+        [
+            _sandbox(
+                "verifier",
+                outcome="sandbox_error",
+                error_type="close:TimeoutError",
+                teardown_confirmed=False,
+                cleanup_errors=["close:TimeoutError"],
+            )
+        ],
+        [_sandbox("verifier", error_type="aclose:OSError", cleanup_errors=["aclose:OSError"])],
     ],
-    ids=["unreported", "completed-tests-failed", "teardown-unconfirmed", "agent-timed-out"],
+    ids=[
+        "unreported",
+        "completed-tests-failed",
+        "teardown-unconfirmed",
+        "agent-timed-out",
+        "close-failed-after-grade",
+        "client-release-failed",
+    ],
 )
 def test_a_recorded_sandbox_use_beside_bound_grading_is_observed(artifact, sandboxes):
     collected = _run(20)
@@ -77,9 +100,26 @@ def test_a_recorded_sandbox_use_beside_bound_grading_is_observed(artifact, sandb
         _sandbox("verifier", outcome="sandbox_error"),
         _sandbox("verifier", outcome="oom"),
         _sandbox("verifier", error_type="SandboxCreateError"),
+        # A failed grading stays a failure when its teardown failed too.
+        _sandbox(
+            "verifier",
+            outcome="failed",
+            error_type="close:TimeoutError",
+            teardown_confirmed=False,
+            cleanup_errors=["close:TimeoutError"],
+        ),
+        _sandbox("verifier", outcome="sandbox_error", error_type="SandboxExecError", cleanup_errors=["close:OSError"]),
         "malformed",
     ],
-    ids=["failed", "sandbox-error", "oom", "error-type", "malformed"],
+    ids=[
+        "failed",
+        "sandbox-error",
+        "oom",
+        "error-type",
+        "failed-and-close-failed",
+        "error-besides-close",
+        "malformed",
+    ],
 )
 def test_a_grading_sandbox_failure_leaves_the_trial_unobserved(sandbox):
     collected = _run(20)
@@ -88,3 +128,25 @@ def test_a_grading_sandbox_failure_leaves_the_trial_unobserved(sandbox):
     _with_sandboxes(collected.results[0], _sandbox("agent"), sandbox)
     passed, reason, report, _ = _observed(collected)
     assert passed is None and report["status"] == "UNVERIFIED", reason
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("error", [TimeoutError(), ConnectionError("refused")], ids=["timeout", "connection"])
+async def test_a_verifier_sandbox_whose_close_failed_after_grading_keeps_the_trial_observed(error):
+    """End to end from the producer: a real sandbox whose provider close fails, as lifecycle_observation records it."""
+    from tests.unit_tests.test_sandbox_lifecycle_observation import FakeSandboxProvider
+
+    provider = FakeSandboxProvider()
+    provider.close = AsyncMock(side_effect=error)
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="task"))
+    with pytest.raises(type(error)):
+        await sandbox.stop()
+    observation = lifecycle_observation(sandbox, role="verifier")
+    assert observation["cleanup_errors"] and observation["error_type"] == observation["cleanup_errors"][0]
+    collected = _run(20)
+    for row in collected.results:
+        _test_execution(row)
+    _with_sandboxes(collected.results[0], observation)
+    passed, reason, report, task = _observed(collected)
+    assert passed is True and task["trial_counts"]["unobserved"] == 0, reason

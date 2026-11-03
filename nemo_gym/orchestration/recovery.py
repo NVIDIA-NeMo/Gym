@@ -4459,13 +4459,25 @@ def _observed_trial_operations(
 _SANDBOX_FAILURES = frozenset({"failed", "timeout", "oom", "sandbox_error", "cancelled"})
 
 
+def _teardown_failure_only(item: Mapping) -> bool:
+    """Whether a sandbox observation's only failure is its teardown: the producer records a failed close or release
+    after the work as outcome ``sandbox_error`` or ``unknown`` with that cleanup error as its ``error_type``."""
+    errors = item.get("cleanup_errors")
+    return (
+        isinstance(errors, list)
+        and bool(errors)
+        and item.get("outcome") in ("unknown", "sandbox_error")
+        and item.get("error_type") == errors[0]
+    )
+
+
 def _grading_sandbox_failed(observations: Any) -> bool:
     """Whether a verifier's sandbox observations report that a grading sandbox failed, or are malformed.
 
     They are lifecycle evidence of the sandboxes the verification used, not a grading record: a completed or
-    unreported outcome, an unconfirmed teardown, a failing test command's exit code and the agent's own sandbox
-    outcome do not leave a bound grading unobserved. A verifier sandbox whose outcome is a failure, or that records
-    an error, does.
+    unreported outcome, an unconfirmed or failed teardown, a failing test command's exit code and the agent's own
+    sandbox outcome do not leave a bound grading unobserved. A verifier sandbox whose outcome is a failure, or that
+    records an error other than its teardown's, does.
     """
     if observations is None:
         return False
@@ -4475,6 +4487,7 @@ def _grading_sandbox_failed(observations: Any) -> bool:
         not isinstance(item, Mapping)
         or (
             item.get("role") == "verifier"
+            and not _teardown_failure_only(item)
             and (item.get("outcome") in _SANDBOX_FAILURES or item.get("error_type") is not None)
         )
         for item in observations
