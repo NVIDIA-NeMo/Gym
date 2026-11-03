@@ -26,7 +26,7 @@ import pytest
 import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.sandbox.failures import sandbox_failure
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtyError, SandboxPtySpec
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtySpec
 from nemo_gym.sandbox.providers.opensandbox.pty import (
     OpenSandboxPtySession,
     _effective_command,
@@ -246,9 +246,9 @@ async def test_frame_encode() -> None:
 async def test_abnormal_close_raises(close_code: int, match: str) -> None:
     session, ws, _ = await _session_over([CONNECTED], close_code=close_code)
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match=match):
+    with pytest.raises(NgFailureEvent, match=match):
         await session.read()
-    with pytest.raises(SandboxPtyError, match=match):
+    with pytest.raises(NgFailureEvent, match=match):
         await session.wait_exit()
     await session.close()
 
@@ -258,7 +258,7 @@ async def test_error_frame_is_fatal() -> None:
         [CONNECTED, _text({"type": "error", "code": "STDIN_WRITE_FAILED", "error": "boom"})]
     )
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match="STDIN_WRITE_FAILED"):
+    with pytest.raises(NgFailureEvent, match="STDIN_WRITE_FAILED"):
         await session.read()
     await session.close()
 
@@ -283,9 +283,9 @@ async def test_close_is_idempotent_and_tears_down() -> None:
     assert client.delete_calls == [
         ("http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1", {"OPEN-SANDBOX-API-KEY": "k"})
     ]
-    with pytest.raises(SandboxPtyError, match="closed"):
+    with pytest.raises(NgFailureEvent, match="closed"):
         await session.write(b"x")
-    with pytest.raises(SandboxPtyError, match="closed before process exit"):
+    with pytest.raises(NgFailureEvent, match="closed before process exit"):
         await session.wait_exit()
 
 
@@ -344,7 +344,7 @@ async def test_open_pty_session_https_becomes_wss_and_default_size_skips_resize(
 )
 async def test_open_pty_session_create_failure(post_status: int, match: str) -> None:
     client = FakeHttpClient(post_status=post_status)
-    with pytest.raises(SandboxPtyError, match=match):
+    with pytest.raises(NgFailureEvent, match=match):
         await open_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -358,7 +358,7 @@ async def test_open_pty_session_create_failure(post_status: int, match: str) -> 
 async def test_pty_create_propagates_server_detail() -> None:
     # The server's own answer must reach the caller, not a guessed diagnosis.
     client = FakeHttpClient(post_status=404)
-    with pytest.raises(SandboxPtyError, match="session_id"):  # FakeResponse body text
+    with pytest.raises(NgFailureEvent, match="session_id"):  # FakeResponse body text
         await open_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -403,7 +403,7 @@ async def test_ws_handshake_transient_is_retried(monkeypatch: pytest.MonkeyPatch
 
 async def test_open_pty_session_ws_failure_deletes_session() -> None:
     client = FakeHttpClient(ws_error=RuntimeError("upgrade refused"))
-    with pytest.raises(SandboxPtyError, match="upgrade refused"):
+    with pytest.raises(NgFailureEvent, match="upgrade refused"):
         await open_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -590,7 +590,7 @@ async def test_attach_pty_session_failure_closes_client() -> None:
     from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
 
     client = FakeHttpClient(ws_error=RuntimeError("gone"))
-    with pytest.raises(SandboxPtyError, match="Failed to attach to PTY session s-9"):
+    with pytest.raises(NgFailureEvent, match="Failed to attach to PTY session s-9"):
         await attach_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -605,7 +605,7 @@ async def test_attach_pty_session_failure_closes_client() -> None:
 async def test_evicted_session_reports_takeover() -> None:
     session, ws, _ = await _session_over([CONNECTED], close_code=4001)
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match="taken over"):
+    with pytest.raises(NgFailureEvent, match="taken over"):
         await session.read()
     await session.close()
 
@@ -657,7 +657,7 @@ async def test_unexpected_close_reports_oom_diagnosis() -> None:
 async def test_unexpected_close_without_diagnosis_keeps_close_code() -> None:
     session, ws, calls = await _diagnosed_session(1011, None)
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match="close code 1011"):
+    with pytest.raises(NgFailureEvent, match="close code 1011"):
         await session.wait_exit(timeout_s=5)
     assert calls == [1]
     await session.close()
@@ -667,7 +667,7 @@ async def test_takeover_close_skips_diagnosis() -> None:
     # An eviction names its own cause; the sandbox is alive, so don't poll it.
     session, ws, calls = await _diagnosed_session(4001, "Sandbox was OOM-killed.")
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match="taken over"):
+    with pytest.raises(NgFailureEvent, match="taken over"):
         await session.wait_exit(timeout_s=5)
     assert calls == []
     await session.close()
@@ -767,7 +767,7 @@ async def test_provider_attach_pty_does_not_retry_without_takeover(monkeypatch: 
 
     monkeypatch.setattr(provider, "_pty_http_client", _client)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
-    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client"):
         await provider.attach_pty(handle, "s-7", takeover=False)
     assert clients_handed == 2, "without takeover the rejection is definitive (existence check + one dial)"
 
@@ -907,7 +907,7 @@ async def test_provider_attach_pty_fails_fast_on_a_missing_session(
     provider, handed_out = _refused_with_existence(monkeypatch, missing)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_RefusingRaw())
 
-    with pytest.raises(SandboxPtyError, match="PTY session s-7 not found"):
+    with pytest.raises(NgFailureEvent, match="PTY session s-7 not found"):
         await provider.attach_pty(handle, "s-7", takeover=takeover)
 
     assert len(handed_out) == 1, "only the existence check; no WebSocket dial"
@@ -978,7 +978,7 @@ async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
     ws = FakeWs([], close_code=1008)
     ws.closed = True
     client = FakeHttpClient(ws=ws)
-    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client"):
         await open_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -994,7 +994,7 @@ async def test_connected_timeout_closes_session_and_client() -> None:
     # Server accepts the socket but never sends `connected`.
     ws = FakeWs([])
     client = FakeHttpClient(ws=ws)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(NgFailureEvent):
         await open_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -1031,7 +1031,7 @@ async def test_empty_and_short_frames_do_not_signal_eof() -> None:
 async def test_malformed_text_frame_surfaces_as_error() -> None:
     session, ws, _ = await _session_over([CONNECTED, SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data="{not json")])
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match="malformed frame"):
+    with pytest.raises(NgFailureEvent, match="malformed frame"):
         await session.read()
     await session.close()
 
@@ -1044,7 +1044,7 @@ async def test_send_after_close_raises_for_every_sender() -> None:
         lambda: session.resize(10, 10),
         lambda: session.send_signal("SIGINT"),
     ):
-        with pytest.raises(SandboxPtyError, match="closed"):
+        with pytest.raises(NgFailureEvent, match="closed"):
             await send()
 
 
@@ -1055,7 +1055,7 @@ async def test_send_failure_becomes_sandbox_pty_error() -> None:
         raise ConnectionResetError("peer gone")
 
     ws.send_bytes = boom  # type: ignore[assignment]
-    with pytest.raises(SandboxPtyError, match="connection lost"):
+    with pytest.raises(NgFailureEvent, match="connection lost"):
         await session.write(b"x")
     await session.close()
 
@@ -1225,7 +1225,7 @@ async def test_barren_reconnects_give_up(monkeypatch: pytest.MonkeyPatch) -> Non
         headers={},
         request_timeout_s=5.0,
     )
-    with pytest.raises(SandboxPtyError):
+    with pytest.raises(NgFailureEvent):
         await asyncio.wait_for(session.wait_exit(), timeout=10)
     await session.close()
 
@@ -1289,7 +1289,7 @@ async def test_policy_violation_exhausted_gives_up(monkeypatch: pytest.MonkeyPat
         request_timeout_s=5.0,
     )
     await session.read()  # b"x" from first
-    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client"):
         await session.wait_exit(timeout_s=5)
     # initial + reattach after the drop + 2 takeover retries (delays exhausted on the 3rd refusal)
     assert len(client.ws_calls) == 4
@@ -1315,7 +1315,7 @@ async def test_policy_violation_on_initial_socket_does_not_reattach(monkeypatch:
         headers={},
         request_timeout_s=5.0,
     )
-    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client"):
         await session.wait_exit(timeout_s=5)
     assert len(client.ws_calls) == 1, "a refusal on the initial socket must not trigger reattach"
     await session.close()
@@ -1367,7 +1367,7 @@ async def test_takeover_close_does_not_reattach(monkeypatch: pytest.MonkeyPatch)
         headers={},
         request_timeout_s=5.0,
     )
-    with pytest.raises(SandboxPtyError, match="taken over"):
+    with pytest.raises(NgFailureEvent, match="taken over"):
         await session.wait_exit(timeout_s=5)
     assert len(client.ws_calls) == 1, "a deliberate takeover must not be fought"
     await session.close()
@@ -1379,7 +1379,7 @@ async def test_open_pty_session_rejects_exit_before_connected() -> None:
     ws = FakeWs([_text({"type": "exit", "exit_code": 0})])
     ws.closed = True  # the stream ends right after its frames
     client = FakeHttpClient(ws=ws)
-    with pytest.raises(SandboxPtyError):
+    with pytest.raises(NgFailureEvent):
         await open_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -1434,7 +1434,7 @@ async def test_attach_never_deletes_a_session_it_did_not_create() -> None:
     ws = FakeWs([], close_code=1008)
     ws.closed = True
     client = FakeHttpClient(ws=ws)
-    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client"):
         await attach_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://server/base",
@@ -1469,7 +1469,7 @@ async def test_initial_resize_failure_closes_session_and_client() -> None:
 
     ws.send_str = boom  # type: ignore[assignment]
     client = FakeHttpClient(ws=ws)
-    with pytest.raises(SandboxPtyError, match="connection lost"):
+    with pytest.raises(NgFailureEvent, match="connection lost"):
         await open_pty_session(
             client=client,  # type: ignore[arg-type]
             base_url="http://s/b",
@@ -1488,9 +1488,9 @@ async def test_error_frame_wins_over_close_code() -> None:
         close_code=4001,
     )
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match="STDIN_WRITE_FAILED"):
+    with pytest.raises(NgFailureEvent, match="STDIN_WRITE_FAILED"):
         await session.read()
-    with pytest.raises(SandboxPtyError, match="STDIN_WRITE_FAILED"):
+    with pytest.raises(NgFailureEvent, match="STDIN_WRITE_FAILED"):
         await session.wait_exit()
     await session.close()
 
@@ -1508,7 +1508,7 @@ async def test_close_unblocks_a_pending_reader() -> None:
     reader = asyncio.create_task(session.read())
     await asyncio.sleep(0.01)
     await session.close()
-    with pytest.raises(SandboxPtyError):
+    with pytest.raises(NgFailureEvent):
         await asyncio.wait_for(reader, timeout=1)
 
 
@@ -1557,7 +1557,7 @@ async def test_detach_keeps_session_alive_and_reattach_resumes() -> None:
     assert ws1.closed
     assert not session.closed, "a detached session must not look prunable"
     assert client.delete_calls == [], "detach must not end the server-side session"
-    with pytest.raises(SandboxPtyError, match="detached"):
+    with pytest.raises(NgFailureEvent, match="detached"):
         await session.write(b"x")
     await session.reattach()
     url, _ = client.ws_calls[-1]
@@ -1614,14 +1614,14 @@ async def test_close_while_detached_releases_and_unblocks_readers() -> None:
     await session.close()
     assert session.closed
     assert len(client.delete_calls) == 1
-    with pytest.raises(SandboxPtyError):
+    with pytest.raises(NgFailureEvent):
         await session.read()
 
 
 async def test_detach_after_close_raises() -> None:
     session, ws, _ = await _session_over([CONNECTED])
     await session.close()
-    with pytest.raises(SandboxPtyError, match="closed"):
+    with pytest.raises(NgFailureEvent, match="closed"):
         await session.detach()
 
 
@@ -1693,3 +1693,48 @@ async def test_run_detached_launch_uses_stdin_at_eof() -> None:
     await session.run_detached("work", poll_interval_s=0.01)
     assert b"</dev/null" in state["launch"], "detached commands must not inherit the session's endless stdin"
     await session.close()
+
+
+@pytest.mark.parametrize("status,kind", [(403, "provider_credentials_rejected"), (409, "provider_request_failed")])
+async def test_pty_create_http_failure_is_a_serializable_sandbox_event(status, kind):
+    client = FakeHttpClient(post_status=status)
+    with pytest.raises(NgFailureEvent) as caught:
+        await open_pty_session(
+            client=client,
+            base_url="http://server",
+            headers={},
+            spec=SandboxPtySpec(),
+            sandbox_id="sb",
+            request_timeout_s=1,
+        )
+    failure = caught.value
+    assert failure.boundary.value == "sandbox"
+    assert failure.failure_kind == kind and failure.http_status == status
+    assert failure.sandbox.sandbox_id == "sb"
+    assert failure.to_record()["failure_events"][failure.event_id]["http_status"] == status
+    assert len(client.post_calls) == 1 and client.closed
+
+
+async def test_recovered_pty_create_is_retained_in_success_report(monkeypatch):
+    from nemo_gym.failure_transport import RequestFailureLog
+
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]), post_status=[503, 201])
+    with RequestFailureLog.capture() as log:
+        session = await open_pty_session(
+            client=client,
+            base_url="http://server",
+            headers={},
+            spec=SandboxPtySpec(),
+            sandbox_id="sb",
+            request_timeout_s=1,
+        )
+        report = log.reply_report(None)
+    try:
+        assert report.failure_id is None
+        event = next(iter(report.events.values()))
+        assert event.failure_kind == "provider_unavailable" and event.http_status == 503
+        assert event.sandbox.sandbox_id == "sb"
+        assert len(client.post_calls) == 2
+    finally:
+        await session.close()
