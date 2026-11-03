@@ -17,7 +17,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_TRANSPORT_ERROR,
 )
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
-from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureReport
+from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureReport, ModelFailureDetails
 
 
 if TYPE_CHECKING:
@@ -182,7 +182,8 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
         and len({event.attempt_id for event in attempts}) == len(attempts)
         and all(
             event.attempt_id
-            and event.request_upload_complete is True
+            and isinstance(event.details, ModelFailureDetails)
+            and event.details.request_upload_complete is True
             and event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
             for event in attempts
         )

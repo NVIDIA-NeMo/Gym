@@ -23,10 +23,10 @@ from nemo_gym.agents import (
     is_harness_termination_failure,
     parse_cleanup_receipt,
 )
+from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
-from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 

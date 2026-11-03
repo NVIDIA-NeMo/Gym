@@ -37,7 +37,11 @@ from nemo_gym.orchestration.recovery import (
     fault_report,
     trial_faults,
 )
-from nemo_gym.rollout_recovery import is_answered_agent_deadline, is_infrastructure_agent_timeout, is_server_fault_call
+from nemo_gym.rollouts.rollout_recovery import (
+    is_answered_agent_deadline,
+    is_infrastructure_agent_timeout,
+    is_server_fault_call,
+)
 from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, ident, inventory
 from tests.unit_tests.test_recovery_saved_generation import persist_producer_result, response
 

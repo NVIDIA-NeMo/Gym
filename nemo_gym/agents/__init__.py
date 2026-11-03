@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         assert_model_url_reachable_from_sandbox,
     )
     from nemo_gym.agents.skills import stage_skills
+    from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -123,6 +124,7 @@ _PUBLIC_API = {
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
+    "check_agent_seed_rejected": "testing.agent_session_conformance",
     "exec_timeout": "utils.supervisor_client",
     "harness_termination_failure": "utils.supervisor_client",
     "is_harness_termination_failure": "utils.supervisor_client",

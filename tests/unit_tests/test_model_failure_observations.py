@@ -197,7 +197,7 @@ async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
     [attempt] = report.events.values()
     assert report.failure_id == attempt.event_id
     assert (attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON) is waited_for_response
-    assert (attempt.request_upload_complete is True) is waited_for_response
+    assert (attempt.details.request_upload_complete is True) is waited_for_response
 
 
 def _reply(status: int, *, headers: dict | None = None, body: bytes = b"") -> SimpleNamespace:
@@ -405,7 +405,7 @@ async def test_a_recovered_response_timeout_keeps_its_confirmed_upload_observati
             report = log.reply_report(None)
     assert calls == 2 and report.failure_id is None
     [attempt] = report.events.values()
-    assert attempt.request_upload_complete is True
+    assert attempt.details.request_upload_complete is True
     assert attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
     assert attempt.operation_id and attempt.attempt_id
     assert FailureHeader.decode(FailureHeader.encode(report)) == report
@@ -433,7 +433,7 @@ async def test_failed_body_upload_never_reports_a_response_wait_timeout(monkeypa
                 await model._request(method="POST", url=str(server.make_url("/responses")), data=broken_body())
             report = log.reply_report(caught.value)
     [attempt] = report.events.values()
-    assert attempt.request_upload_complete is False
+    assert attempt.details.request_upload_complete is False
     assert attempt.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
 
 

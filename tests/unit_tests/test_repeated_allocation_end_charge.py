@@ -28,9 +28,9 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
 )
 from nemo_gym.orchestration.recovery import failure_facts, fault_class
-from nemo_gym.rollout_records import read_records
-from nemo_gym.rollout_recovery import RunManifest
-from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.rollouts.rollout_records import read_records
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.utils.path_utils import failures_path_for
 from tests.unit_tests.test_allocation_cut_recovery import _decide
 

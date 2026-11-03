@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.rollout_collection import _attach_trajectory_record, _trajectory_identity
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _trajectory_identity
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import (
     TerminalBench4Config,

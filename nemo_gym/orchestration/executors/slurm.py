@@ -176,7 +176,7 @@ if not derived and selected.managed_selection is not None and selected.managed_r
     if snapshot() != collected.source_digests:
         raise ValueError("managed source changed after Store selection")
     try:
-        from nemo_gym.rollout_store import RolloutStore
+        from nemo_gym.rollouts import RolloutStore
     except ImportError:
         RolloutStore = None
     if RolloutStore is not None:

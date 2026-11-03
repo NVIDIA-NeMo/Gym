@@ -354,7 +354,7 @@ Any failure in that call — transport, timeout, 401, 500, malformed body — ra
 - excluded from the aggregate, which is computed only over the rows in `output.jsonl`
 - retained on resume without regenerating its saved answer
 
-Judge-only recovery requires a supported reverification path. Manifest-backed runs currently reject `gym eval reverify`; ordinary resume does not substitute a new agent answer.
+Judge-only recovery requires a supported reverification path. On a manifest-backed run, `gym eval reverify` rejects in-place or overwrite output but accepts a separate output path; ordinary resume does not substitute a new agent answer.
 
 Custom handlers must catch both forms. This replaces catching only `JudgeError` around judge calls; that exception remains supported for parser-declared failures. The tuple also includes other Gym failures, so preserve the selector and re-raise unrelated events:
 

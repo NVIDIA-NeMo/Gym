@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_recovery import (
+from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
     _configuration_identity,
     _digest,
@@ -264,7 +264,7 @@ def test_a_saved_identity_names_a_changed_value_on_the_other_server(tmp_path: Pa
     ],
 )
 def test_an_agent_behaviour_or_unknown_setting_is_semantic(key):
-    from nemo_gym.rollout_recovery import _is_semantic
+    from nemo_gym.rollouts.rollout_recovery import _is_semantic
 
     assert _is_semantic(key)
 
@@ -279,7 +279,7 @@ def test_an_agent_behaviour_or_unknown_setting_is_semantic(key):
     ],
 )
 def test_an_operational_setting_stays_operational(key):
-    from nemo_gym.rollout_recovery import _is_semantic
+    from nemo_gym.rollouts.rollout_recovery import _is_semantic
 
     assert not _is_semantic(key)
 
