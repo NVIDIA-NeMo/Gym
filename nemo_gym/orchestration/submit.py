@@ -17,6 +17,7 @@ import getpass
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -103,8 +104,14 @@ def recover(
     spinup_timeout_reason: str | None = None,
     judge_partition: str | None = None,
     judge_qos: str | None = None,
+    auto_repin: bool = True,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
+
+    A run pinned at another Gym commit than this launcher's is planned with the installed Gym's rules. When that plan
+    needs the installed revision to run (a re-judge, whose job runs the installed recovery source, or a resubmit the
+    pinned revision plans differently), the run moves to the installed commit, journaled as an automatic repin with
+    the reason; otherwise its pin stays. ``auto_repin=False`` refuses that case instead, naming ``repin``.
 
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's; a
     judge-only job of the run runs at it too.
@@ -149,6 +156,7 @@ def recover(
         spinup_timeout_reason=spinup_timeout_reason,
         judge_partition=judge_partition,
         judge_qos=judge_qos,
+        auto_repin=auto_repin,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -172,8 +180,11 @@ def inspect_recovery(
     extend_attempts: int = 0,
     repin: str | None = None,
     repin_reason: str | None = None,
+    auto_repin: bool = True,
 ) -> RecoveryOutcome:
     """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action.
+
+    It plans as recovery would, on the installed Gym, and reports the same pin decision (``pin_plan``).
 
     With ``repin`` it reports the plan a recovery repinned to that commit would follow: the run's Store is read at the
     target commit, as the repinned resume would read it, and nothing is rendered, repinned or queued.
@@ -196,6 +207,7 @@ def inspect_recovery(
         outcome_policy=outcome_policy,
         mlflow_status=mlflow_status,
         mlflow_run_id=mlflow_run_id,
+        auto_repin=auto_repin,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -234,6 +246,7 @@ def _recover(
     spinup_timeout_reason: str | None = None,
     judge_partition: str | None = None,
     judge_qos: str | None = None,
+    auto_repin: bool = True,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -314,7 +327,7 @@ def _recover(
         return RecoveryOutcome(decision=refused, ok=False, dispatched=None, walltime_plan=walltime_plan)
     segment = {"segment_walltime": walltime_plan["segment"]} if walltime_plan is not None else {}
 
-    def collect():
+    def collect(reader_ref: str | None):
         decision, collected = executor.recovery_evidence(
             record,
             benchmark,
@@ -323,7 +336,7 @@ def _recover(
             score_environment=score_environment,
             outcome_policy=outcome_policy,
             # A repinned run resumes on the target's Store: its reader decides what that Store would run.
-            **({"reader_ref": repin} if repin is not None else {}),
+            **({"reader_ref": reader_ref} if reader_ref is not None else {}),
             **({"extend_retries": extend_retries} if extend_retries else {}),
             **({"extend_attempts": extend_attempts} if extend_attempts else {}),
             # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
@@ -373,7 +386,62 @@ def _recover(
             mlflow["note"] = MLFLOW_NOT_REQUIRED_NOTE
         return decision, collected, gate_task, mlflow
 
-    decision, collected, gate_task, mlflow = collect()
+    # A run pinned at another commit is planned with the installed Gym's rules; its pin moves only when it must.
+    pinned = executor.gym_pin(record) if repin is None and hasattr(executor, "gym_pin") else None
+    installed = executor.installed_commit() if pinned is not None else None
+    pin_plan: dict[str, Any] | None = None
+    if (
+        pinned is not None
+        and installed is not None
+        and re.fullmatch(r"[0-9a-f]{40}", installed)
+        and installed != pinned
+    ):
+        decision, collected, gate_task, mlflow = collect(installed)
+        planned = f"planned on {installed} for a run pinned at {pinned}"
+        needs = None
+        if decision.action == RecoveryAction.REVERIFY:
+            needs = "its judge-only job runs the installed recovery source"
+        elif decision.action == RecoveryAction.RESUBMIT:
+            at_pin = collect(None)[0]
+            if (at_pin.action, at_pin.counts) != (decision.action, decision.counts):
+                needs = (
+                    f"the pinned revision plans {at_pin.action.value} {at_pin.counts}, the installed one "
+                    f"{decision.action.value} {decision.counts}"
+                )
+        if needs is None:
+            pin_plan = {
+                "installed": installed,
+                "pinned": pinned,
+                "repin": False,
+                "reason": f"{planned}; the pin stays",
+            }
+        elif not auto_repin:
+            pin_plan = {
+                "installed": installed,
+                "pinned": pinned,
+                "repin": False,
+                "refused": True,
+                "reason": f"{planned}: {needs}; the pin was kept (--no-auto-repin): recover with --repin {installed} "
+                "--repin-reason TEXT to move it",
+            }
+        else:
+            repin, repin_reason = installed, f"automatic repin: {planned}: {needs}"
+            pin_plan = {"installed": installed, "pinned": pinned, "repin": True, "reason": repin_reason}
+        gate_task = {**gate_task, "warnings": [*gate_task["warnings"], pin_plan["reason"]]}
+        plan_ref = installed
+    else:
+        decision, collected, gate_task, mlflow = collect(repin)
+        plan_ref = repin
+    if pin_plan is not None and pin_plan.get("refused") and not inspect_only:
+        refused = decision.model_copy(update={"action": RecoveryAction.STOP, "reason": pin_plan["reason"]})
+        return RecoveryOutcome(
+            decision=refused,
+            ok=False,
+            dispatched=None,
+            gate_task={**gate_task, "status": "FAILED", "errors": [*gate_task["errors"], pin_plan["reason"]]},
+            mlflow=mlflow,
+            pin_plan=pin_plan,
+        )
     if inspect_only:
         if gate_task["status"] == "PLANNED":
             gate_task = {
@@ -383,7 +451,7 @@ def _recover(
                     f"PLANNED (NOT DISPATCHED): --inspect reports the {decision.action.value} decision and runs nothing",
                 ],
             }
-        if repin is not None:
+        if repin is not None and pin_plan is None:
             # The plan was read at the repin target, as a repinned recovery would read it; nothing was repinned.
             gate_task = {
                 **gate_task,
@@ -399,6 +467,7 @@ def _recover(
             dispatched=None,
             gate_task=gate_task,
             mlflow=mlflow,
+            pin_plan=pin_plan,
         )
     if decision.action == RecoveryAction.NOOP and _tracking_export_due(decision, collected, mlflow):
         export = executor.export_tracking(record, benchmark, collected)
@@ -406,7 +475,7 @@ def _recover(
             reason = f"MLflow post-run export not performed: {export.get('error')}"
         elif export.get("state") in ("succeeded", "skipped"):
             # The receipt changes the MLflow evidence and the gate: collect both again, as a later recovery would.
-            decision, collected, gate_task, mlflow = collect()
+            decision, collected, gate_task, mlflow = collect(plan_ref)
             reason = f"MLflow post-run export performed: receipt written for run {export.get('run_id')}"
         else:
             reason = f"MLflow post-run export failed: {export.get('error')}"
@@ -440,7 +509,7 @@ def _recover(
         if outcome.judge_job is not None:
             # The job just queued joins the run's judge-only jobs the evidence already reports.
             gate_task = {**gate_task, "judge_jobs": [*(gate_task.get("judge_jobs") or []), outcome.judge_job]}
-        return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
+        return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow, "pin_plan": pin_plan})
     if decision.action == RecoveryAction.RESUBMIT:
         operator = decision.operator_continuation
         try:
@@ -483,6 +552,7 @@ def _recover(
             mlflow=mlflow,
             walltime_plan=walltime_plan,
             reverify=_reverify_first_note(decision, job.job_id),
+            pin_plan=pin_plan,
         )
     if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is not None:
         if repin is not None or extend_retries or extend_attempts:

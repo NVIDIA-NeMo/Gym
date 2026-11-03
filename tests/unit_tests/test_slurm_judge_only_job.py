@@ -240,6 +240,10 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     queued = _queued_reverify_config(script)
     assert queued.withdraw_unresolved_admissions is True and queued.skip_spent_judge_failures is True
     assert "--model-type openai_model" in script
+    # Observability is on, so the job names where its model calls are captured: its own folder.
+    (line,) = [line for line in script.splitlines() if line.strip().startswith("gym eval reverify")]
+    assert "+observability_enabled=True" in line
+    assert f"+model_call_capture_dir={Path(job['receipt']).parent / 'model-calls'}" in line
     # The judge-only job is not a segment of the policy chain: no chain entry, no walltime charged, no retry spent.
     assert _accounting(job_dir) == before
     (entry,) = _journal(job_dir)
@@ -422,3 +426,23 @@ def test_every_gym_command_a_rendered_script_runs_parses_with_the_real_cli(
     assert commands
     for words in commands:
         assert _unrecognized_flags(words) == [], words
+
+
+def test_an_old_pin_model_served_run_is_rejudged_headless_on_the_installed_revision(
+    tmp_path, judge_slurm_bin, monkeypatch
+) -> None:
+    """No flags: the plan is made on the installed Gym and its judge-only job runs there, journaled as a repin."""
+    monkeypatch.setenv("NEMO_GYM_SUBMIT_NO_REF_CHECK", "true")
+    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "b" * 40)
+    job_dir = _model_served_run(tmp_path)
+
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.ok and out.dispatched == "reverify", out.decision.reason
+    assert out.pin_plan["repin"] is True and out.pin_plan["pinned"] == "a" * 40
+    assert out.pin_plan["reason"] == (
+        f"automatic repin: planned on {'b' * 40} for a run pinned at {'a' * 40}: "
+        "its judge-only job runs the installed recovery source"
+    )
+    assert out.judge_job["gym_commit"] == "b" * 40
+    assert "b" * 40 in _queued_script(job_dir)
