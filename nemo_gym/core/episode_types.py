@@ -177,7 +177,7 @@ class FailureReport(BaseModel):
     observed while serving the request, each with its explicit causes.
 
     ``omitted`` says that a report on the way here was too large to send, so events are missing.
-    ``nemo_gym.failure_transport`` carries it in one HTTP header; Collection saves it beside the outcome.
+    ``nemo_gym.core.failure_transport`` carries it in one HTTP header; Collection saves it beside the outcome.
     """
 
     model_config = ConfigDict(extra="forbid")

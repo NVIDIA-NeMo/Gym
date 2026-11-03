@@ -343,7 +343,7 @@ class CustomTaskInput(BaseModel):
 
 
 def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
-    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest
+    from nemo_gym.core.episode_types import BaseEpisodeRequest
 
     row = {"scenario": "order", "user_profile": {"name": "Example"}}
     source = tmp_path / "custom.jsonl"

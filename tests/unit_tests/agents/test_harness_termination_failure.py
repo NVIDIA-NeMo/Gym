@@ -3,9 +3,9 @@
 
 from nemo_gym.agents.base_responses_api_agent import AgentSessionSetupError, AgentSessionState
 from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
-from nemo_gym.failure_transport import FailureHeader
-from nemo_gym.typed_exceptions import NgFailureEvent
-from tests.unit_tests.test_agent_seed_failure_boundary import _served
+from nemo_gym.core.failure_transport import FailureHeader
+from nemo_gym.core.typed_exceptions import NgFailureEvent
+from tests.unit_tests.agents.test_agent_seed_failure_boundary import _served
 
 
 def _receipt() -> dict:

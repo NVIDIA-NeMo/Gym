@@ -4,7 +4,7 @@
 
 Flow: a boundary raises ``NgFailureEvent(...) from cause``. ``failure_report_for`` turns that
 chain into a ``FailureReport`` (one ``FailureEvent`` per exception, linked by ``cause_id``).
-``nemo_gym.failure_transport`` sends the report with the HTTP reply; the receiver rebuilds the chain with
+``nemo_gym.core.failure_transport`` sends the report with the HTTP reply; the receiver rebuilds the chain with
 ``rebuild_failure`` and Collection saves it. Nothing here chooses retries, terminality or scores.
 """
 
@@ -19,14 +19,19 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from aiohttp import ClientResponseError
 
-from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, FailureStage, require_failure_kind
-from nemo_gym.exception_inspection import bounded_text, error_to_http_status, explicit_causes, qualified_type_name
-from nemo_gym.server_runtime.episode_types import (
+from nemo_gym.core.episode_types import (
     FailureBoundary,
     FailureDetails,
     FailureEvent,
     FailureReport,
     SdkErrorDetails,
+)
+from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, FailureStage, require_failure_kind
+from nemo_gym.utils.exception_inspection import (
+    bounded_text,
+    error_to_http_status,
+    explicit_causes,
+    qualified_type_name,
 )
 
 

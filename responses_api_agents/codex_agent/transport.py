@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from aiohttp import web
 
 from nemo_gym.client import request
-from nemo_gym.failure_transport import StreamFailureReportReader
+from nemo_gym.core import StreamFailureReportReader
 
 
 @asynccontextmanager

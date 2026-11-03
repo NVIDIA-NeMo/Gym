@@ -27,7 +27,10 @@ if TYPE_CHECKING:
         AgentOutcome,
         AgentOutcomePolicyConfig,
         OutcomeAction,
+        OutcomePolicyConfig,
         agent_outcome_policy,
+        confirmed_policy_response_timeout,
+        failure_outcome_policy,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -55,6 +58,8 @@ if TYPE_CHECKING:
     )
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
+    from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+    from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -113,6 +118,7 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OutcomeAction": "agent_outcome",
+    "OutcomePolicyConfig": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RUNNER_FILE": "utils.sandbox_session",
     "RolloutStopRequest": "base_responses_api_agent",
@@ -125,10 +131,14 @@ _PUBLIC_API = {
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
+    "confirmed_policy_response_timeout": "agent_outcome",
     "exec_timeout": "utils.supervisor_client",
+    "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",
     "is_harness_termination_failure": "utils.supervisor_client",
+    "lifecycle_observation": "utils.sandbox_observation",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_timeout": "utils.task_timeout",
     "restricted_network_policy": "agent_tools",
     "sandbox_server_url": "agent_tools",
