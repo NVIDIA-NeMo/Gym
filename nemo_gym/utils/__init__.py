@@ -27,12 +27,19 @@ if TYPE_CHECKING:
         materialized_path_for,
         resubmit_offset_path_for,
     )
-    from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+    from nemo_gym.utils.server_process import (
+        IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME,
+        IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME,
+        is_nemo_gym_fastapi_entrypoint,
+        is_nemo_gym_fastapi_worker,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME": "server_process",
+    "IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME": "server_process",
     "aggregation_sources_path_for": "path_utils",
     "failures_path_for": "path_utils",
     "is_nemo_gym_fastapi_entrypoint": "server_process",

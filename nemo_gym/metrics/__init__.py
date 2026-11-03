@@ -23,6 +23,7 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.metrics.metrics_config import Stat
     from nemo_gym.metrics.reward_profile import (
+        MASK_SAMPLE_FIELD,
         AggregateMetricsMixin,
         RewardProfiler,
         add_avg_sample_std_dev,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
         compute_pass_majority_metrics,
         compute_subset_metrics,
         highest_k_metrics,
+        select_measured,
     )
 
 
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "AggregateMetricsMixin": "reward_profile",
+    "MASK_SAMPLE_FIELD": "reward_profile",
     "RewardProfiler": "reward_profile",
     "Stat": "metrics_config",
     "add_avg_sample_std_dev": "reward_profile",
@@ -44,6 +47,7 @@ _PUBLIC_API = {
     "compute_pass_majority_metrics": "reward_profile",
     "compute_subset_metrics": "reward_profile",
     "highest_k_metrics": "reward_profile",
+    "select_measured": "reward_profile",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

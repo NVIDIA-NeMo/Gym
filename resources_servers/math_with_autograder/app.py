@@ -24,7 +24,7 @@ fallback, but on a symbolic miss the judge is asked
 Three overrides versus the parent:
 
   1. Judge prompt is loaded via Gym's prompt system
-     (``nemo_gym.prompt.load_prompt_config``) from a YAML file with a
+     (``nemo_gym.data.prompt.load_prompt_config``) from a YAML file with a
      required ``user`` key and optional ``system`` key. Skills-style
      placeholders (``{problem}`` / ``{predicted_answer}`` /
      ``{expected_answer}``) are filled at judge-call time. The default
@@ -51,7 +51,7 @@ from typing import Any, ClassVar, Optional
 from pydantic import Field
 
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.verification import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
