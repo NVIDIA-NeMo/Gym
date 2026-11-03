@@ -43,7 +43,12 @@ from nemo_gym.orchestration.api import (
     VllmPDServiceConfig,
 )
 from nemo_gym.orchestration.executors.base import BaseExecutor, SchedulerRefusedError
-from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
+from nemo_gym.orchestration.executors.connection import (
+    READER_PROGRESS_PREFIX,
+    Connection,
+    LocalConnection,
+    get_connection,
+)
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.judge_profile import (
     JUDGE_POOL_NAME,
@@ -83,7 +88,11 @@ from nemo_gym.orchestration.executors.resume_script import (
     _walltime_to_seconds,
 )
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
-from nemo_gym.orchestration.executors.slurm_script import _resolve_env, build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import (
+    _resolve_env,
+    _with_default_capture_dir,
+    build_sbatch_script,
+)
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
@@ -481,6 +490,11 @@ def _remote_reader_bound_s() -> int | None:
 READER_SRUN_ENV = "NEMO_GYM_REMOTE_READER_SRUN"
 READER_SRUN_WAIT_ENV = "NEMO_GYM_REMOTE_READER_SRUN_WAIT_S"
 READER_MAX_ENV = "NEMO_GYM_REMOTE_READER_MAX"
+# How long a reader waits for a slot when the user's reader steps are at the cap (0: it does not wait).
+READER_QUEUE_WAIT_ENV = "NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S"
+_READER_QUEUE_WAIT_DEFAULT_S = 600
+# How often a queued reader counts the reader steps again.
+_READER_QUEUE_POLL_S = 10
 # With a reader step, whether a reader that cannot run in its step may read on the login host instead: "forbid" (the
 # default) or "allow". Forbidden, such a read is unavailable: nothing is read on the login host or decided from it.
 READER_LOGIN_FALLBACK_ENV = "NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK"
@@ -495,13 +509,25 @@ _READER_FALLBACK_PREFIX = "__GYM_READER_FALLBACK:"
 @dataclass(frozen=True)
 class ReaderStep:
     """How a heavy reader runs in a Slurm step: the caller's srun arguments (each quoted), how long the step may take
-    to start, how many reader steps the user may have running or pending before readers stay on the login host, and
-    whether a reader that cannot run in its step may run on the login host instead."""
+    to start, how many reader steps the user may have running or pending at once, how long a reader waits for one of
+    them to end when they are at that cap, and whether a reader that cannot run in its step may run on the login host
+    instead."""
 
     args: str
     wait_s: int
     max_readers: int
     login_fallback: bool = False
+    queue_wait_s: int = 0
+
+
+def _env_seconds(name: str, default: int) -> int:
+    """A nonnegative number of seconds from the environment; the default for an unset or invalid value."""
+    raw = os.environ.get(name, "")
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        return default
+    return value if value >= 0 else default
 
 
 def _env_count(name: str, default: int) -> int:
@@ -522,7 +548,8 @@ COLLECTOR_NOT_RUN = (
 
 def reader_step() -> ReaderStep | None:
     """The reader step from ``NEMO_GYM_REMOTE_READER_SRUN`` (extra srun arguments, for example ``-p cpu -c 4``),
-    ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120), ``NEMO_GYM_REMOTE_READER_MAX`` (default 8) and
+    ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120), ``NEMO_GYM_REMOTE_READER_MAX`` (default 8),
+    ``NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S`` (default 600; 0 does not wait) and
     ``NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK`` (``allow``; anything else forbids it); None when the arguments are unset
     or empty."""
     raw = os.environ.get(READER_SRUN_ENV, "").strip()
@@ -533,6 +560,7 @@ def reader_step() -> ReaderStep | None:
         wait_s=_env_count(READER_SRUN_WAIT_ENV, 120),
         max_readers=_env_count(READER_MAX_ENV, 8),
         login_fallback=os.environ.get(READER_LOGIN_FALLBACK_ENV, "").strip().lower() == "allow",
+        queue_wait_s=_env_seconds(READER_QUEUE_WAIT_ENV, _READER_QUEUE_WAIT_DEFAULT_S),
     )
 
 
@@ -547,6 +575,10 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
     and the reader runs on the login host. With ``watchdog`` (FD 4 is the shell's stdin), srun runs under the EOF
     watcher (``_watch_lines``), which also cancels the step by name. Without ``step.login_fallback``, a reader that
     would fall back runs nowhere: ``_gym_host`` is ``none``, ``_gym_rc`` 1, and ``_gym_fallback`` says why.
+
+    When the user's reader steps are at ``step.max_readers``, the reader queues: it counts them again every
+    ``_READER_QUEUE_POLL_S`` seconds for up to ``step.queue_wait_s``, saying on stderr how many it is queued behind
+    (a progress line), and runs in its step once one ends. Only a cap still reached after that wait keeps it out.
     """
     name = shlex.quote(f"gym-reader-{token}")
     inside = shlex.quote(f'echo "{_READER_HOST_PREFIX}cpu:$SLURM_JOB_ID"; exec 3<&0 </dev/null; {script}')
@@ -566,8 +598,26 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         "_gym_step_out=$(mktemp)",
         'if ! _gym_readers=$(squeue -h -u "$USER" -t RUNNING,PENDING -o %j 2>/dev/null); then',
         '    _gym_fallback="squeue failed, so the running reader steps cannot be counted"',
-        f'elif (( $(printf "%s\\n" "$_gym_readers" | grep -c "^gym-reader-") >= {step.max_readers} )); then',
-        f'    _gym_fallback="{step.max_readers} reader steps are already running or pending"',
+        "else",
+        "    _gym_queued_s=0",
+        f'    while _gym_n=$(printf "%s\\n" "$_gym_readers" | grep -c "^gym-reader-"); (( _gym_n >= {step.max_readers} )); do',
+        f"        if (( _gym_queued_s >= {step.queue_wait_s} )); then",
+        f'            _gym_fallback="{step.max_readers} reader steps are already running or pending"',
+        f'            (( _gym_queued_s == 0 )) || _gym_fallback="$_gym_fallback (still $_gym_n after queueing '
+        f'{step.queue_wait_s} s)"',
+        "            break",
+        "        fi",
+        "        if (( _gym_queued_s % 60 == 0 )); then",
+        f'            echo "{READER_PROGRESS_PREFIX} queued behind $_gym_n reader steps (cap {step.max_readers}), '
+        f'waited $_gym_queued_s s of {step.queue_wait_s} s" >&2',
+        "        fi",
+        f"        sleep {_READER_QUEUE_POLL_S}",
+        f"        _gym_queued_s=$(( _gym_queued_s + {_READER_QUEUE_POLL_S} ))",
+        '        if ! _gym_readers=$(squeue -h -u "$USER" -t RUNNING,PENDING -o %j 2>/dev/null); then',
+        '            _gym_fallback="squeue failed while queued, so the running reader steps cannot be counted"',
+        "            break",
+        "        fi",
+        "    done",
         "fi",
         "if [[ -z $_gym_fallback ]]; then",
         *(f"    {line}" for line in run_step),
@@ -1628,6 +1678,9 @@ class SlurmExecutor(BaseExecutor):
             queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
             nonce = new_gym_job_id(utc_now())
             output = job_dir / "reverification" / nonce / "rollouts.jsonl"
+            # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
+            # evaluation captures into its benchmark directory.
+            run = _with_default_capture_dir(run, output.parent)
             command = " ".join(
                 [
                     "gym eval reverify",
@@ -1845,6 +1898,9 @@ class SlurmExecutor(BaseExecutor):
         nonce = new_gym_job_id(utc_now())
         folder = job_dir / "reverification" / nonce
         output, receipt = folder / "rollouts.jsonl", folder / "receipt.json"
+        # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
+        # evaluation captures into its benchmark directory.
+        run = _with_default_capture_dir(run, folder)
         policy_type = config.driver.policy_model_type
         command = " ".join(
             [
@@ -2638,6 +2694,20 @@ class SlurmExecutor(BaseExecutor):
             "|| fail 'cannot write the rendered resolved config'",
         ]
         return commands, journals
+
+    def installed_commit(self) -> str | None:
+        """The Gym commit this launcher runs; the same value the judge-only job and a repin are checked against."""
+        return installed_gym_commit()
+
+    def gym_pin(self, record: SubmissionRecord) -> str | None:
+        """The full Gym commit the run's saved config pins its driver to; None when there is none or it is unreadable."""
+        try:
+            with get_connection(record.hostname) as conn:
+                install = self._saved_config(conn, Path(record.run_dir)).driver.gym_install
+        except (OSError, RuntimeError, ValueError):
+            return None
+        ref = install.ref if install is not None else None
+        return ref if ref is not None and re.fullmatch(r"[0-9a-f]{40}", ref) else None
 
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:

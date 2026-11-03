@@ -43,6 +43,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     failure_kinds,
 )
+from nemo_gym.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 from nemo_gym.sandbox import (
     ConnectableProvider,
     SandboxBackendUnreachableError,
@@ -349,11 +350,13 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "url_prefix": self.url_path_for_run("", body),
             }
             token = _RUN_CONTEXT.set(run_context)
+            phase = "agent"
             try:
                 if self.config.forward_mcp_tools:
                     run_context["mcp"] = self._mcp_server_entry(seed)
                 agent_resp = await self.responses(request, body.responses_create_params)
                 agent_resp_json = agent_resp.model_dump(mode="json")
+                phase = "verify"
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
@@ -377,7 +380,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     raise
                 # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
                 LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
-                return _masked_result(body, failure_kind, f"{type(exc).__name__}: {exc}")
+                sandbox_id = (descriptor or {}).get("sandbox_id") if isinstance(descriptor, Mapping) else None
+                facts = sandbox_failure_prefix(
+                    phase=phase,
+                    sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                    reason=provider_error_reason(exc),
+                    http_status=error_to_http_status(exc),
+                )
+                return _masked_result(body, failure_kind, f"{facts}{type(exc).__name__}: {exc}")
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise

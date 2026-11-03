@@ -152,11 +152,31 @@ on that host reuse the cache. An inspection and a recovery decide the same from 
 and the read hashes its sources when it opens, parses and closes them: a file that changes under
 it makes the decision stop ("unstable sources"), so never edit a run while you read it.
 
+A run pinned at another Gym commit than the one you run the command from is planned with the
+installed Gym's rules, so a rule added after the run's pin applies without any option. When that
+plan needs the installed revision to run (a re-judge, whose job runs the installed recovery source,
+or a resubmit the pinned revision would plan differently), the recovery moves the run to the
+installed commit itself: an automatic repin, journaled in `repin-journal.jsonl` with its reason.
+Otherwise the pin stays. The report says which (`pin_plan`, and a warning "planned on <installed>
+for a run pinned at <old>"), and `--inspect` shows the same decision. `--no-auto-repin` keeps the
+pin and refuses that case, naming `--repin`; `--repin <full commit> --repin-reason "<why>"` stays the
+explicit way to move a run, and the repin target must be the Gym that runs the command.
+
+Where readers run in Slurm steps (`NEMO_GYM_REMOTE_READER_SRUN`), an inspect that could not read
+returns `UNKNOWN` with "nothing was read or decided". That is not a problem of the run: read the
+reason on stderr (`gym: the reader did not run: ...`). A reader at the per-user limit of reader steps
+(`NEMO_GYM_REMOTE_READER_MAX`, default 8) queues first, printing `gym-reader progress: queued behind N
+reader steps`, and runs once one ends; it waits up to `NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S` (default 600,
+0 does not wait). When the reason still says that reader steps are already running or pending, raise the
+limit or the wait and run the same command again. Other reasons (the step did not
+start within its wait) have their own remedy.
+
 The output is one JSON line, the recovery outcome, and nothing is written; the exit code is 0 only
 when `gate_task.status` is `SUCCESS`. Keep that line: it is your record of the read. A dispatching call (`--recover` without `--inspect`)
 that carries a score, MLflow or health-limit option exits 1 even when it succeeds, because the gate
 cannot be `SUCCESS` right after a dispatch; without one it exits 0. Read `ok` and `dispatched`, not
-the exit code. Its top-level
+the exit code. A call handed to a queue can also exit 0 while the gate still reads `RESUMING`:
+take `ok` and `job_id` from the JSON line, not from the exit code. Its top-level
 keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_id`, `unsupported`,
 `mlflow` (`receipt`: `run_id`, `current`, `uploaded_rollouts`, `rollout_projection_version`),
 `reverify`, `judge_job`, `walltime_plan`, `scheduler_refusal` and `reader_token`. Read:
@@ -197,7 +217,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | The inspection says | Do |
 | --- | --- |
 | Eligible work, `PLANNED` | Run the same command without `--inspect`, with the variables the saved config forwards (`compute.forward_env`, `HF_TOKEN` for instance) set in that shell; a missing one stops the dispatch. |
-| `reverify`, `PLANNED` (only rows with a saved answer remain: a judge failure, or a verify call lost in transport) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. A run that served its own model, and nothing else beside it, gets a judge-only job on one CPU node. Its partition is the first of: `--judge-partition <partition>`, a node pool of the saved config with `gpus_per_node: 0`, or the partition that `NEMO_GYM_REMOTE_READER_SRUN` names. The job also needs a QOS that matches that partition: `--judge-qos <qos>`, else the QOS of the saved CPU pool, else the `-q` or `--qos` option of `NEMO_GYM_REMOTE_READER_SRUN` when it names this partition or none, else the partition's default. Slurm refuses a GPU QOS on a CPU partition (`QOSMinGRES`); pass `--judge-qos` then. On a site where the saved config has no CPU pool and no reader placement is set, pass `--judge-partition` with the resubmit, or the recovery stops with nothing queued (next row). A run that serves its judge on a node pool of its own gets a judge-only job on that saved pool instead: the judge's services start on their saved pools and the job keeps the run's QOS; `--judge-partition` and `--judge-qos` are not used (when you pass them, the report says `--judge-partition/--judge-qos apply to the CPU judge profile only; not used`). A run with both judge failures and policy work is resubmitted; the resumed run re-judges the saved judge failures before its policy work, while its judge servers are up, and again at the end of the run. |
+| `reverify`, `PLANNED` (only rows with a saved answer remain: a judge failure, or a verify call lost in transport) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. A run that served its own model, and nothing else beside it, gets a judge-only job on one CPU node. Its partition is the first of: `--judge-partition <partition>`, a node pool of the saved config with `gpus_per_node: 0`, or the partition that `NEMO_GYM_REMOTE_READER_SRUN` names. The job also needs a QOS that matches that partition: `--judge-qos <qos>`, else the QOS of the saved CPU pool, else the `-q` or `--qos` option of `NEMO_GYM_REMOTE_READER_SRUN` when it names this partition or none, else the partition's default. Slurm refuses a GPU QOS on a CPU partition (`QOSMinGRES`); pass `--judge-qos` then. On a site where the saved config has no CPU pool and no reader placement is set, pass `--judge-partition` with the resubmit, or the recovery stops with nothing queued (next row). The judge-only job runs `gym eval reverify --settle-receipt`: the Gym that runs it must define that option, or the queued job stops at argument parsing. A run that serves its judge on a node pool of its own gets a judge-only job on that saved pool instead: the judge's services start on their saved pools and the job keeps the run's QOS; `--judge-partition` and `--judge-qos` are not used (when you pass them, the report says `--judge-partition/--judge-qos apply to the CPU judge profile only; not used`). A run with both judge failures and policy work is resubmitted; the resumed run re-judges the saved judge failures before its policy work, while its judge servers are up, and again at the end of the run. |
 | STOP on a `reverify` of a GPU-served run, `... has no existing CPU-only judge execution profile and none can be derived: no CPU partition is known (... no --judge-partition was given)` | Nothing was queued and no row was lost. Run the same command again with `--recover --judge-partition <cpu partition>` (and `--judge-qos <qos>` when Slurm refuses the job with `QOSMinGRES`), a partition of your site that runs CPU jobs. If the message says instead `this submission has no served-judge execution profile: service(s) <names> run on the policy's nodes (its node pool, or no node_pool of their own, which is the whole allocation)`, no partition helps: the judge-only job does not start the policy's allocation and policy services are not restarted. Give each of those services a node pool of its own, beside the policy's, in the submission config, or report that the saved answers cannot be re-judged. |
 | NOOP, `RUNNING` (`continuation <job> live; nothing to decide`) | A job of the run is live. Wait for it to end, then inspect again. |
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (the table in step 2). |
@@ -488,6 +508,36 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 2. Then inspect (step 4) before deciding anything else.
 3. Keep the run directory. To evaluate something different, submit a new run to a new location
    rather than reusing this one; a fresh `gym eval run` at an existing output path replaces it.
+
+## What the stack does not decide for you
+
+A Gym run reports what it recorded. These outcomes are scored or retried today in a way you must
+correct or report yourself, until the matching policy lands in Gym.
+
+- **A sandbox killed for memory.** A kill during the agent's own command is the model's outcome, not
+  a fault to rerun. Where the stack retries it (harness-agent rows, kind `provider_oom_killed`, the
+  provider text in `failure_reason`) or scores it 0 (Terminal-Bench 4.0: read `sandbox_resource_limit`,
+  resource `memory`, with the provider text in `detail`), count it as the model's. In Terminal-Bench 4.0,
+  a process killed inside a live sandbox (exit 137) is a scored 0 marked interrupted. SWE-family and SkillsBench keep
+  nothing typed about it.
+- **A sandbox that ended for its own limit.** Terminal-Bench 4.0 scores 0 only when the provider text
+  names the sandbox's own memory or storage limit; read `sandbox_resource_limit` before you accept
+  that zero. Other sandbox deaths there are `infrastructure_error` and are retried. In SkillsBench a
+  sandbox that dies mid-trial is `harbor_failed` and is retried, not scored; it scores 0 only when it
+  ended at the agent deadline with no test result.
+- **SkillsBench agent timeouts.** The row is final and scored. Many are zeros without a verifier
+  result (the sandbox was discarded before verification, or the verifier produced nothing). Report the
+  score over the rows the verifier graded beside the headline score.
+- **AutomationBench rows that ended on a serving timeout or a 5xx.** They are graded on the partial
+  world. Count them from `rollout_error` before you publish a score; its `kind_candidate` is a
+  candidate (`http_5xx`, `http_429`, `timeout`, `connection`), and the verifier's own time limit
+  leaves no `rollout_error`.
+- **SciCode.** A killed grading subprocess shows as a wrong answer unless the step exit is recorded.
+  Gym records it: look for `killed:<SIGNAL>` in `step_exits[].exit` (`killed:SIGKILL` for a memory
+  kill). It is recorded for the run that decided the step, so a kill in another grading interpreter
+  of the same row is not shown.
+
+Name each correction in your report with its count.
 
 ## Exit checks
 

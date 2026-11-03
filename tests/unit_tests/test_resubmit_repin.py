@@ -208,3 +208,91 @@ def test_an_inspect_at_a_repin_reads_the_plan_there_and_changes_nothing(tmp_path
     after = _digests(job_dir) | {"job.sh": hashlib.sha256((job_dir / "job.sh").read_bytes()).hexdigest()}
     assert after == before
     assert not list(job_dir.glob("job.sh.pre-repin-*")) and not (job_dir / REPIN_JOURNAL_NAME).exists()
+
+
+# --- A run pinned at another commit is planned on the installed Gym; its pin moves only when the plan needs it. ---
+
+
+def _pinned_plans_differently(monkeypatch) -> None:
+    """The pinned revision's Store reader plans fewer rows than the installed one (a row only newer rules plan)."""
+    real = SlurmExecutor.recovery_evidence
+
+    def evidence(self, *args, **kwargs):
+        decision, collected = real(self, *args, **kwargs)
+        if kwargs.get("reader_ref") is None:
+            decision = decision.model_copy(update={"counts": {**decision.counts, "unowned": 1}})
+        return decision, collected
+
+    monkeypatch.setattr(SlurmExecutor, "recovery_evidence", evidence)
+
+
+def test_an_old_pin_run_the_pinned_revision_plans_alike_keeps_its_pin(tmp_path, slurm_bin, launcher_at):
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path)
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert out.pin_plan == {
+        "installed": NEW,
+        "pinned": OLD,
+        "repin": False,
+        "reason": f"planned on {NEW} for a run pinned at {OLD}; the pin stays",
+    }
+    assert out.pin_plan["reason"] in out.gate_task["warnings"]
+    assert OLD in (job_dir / "job.sh").read_text() and not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
+
+
+def test_an_old_pin_run_whose_plan_needs_the_installed_revision_is_repinned_automatically(
+    tmp_path, slurm_bin, launcher_at, monkeypatch
+):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path)
+    _pinned_plans_differently(monkeypatch)
+    before = (job_dir / "job.sh").read_text()
+    # --inspect reports the same plan and pin decision, and changes nothing.
+    inspected = inspect_recovery(*_handle(job_dir))
+    assert inspected.dispatched is None and inspected.pin_plan["repin"] is True
+    assert (job_dir / "job.sh").read_text() == before and not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
+
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert out.pin_plan == inspected.pin_plan
+    reason = out.pin_plan["reason"]
+    assert reason.startswith(f"automatic repin: planned on {NEW} for a run pinned at {OLD}: the pinned revision plans")
+    assert NEW in (job_dir / "job.sh").read_text()
+    [entry] = [json.loads(line) for line in (job_dir.parent / REPIN_JOURNAL_NAME).read_text().splitlines()]
+    assert (entry["from"], entry["to"], entry["reason"]) == (OLD, NEW, reason)
+    [job] = json.loads((job_dir.parent / "gym-job.json").read_text())["benchmarks"]
+    assert job["gym_commit"] == NEW
+
+
+def test_no_auto_repin_refuses_a_plan_that_needs_the_installed_revision_and_names_repin(
+    tmp_path, slurm_bin, launcher_at, monkeypatch
+):
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path)
+    _pinned_plans_differently(monkeypatch)
+    files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
+    out = recover(*_handle(job_dir), auto_repin=False)
+    assert not out.ok and out.dispatched is None and out.decision.action.value == "stop"
+    assert f"--repin {NEW} --repin-reason TEXT" in out.decision.reason and out.pin_plan["refused"] is True
+    assert {path: path.read_bytes() for path in files} == files
+    assert not (slurm_bin / "env").exists() and not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
+
+
+def test_no_auto_repin_needs_recover_and_excludes_repin(capsys):
+    from nemo_gym.cli.main import _eval_resubmit
+
+    parser = build_parser()
+    for argv in (
+        ["eval", "resubmit", "job", "bench", "--no-auto-repin"],
+        ["eval", "resubmit", "job", "bench", "--recover", "--no-auto-repin", "--repin", NEW, "--repin-reason", "x"],
+    ):
+        with pytest.raises(SystemExit):
+            _eval_resubmit(parser.parse_args(argv), [])
+        assert "--no-auto-repin needs --recover and cannot be used with --repin" in capsys.readouterr().err

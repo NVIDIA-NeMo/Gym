@@ -84,6 +84,8 @@ def fake_slurm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN_WAIT_S", "1")
     # These tests pin the login-host fallback where it is allowed; test_reader_login_fallback covers the default.
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK", "allow")
+    # The cap tests set their own queue wait.
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", "0")
 
     def use(srun: str) -> Path:
         (bin_dir / "srun").write_text(srun)
@@ -373,3 +375,46 @@ def test_an_unconfirmed_cancellation_starts_no_second_reader(fake_slurm, tmp_pat
     assert "__GYM_READER_RC:1" in output
     assert "was not confirmed gone" in output
     assert slurm.reader_placement(output)[0] == "unconfirmed"
+
+
+def test_a_reader_at_the_cap_queues_and_runs_in_its_step_once_a_reader_ends(
+    fake_slurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = fake_slurm(_STARTED_SRUN)
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_MAX", "2")
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", "60")
+    (log / "queue").write_text("gym-reader-a\ngym-reader-b\n")
+    threading.Timer(3, lambda: (log / "queue").write_text("gym-reader-a\n")).start()
+
+    result = subprocess.run(["bash", "-s"], input="\n".join(_reader(tmp_path)), text=True, capture_output=True)
+
+    assert result.returncode == 0, result.stderr
+    assert slurm.reader_placement(result.stdout) == ("cpu:4242", None)
+    assert (log / "srun").exists()
+    assert "gym-reader progress: queued behind 2 reader steps (cap 2), waited 0 s of 60 s" in result.stderr
+
+
+def test_a_reader_still_at_the_cap_after_its_queue_wait_says_how_long_it_queued(
+    fake_slurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = fake_slurm(_STARTED_SRUN)
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_MAX", "2")
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", "4")
+    (log / "queue").write_text("gym-reader-a\ngym-reader-b\ngym-reader-c\n")
+
+    output = LocalConnection().run(_reader(tmp_path))
+
+    assert slurm.reader_placement(output) == (
+        "login",
+        "2 reader steps are already running or pending (still 3 after queueing 4 s)",
+    )
+    assert not (log / "srun").exists()
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("", 600), ("0", 0), ("90", 90), ("-5", 600), ("x", 600)])
+def test_the_queue_wait_defaults_to_ten_minutes_and_zero_does_not_wait(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: int
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN", "-p cpu")
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", raw)
+    assert slurm.reader_step().queue_wait_s == expected

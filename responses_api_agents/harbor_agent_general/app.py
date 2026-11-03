@@ -56,6 +56,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.exception_inspection import sandbox_failure_prefix
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
@@ -232,6 +233,27 @@ class HarborRunRequest(BaseRunRequest):
 
 class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+# Harbor's timed phases of a trial (or of one of its steps), in order, and the sandbox phase each one is.
+_HARBOR_PHASES = (
+    ("environment_setup", "setup"),
+    ("agent_setup", "setup"),
+    ("agent_execution", "agent"),
+    ("verifier", "verify"),
+)
+
+
+def _running_phase(result: object) -> str:
+    """The phase a failed Harbor trial or step result was in: the last timed phase that started and did not finish,
+    else ``unknown``."""
+    running = [
+        phase
+        for name, phase in _HARBOR_PHASES
+        if getattr(timing := getattr(result, name, None), "started_at", None) is not None
+        and getattr(timing, "finished_at", None) is None
+    ]
+    return running[-1] if running else "unknown"
 
 
 class HarborAgent(SimpleResponsesAPIAgent):
@@ -722,8 +744,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     exception_info = failed.exception_info
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
                     result_path.unlink()
+                    environment = getattr(getattr(job_config, "environment", None), "type", None)
+                    facts = sandbox_failure_prefix(
+                        phase=_running_phase(failed),
+                        provider=getattr(environment, "value", environment),
+                        reason=exception_info.exception_type,
+                    )
                     raise RuntimeError(
-                        f"Harbor trial failed with {exception_info.exception_type}: {exception_info.exception_message}"
+                        f"{facts}Harbor trial failed with {exception_info.exception_type}: "
+                        f"{exception_info.exception_message}"
                     )
 
                 return str(trial_dir.resolve())
