@@ -161,6 +161,9 @@ _UNSUPPORTED_VALUE_PATTERNS = (
 )
 # The error category recorded for such a refusal; the acceptance gate types it as ``invalid_request_parameter``.
 INVALID_REQUEST_PARAMETER_CATEGORY = "invalid_request_parameter"
+# Request fields that choose what the engine reports about the tokens it samples, not how it samples them. A trained
+# agent's Model Server may pin these: NeMo RL's score centering pins logprobs and top_logprobs on its policy's server.
+_REPORTING_ONLY_SAMPLING_OVERRIDES = frozenset({"logprobs", "top_logprobs"})
 
 
 def _names_context_window(message: str) -> bool:
@@ -989,13 +992,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             body = _set_aside_unlisted_reasoning_effort(request, body)
         return await super().responses_dispatch(request, body)
 
+    def _sampling_pins(self) -> List[str]:
+        """The ``sampling_overrides`` fields that change how the engine samples."""
+        return sorted(set(self.config.sampling_overrides or {}) - _REPORTING_ONLY_SAMPLING_OVERRIDES)
+
     def _post_init(self) -> None:
         if self.config.sampling_overrides:
             sampling_config = model_call_sampling_config(getattr(self.server_client, "global_config_dict", None))
-            if sampling_config is not None and self.config.name in sampling_config.required_model_servers:
+            pins = self._sampling_pins()
+            if pins and sampling_config is not None and self.config.name in sampling_config.required_model_servers:
                 raise ValueError(
                     f"Model Server {self.config.name!r} serves an agent that the training framework trains, so it "
-                    "cannot set sampling_overrides: that agent samples with the framework's values."
+                    f"cannot set sampling_overrides {pins}: that agent samples with the framework's values."
                 )
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
@@ -1154,12 +1162,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         sampling is pinned.
         """
         if self.config.sampling_overrides:
-            if current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
-                raise ValueError(
-                    f"Model Server {self.config.name!r} sets sampling_overrides, but this call carries a training "
-                    "framework's values for an agent it trains, which must sample with them. Remove "
-                    "sampling_overrides from this Model Server, and give an untrained agent that needs a pin a Model "
-                    "Server of its own."
+            pins = self._sampling_pins()
+            if pins and current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
+                # 409, not 500: the conflict is configuration, so retrying the rollout cannot help.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Model Server {self.config.name!r} sets sampling_overrides {pins}, but this call carries a "
+                    "training framework's values for an agent it trains, which must sample with them. Remove them "
+                    "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
+                    "Model Server of its own.",
                 )
             body_dict.update(self.config.sampling_overrides)
         return body_dict
