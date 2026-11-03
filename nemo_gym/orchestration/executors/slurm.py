@@ -33,7 +33,11 @@ from typing import Any
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.config.global_config import DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS, SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
+from nemo_gym.config.global_config import (
+    DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
+)
 from nemo_gym.orchestration.api import (
     HOST_ENV_REFS,
     SAVED_CONFIG,
@@ -1977,6 +1981,9 @@ class SlurmExecutor(BaseExecutor):
         # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
         # evaluation captures into its benchmark directory.
         run = _with_default_capture_dir(run, folder)
+        # The job only judges saved answers: it never calls the policy model, whose served endpoint is gone with the
+        # run's allocation, so waiting for that endpoint's readiness would only time the job out.
+        run = {key: value for key, value in run.items() if key != MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}
         policy_type = config.driver.policy_model_type
         command = " ".join(
             [
@@ -2000,6 +2007,7 @@ class SlurmExecutor(BaseExecutor):
                 # A judge failure whose saved attempts are spent keeps its masked row; the rest are judged.
                 "+skip_spent_judge_failures=True",
                 *flatten_run_args(run),
+                f"++{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}=0",
             ]
         )
         bound = judge_job_config(config, record.cluster, benchmark, profile, command, gym_ref=repin)

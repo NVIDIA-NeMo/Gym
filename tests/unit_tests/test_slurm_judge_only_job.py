@@ -446,3 +446,18 @@ def test_an_old_pin_model_served_run_is_rejudged_headless_on_the_installed_revis
     )
     assert out.judge_job["gym_commit"] == "b" * 40
     assert "b" * 40 in _queued_script(job_dir)
+
+
+def test_the_judge_only_job_skips_the_policy_endpoint_readiness_wait(tmp_path, judge_slurm_bin) -> None:
+    # It only judges saved answers and never calls the policy model, whose endpoint left with the run's allocation:
+    # waiting for its readiness would time the job out before any judging.
+    job_dir = _model_served_run(tmp_path)
+
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.ok and out.dispatched == "reverify", out.decision.reason
+    (line,) = [line for line in _queued_script(job_dir).splitlines() if line.strip().startswith("gym eval reverify")]
+    assert line.count("model_endpoint_readiness_timeout_seconds") == 1
+    assert line.rstrip().endswith("++model_endpoint_readiness_timeout_seconds=0") or (
+        "++model_endpoint_readiness_timeout_seconds=0 " in line
+    )
