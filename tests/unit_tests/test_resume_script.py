@@ -33,6 +33,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     EXPORT_RECEIPT_MISSING,
     EXPORT_RECEIPT_MISSING_REASON,
     FOLLOW_UP_SUBMISSION_REFUSED,
+    FRESH_RESTART_MARKER_NAME,
     GUARDED_DRIVER_FAILURE_KINDS,
     INCOMPLETE_MARKER_NAME,
     NO_ELIGIBLE_RETRY,
@@ -1822,3 +1823,58 @@ def test_a_segment_without_a_recorded_sentinel_cancels_only_its_follow_up(tmp_pa
     assert _scancel_calls(tmp_path) == ["999"]
     [entry] = _chain_end_entries(tmp_path)
     assert entry["cancelled"] == {"follow_up": {"job_id": "999", "result": "cancelled"}}
+
+
+def _server_start_failed_before_any_rollout(tmp_path, prev_job_id: str = "100") -> None:
+    # The previous segment's driver: its policy server could not bind its port, and nothing was saved.
+    (tmp_path / f"{DRIVER_FAILURE_NAME}.{prev_job_id}").write_text("server_start_failed\n")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_server_that_failed_to_start_before_any_rollout_restarts_the_run_fresh_once(tmp_path):
+    _server_start_failed_before_any_rollout(tmp_path)
+
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "FAILED")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "restarting the run fresh as an infra retry" in result.stdout and "REACHED_WORK" in result.stdout
+    assert "no eligible retries" not in result.stdout
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
+    assert (tmp_path / f"{FRESH_RESTART_MARKER_NAME}.200").exists()
+    assert _sbatch_calls(tmp_path), "the follow-up is queued as for any infra retry"
+    incomplete = tmp_path / INCOMPLETE_MARKER_NAME
+    assert not incomplete.exists() or "no eligible retries" not in incomplete.read_text()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("exhausted", ["restarted_once", "budget_spent"])
+def test_a_server_start_failure_after_the_fresh_restart_stops_with_its_kind_and_a_fresh_resubmit(tmp_path, exhausted):
+    _server_start_failed_before_any_rollout(tmp_path)
+    if exhausted == "restarted_once":
+        (tmp_path / f"{FRESH_RESTART_MARKER_NAME}.100").write_text("")
+        resume = ResumeConfig(max_retries=2)
+    else:
+        resume = ResumeConfig(max_retries=0)
+
+    result = _run_prologue(tmp_path, resume, "FAILED")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    stop = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert "server_start_failed on job 100 before any rollout was saved; fresh restart exhausted" in stop
+    assert "resubmit fresh:" in stop and "--recover" not in stop
+    assert "REACHED_WORK" not in result.stdout and not _sbatch_calls(tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_server_start_failure_with_saved_rollouts_keeps_the_saved_evidence_path(tmp_path):
+    _server_start_failed_before_any_rollout(tmp_path)
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    (tmp_path / "artifacts" / "rollouts_manifest.json").write_text("{}")
+
+    result = _run_prologue(
+        tmp_path, ResumeConfig(max_retries=2), "FAILED", admission_command="echo __GYM_CONTINUATION:stop"
+    )
+
+    assert "restarting the run fresh" not in result.stdout
+    assert not (tmp_path / f"{FRESH_RESTART_MARKER_NAME}.200").exists()
+    assert result.returncode == 1 and "no eligible retries" in result.stdout

@@ -36,6 +36,7 @@ from nemo_gym.core.failure_kinds import (
     DRIVER_INSTALL_FAILED,
     PROVIDER_CREDENTIALS_REJECTED,
     SERVER_SPINUP_TIMEOUT,
+    SERVER_START_FAILED,
 )
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
@@ -51,6 +52,9 @@ _JOB_SCRIPT_NAME = "job.sh"
 PROLOGUE_MARKER = "# --- Auto-resume chain ---"
 JOB_CHAIN_NAME = ".gym_job_chain"
 RETRY_FILE_NAME = ".gym_infra_retries"
+# Written by a segment that restarted the run fresh after a server failed to start before any rollout was saved,
+# named by that segment's job id: the next segment restarts it no more, so one such restart is the bound.
+FRESH_RESTART_MARKER_NAME = ".gym_fresh_restart"
 # Written only by `gym eval resubmit --recover --extend-retries`: infra retries added to the configured cap.
 RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"
 # Capability of the generated script: it reads the recorded extension.
@@ -513,6 +517,7 @@ if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
 fi
 _gym_needs_retry=0
 _gym_stop_reason=""
+_gym_fresh_restart=""
 
 if [[ "$_prev_slurm_job_id" != "" ]]; then
     _accounting=""
@@ -582,6 +587,20 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {resume_refused_reason}" ;;
         {provider_credentials_rejected})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {credentials_rejected_reason}" ;;
+        {server_start_failed})
+            # A server that did not start (its port taken, for instance) before the run saved anything: there is
+            # nothing to resume, and the failure is the infrastructure's, so the segment starts the run again fresh,
+            # once, as an infra retry. A run with saved rollouts keeps the saved-evidence path below.
+            if [[ ! -e "$OUTPUT_DIR/artifacts/rollouts_manifest.json" ]]; then
+                _gym_run_dir="${{OUTPUT_DIR%/*}}"
+                if [[ -e "$OUTPUT_DIR/{fresh_restart_marker_name}.$_prev_slurm_job_id" ]] || (( _retries >= _gym_max_retries )); then
+                    _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {server_start_failed} on job $_prev_slurm_job_id before any rollout was saved; fresh restart exhausted; resubmit fresh: gym eval resubmit ${{_gym_run_dir##*/}} ${{OUTPUT_DIR##*/}}"
+                fi
+                _gym_stop_reason=""
+                _gym_needs_retry=1
+                _gym_fresh_restart=1
+                echo "Previous job $_prev_slurm_job_id ended $_prev_state: {server_start_failed} before any rollout was saved; restarting the run fresh as an infra retry."
+            fi ;;
     esac
     # A segment that timed out before Gym wrote the task inventory saved nothing to resume, and the next one would
     # repeat the same startup under the same walltime: the chain ends and names the fresh restart instead.
@@ -687,6 +706,9 @@ fi
 if [[ "$_gym_needs_retry" == 1 ]]; then
     _retries=$((_retries + 1))
     echo "$_retries" > "$_retry_file" || _gym_stop_incomplete "Cannot preserve the spent retry."
+    if [[ -n "$_gym_fresh_restart" ]]; then
+        : > "$OUTPUT_DIR/{fresh_restart_marker_name}.$SLURM_JOB_ID" || _gym_stop_incomplete "Cannot record the fresh restart."
+    fi
     echo "Infra retry $_retries/$_gym_max_retries..."
 fi
 
@@ -966,6 +988,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         rows_at_start_name=ROWS_AT_START_NAME,
         no_progress_segment_reason=NO_PROGRESS_SEGMENT_REASON,
         # The job dir is <output_path>/<gym_job_id>/<benchmark>: the command names both from the directory it runs in.
+        server_start_failed=SERVER_START_FAILED,
+        fresh_restart_marker_name=FRESH_RESTART_MARKER_NAME,
         fresh_restart_command=fresh_restart_command("${_gym_run_dir##*/}", "${OUTPUT_DIR##*/}"),
         driver_failure_name=DRIVER_FAILURE_NAME,
         server_spinup_timeout=SERVER_SPINUP_TIMEOUT,
