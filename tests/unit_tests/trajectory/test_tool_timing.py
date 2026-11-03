@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -110,10 +112,9 @@ def test_unknown_source_never_joins_by_native_call_id_alone():
 def test_retries_remain_distinct_and_replay_deduplicates():
     observed = [tool("first", status="failed"), tool("second", status="completed")]
     records, gaps = normalize([*observed, *observed])
-    assert [(t.span_id, t.status, t.model_call_id) for t in records] == [
-        ("first", "failed", "model"),
-        ("second", "completed", "model"),
-    ]
+    assert len({t.span_id for t in records}) == 2
+    assert [(t.status, t.model_call_id) for t in records] == [("failed", "model"), ("completed", "model")]
+    assert [t.span_id for t in normalize(records)[0]] == [t.span_id for t in records]
     assert "tool_failure_detail_unavailable" in {g.code for g in gaps}
 
 
@@ -281,3 +282,143 @@ async def test_legacy_observation_upgrades_before_v2_serialization():
     decoded = TrajectoryRecord.model_validate(result["ng_trajectory"])
     assert decoded.tool_calls[0].span_id
     assert decoded.tool_calls[0].timings[0].started_at == 1.0
+
+
+@pytest.mark.parametrize("fixture", ["legacy-artifact", "canonical-failure"])
+async def test_saved_migration_evidence_survives_repeated_enrichment(fixture):
+    result = json.loads((Path(__file__).parent / "fixtures" / f"tool-timing-{fixture}.json").read_text())
+    row = {"task_id": "task", "_ng_rollout_id": "capture"}
+    first_tools = None
+    for _ in range(3):
+        await enrich_run_result(
+            row, result, capture_dirs=[], observability_enabled=True, trajectory_schema_version="2.0"
+        )
+        trajectory = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        assert len(trajectory.tool_calls) == 1
+        tools = result["ng_trajectory"]["tool_calls"]
+        if first_tools is not None:
+            assert tools == first_tools
+        first_tools = deepcopy(tools)
+    if fixture == "canonical-failure":
+        assert trajectory.tool_calls[0].failure_id == "failure"
+        assert trajectory.failure_events["failure"]["failure_reason"] == "tool failed"
+    else:
+        assert not trajectory.tool_calls[0].timings
+        assert any(
+            g.code == "tool_legacy_boundary_unavailable" and '"timing_source": "artifact"' in g.detail
+            for g in trajectory.gaps
+        )
+
+
+async def test_failure_event_merge_preserves_canonical_event_and_reports_conflict():
+    result = json.loads((Path(__file__).parent / "fixtures/tool-timing-canonical-failure.json").read_text())
+    result["failure_events"] = {
+        "failure": {"boundary": "harness", "failure_kind": "example:failure", "failure_reason": "conflicting"},
+        "other": {
+            "boundary": "agent",
+            "failure_kind": "example:other",
+            "failure_reason": "wrapper",
+            "cause_id": "failure",
+        },
+    }
+    await enrich_run_result(
+        {"task_id": "task", "_ng_rollout_id": "capture"},
+        result,
+        capture_dirs=[],
+        observability_enabled=True,
+        trajectory_schema_version="2.0",
+    )
+    trajectory = TrajectoryRecord.model_validate(result["ng_trajectory"])
+    assert trajectory.failure_events["failure"]["failure_reason"] == "tool failed"
+    assert trajectory.failure_events["other"]["cause_id"] == "failure"
+    assert any(g.code == "failure_event_conflict" and g.detail == "failure" for g in trajectory.gaps)
+
+
+def test_producer_span_mapping_is_stable_before_collision_and_translates_parents():
+    def producer_tools(producer):
+        return [
+            tool(span, instance=None).model_copy(update={"producer_id": producer, "parent_span_id": parent})
+            for span, parent in (("parent", None), ("child", "parent"))
+        ]
+
+    first, _ = normalize(
+        producer_tools("one"), calls=[call(instance=None)], invocations=[AgentInvocation(invocation_id="root")]
+    )
+    later, _ = normalize(
+        [*first, *producer_tools("one"), *producer_tools("two")],
+        calls=[call(instance=None)],
+        invocations=[AgentInvocation(invocation_id="root")],
+    )
+    assert len(later) == 4
+    assert [t.span_id for t in later[:2]] == [t.span_id for t in first]
+    assert len({t.span_id for t in later}) == 4
+    for producer in ("one", "two"):
+        parent, child = [t for t in later if t.producer_id == producer]
+        assert child.parent_span_id == parent.span_id
+    decoded = TrajectoryRecord.model_validate(
+        TrajectoryRecord(
+            schema_version="2.0",
+            task_id="task",
+            rollout_id="capture",
+            tool_calls=later,
+            model_calls=[call(instance=None)],
+        ).model_dump(mode="json")
+    )
+    replay, _ = normalize(
+        [*decoded.tool_calls, *producer_tools("one"), *producer_tools("two")],
+        calls=[call(instance=None)],
+        invocations=[AgentInvocation(invocation_id="root")],
+    )
+    assert len(replay) == 4
+    assert [(t.span_id, t.parent_span_id) for t in replay] == [(t.span_id, t.parent_span_id) for t in later]
+
+
+@pytest.mark.parametrize(
+    "response,status", [("upstream unavailable", 503), ("malformed", 200), ({"error": "failed"}, 200)]
+)
+@pytest.mark.parametrize("include_success", [False, True])
+async def test_unusable_capture_cannot_remove_tool_evidence_or_obscure_success(response, status, include_success):
+    result = {
+        "ng_agent_observations": AgentObservationBundle(
+            schema_version="2.0",
+            source="test",
+            records=[
+                AgentInvocation(invocation_id="root", agent_instance="assistant"),
+                tool(status="completed"),
+            ],
+        ).model_dump(mode="json"),
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": "bad",
+                    "client_session_id": "root",
+                    "client_assistant_message_id": "message",
+                    "status_code": status,
+                    "response_raw": response,
+                }
+            ]
+        },
+    }
+    if include_success:
+        result["ng_model_call_capture"]["calls"].append(
+            {
+                "model_call_id": "good",
+                "client_session_id": "root",
+                "client_assistant_message_id": "message",
+                "status_code": 200,
+                "response": call().response,
+            }
+        )
+    await enrich_run_result(
+        {"task_id": "task", "_ng_rollout_id": "capture"},
+        result,
+        capture_dirs=[],
+        observability_enabled=True,
+        trajectory_schema_version="2.0",
+    )
+    decoded = TrajectoryRecord.model_validate(result["ng_trajectory"])
+    (observed,) = decoded.tool_calls
+    assert observed.timings[0].duration_ms == 2000
+    assert observed.model_call_id == ("good" if include_success else None)
+    assert not any(g.code == "trajectory_projection_failed" for g in decoded.gaps)
+    assert any(g.code in {"tool_request_payload_malformed", "tool_request_payload_unsuccessful"} for g in decoded.gaps)

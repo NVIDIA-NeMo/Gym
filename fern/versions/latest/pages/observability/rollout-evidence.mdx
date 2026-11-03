@@ -60,7 +60,9 @@ a started but unfinished tool stays `incomplete`, including when its enclosing h
 loses attempt, instance, parent, failure and detailed timing provenance. It projects one measured
 boundary into legacy flat fields; multiple boundaries require an explicit consumer choice and
 produce no flat interval. Legacy measurements with unknown boundaries remain diagnostic evidence
-when upgraded, rather than becoming executor measurements.
+when upgraded. In particular, the coarse `artifact` source does not identify a timing boundary.
+Raw observation spans and parent references are qualified by producer and capture namespace on
+import; canonical trajectory spans retain those identities on replay.
 
 Missing agent identity, clock provenance, completion, failure details or exact requesting-call
 links produce scoped gaps. Tool IDs alone never select a model call. Payload omission happens

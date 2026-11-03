@@ -1841,7 +1841,8 @@ class TestRolloutCollection:
         assert maybe_rollout_id_from_run_body(returned_row) == "caller-owned-capture-id"
         assert result == {"reward": 1.0}
 
-    async def test_run_examples_enrichment_matches_shared_projection(self, monkeypatch):
+    @pytest.mark.parametrize("include_payloads", [False, True])
+    async def test_run_examples_enrichment_matches_shared_projection(self, monkeypatch, include_payloads):
         from copy import deepcopy
 
         from nemo_gym.rollouts.rollout_collection import enrich_run_result
@@ -1857,24 +1858,79 @@ class TestRolloutCollection:
         raw = {
             "reward": 1.0,
             "ng_agent_observations": {
+                "schema_version": "2.0",
                 "source": "test",
-                "records": [{"kind": "agent_invocation", "invocation_id": "root"}],
+                "records": [
+                    {"kind": "agent_invocation", "invocation_id": "root"},
+                    *[
+                        {
+                            "kind": "tool_call",
+                            "invocation_id": "root",
+                            "tool_call_id": "request",
+                            "native_tool_call_id": "request",
+                            "span_id": span,
+                            "source_message_id": "message",
+                            "status": status,
+                            "timings": [
+                                {
+                                    "boundary": "lifecycle",
+                                    "timing_source": "test.tool",
+                                    "duration_ms": 2,
+                                    "duration_source": "reported",
+                                }
+                            ],
+                        }
+                        for span, status in (("first", "failed"), ("retry", "completed"))
+                    ],
+                ],
             },
+        }
+        raw["ng_model_call_capture"] = {
+            "calls": [
+                {
+                    "model_call_id": "failed",
+                    "client_session_id": "root",
+                    "client_assistant_message_id": "message",
+                    "status_code": 503,
+                    "response_raw": "unavailable",
+                },
+                {
+                    "model_call_id": "requesting",
+                    "client_session_id": "root",
+                    "client_assistant_message_id": "message",
+                    "status_code": 200,
+                    "response": {
+                        "output": [{"type": "function_call", "call_id": "request", "name": "bash", "arguments": "{}"}]
+                    },
+                },
+            ]
         }
         install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, deepcopy(raw))))
         _, result = await next(
             RolloutCollectionHelper().run_examples(
                 [source_row],
                 enrich_results=True,
+                include_model_call_payloads=include_payloads,
                 trajectory_schema_version="2.0",
             )
         )
         expected = deepcopy(raw)
         await enrich_run_result(
-            source_row, expected, capture_dirs=[], observability_enabled=False, trajectory_schema_version="2.0"
+            source_row,
+            expected,
+            capture_dirs=[],
+            observability_enabled=False,
+            trajectory_schema_version="2.0",
+            include_payloads=include_payloads,
         )
         assert result["ng_trajectory"] == expected["ng_trajectory"]
         assert result["reward"] == 1.0
+        assert [tool["model_call_id"] for tool in result["ng_trajectory"]["tool_calls"]] == [
+            "requesting",
+            "requesting",
+        ]
+        assert len({tool["span_id"] for tool in result["ng_trajectory"]["tool_calls"]}) == 2
+        assert (result["ng_trajectory"]["model_calls"][1]["response"] is not None) == include_payloads
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch

@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 
 from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
-from nemo_gym.trajectory.model_call_record import _tool_calls_and_reasoning
+from nemo_gym.trajectory.model_call_record import tool_request_evidence
 from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     ModelCallRef,
@@ -73,19 +73,6 @@ def normalize_operation_timing(
     ), gaps
 
 
-def _requested_ids(call: TrajectoryModelCall) -> set[str] | None:
-    response = call.response
-    if isinstance(response, str):
-        try:
-            response = json.loads(response)
-        except ValueError:
-            return None
-    if not isinstance(response, dict):
-        return None
-    requests, _ = _tool_calls_and_reasoning(response)
-    return {request["call_id"] for request in requests if isinstance(request.get("call_id"), str)}
-
-
 def _matches_reference(call: TrajectoryModelCall, reference: ModelCallRef) -> bool:
     if reference.model_call_id is not None:
         return call.model_call_id == reference.model_call_id
@@ -126,18 +113,14 @@ def normalize_tool_calls(
 
     tools = list(tools)
     legacy_spans: set[str] = set()
-    span_producers = defaultdict(set)
     for observed in tools:
-        if observed.span_id and observed.producer_id is not None:
-            span_producers[observed.span_id].add(observed.producer_id)
-    for index, observed in enumerate(tools):
         tool = TrajectoryToolCall.model_validate(observed.model_dump())
         if not tool.timings and any(
             value is not None for value in (tool.started_at, tool.completed_at, tool.duration_ms)
         ):
-            boundary = {"executor": "executor", "harness": "lifecycle", "artifact": "transcript"}.get(
-                tool.timing_source
-            )
+            # "artifact" describes delivery, not the measured boundary. It can carry
+            # lifecycle, executor or transcript evidence, so preserve it diagnostically.
+            boundary = {"executor": "executor", "harness": "lifecycle"}.get(tool.timing_source)
             if boundary is None:
                 gap(
                     tool,
@@ -147,6 +130,7 @@ def normalize_tool_calls(
                             "started_at": tool.started_at,
                             "completed_at": tool.completed_at,
                             "duration_ms": tool.duration_ms,
+                            "timing_source": tool.timing_source,
                         }
                     ),
                 )
@@ -165,10 +149,23 @@ def normalize_tool_calls(
             tool.span_id = tool_attempt_id(
                 producer_id=tool.producer_id or producer_id,
                 invocation_id=tool.invocation_id,
-                operation_key=f"legacy:{index}:{tool.tool_call_id}",
+                operation_key=f"legacy:{tool.tool_call_id}",
             )
             legacy_spans.add(tool.span_id)
             gap(tool, "tool_attempt_identity_unavailable")
+        elif not isinstance(observed, TrajectoryToolCall):
+            # Observation spans are producer-local. Qualify them on first import even
+            # before a collision arrives; canonical trajectory spans are already scoped.
+            def qualified(span_id: str) -> str:
+                return tool_attempt_id(
+                    producer_id=tool.producer_id or producer_id,
+                    invocation_id=capture_key,
+                    operation_key=span_id,
+                )
+
+            tool.span_id = qualified(tool.span_id)
+            if tool.parent_span_id is not None:
+                tool.parent_span_id = qualified(tool.parent_span_id)
         owners = [
             inv
             for inv in invocations
@@ -177,11 +174,6 @@ def normalize_tool_calls(
         ]
         if len(owners) == 1 and owners[0].agent_instance is not None:
             tool.agent_instance = owners[0].agent_instance
-        if len(span_producers[tool.span_id]) > 1:
-            tool.span_id = tool_attempt_id(
-                producer_id=tool.producer_id or producer_id, invocation_id=capture_key, operation_key=tool.span_id
-            )
-            gap(tool, "tool_span_identity_conflict")
         key = (tool.agent_instance, tool.span_id)
         existing = merged.get(key)
         if existing is None:
@@ -290,7 +282,18 @@ def normalize_tool_calls(
         native_id = tool.native_tool_call_id or tool.tool_call_id
         # Exact message identity can span failed HTTP retries; the requested native ID selects
         # only successful responses which actually contained this request.
-        candidates = [call for call in candidates if _requested_ids(call) is None or native_id in _requested_ids(call)]
+        evidence = {
+            id(call): tool_request_evidence(
+                call.response,
+                status_code=call.response_metadata.status_code,
+                response_status=call.response_metadata.response_status,
+            )
+            for call in candidates
+        }
+        rejected = {item.kind for item in evidence.values()} & {"malformed", "unsuccessful"}
+        candidates = [call for call in candidates if evidence[id(call)].permits_link(native_id)]
+        for kind in sorted(rejected):
+            gap(tool, f"tool_request_payload_{kind}")
         if len(candidates) != 1 or not candidates[0].model_call_id or call_ids[candidates[0].model_call_id] != 1:
             tool.model_call_id = None
             gap(tool, "tool_model_call_ambiguous" if len(candidates) > 1 else "tool_model_call_unavailable")
@@ -301,7 +304,7 @@ def normalize_tool_calls(
         tool.model_call_id = call.model_call_id
         if tool.agent_instance is None and call.agent_instance is not None:
             tool.agent_instance = call.agent_instance
-        if _requested_ids(call) is None:
+        if evidence[id(call)].kind == "omitted":
             gap(tool, "tool_request_payload_unavailable")
 
     # A captured call can resolve previously unknown attribution. Merge again only when

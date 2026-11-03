@@ -870,7 +870,8 @@ def _build_trajectory_record(
     invocations: list[AgentInvocation] = []
     verifier_invocations: list[VerifierInvocation] = []
     turns: list[TrajectoryTurn] = []
-    tools: list[TrajectoryToolCall] = []
+    tools: list[ToolCallObservation] = []
+    failure_events: dict[str, dict[str, Any]] = {}
     model_calls: list[TrajectoryModelCall] = []
 
     producer_turns_observed = False
@@ -897,7 +898,8 @@ def _build_trajectory_record(
             gaps.extend(trajectory.gaps)
             invocations = trajectory.invocations
             verifier_invocations = trajectory.verifier_invocations
-            tools = trajectory.tool_calls
+            tools = list(trajectory.tool_calls)
+            failure_events = dict(trajectory.failure_events)
             model_calls = trajectory.model_calls
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
@@ -935,7 +937,7 @@ def _build_trajectory_record(
                     merged_tool.update(observed.model_dump(mode="json", exclude_unset=True))
                     tools[tools.index(existing)] = TrajectoryToolCall.model_validate(merged_tool)
                 else:
-                    tools.append(TrajectoryToolCall.model_validate(observed.model_dump(mode="json")))
+                    tools.append(observed)
             observations_read = True
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
@@ -1059,14 +1061,37 @@ def _build_trajectory_record(
     if not any(invocation.conversation for invocation in invocations):
         gaps.append(ObservationGap(code="conversation_unavailable"))
 
-    failure_events = result.get("failure_events", result.get("_ng_failure_events", {}))
-    if not isinstance(failure_events, dict):
-        failure_events = {}
-    try:
-        validate_failure_events(failure_events)
-    except (ValueError, TypeError, KeyError):
-        gaps.append(ObservationGap(code="failure_events_invalid"))
-        failure_events = {}
+    # Canonical-only saved trajectories are replayable without their original envelope.
+    # Prefer already validated canonical events on ID conflicts, retaining an explicit gap.
+    for supplied in (result.get("failure_events"), result.get("_ng_failure_events")):
+        if supplied is None:
+            continue
+        if not isinstance(supplied, dict):
+            gaps.append(ObservationGap(code="failure_events_invalid"))
+            continue
+        combined = dict(failure_events)
+        conflicts = []
+        for event_id, event in supplied.items():
+            if event_id in combined and combined[event_id] != event:
+                conflicts.append(event_id)
+            else:
+                combined[event_id] = event
+        try:
+            validate_failure_events(combined)
+        except (ValueError, TypeError, KeyError):
+            gaps.append(ObservationGap(code="failure_events_invalid"))
+            continue
+        failure_events = combined
+        for event_id in conflicts:
+            gaps.append(ObservationGap(code="failure_event_conflict", detail=event_id))
+            # The event map retains canonical evidence; a conflicting producer cannot
+            # establish which event an imported reference meant.
+            tools = [
+                tool.model_copy(update={"failure_id": None})
+                if tool.failure_id == event_id and not isinstance(tool, TrajectoryToolCall)
+                else tool
+                for tool in tools
+            ]
     tools, tool_gaps = normalize_tool_calls(
         tools,
         capture_key=rollout_id,

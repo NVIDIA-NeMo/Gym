@@ -4,11 +4,56 @@
 """One model call as a rollout records it: token counts, cache use, tool calls, and totals across calls."""
 
 import json
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Literal, Mapping, NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
 from nemo_gym.config.config_types import ModelServerRef
+
+
+class ToolRequestEvidence(NamedTuple):
+    """Whether captured response evidence can establish a tool request."""
+
+    kind: Literal["available", "omitted", "malformed", "unsuccessful"]
+    call_ids: frozenset[str] = frozenset()
+
+    def permits_link(self, native_call_id: str) -> bool:
+        return self.kind == "omitted" or (self.kind == "available" and native_call_id in self.call_ids)
+
+
+def tool_request_evidence(
+    response: Any,
+    *,
+    status_code: int | None = None,
+    response_status: str | None = None,
+) -> ToolRequestEvidence:
+    """Classify request evidence consistently for normalization and canonical decoding.
+
+    Omitted payloads may retain an independently resolved association with a verification gap.
+    Malformed payloads and explicit failed responses cannot establish a requesting call.
+    """
+    if (status_code is not None and status_code >= 400) or response_status in {"failed", "cancelled"}:
+        return ToolRequestEvidence("unsuccessful")
+    if response is None:
+        return ToolRequestEvidence("omitted")
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except ValueError:
+            return ToolRequestEvidence("malformed")
+    if not isinstance(response, dict):
+        return ToolRequestEvidence("malformed")
+    if response.get("error") is not None or response.get("status") in ("failed", "cancelled"):
+        return ToolRequestEvidence("unsuccessful")
+    if not any(isinstance(response.get(key), list) for key in ("output", "choices", "content")):
+        return ToolRequestEvidence("malformed")
+    try:
+        requests, _ = _tool_calls_and_reasoning(response)
+    except (TypeError, ValueError, AttributeError):
+        return ToolRequestEvidence("malformed")
+    return ToolRequestEvidence(
+        "available", frozenset(request["call_id"] for request in requests if isinstance(request.get("call_id"), str))
+    )
 
 
 def _token_count(value: Any) -> Optional[int]:

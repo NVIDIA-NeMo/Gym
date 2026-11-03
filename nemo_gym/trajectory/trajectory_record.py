@@ -24,6 +24,7 @@ from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.failure_kinds import validate_failure_kind
 from nemo_gym.core.operation_timing import OperationTiming
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseInputItem
+from nemo_gym.trajectory.model_call_record import tool_request_evidence
 from nemo_gym.trajectory.trajectory_format import (
     canonical_tool_record,
     project_bundle_v1,
@@ -217,7 +218,7 @@ def exclude_verifier_model_calls(
 
 
 class ToolCallObservation(ObservationModel):
-    """Timing observed for one tool call at an Agent-owned boundary."""
+    """Raw tool evidence; span and parent IDs are local to its producer until imported."""
 
     kind: Literal["tool_call"] = "tool_call"
     invocation_id: str
@@ -257,7 +258,11 @@ class ToolCallObservation(ObservationModel):
 
 
 class TrajectoryToolCall(ToolCallObservation):
-    """Tool observation enriched with the model-visible output in a trajectory record."""
+    """Canonical tool attempt with qualified span IDs and model-visible output.
+
+    Unlike raw ToolCallObservation inputs, these IDs have already crossed the import
+    boundary and must remain unchanged on replay.
+    """
 
     output: Optional[Any] = None
 
@@ -493,19 +498,13 @@ class TrajectoryRecord(ObservationModel):
                     call = calls.get(tool.model_call_id)
                     if call is None:
                         raise ValueError("tool model_call_id must resolve to one captured call")
-                    if call.response is not None:
-                        import json
-
-                        from nemo_gym.trajectory.model_call_record import _tool_calls_and_reasoning
-
-                        response = json.loads(call.response) if isinstance(call.response, str) else call.response
-                        requested, _ = (
-                            _tool_calls_and_reasoning(response) if isinstance(response, dict) else ([], None)
-                        )
-                        if (tool.native_tool_call_id or tool.tool_call_id) not in {
-                            item.get("call_id") for item in requested
-                        }:
-                            raise ValueError("requesting model response does not contain this tool request")
+                    evidence = tool_request_evidence(
+                        call.response,
+                        status_code=call.response_metadata.status_code,
+                        response_status=call.response_metadata.response_status,
+                    )
+                    if not evidence.permits_link(tool.native_tool_call_id or tool.tool_call_id):
+                        raise ValueError("requesting model response does not establish this tool request")
                     if (
                         tool.agent_instance is not None
                         and call.agent_instance is not None
