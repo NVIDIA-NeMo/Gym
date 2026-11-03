@@ -92,6 +92,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
     is_server_status,
 )
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTED_WALLTIME_PREFIX,
@@ -104,7 +105,6 @@ from nemo_gym.orchestration.executors.resume_script import (
     REQUEUE_UNKNOWN_REASON,
 )
 from nemo_gym.server_runtime.episode_types import FailureBoundary
-from nemo_gym.task_materialization import TASK_ID_FIELDS
 
 
 TASK_INDEX = "_ng_task_index"
@@ -2261,8 +2261,8 @@ def _managed_trial_metadata(
     try:
         import yaml
 
+        from nemo_gym.data.task_materialization import materialize_task
         from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
-        from nemo_gym.task_materialization import materialize_task
 
         try:
             config = yaml.safe_load(config_bytes)

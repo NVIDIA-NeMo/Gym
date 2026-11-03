@@ -46,7 +46,7 @@ from typing import Any
 
 from nemo_skills.mcp.tool_manager import ToolManager
 
-from nemo_gym.prompt import PromptConfig, load_prompt_config
+from nemo_gym.data import PromptConfig, load_prompt_config
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
