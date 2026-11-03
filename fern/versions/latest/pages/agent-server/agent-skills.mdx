@@ -75,11 +75,11 @@ This splits cleanly into **shared core** and a **thin per-agent adapter**:
 
 ## Adding skills support to an agent
 
-To support skills in a new agent, implement the three-step adapter. NeMo Gym provides the shared utilities in `nemo_gym.skills`.
+To support skills in a new agent, implement the three-step adapter. NeMo Gym provides the shared utilities in `nemo_gym.agents.skills`.
 
 1. **Read the skills path from the request.** NeMo Gym stamps `skills_ref` (with `path`) onto the `/run` request body. Read `skills_ref["path"]` in your agent's `run()`.
 
-2. **Stage the directory where your runtime discovers skills**, using `nemo_gym.skills.stage_skills(path, dest_dir)`. The destination is agent-specific:
+2. **Stage the directory where your runtime discovers skills**, using `nemo_gym.agents.skills.stage_skills(path, dest_dir)`. The destination is agent-specific:
 
    | Agent | Discovery location |
    |---|---|

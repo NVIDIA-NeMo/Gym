@@ -14,17 +14,22 @@
 # limitations under the License.
 
 import asyncio
+import base64
+import binascii
 import json
+import logging
 import sqlite3
 import sys
+import tempfile
 from asyncio import Semaphore
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import cache
 from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -32,19 +37,18 @@ from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+    restricted_network_policy,
+    sandbox_server_url,
+    seed_mcp_servers,
+    verify_agent_response,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -59,8 +63,22 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
+from nemo_gym.models import ResponsesConverter
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -69,21 +87,12 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.agent_tools import (
-    restricted_network_policy,
-    sandbox_server_url,
-    seed_mcp_servers,
-    verify_agent_response,
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from responses_api_agents.opencode_agent.observability import (
+    append_opencode_turns,
+    opencode_tool_outcome,
+    scope_opencode_trajectory,
 )
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-)
-from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
@@ -91,7 +100,94 @@ from responses_api_agents.opencode_agent.runtime import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: opencode_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
+    "after the environment-server migration. Where the resources server returns sandbox_access, switch to a session "
+    "harness in its allowed_agents under an environment server: opencode_agent where listed (Terminal Bench 2.1), "
+    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro). Setups with no session path yet keep "
+    "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
+    "the HLE search presets (tool_servers) and vibench_agent. "
+    "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
+
+
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+# Image parts of the user turn are uploaded here and handed to `opencode run -f`. Outside the task
+# workdir on purpose (see the export path below) and fixed because each rollout owns its sandbox.
+_REMOTE_ATTACHMENTS_DIR = "/tmp/nemo-gym-attachments"
+# The image formats OpenCode 1.17.11's Read tool recognises by magic bytes (SUPPORTED_IMAGE_MIMES in
+# packages/opencode/src/tool/read.ts). `opencode run -f` labels a local file text/plain and routes it
+# through that tool (packages/opencode/src/cli/cmd/run.ts, session/prompt.ts), which re-sniffs the
+# bytes and attaches a data: file part; any other format is read as a binary file and fails.
+_ATTACHMENT_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+
+
+class _ImageAttachment(NamedTuple):
+    """One decoded `input_image` part of the user turn."""
+
+    remote_path: str
+    content: bytes
+
+
+def _decode_image_part(part: Dict[str, Any], index: int) -> _ImageAttachment:
+    """Turn one `input_image` part into bytes for the sandbox, failing closed on anything OpenCode cannot show."""
+    image_url = part.get("image_url")
+    if not image_url:
+        raise ValueError(f"input_image part {index} has no image_url; file_id inputs are not supported")
+    if not image_url.startswith("data:"):
+        raise ValueError(
+            f"input_image part {index} is a remote URL; the OpenCode sandbox has no internet access, so only "
+            "data: URIs are supported (prepare the dataset with the image inlined)"
+        )
+    header, separator, payload = image_url[len("data:") :].partition(",")
+    media_type, *parameters = header.split(";")
+    if not separator or "base64" not in parameters:
+        raise ValueError(f"input_image part {index} is not a base64 data URI")
+    extension = _ATTACHMENT_EXTENSIONS.get(media_type.strip().lower())
+    if extension is None:
+        raise ValueError(
+            f"input_image part {index} has media type {media_type!r}; OpenCode attaches only "
+            + ", ".join(sorted(_ATTACHMENT_EXTENSIONS))
+        )
+    try:
+        content = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"input_image part {index} carries invalid base64") from exc
+    return _ImageAttachment(remote_path=f"{_REMOTE_ATTACHMENTS_DIR}/image-{index}.{extension}", content=content)
+
+
+def _parse_user_turn(input_items: Any) -> tuple[str, List[_ImageAttachment]]:
+    """The single user turn as OpenCode receives it: its text as the query, its images as attachments.
+
+    A string or single `input_text` turn is passed through unchanged. System and developer items are
+    not forwarded (OpenCode keeps its own system prompt); a dataset that needs instructions folds them
+    into the user turn, as benchmarks/hle_diamond/prompts/opencode.yaml does.
+    """
+    query = None
+    attachments: List[_ImageAttachment] = []
+    for input_item in input_items:
+        if input_item.role == "user":
+            assert not query, input_items
+            if isinstance(input_item.content, str):
+                query = input_item.content
+            elif isinstance(input_item.content, list):
+                texts = [part for part in input_item.content if part["type"] == "input_text"]
+                images = [part for part in input_item.content if part["type"] == "input_image"]
+                assert len(texts) == 1 and len(texts) + len(images) == len(input_item.content), input_items
+                query = texts[0]["text"]
+                attachments = [_decode_image_part(part, index) for index, part in enumerate(images, start=1)]
+
+    assert query, input_items
+    return query, attachments
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -245,19 +341,17 @@ def parse_opencode_observations(
             conversation.append(call)
             first_item_id_by_message.setdefault((session_id, message_id), call_id)
             native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
-            # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
-            if native_status == "completed" and native_time.get("compacted") is not None:
-                observed_tool_output = "[Old tool result content cleared]"
-            else:
-                observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
-            if observed_tool_output is not None:
+            outcome = opencode_tool_outcome(part.get("tool"), state)
+            if outcome.output is not None:
                 result = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=call_id,
-                    output=str(observed_tool_output),
+                    output=outcome.output,
                     status=response_status,
                 )
                 conversation.append(result)
+            if outcome.gap is not None:
+                gaps.append(ObservationGap(code=outcome.gap, invocation_id=session_id, detail=observed_call_id))
 
             native_start = native_time.get("start")
             native_end = native_time.get("end")
@@ -271,26 +365,7 @@ def parse_opencode_observations(
             started_at = _milliseconds(native_start) if valid_interval else None
             completed_at = _milliseconds(native_end) if valid_interval else None
             duration_ms = float(native_end - native_start) if valid_interval else None
-            status = {
-                "completed": "completed",
-                "error": "failed",
-                "running": "incomplete",
-                "pending": "incomplete",
-            }.get(native_status, "unknown")
-            if native_status == "completed" and part.get("tool") == "bash":
-                # Completion describes the tool lifecycle, not shell success. Timeout/abort
-                # can complete that lifecycle with a null exit code in the native artifact.
-                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-                exit_code = metadata.get("exit")
-                if type(exit_code) is int:
-                    status = "completed" if exit_code == 0 else "failed"
-                else:
-                    status = "unknown"
-                    gaps.append(
-                        ObservationGap(
-                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
-                        )
-                    )
+            status = outcome.status
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -302,7 +377,7 @@ def parse_opencode_observations(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if status == "failed" else None,
+                        error_type=outcome.error_type,
                     )
                 )
             else:
@@ -337,7 +412,7 @@ def parse_opencode_observations(
             child_id = metadata.get("sessionId")
             if isinstance(child_id, str) and observed_call_id is not None:
                 child_tools.setdefault(child_id, set()).add(observed_call_id)
-                child_status[child_id] = status
+                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(status, status)
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
@@ -445,6 +520,16 @@ def parse_opencode_observations(
     )
 
 
+# OpenCode's `attachment.image` limits (config schema packages/core/src/v1/config/attachment.ts at v1.17.11):
+# an image within all three is forwarded unchanged. 2**31 - 1 is the largest value its PositiveInt accepts
+# without a JSON precision caveat and is far above any image a chat-completions request can carry.
+OPENCODE_IMAGE_LIMITS_UNRESTRICTED = {
+    "max_width": 2**31 - 1,
+    "max_height": 2**31 - 1,
+    "max_base64_bytes": 2**31 - 1,
+}
+
+
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -542,6 +627,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
     opencode_failed: bool = False
+    # Images of the user turn uploaded into the sandbox and attached with `opencode run -f`.
+    opencode_attachment_count: int = 0
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -555,6 +642,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        _warn_deprecated_once()
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
@@ -656,7 +744,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             error_type=error_type if isinstance(error_type, str) else None,
         )
 
-    async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+    async def _create_opencode_config(self, request: Request, *, image_input: bool = False) -> Dict[str, Any]:
+        """The OpenCode config for this run; ``image_input`` declares the model vision-capable so OpenCode
+        forwards attached images instead of replacing them with "this model does not support image input"
+        (``unsupportedParts`` in OpenCode's provider/transform.ts reads ``capabilities.input.image``, which
+        provider.ts derives from the model's ``modalities.input``)."""
         base_url = (
             self.base_url_for_run(
                 base_url=sandbox_server_url(
@@ -695,6 +787,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 }
             },
         }
+        if image_input:
+            # Only when the turn carries images: with it, OpenCode would also send any image the agent's
+            # Read tool opens during the run, which a text-only model cannot take.
+            config["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"] = {
+                "input": ["text", "image"],
+                "output": ["text"],
+            }
+            # OpenCode v1.17.11 image/image.ts downscales any image over 2000 px on a side or 5 MiB of
+            # base64 and re-encodes it (PNG, else JPEG at quality 80..40) when its bundled photon resizer
+            # loads. Lifting the limits makes `normalize` return the part untouched, so the model receives
+            # the caller's bytes as a direct image_url input would carry them. `auto_resize: false` is not
+            # the knob for that: it turns the resize into a SizeError that fails the turn.
+            config["attachment"] = {"image": dict(OPENCODE_IMAGE_LIMITS_UNRESTRICTED)}
 
         def merge(base, override):
             for key, value in override.items():
@@ -809,18 +914,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             raise ValueError("Configured tool servers require a seeded /run request")
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
-        query = None
-        # This can be modified to handle system/developer prompts too.
-        for input_item in body.input:
-            if input_item.role == "user":
-                assert not query, body.input
-                if isinstance(input_item.content, str):
-                    query = input_item.content
-                elif isinstance(input_item.content, list):
-                    assert len(input_item.content) == 1, body.input
-                    query = input_item.content[0]["text"]
-
-        assert query, body.input
+        # Fails before anything is uploaded or run, so an unsupported image fails the row explicitly.
+        query, attachments = _parse_user_turn(body.input)
+        # Empty without images, so a text-only turn produces exactly the launch command it always did.
+        opencode_attachment_str = "".join(f" -f {quote(attachment.remote_path)}" for attachment in attachments)
 
         opencode_debug_str = ""
         if self.config.debug:
@@ -851,7 +948,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             && echo "Downloaded OpenCode installer to $installer" \
             && VERSION={self.config.opencode_version} bash "$installer\""""
 
-        effective_config = await self._create_opencode_config(request)
+        effective_config = await self._create_opencode_config(request, image_input=bool(attachments))
         for name in self._runtime_plugins():
             await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
@@ -863,6 +960,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
             await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
+        if attachments:
+            # Decoded on the host only for the upload; the bytes never reach the launch command or a log.
+            with tempfile.TemporaryDirectory(prefix="nemo-gym-attachments-") as staging_dir:
+                for attachment in attachments:
+                    local_path = Path(staging_dir) / Path(attachment.remote_path).name
+                    local_path.write_bytes(attachment.content)
+                    # Uploads keep the host mode and may land root-owned: world-readable so the
+                    # sandbox user can open the file.
+                    local_path.chmod(0o644)
+                    await sandbox.upload(local_path, attachment.remote_path)
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -900,7 +1007,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
@@ -1107,6 +1214,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_attachment_count": len(attachments),
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations

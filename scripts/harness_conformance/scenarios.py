@@ -24,6 +24,7 @@ class Scenario:
     terminal_error: bool = False
     expected_reward: float = 1.0
     steps: bool = True
+    judge_verifier: bool = False
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
 
     def task(self) -> dict:
@@ -78,6 +79,12 @@ SCENARIOS = (
             # retain a known zero total, even though the failed attempt has no usage.
             "rollout_token_count_mismatch": "healthy",
         },
+    ),
+    Scenario(
+        "judge_verifier",
+        "A model-backed verifier grades the final answer; judge calls have verifier ownership, not policy steps.",
+        tool_steps=0,
+        judge_verifier=True,
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
 )

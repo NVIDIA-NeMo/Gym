@@ -43,6 +43,7 @@ class GenRMModelMixin:
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
             custom_tool_strategy=self.config.custom_tool_strategy,
+            inline_tool_output_images=self.config.inline_tool_output_images,
         )
 
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:

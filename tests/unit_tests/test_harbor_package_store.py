@@ -16,12 +16,10 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.tasks.harbor.manifest as manifest_module
-from nemo_gym.tasks.harbor import content_hash, discover_tasks
-from tests.unit_tests.test_harbor_tasks import (
-    no_real_registry,  # noqa: F401 (autouse fixture)
-    write_task,
-)
+import nemo_gym.data.tasks.harbor.manifest as manifest_module
+from nemo_gym.data.tasks.harbor.digest import content_hash
+from nemo_gym.data.tasks.harbor.task import discover_tasks
+from tests.unit_tests.test_harbor_tasks import write_task
 
 
 @pytest.fixture
@@ -71,7 +69,7 @@ class TestPackageStore:
         equals Gym's folder digest unless the folder holds a name Gym's digest skips). ``task_org`` is the org the
         tasks are published under: the requested dataset's own org when ``None``, another org (or a per-task
         mapping) for a dataset that collects tasks across orgs, as Harbor's ``dataset.toml`` lets it."""
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         digests = {name: publish(folder) for name, folder in task_folders.items()}
         calls = []
@@ -139,10 +137,12 @@ class TestPackageStore:
         assert sorted(p.name for p in folder.iterdir() if p.is_dir()) == ["alpha", "beta"]
         assert content_hash(folder / "alpha") == digests["alpha"]
         manifest = tomllib.loads((folder / "manifest.toml").read_text())
-        # Derived facts only: no copy of the name or version, which live in dataset.toml.
+        # Derived facts only: no copy of the name or version, which live in dataset.toml; the reference the fetch
+        # was made from is recorded as the pins are (round 32).
         assert manifest["schema_version"] == 1
-        assert set(manifest["dataset"]) == {"source", "digest", "dataset_toml_digest"}
+        assert set(manifest["dataset"]) == {"source", "ref", "digest", "dataset_toml_digest"}
         assert manifest["dataset"]["source"] == "harbor-package-store"
+        assert manifest["dataset"]["ref"] == "harbor:terminal-bench/terminal-bench@4.0.0"
         assert manifest["dataset"]["digest"] == manifest_module.dataset_digest(
             digests, manifest["dataset"]["dataset_toml_digest"]
         )
@@ -199,7 +199,7 @@ class TestPackageStore:
         """A server that closes the connection before sending its advertised Content-Length makes
         ``response.read()`` raise ``http.client.IncompleteRead``, which is not an OSError: the store reports it
         as a PackageStoreError naming the request, like any other transport failure."""
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         store = module.PackageStore(base_url=short_reply_server, api_key="public", timeout_s=5)
         with pytest.raises(module.PackageStoreError) as info:
@@ -222,7 +222,7 @@ class TestPackageStore:
         """An HTML error page, a JSON reply cut short by a close-delimited connection, or bytes that are not UTF-8
         where the REST API's JSON should be: the resolution and archive lookups report a PackageStoreError naming
         the request and the start of the body, not a JSONDecodeError."""
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         monkeypatch.setattr(
             module.PackageStore, "_request", lambda self, method, path, *, params=None, body=None: reply
@@ -255,7 +255,7 @@ class TestPackageStore:
         from nemo_gym.cli.main import main
 
         folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         real_request = module.PackageStore._request
         module, _, _ = self.fake_store(tmp_path, monkeypatch, folders)
@@ -367,7 +367,7 @@ class TestPackageStore:
         assert not any(c[1].startswith("/storage/") for c in calls)
 
     def test_duplicate_task_names_are_refused_before_writing(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         ref = module.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
         dataset = module.ResolvedDataset(
@@ -557,8 +557,8 @@ class TestPackageStore:
         Fetch after fetch keeps refusing the edit, prepare refuses the folder, and the one download is alpha's."""
         import tomllib
 
-        from nemo_gym.tasks.harbor.cli import prepare_target
-        from nemo_gym.tasks.harbor.manifest import ManifestError
+        from nemo_gym.data.tasks.harbor.manifest import ManifestError
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)
@@ -616,7 +616,7 @@ class TestPackageStore:
         assert sum(1 for c in calls if c[1].startswith("/storage/")) == downloads_before + 1
 
     def test_folder_names_and_digest_refs(self):
-        from nemo_gym.tasks.harbor.package_store import PackageRef
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef
 
         assert PackageRef("o", "n", "4.0.0").folder_name("f" * 64) == "n-4.0.0"
         assert PackageRef("o", "n", "v1/rc 2").folder_name("f" * 64) == "n-v1-rc-2"
@@ -626,19 +626,24 @@ class TestPackageStore:
         assert pinned.digest == "e" * 64 and pinned.folder_name("e" * 64) == "n-eeeeeeeeeeee"
 
     def test_fetch_ref_dispatches_package_references(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor import hub, package_store
+        from nemo_gym.data.tasks.harbor import hub, package_store
 
         seen = {}
 
-        def fake_fetch(ref, root, store=None):
-            seen["ref"], seen["root"] = ref, root
-            return root / "terminal-bench-4.0.0"
+        def fake_fetch(ref, root, store=None, *, folder=None):
+            seen["ref"], seen["root"], seen["folder"] = ref, root, folder
+            return folder or root / "terminal-bench-4.0.0"
 
         monkeypatch.setattr(package_store, "fetch_package_dataset", fake_fetch)
         folder = hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path)
         assert folder == tmp_path / "terminal-bench-4.0.0"
         assert seen["ref"] == package_store.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
-        assert seen["root"] == tmp_path
+        assert seen["root"] == tmp_path and seen["folder"] is None
+        # A caller that names the dataset folder (a committed entry's) passes it through to the store fetch.
+        assert hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path, folder=tmp_path / "tb4") == (
+            tmp_path / "tb4"
+        )
+        assert seen["folder"] == tmp_path / "tb4"
 
     def test_archive_is_checked_without_exclusions_but_a_noisy_folder_still_matches(self, tmp_path, monkeypatch):
         folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
@@ -672,7 +677,7 @@ class TestPackageStore:
         import os
         import tomllib
 
-        from nemo_gym.tasks.harbor.digest import archive_hash
+        from nemo_gym.data.tasks.harbor.digest import archive_hash
 
         # Harbor's packager applies the task's own .gitignore instead of its defaults when there is one, so a
         # published archive can hold a name Gym's folder digest skips (here an editor backup the task's .gitignore
@@ -771,6 +776,25 @@ class TestPackageStore:
             module.fetch_package_dataset(ref, tmp_path / "datasets")
         assert sum(1 for c in calls if c[1].startswith("/storage/")) == 1
 
+    @pytest.mark.parametrize(
+        ("target", "reference"),
+        [
+            ("harbor:org/ds", "harbor:org/ds@latest"),
+            ("harbor:org/ds@latest", "harbor:org/ds@latest"),
+            ("harbor:org/ds@4.0.0", "harbor:org/ds@4.0.0"),
+            ("harbor:org/ds@sha256:" + "a" * 64, "harbor:org/ds@sha256:" + "a" * 64),
+            ("harbor:org/ds@" + "a" * 64, "harbor:org/ds@sha256:" + "a" * 64),
+        ],
+    )
+    def test_the_recorded_reference_reads_a_reference_as_the_store_does(self, target, reference):
+        """What a manifest records for a package-store fetch: ``latest`` spelled out, a digest in its ``sha256:`` form,
+        so the same dataset declared either way reads as one reference (round 32)."""
+        from nemo_gym.data.tasks.harbor.hub import HubRef
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef
+
+        ref = PackageRef.of(HubRef.parse(target))
+        assert ref.package == "org/ds" and ref.reference == reference
+
     def test_folder_fetched_for_another_package_is_refused_by_its_task_pins(self, tmp_path, monkeypatch):
         """The manifest holds no copy of the dataset's name, so the per-task `package` pins (`<org>/<task>`) are
         what tell another org's dataset of the same name and tag, which lands in the same readable folder."""
@@ -779,6 +803,12 @@ class TestPackageStore:
         folder = module.fetch_package_dataset(
             module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
         )
+        manifest_before = (folder / "manifest.toml").read_text()
+        # The fetch's reference is recorded, but the check reads the pins, so a manifest written before the reference
+        # was recorded (stripped of it here) is told apart the same way.
+        recorded = 'ref = "harbor:terminal-bench/terminal-bench@4.0.0"\n'
+        assert recorded in manifest_before
+        (folder / "manifest.toml").write_text(manifest_before.replace(recorded, ""))
         manifest_before = (folder / "manifest.toml").read_text()
         assert "terminal-bench/terminal-bench" not in manifest_before  # no dataset name to compare by
         downloads_before = sum(1 for c in calls if c[1].startswith("/storage/"))
@@ -814,8 +844,8 @@ class TestPackageStore:
         orgs (a curated suite of upstream tasks). Its pins name those packages, not <dataset org>/<task>: the folder
         is this dataset's on every later fetch, with one download per task, prepare takes it, and a same-named
         dataset whose tasks are someone else's packages is still refused before anything is touched."""
-        from nemo_gym.tasks.harbor.cli import prepare_target
-        from nemo_gym.tasks.harbor.hub import fetch_ref
+        from nemo_gym.data.tasks.harbor.hub import fetch_ref
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders, task_org="upstream")
@@ -1082,8 +1112,8 @@ class TestPackageStore:
         with nothing downloaded and its manifest is upgraded with the recorded digests kept, an edited folder is
         refused by fetch and prepare alike with the manifest untouched, and a task the earlier fetch never landed
         is unfinished business until it is fetched."""
-        from nemo_gym.tasks.harbor.cli import prepare_target
-        from nemo_gym.tasks.harbor.manifest import ManifestError, check_manifest
+        from nemo_gym.data.tasks.harbor.manifest import ManifestError, check_manifest
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)

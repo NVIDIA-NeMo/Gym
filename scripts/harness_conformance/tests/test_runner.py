@@ -14,14 +14,15 @@ import psutil
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
-from scripts.harness_conformance.provider import Probe
+from scripts.harness_conformance.provider import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ConfigError
 from nemo_gym.harness_capabilities.cli import json_rows
 from nemo_gym.observability.model_calls import build_model_call_record
-from nemo_gym.server_utils import ServerClient
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -57,7 +58,13 @@ def test_catalog_covers_p0_without_exposing_expectations():
 @pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
+    config = _config(
+        harness,
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+        use_agent_sessions=use_agent_sessions,
+    )
     from omegaconf import OmegaConf
 
     from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -77,9 +84,16 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         SingleAgentTurnEnvironmentServerConfig.model_validate(
             config["probe_environment"]["environment_servers"][environment_type]
         )
-        assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
         assert "resources_server" not in agent
-        assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
+        if harness == "simple":
+            assert "sandbox_provider" not in agent
+            assert "probe_sandbox" not in config
+            assert config["probe_environment"]["environment_servers"][environment_type][
+                "resources_tool_transports"
+            ] == ["direct_http"]
+        else:
+            assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
+            assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
         if harness == "codex":
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":
@@ -93,7 +107,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 
 
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     class LegacyAgent(SimpleResponsesAPIAgent):
         pass
@@ -141,17 +155,17 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     from fastapi import HTTPException, Request
     from scripts.harness_conformance import episode
 
-    import nemo_gym.global_config
-    import nemo_gym.server_utils
-    from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-    from nemo_gym.base_responses_api_agent import (
+    import nemo_gym.config.global_config
+    import nemo_gym.server_runtime.base_server
+    from nemo_gym.agents import (
         AgentCloseSessionResponse,
         AgentSessionState,
         BaseResponsesAPIAgentConfig,
         SimpleResponsesAPIAgent,
     )
-    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+    from nemo_gym.trajectory import AgentObservationBundle
 
     calls = []
     response = NeMoGymResponse(
@@ -213,8 +227,8 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
-    monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
     if interface.endswith("error"):
         with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
@@ -256,7 +270,12 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
     from omegaconf import OmegaConf
 
-    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    config = _config(
+        "opencode",
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+    )
     server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
     header = server_client.assistant_message_header("policy_model")
     assert header is not None
@@ -274,12 +293,15 @@ def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_
     assert call.client_assistant_message_id == "assistant-message"
 
 
+@pytest.mark.parametrize("tool_name", ["bash", "exec"])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
-def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
+def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name, tool_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
     messages = [{"role": "user", "content": "Run checks"}]
-    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    tool = copy.deepcopy(TOOL)
+    tool["function"]["name"] = tool_name
+    body = {"model": "conformance-model", "messages": messages, "tools": [tool]}
     with TestClient(probe.model_app()) as client:
         for status in scenario.http_errors:
             response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
@@ -289,6 +311,8 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
             assert response.status_code == 200
             message = response.json()["choices"][0]["message"]
             call = message["tool_calls"][0]
+            assert call["id"].startswith("call_")
+            assert call["function"]["name"] == tool_name
             execution = subprocess.run(
                 json.loads(call["function"]["arguments"])["command"],
                 shell=True,
@@ -344,6 +368,47 @@ def test_a_harness_that_finishes_on_a_tool_gets_a_finish_call(tmp_path):
     assert json.loads(call["function"]["arguments"]) == {"reason": "CONFORMANCE_DONE", "paths": []}
     assert probe.finished and not probe.violations
     assert probe.finish_call["id"] == call["id"]
+
+
+@pytest.mark.parametrize("probe_cls", [Probe, OpenClawProbe])
+@pytest.mark.parametrize("replay", ["matched", "missing_call", "wrong_name", "wrong_arguments", "wrong_result"])
+def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, probe_cls, replay):
+    probe = probe_cls(SCENARIO["tool_success"], tmp_path)
+    body = {"model": "probe", "messages": [], "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        message = client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+        call = message["tool_calls"][0]
+        original_id = call["id"]
+        assert original_id.startswith("call_")
+        execution = subprocess.run(
+            json.loads(call["function"]["arguments"])["command"],
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        call["id"] = original_id.replace("_", "")
+        # Replay may serialize equivalent arguments differently.
+        call["function"]["arguments"] = json.dumps(json.loads(call["function"]["arguments"]), separators=(",", ":"))
+        if replay == "wrong_name":
+            call["function"]["name"] = "other_tool"
+        if replay == "wrong_arguments":
+            call["function"]["arguments"] = '{"command":"false"}'
+        body["messages"] = [] if replay == "missing_call" else [message]
+        body["messages"].append(
+            {
+                "role": "tool",
+                "tool_call_id": "other" if replay == "wrong_result" else call["id"],
+                "content": execution.stdout,
+            }
+        )
+        response = client.post("/v1/chat/completions", json=body)
+    accepted = probe_cls is OpenClawProbe and replay == "matched"
+    assert response.status_code == (200 if accepted else 409)
+    assert probe.tool_calls[0]["result_seen"] == accepted
+    assert probe.tool_calls[0]["id"] == original_id
+    assert probe.attempts[0]["response"]["choices"][0]["message"]["tool_calls"][0]["id"] == original_id
+    assert probe.attempts[1]["request"] == body
 
 
 def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):
@@ -710,7 +775,8 @@ def test_witness_detects_changed_payload_even_when_attempt_identity_matches(reta
     assert "canonical" in " ".join(result["issues"])
 
 
-def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error", [ValueError, ConfigError])
+def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch, error):
     from scripts.harness_conformance import runner
 
     inspected = []
@@ -718,7 +784,7 @@ def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch
 
     def fail_inspection(scenario, directory, execution):
         inspected.append(scenario.name)
-        raise ValueError("truncated rollout")
+        raise error("truncated rollout")
 
     monkeypatch.setattr(runner, "inspect_episode", fail_inspection)
     summary, code = run_suite(harnesses=["pi"], scenarios=SCENARIOS[:2], output=tmp_path / "run", timeout=1)
@@ -854,3 +920,47 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+def test_manifest_backed_episode_reaches_conformance_report(retained_episode):
+    from nemo_gym.rollout_recovery import RunManifest
+    from nemo_gym.rollout_store import RolloutStore
+
+    directory, _ = retained_episode
+    output = directory / "rollouts.jsonl"
+    result = json.loads(output.read_text())
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    source = directory / "inputs.jsonl"
+    source.write_text(json.dumps(rows[0]) + "\n")
+    manifest = RunManifest.create(source, rows, {}, {})
+    with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(result | row)
+    report = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert report["verdict"] == "fulfilled", report["issues"]
+
+
+def test_cli_reports_configuration_error_as_execution_error(tmp_path, monkeypatch, capsys):
+    from scripts.harness_conformance import runner
+
+    def fail(**kwargs):
+        raise ConfigError("conflicting recovery history")
+
+    monkeypatch.setattr(runner, "run_suite", fail)
+    assert main(["--output", str(tmp_path / "run")]) == 2
+    assert "runner_error: conflicting recovery history" in capsys.readouterr().err
+
+
+def test_missing_judge_reference_fails_p1_without_blocking_p0(retained_episode):
+    from dataclasses import replace
+
+    directory, _ = retained_episode
+    scenario = replace(SCENARIO["verifier_failure"], judge_verifier=True)
+    result = inspect_episode(scenario, directory, {"returncode": 0, "timed_out": False})
+    check = next(c for c in result["checks"] if c["id"] == "verifier.judge_reference")
+    assert check["tier"] == "P1"
+    assert check["status"] == "fail"
+    assert result["behavioral_status"] == "fail"
+    assert result["verdict"] == "fulfilled"
+    assert all(c["status"] in {"pass", "not_applicable"} for c in result["checks"] if c["tier"] == "P0")

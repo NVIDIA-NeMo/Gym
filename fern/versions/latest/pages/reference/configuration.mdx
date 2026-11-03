@@ -377,6 +377,11 @@ Each backend writes its run id to `<output stem>_<backend>_run_id` next to `outp
 example `rollouts_mlflow_run_id` or `rollouts_wandb_run_id`. A resumed or resubmitted run with the same
 output logs to that run. Delete the file to start a new one.
 
+A finished run can also be sent afterwards with `gym eval export mlflow` or `gym eval export wandb`, which log the run's
+saved config, aggregate metrics and rollouts through the same backend. They keep their own `<output stem>_<backend>_export_done`
+marker, so exporting never changes which run a resumed run logs to. A run that was logged live is exported again as a
+separate run, because the run id file shows only that the live run opened, not that every upload landed. See [`gym eval export`](/reference/cli-commands#gym-eval-export).
+
 ### Weights & Biases
 
 | Key | Required | Description |

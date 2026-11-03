@@ -103,7 +103,7 @@ are loaded as Copilot normally does.
 6. Agent close confirms harness termination, returns observations, removes session files, and disconnects.
 7. The Environment Server asks Resources to verify and close the task session.
 
-Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`. Each session supports one
+Harness execution uses `nemo_gym.agents.utils.sandbox_session.SandboxSession`. Each session supports one
 activation; identical retries join it and changed requests are rejected. A disconnected caller does not
 cancel Copilot; session close owns cancellation. Without `SandboxAccess`, configure `sandbox_provider`
 and `sandbox_config` for an agent-owned sandbox (default workdir `/app`). Owned sandboxes default to a TTL of the install budget plus the run budget plus 600 seconds; an explicit `ttl_s`, including `null`, is preserved. Check that your provider enforces TTLs. Calls without an agent session and

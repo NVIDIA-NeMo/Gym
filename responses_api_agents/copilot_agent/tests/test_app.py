@@ -12,11 +12,9 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.copilot_agent.app import (
     CopilotAgent,
