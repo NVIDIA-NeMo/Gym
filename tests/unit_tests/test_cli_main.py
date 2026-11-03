@@ -23,6 +23,7 @@ import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from pytest import MonkeyPatch
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.config.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
@@ -909,10 +910,9 @@ class TestDatasetValidateFlags:
         # The file name is not a Hydra expression: unquoted, `(` is a parse error and `,` is ambiguous. It is
         # also not JSON: Hydra keeps `\uXXXX` and a doubled backslash literally, so the override must parse
         # back to the exact name the user typed, Unicode and backslashes included.
-        from nemo_gym.data.tasks.harbor import cli as harbor_cli
 
         captured: list = []
-        monkeypatch.setattr(harbor_cli, "validate_target", lambda args, overrides: captured.append(overrides))
+        monkeypatch.setattr(cli_eval, "validate_target", lambda args, overrides: captured.append(overrides))
         monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", "tasks", "--output", name])
         main()
         assert len(captured) == 1 and len(captured[0]) == 1
@@ -2024,10 +2024,8 @@ def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, delet
 
 
 def test_eval_run_keeps_home_relative_target(monkeypatch):
-    import nemo_gym.data.tasks.harbor.cli as harbor_cli
-
     captured = []
-    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append(args.target))
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append(args.target))
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes_agent"])
     cli_main.main()
     assert captured == ["~/tasks"]
@@ -2039,8 +2037,6 @@ def test_eval_run_keeps_home_relative_target(monkeypatch):
 def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch, target):
     import pwd
     from types import SimpleNamespace
-
-    import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
     home = tmp_path / "home"
     (home / "tasks").mkdir(parents=True)
@@ -2054,7 +2050,7 @@ def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch
         lambda name: SimpleNamespace(pw_dir=str(home)) if name == "harbor_test_user" else real_getpwnam(name),
     )
     captured = []
-    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes_agent", "+limit=3"])
     cli_main.main()
     assert captured == [(target, ["+agent_name=hermes_agent", "+limit=3"])]

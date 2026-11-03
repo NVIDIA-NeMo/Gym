@@ -5,8 +5,8 @@
 
 Reads the rows a validation run wrote, keys them by task, reports which tasks passed, which
 scored below one and which were never run, and returns the text and the overall verdict as a
-ValidationReport. The task digest lookup the resume checks share lives here as well. cli.py
-imports it for validate_target and the eval run resume conflict check.
+ValidationReport. The task digest lookup the resume checks share lives here as well.
+``nemo_gym.cli.eval`` imports it for ``validate_target`` and for the resume conflict check of ``gym eval run``.
 """
 
 import json

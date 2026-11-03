@@ -528,7 +528,7 @@ class TestPrepare:
         both received a's image; now b is left out with the reason and the record names a alone, whether the image
         is built by this prepare or reused from a record."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -587,7 +587,7 @@ class TestPrepare:
         test.sh 0700 against a's 0644. Refusing b for its conflict with a in the round that refuses a left no task;
         without a, b is first of that tests/ context and prepares alone."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         self.write_separate(folder, "a", compose=self.PRIVILEGED)
@@ -612,7 +612,7 @@ class TestPrepare:
         it conflicts with m, and its environment/ E was still planned, so o, whose E differs from n's only in
         setup.sh's mode, conflicted with a task that was out. n is in no entry now and o is first of E."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         self.write_separate(folder, "m", setup="#!/bin/sh\necho m\n")
@@ -635,7 +635,7 @@ class TestPrepare:
 
     def test_builds_disabled_leaves_out_a_stale_record_with_the_reason(self, tmp_path, fake_builder, capsys):
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         image = self._recorded_then_changed(folder)
@@ -652,7 +652,7 @@ class TestPrepare:
 
     def test_builds_enabled_rebuilds_a_stale_record_under_the_same_name(self, tmp_path, fake_builder, capsys):
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         image = self._recorded_then_changed(folder)

@@ -22,7 +22,6 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
-    from nemo_gym.data.tasks.harbor.cli import ORACLE_AGENT
     from nemo_gym.data.tasks.harbor.compose_overlay import (
         ComposeOverlayError,
         HarborComposeOverlay,
@@ -66,6 +65,7 @@ if TYPE_CHECKING:
         HarborTaskStep,
         HarborVerifier,
     )
+    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
     from nemo_gym.data.tasks.harbor.publish import answer_write_command
     from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, VerifierShim, write_shim
     from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, MAIN_SERVICE
@@ -107,7 +107,7 @@ _PUBLIC_API = {
     "IMAGE_CONFIGS_FILE": "records",
     "ImageConfigError": "registry",
     "MAIN_SERVICE": "records",
-    "ORACLE_AGENT": "cli",
+    "ORACLE_AGENT": "prepare",
     "OverlayRun": "dockerfile",
     "OverlayWorkdir": "dockerfile",
     "RECORD_VERSION": "dockerfile",
