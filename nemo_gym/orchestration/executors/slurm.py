@@ -1093,6 +1093,31 @@ _RESUBMIT_LOCK = RESUBMIT_LOCK_NAME
 _EXPORT_TIMEOUT_S = 3600
 
 
+def _chain_live_check(chain: list[str], live_error: str) -> list[str]:
+    """Shell lines that fail unless the scheduler confirms that no job of `chain` waits or runs.
+
+    Slurm drops a finished job from the controller after MinJobAge, and `squeue -j` then exits 1 with "Invalid job
+    id specified" once it knows none of the ids. That is no answer about the jobs, so sacct, which keeps finished
+    jobs, decides: a job whose latest incarnation (highest Restarts; sacct -D lists every requeue) is in one of the
+    `LIVE_JOB_STATES` is live, and one it does not know is not. Any other squeue failure, or a failing sacct, leaves
+    the scheduler unknown.
+    """
+    ids = shlex.quote(",".join(chain))
+    live_states = "|".join(sorted(LIVE_JOB_STATES))
+    return [
+        f"if _gym_queue=$(squeue --all --noheader -j {ids} --format=%A 2>&1); then "
+        "live=$(printf '%s\n' \"$_gym_queue\" | grep -E '^[0-9]' || true); "
+        "elif printf '%s' \"$_gym_queue\" | grep -q 'Invalid job id specified'; then "
+        f"_gym_accounting=$(sacct -D -n -P -X -j {ids} --format=JobIDRaw,State,Restarts) || fail 'scheduler unknown'; "
+        "live=$(printf '%s\n' \"$_gym_accounting\" | awk -F'|' "
+        '\'NF >= 2 {split($2, s, " "); state = s[1]; sub(/[+]$/, "", state); '
+        "if (!($1 in restarts) || $3 + 0 >= restarts[$1]) {restarts[$1] = $3 + 0; latest[$1] = state}} "
+        f"END {{for (id in latest) if (latest[id] ~ /^({live_states})$/) print id}}'); "
+        "else fail 'scheduler unknown'; fi",
+        f'[ -z "$live" ] || fail "{live_error}"',
+    ]
+
+
 def _validate_benchmark_names(benchmarks: list[str]) -> None:
     """Fail before anything is staged or copied.
 
@@ -1664,8 +1689,7 @@ class SlurmExecutor(BaseExecutor):
                 "printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge acknowledgement unknown' > .gym_chain_incomplete; fi; "
                 f"rm -f {_RESUBMIT_LOCK}; }}",
                 "trap _gym_release_rejudge_lock EXIT",
-                f"live=$(squeue --all --noheader -j {shlex.quote(','.join(evidence.job_chain))} --format=%A) || fail 'scheduler unknown'",
-                '[ -z "$live" ] || fail "an original allocation is still live"',
+                *_chain_live_check(evidence.job_chain, "an original allocation is still live"),
                 f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} || fail 'accounting changed or exhausted'",
                 "umask 077",
                 f"printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))} || fail 'cannot stage judge driver'",
@@ -1890,11 +1914,7 @@ class SlurmExecutor(BaseExecutor):
             'for d in $workdirs; do [ "$d" != "$PWD" ] || '
             'fail "a job of this run is still pending or running in $PWD"; done',
             *(
-                [
-                    f"live=$(squeue --all --noheader -j {shlex.quote(','.join(evidence.job_chain))} --format=%A) "
-                    "|| fail 'scheduler unknown'",
-                    '[ -z "$live" ] || fail "an original allocation is still live"',
-                ]
+                _chain_live_check(evidence.job_chain, "an original allocation is still live")
                 if evidence.job_chain
                 else []
             ),
@@ -1969,15 +1989,7 @@ class SlurmExecutor(BaseExecutor):
                     f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
                     f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
                     f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
-                    *(
-                        [
-                            f"live=$(squeue --all --noheader -j {shlex.quote(','.join(chain))} --format=%A) "
-                            "|| fail 'scheduler unknown'",
-                            '[ -z "$live" ] || fail "a job of the chain is still live"',
-                        ]
-                        if chain
-                        else []
-                    ),
+                    *(_chain_live_check(chain, "a job of the chain is still live") if chain else []),
                     "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
                     f"_gym_out=$({_resolve_env(config.driver.env)}timeout --kill-after=10s {_EXPORT_TIMEOUT_S}s "
                     f"{entrypoint} 2>&1); _gym_rc=$?",

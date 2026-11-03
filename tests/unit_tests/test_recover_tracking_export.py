@@ -128,7 +128,7 @@ def test_a_failed_or_unsupported_export_is_reported_not_hidden(fake, state) -> N
     assert f"MLflow post-run export {'failed' if state == 'failed' else 'not performed'}" in out.decision.reason
 
 
-@pytest.mark.parametrize("case", ["succeeded", "failed", "live"])
+@pytest.mark.parametrize("case", ["succeeded", "failed", "live", "purged", "purged-live", "squeue-down", "sacct-down"])
 def test_slurm_export_runs_gym_export_on_the_login_host_with_the_saved_settings(tmp_path, monkeypatch, case) -> None:
     job = tmp_path / "run" / "bench"
     (job / "artifacts").mkdir(parents=True)
@@ -168,9 +168,25 @@ def test_slurm_export_runs_gym_export_on_the_login_host_with_the_saved_settings(
         f'echo "Export mlflow: {status}"\n'
         + ('echo "  run_id: post-run"\n' if status == "succeeded" else 'echo "Error: refused" >&2; exit 1\n')
     )
+    # Slurm purges a finished job from the controller: `squeue -j` then exits 1 and sacct still knows the job.
+    purged = "echo 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1\n"
     squeue = bins / "squeue"
-    squeue.write_text("#!/bin/bash\n" + ("echo 10\n" if case == "live" else "true\n"))
-    for f in (gym, squeue):
+    squeue.write_text(
+        "#!/bin/bash\n"
+        + {
+            "live": "echo 10\n",
+            "purged": purged,
+            "purged-live": purged,
+            "sacct-down": purged,
+            "squeue-down": "echo 'slurm_load_jobs error: Unable to contact slurm controller' >&2; exit 1\n",
+        }.get(case, "true\n")
+    )
+    sacct = bins / "sacct"
+    sacct.write_text(
+        "#!/bin/bash\n"
+        + {"purged-live": "echo '10|PENDING|0'\n", "sacct-down": "exit 1\n"}.get(case, "echo '10|COMPLETED|0'\n")
+    )
+    for f in (gym, squeue, sacct):
         f.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bins}:{os.environ['PATH']}")
     monkeypatch.setenv("FORWARDED_VALUE", "forwarded")
@@ -196,8 +212,12 @@ def test_slurm_export_runs_gym_export_on_the_login_host_with_the_saved_settings(
     evidence = CollectedEvidence(materialized=[], results=[], failures=[], job_chain=["10"])
     result = sm.SlurmExecutor().export_tracking(record, "bench", evidence)
     assert not (job / sm._RESUBMIT_LOCK).exists()
-    if case == "live":
+    if case in ("live", "purged-live"):
         assert result["state"] == "failed" and "still live" in result["error"]
+        assert not (tmp_path / "args").exists()
+        return
+    if case in ("squeue-down", "sacct-down"):
+        assert result["state"] == "failed" and "scheduler unknown" in result["error"]
         assert not (tmp_path / "args").exists()
         return
     assert entrypoints[0]["ref"] == "a" * 40 and entrypoints[0]["extras"] == ("mlflow",)
@@ -216,7 +236,39 @@ def test_slurm_export_runs_gym_export_on_the_login_host_with_the_saved_settings(
     ]
     assert (tmp_path / "forwarded").read_text().strip() == "forwarded"
     assert (tmp_path / "lock").read_text().strip() == "locked"
-    if case == "succeeded":
+    if case in ("succeeded", "purged"):
         assert result == {"exporter": "mlflow", "host": "login", "state": "succeeded", "run_id": "post-run"}
     else:
         assert result["state"] == "failed" and "exit code 1" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("accounting", "live"),
+    [
+        ("10|COMPLETED|0\n11|CANCELLED by 4242|0", False),
+        ("10|COMPLETED|0\n11|RUNNING|0", True),
+        ("10|PENDING+|0", True),
+        ("10|REQUEUED|0", True),
+        # sacct -D lists every incarnation of a requeued job: only the latest one says whether it is live.
+        ("10|REQUEUED|0\n10|COMPLETED|1", False),
+        ("10|REQUEUED|0\n10|RUNNING|1", True),
+        ("", False),
+    ],
+)
+def test_a_chain_purged_from_squeue_is_judged_by_its_accounting(tmp_path, accounting, live) -> None:
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (bins / "squeue").write_text("#!/bin/bash\necho 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1\n")
+    (bins / "sacct").write_text(f"#!/bin/bash\ncat <<'EOF'\n{accounting}\nEOF\n")
+    for f in bins.iterdir():
+        f.chmod(0o755)
+    script = [
+        'fail() { echo "Error: $*" >&2; exit 1; }',
+        *sm._chain_live_check(["10", "11"], "still live"),
+        "echo free",
+    ]
+    env = {**os.environ, "PATH": f"{bins}:{os.environ['PATH']}"}
+    result = subprocess.run(["bash", "-c", "\n".join(script)], text=True, capture_output=True, env=env)
+    assert (result.returncode, result.stdout.strip(), "still live" in result.stderr) == (
+        (1, "", True) if live else (0, "free", False)
+    )

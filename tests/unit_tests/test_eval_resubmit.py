@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -35,12 +36,14 @@ from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME, rend
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
+    INDEX_RESTORE_JOURNAL_NAME,
     MANIFEST_NAME,
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
     SubmissionRecord,
     load_submission_record,
     local_index_dir,
+    restore_index_entry,
 )
 from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
 
@@ -252,6 +255,80 @@ def test_resubmit_refuses_while_a_job_runs_in_the_job_dir_in_a_hidden_partition(
 def test_resubmit_refuses_an_unknown_submission(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="No submission 'gym-job-nope'"):
         resubmit("gym-job-nope", "gsm8k")
+
+
+def test_a_recycled_index_entry_is_restored_from_the_run_dir_and_journaled(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path)
+    gym_job_id = job_dir.parent.name
+    manifest = (job_dir.parent / MANIFEST_NAME).read_bytes()
+    # A recycled machine: the run directory keeps its record, the job index is gone.
+    (local_index_dir() / f"{gym_job_id}.json").unlink()
+    with pytest.raises(ValueError, match="--run-dir RUN_DIR"):
+        load_submission_record(gym_job_id)
+
+    _eval_resubmit(argparse.Namespace(gym_job_id=gym_job_id, benchmark="gsm8k", run_dir=job_dir.parent), [])
+
+    assert capsys.readouterr().out.strip() == "4242"
+    assert load_submission_record(gym_job_id).benchmark_job("gsm8k").job_id == "4242"
+    (entry,) = [json.loads(line) for line in (local_index_dir() / INDEX_RESTORE_JOURNAL_NAME).read_text().splitlines()]
+    assert entry["gym_job_id"] == gym_job_id and entry["source"] == str(job_dir.parent.resolve() / MANIFEST_NAME)
+    assert entry["sha256"] == hashlib.sha256(manifest).hexdigest() and entry["user"] and entry["host"]
+
+
+def test_an_existing_index_entry_is_kept_and_not_journaled(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    job_dir = _staged_run(tmp_path)
+    index = local_index_dir() / f"{job_dir.parent.name}.json"
+    before = index.read_text()
+
+    assert restore_index_entry(job_dir.parent.name, job_dir.parent).gym_job_id == job_dir.parent.name
+    assert capsys.readouterr().err == ""
+    # A stale entry that names another run directory is kept too, and the unused directory is named.
+    elsewhere = tmp_path / "copy" / job_dir.parent.name
+    elsewhere.mkdir(parents=True)
+    restore_index_entry(job_dir.parent.name, elsewhere)
+    assert f"{elsewhere} was not used" in capsys.readouterr().err
+
+    assert index.read_text() == before and not (local_index_dir() / INDEX_RESTORE_JOURNAL_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "problem"),
+    [
+        ("gym_job_id", "the record is submission 'gym-job-other'"),
+        ("run_dir", "the record's run_dir is /elsewhere/gym-job-x"),
+        ("job_dir", "benchmark 'gsm8k' has its job_dir /elsewhere/gsm8k outside it"),
+    ],
+)
+def test_a_record_of_another_run_is_not_restored(tmp_path: Path, field: str, problem: str) -> None:
+    job_dir = _staged_run(tmp_path)
+    gym_job_id = job_dir.parent.name
+    (local_index_dir() / f"{gym_job_id}.json").unlink()
+    payload = json.loads((job_dir.parent / MANIFEST_NAME).read_text())
+    if field == "gym_job_id":
+        payload["gym_job_id"] = "gym-job-other"
+    elif field == "run_dir":
+        payload["run_dir"] = "/elsewhere/gym-job-x"
+    else:
+        payload["benchmarks"][0]["job_dir"] = "/elsewhere/gsm8k"
+    (job_dir.parent / MANIFEST_NAME).write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match=re.escape(problem)):
+        restore_index_entry(gym_job_id, job_dir.parent)
+
+    assert not (local_index_dir() / f"{gym_job_id}.json").exists()
+    assert not (local_index_dir() / INDEX_RESTORE_JOURNAL_NAME).exists()
+
+
+def test_a_run_dir_named_for_another_submission_is_not_restored(tmp_path: Path) -> None:
+    job_dir = _staged_run(tmp_path)
+    (local_index_dir() / f"{job_dir.parent.name}.json").unlink()
+
+    with pytest.raises(ValueError, match="the record is submission 'gym-job-x'; the directory is named 'gym-job-x'"):
+        restore_index_entry("gym-job-y", job_dir.parent)
+    with pytest.raises(ValueError, match="no gym-job.json in"):
+        restore_index_entry("gym-job-x", tmp_path)
 
 
 def test_resubmit_refuses_an_unknown_executor(tmp_path: Path) -> None:
