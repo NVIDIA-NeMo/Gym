@@ -58,7 +58,6 @@ if TYPE_CHECKING:
         BaseEnvironmentServerConfig,
         CleanupContext,
         CleanupHandle,
-        HandledEpisodeError,
         dependency_failure,
         is_retryable_dependency_error,
         is_retryable_dependency_status,
@@ -92,7 +91,11 @@ if TYPE_CHECKING:
         BaseEpisodeRequest,
         BaseEpisodeResponse,
         EpisodeFailure,
+        FailureBoundary,
+        FailureReport,
         MaterializedTask,
+        ModelFailureDetails,
+        SandboxFailureDetails,
     )
     from nemo_gym.server_runtime.mcp_auto_exposure import (
         TOKEN_HEADER,
@@ -118,12 +121,18 @@ if TYPE_CHECKING:
         MCPToolAccess,
         ToolAccess,
     )
-    from nemo_gym.server_runtime.verifier_observability import observe_verifier
+    from nemo_gym.server_runtime.verifier_observability import (
+        observe_llm_judge_grading,
+        observe_programmatic_grading,
+        observe_verifier,
+        observe_verifier_sandbox,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "FailureBoundary": "episode_types",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
     "AgentSessionParticipant": "_checkpoint.agent",
@@ -150,15 +159,16 @@ _PUBLIC_API = {
     "EnvironmentParticipant": "_checkpoint.environment",
     "EpisodeFailure": "episode_types",
     "EpisodeRecord": "_checkpoint.environment",
+    "FailureReport": "episode_types",
     "GenerationCutInventory": "_checkpoint.generation_cut",
     "GenerationCutPrefixAck": "_checkpoint.generation_cut",
     "GenerationCutReceipt": "_checkpoint.generation_cut",
-    "HandledEpisodeError": "base_environment_server",
     "LegacyRun": "_checkpoint.agent",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
     "MCPToolAccess": "tool_access",
     "MaterializedTask": "episode_types",
+    "ModelFailureDetails": "episode_types",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
     "ParticipantControlPlane": "_checkpoint.control",
@@ -178,6 +188,7 @@ _PUBLIC_API = {
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
+    "SandboxFailureDetails": "episode_types",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
     "SingleAgentTurnFailure": "single_agent_turn_types",
@@ -200,6 +211,9 @@ _PUBLIC_API = {
     "lost_session_verification": "base_resources_server",
     "maybe_auto_expose": "mcp_auto_exposure",
     "next_attempt": "_checkpoint.control",
+    "observe_llm_judge_grading": "verifier_observability",
+    "observe_programmatic_grading": "verifier_observability",
+    "observe_verifier_sandbox": "verifier_observability",
     "observe_verifier": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
     "seed_restarts": "_checkpoint.steps",
