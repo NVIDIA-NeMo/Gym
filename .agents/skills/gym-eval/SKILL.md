@@ -116,9 +116,7 @@ job of the run is live.
 
 While the chain runs, read its progress with the read-only inspection of step 3 (`gym eval resubmit
 "$GYM_JOB_ID" <benchmark> --recover --inspect`, which reports `RUNNING` while a job is live) or from the run
-directory: `artifacts/rollouts_coverage.json` holds the completed and expected rollouts. A `gym eval status`
-command that prints this from the Store without taking the run lock comes with the Store status layer; it is
-not part of this version.
+directory: `artifacts/rollouts_coverage.json` holds the completed and expected rollouts.
 
 ## 3. Inspect first, always
 
@@ -147,7 +145,8 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   stays. The report says which (`pin_plan`, and a warning "planned on <installed> for a run pinned at
   <old>"), and `--inspect` shows the same decision. `--no-auto-repin` keeps the pin and refuses that case,
   naming `--repin`; `--repin <full commit> --repin-reason "<why>"` stays the explicit way to move a run,
-  and the repin target must be the Gym that runs the command.
+  and the repin target must be the Gym that runs the command. Runs you compare stay on one Gym commit:
+  inspect each with `--no-auto-repin`, or repin every run of the comparison together.
 - **`UNKNOWN`, "nothing was read or decided"** (heavy readers run as a Slurm step; `NEMO_GYM_REMOTE_READER_SRUN`
   holds the extra `srun` arguments of that step, for example
   `export NEMO_GYM_REMOTE_READER_SRUN='-p <cpu partition> -q <qos> -c 4 --mem=128G'`, and a launcher may set it
@@ -259,7 +258,8 @@ decision). The action comes from the failure's HTTP status, else its kind, else 
 retried; every other saved failure is retried (`default_action: retry`). Settled results are final and
 never reopened: a scored answer or zero (including a typed answer failure: truncated, empty or
 malformed), and a clean agent timeout, which is the model's result under the benchmark's own time limit.
-An `agent_timeout` that kept no answer is a saved failure the policy decides, retried by default. A
+An `agent_timeout` that kept no answer is a saved failure the policy decides, retried by default
+(`recovery_outcome_policy: {by_failure_kind: {agent_timeout: fail}}` keeps it final instead). A
 failure the Environment Server marked terminal (a typed model failure such as `model_context_limit`) is
 never retried. `--inspect` lists the identities in each state and the policy in force (`outcome_policy`,
 with its `source`: `default`, `config` or `python`).
@@ -336,7 +336,9 @@ evaluation's identity. The model section is yours
 ([gym-add-model-config](../gym-add-model-config/SKILL.md)). A slow deployment produces timeouts and
 truncated answers that count as model failures: a policy-model response timeout is the model's unless
 the call sets `--policy-timeout-counts-as-model false` (for a self-hosted evaluation that owns its
-serving; it moves the timeout to the evaluation side and changes nothing else).
+serving; it moves the timeout to the evaluation side and changes nothing else). Keep the default whenever
+two checkpoints, or a checkpoint and its quantized export, are compared: the deployment is part of what is
+measured.
 
 - The verdict is the inspection's output line. The persisted health record is `_ng_run_health_metrics` in
   the first entry of `artifacts/rollouts_aggregate_metrics.json`; `quality_summary.json` is the per-rollout
