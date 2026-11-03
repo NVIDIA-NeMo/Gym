@@ -104,7 +104,7 @@ def test_an_export_that_already_succeeded_is_not_repeated_and_its_result_is_kept
     result = runner.run_export("fake", _config(tmp_path))
 
     assert result.state is ExportState.SKIPPED
-    assert result.detail == {"reason": "a previous attempt already exported this run", "previous_state": previous}
+    assert result.detail == {"reason": "a previous attempt already finished this export", "previous_state": previous}
     assert FakeExporter.instances == []
     assert json.loads(result_fpath.read_text())["detail"] == {"run_id": "earlier"}
 

@@ -76,7 +76,9 @@ def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
     if result_fpath is not None:
         previous = _read_state(result_fpath)
         if previous in _FINAL_STATES:
-            return ExportResult.skipped(reason="a previous attempt already exported this run", previous_state=previous)
+            return ExportResult.skipped(
+                reason="a previous attempt already finished this export", previous_state=previous
+            )
         _write_json_atomically(result_fpath, {"state": RUNNING_STATE})
     try:
         settings = RunExportConfig.model_validate(global_config_dict)
