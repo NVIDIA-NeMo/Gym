@@ -14,6 +14,7 @@ import json
 import shutil
 from http.cookiejar import CookieJar
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,10 +37,12 @@ from resources_servers.officeenv.app import (
     LengthPenaltyConfig,
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
+    OfficeEnvSeedSessionRequest,
     length_penalty_fields,
     model_turns,
     tools_exposure_catalog,
 )
+from resources_servers.officeenv.task_data import TaskData
 
 
 ME, AVA = "alex.morgan@example.com", "ava.rossi@example.com"
@@ -285,6 +288,17 @@ def test_the_example_rows_match_the_pinned_officeenv(client: TestClient) -> None
         assert seeded.status_code == 200, (row["task_id"], seeded.text)
         assert seeded.json()["tool_drift"] == [], (row["task_id"], "re-emit data/example.jsonl")
         assert row["officeenv_version"] == officeenv_version, "re-emit data/example.jsonl"
+
+
+def test_the_row_schema_and_the_seed_request_declare_the_taskspec_alike() -> None:
+    # task_data.py declares a row's fields for Gym's data tooling and the drift gate, OfficeEnvSeedSessionRequest the
+    # row as the seed reads it: both require the TaskSpec as an object whose content OfficeEnv validates, and keep the
+    # row's other fields.
+    for model in (TaskData, OfficeEnvSeedSessionRequest):
+        field = model.model_fields["officeenv"]
+        assert field.annotation == dict[str, Any], model
+        assert field.is_required(), model
+        assert model.model_config["extra"] == "allow", model
 
 
 # Environment Server episodes: typed seed and close.
