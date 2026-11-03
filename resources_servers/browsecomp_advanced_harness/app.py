@@ -50,6 +50,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
+    BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -59,6 +60,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionFence,
     ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
@@ -278,7 +280,7 @@ class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+class TavilySearchVerifyResponse(TavilySearchVerifyRequest, BaseVerifyResponse, JudgeEvaluation):
     num_tool_calls: int
     reset_count: int = 0
     metrics: TavilySearchMetrics
@@ -1557,6 +1559,28 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return BrowseResponse(results_string=results_string)
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
+        # num_tool_calls now comes from the agent loop (counts ALL tool calls,
+        # including those made before context resets). Fall back to the old
+        # final-output count only if the agent didn't surface it.
+        agent_num_tool_calls = getattr(body.response, "num_tool_calls", None)
+        if agent_num_tool_calls is None:
+            agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
+        reset_count = getattr(body.response, "reset_count", 0) or 0
+        sid = request.session[SESSION_ID_KEY]
+        if self._fence.closed_episode(sid) is not None:
+            # Masked although the score reads only the response, so every server under the resources session contract
+            # treats a closed session alike. single_agent_turn verifies before it closes, so only an out-of-order verify
+            # lands here. A session the fence never closed, such as an agent's /run, is graded as usual.
+            lost = lost_session_verification("This browsecomp_advanced_harness session is already closed")
+            return TavilySearchVerifyResponse(
+                **(body.model_dump() | lost),
+                reasoning="",
+                extracted_final_answer="",
+                num_tool_calls=agent_num_tool_calls,
+                reset_count=reset_count,
+                metrics=TavilySearchMetrics(),
+            )
+
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
@@ -1569,20 +1593,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         else:
             judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
 
-        # num_tool_calls now comes from the agent loop (counts ALL tool calls,
-        # including those made before context resets). Fall back to the old
-        # final-output count only if the agent didn't surface it.
-        agent_num_tool_calls = getattr(body.response, "num_tool_calls", None)
-        if agent_num_tool_calls is None:
-            agent_num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
-        sid = request.session[SESSION_ID_KEY]
         session_metrics = self._session_id_to_metrics[sid]
         num_provider_429s, num_provider_other_retries = _sum_provider_retry_counts(session_metrics)
         verify_response = TavilySearchVerifyResponse(
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=agent_num_tool_calls,
-            reset_count=getattr(body.response, "reset_count", 0) or 0,
+            reset_count=reset_count,
             metrics=session_metrics,
             num_provider_429s=num_provider_429s,
             num_provider_other_retries=num_provider_other_retries,
