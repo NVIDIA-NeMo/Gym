@@ -22,6 +22,7 @@ import pickle
 import pkgutil
 import re
 import runpy
+import subprocess
 import sys
 import textwrap
 import types
@@ -96,6 +97,11 @@ def _runs() -> dict:
     return importlib.import_module("newpkg.counter").RUNS
 
 
+def _moved_path_warnings(caught: list[warnings.WarningMessage]) -> list[warnings.WarningMessage]:
+    """The moved-path deprecations among the captured warnings, ignoring unrelated ones."""
+    return [w for w in caught if w.category is DeprecationWarning and " moved to `" in str(w.message)]
+
+
 class TestMovedModuleFinder:
     def test_old_path_is_the_new_module(self, moved_tree) -> None:
         with pytest.warns(DeprecationWarning):
@@ -167,7 +173,8 @@ class TestMovedModuleFinder:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             importlib.import_module("oldpkg.mod")
-        [warning] = caught
+        # Other packages may warn during the import too; check only the moved-path warning.
+        [warning] = _moved_path_warnings(caught)
         message = str(warning.message)
         assert warning.category is DeprecationWarning
         assert "`oldpkg.mod` moved to `newpkg.sub.mod` in nemo_gym 0.8.0" in message
@@ -180,7 +187,7 @@ class TestMovedModuleFinder:
             warnings.simplefilter("always")
             importlib.import_module("oldpkg.mod")
             importlib.import_module("oldpkg.mod")
-        assert len(caught) == 1
+        assert len(_moved_path_warnings(caught)) == 1
 
     def test_find_spec_of_old_path_points_at_the_new_file(self, moved_tree, tmp_path: Path) -> None:
         # find_spec imports the parent packages, which are old paths too.
@@ -580,6 +587,29 @@ class TestImportSurface:
             assert module in surface
         assert "text_file_equals" in surface["nemo_gym.verifiers.files"]
 
+    def test_failure_surface_records_the_intentional_canonical_exception_migration(self) -> None:
+        """Package moves preserve names; the separate failure API migration deliberately retires concrete types.
+
+        Keep its replacement in the snapshot so compatibility checks cannot silently discard the canonical API.
+        The v1 EpisodeFailure data envelope is retained; only its old raised-error wrapper and type variable go away.
+        """
+        from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+        retired = {
+            "nemo_gym.agent_utils.sandbox_session": ("HarnessTerminationError",),
+            "nemo_gym.agent_utils.supervisor_client": ("HarnessTerminationError",),
+            "nemo_gym.base_environment_server": ("HandledEpisodeError", "EpisodeFailureT"),
+        }
+        for module, old_names in retired.items():
+            current = importlib.import_module(module)
+            assert "NgFailureEvent" in self.surface[module]
+            assert current.NgFailureEvent is NgFailureEvent
+            for name in old_names:
+                assert name not in self.surface[module]
+                assert not hasattr(current, name)
+        assert "NgFailureEvent" in self.surface["nemo_gym.core.typed_exceptions"]
+        assert "FailureReportRow" in self.surface["nemo_gym.core.failure_transport"]
+
     def test_every_recorded_name_still_resolves_at_its_old_path(self) -> None:
         missing = []
         for module, names in self.surface.items():
@@ -705,3 +735,41 @@ if __name__ == "__main__":
     IMPORT_SURFACE_PATH.write_text(
         "{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in sorted(surface.items())) + "\n}\n"
     )
+
+
+@pytest.mark.parametrize("first", ["", "import nemo_gym.data.tasks.harbor\n"])
+def test_harbor_cli_imports_from_the_old_package(first: str) -> None:
+    # In a fresh interpreter: an earlier `import nemo_gym.tasks.harbor.cli` would bind `cli` on the package.
+    code = first + (
+        "import importlib\n"
+        "from nemo_gym.tasks.harbor import cli\n"
+        "assert cli is importlib.import_module('nemo_gym.data.tasks.harbor.prepare')\n"
+        "assert cli.run_target is importlib.import_module('nemo_gym.cli.eval').run_target\n"
+        "from nemo_gym.data.tasks.harbor import prepare\n"
+        "assert prepare is cli\n"
+        "import nemo_gym.data.tasks.harbor as harbor\n"
+        "try:\n"
+        "    harbor.not_a_module\n"
+        "except AttributeError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('unknown attribute resolved')\n"
+    )
+    subprocess.run([sys.executable, "-W", "ignore::DeprecationWarning", "-c", code], check=True)
+
+
+def test_package_facade_warns_once_for_a_renamed_name() -> None:
+    # In a fresh interpreter: a from-import looks the name up on the package more than once.
+    # nemo_gym.config serves TOKEN_ID_CAPTURE_BLOCK only through MOVED_NAMES, by way of lazy_exports.
+    code = (
+        "import warnings\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    from nemo_gym.config import TOKEN_ID_CAPTURE_BLOCK\n"
+        "    import nemo_gym.config\n"
+        "    nemo_gym.config.TOKEN_ID_CAPTURE_BLOCK\n"
+        "messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]\n"
+        "assert len(messages) == 1, messages\n"
+        "assert messages[0].startswith('`nemo_gym.config.TOKEN_ID_CAPTURE_BLOCK` moved to'), messages\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

@@ -1687,14 +1687,17 @@ class TestJudgeHttpError:
     _make_verify_request = TestArenaResourcesServer._make_verify_request
 
     async def test_a_judge_500_is_a_judge_failure_with_its_status_and_body_not_a_parse_error(
-        self, server: ArenaResourcesServer
+        self, server: ArenaResourcesServer, monkeypatch
     ):
         import aiohttp
         from aiohttp import web
         from aiohttp.test_utils import TestServer
 
+        from nemo_gym.verification import judge as judge_module
         from nemo_gym.verification import judge_failsafe
 
+        monkeypatch.setattr(judge_module, "_judge_retry_wait_s", lambda attempt: 0)
+        attempts = judge_module.JUDGE_CALL_MAX_ATTEMPTS
         body = "Error code: 429 - rate limit exceeded"
         hits = []
 
@@ -1719,4 +1722,6 @@ class TestJudgeHttpError:
         # The judge's real status and body are kept; the 429 in the body text classifies nothing.
         assert "ClientResponseError" in error and "500" in error and "ValidationError" not in error
         assert row["response"] == request.response.model_dump(mode="json")  # the saved answer is kept
-        assert len(hits) == 2  # one call per ordering, no extra request
+        # A 500 is retried up to the bounded attempts of one call; the ordering that exhausts them
+        # first cancels its sibling, so two orderings never make more than twice that bound.
+        assert attempts <= len(hits) <= 2 * attempts

@@ -11,8 +11,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest, AgentSessionSetupError
+from nemo_gym.agents import AgentSeedSessionRequest, AgentSessionSetupError, SandboxSession
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
@@ -648,7 +647,7 @@ async def test_lifespan_closes_sessions_using_their_ownership(owned):
 
 @pytest.mark.asyncio
 async def test_shutdown_continues_after_failed_close_and_retains_retry_state():
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+    from nemo_gym.agents import AgentCloseSessionRequest
 
     server = agent()
     failed, healthy = state(), state()
@@ -672,8 +671,7 @@ async def test_shutdown_continues_after_failed_close_and_retains_retry_state():
 
 
 def test_harbor_materialized_request_passes_validation(tmp_path):
-    from nemo_gym.tasks.harbor.materialize import materialize_task
-    from nemo_gym.tasks.harbor.task import load_task
+    from nemo_gym.data.tasks.harbor import load_task, materialize_task
 
     (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 12.0\n")
     (tmp_path / "instruction.md").write_text("Inspect the repository.")
@@ -766,7 +764,7 @@ async def test_shutdown_during_installation_joins_before_stopping_sandbox():
 
 @pytest.mark.asyncio
 async def test_shutdown_setup_deadline_retains_installation_for_later_close():
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+    from nemo_gym.agents import AgentCloseSessionRequest
 
     server = agent(
         setup_timeout=0.01,

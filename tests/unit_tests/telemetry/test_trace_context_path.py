@@ -285,7 +285,7 @@ def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
 
     from opentelemetry import trace
 
-    from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+    from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
     from nemo_gym.client.server_client import ServerClient
 
     class _Agent(SimpleResponsesAPIAgent):

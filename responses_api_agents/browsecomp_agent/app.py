@@ -25,12 +25,12 @@ import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
 from nemo_gym.config import (
     AggregateMetrics,
@@ -938,7 +938,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 flush=True,
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
-            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollouts/rollout_collection.py)
             # and every remaining sample dies with it — that cost two full multi-node
             # allocations, each dying part-way through a run on one bad sample.
             #
