@@ -234,6 +234,25 @@ class TestRunDirectory:
 
         assert _sdk_call(fake_sdk)["path"] == str(run_dir.resolve())
 
+    def test_the_resume_identity_beside_the_manifest_is_never_uploaded(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        identity = tmp_path / "gpqa_rollouts_manifest.identity.json"
+        (tmp_path / "gpqa_rollouts_manifest.json").write_text("{}")
+        identity.write_text('{"exa_api_key": "CANARY-SECRET-123"}')  # pragma: allowlist secret
+        (tmp_path / "model-calls").mkdir()
+        (tmp_path / "model-calls" / "0-0.capture.jsonl").write_text("{}")
+        expected = sorted(p.name for p in tmp_path.iterdir() if p != identity)
+
+        assert _exporter(artifacts, tmp_path).export(artifacts).state is ExportState.SUCCEEDED
+
+        call = _sdk_call(fake_sdk)
+        assert call["files"] == expected
+        assert Path(call["path"]).name == tmp_path.name
+        # The run directory itself is left as it was.
+        assert identity.exists() and not fake_sdk["log"].with_name("model-calls").is_symlink()
+
     @pytest.mark.parametrize("other", ["math_rollouts.jsonl", "rollouts.jsonl"])
     def test_a_directory_holding_another_runs_rollouts_is_refused_before_any_environment_is_built(
         self, tmp_path: Path, fake_sdk: dict[str, Any], other: str

@@ -20,7 +20,9 @@ import json
 import os
 import re
 import shlex
+import socket
 import sys
+import traceback
 from functools import cache
 from glob import glob
 from math import isfinite
@@ -31,13 +33,15 @@ from subprocess import PIPE, Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Lock, Thread
 from time import monotonic, sleep, time
-from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
+from typing import IO, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 import requests
 import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf.errors import OmegaConfBaseException
+from omegaconf.resolvers.oc import env as _oc_env
 from pydantic import BaseModel, Field, ValidationError
 from rich.markup import escape
 from rich.table import Table
@@ -57,6 +61,7 @@ from nemo_gym.client.server_client import ServerClient, ServerStatus
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
 from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
+    DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
     DRY_RUN_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
@@ -77,7 +82,7 @@ from nemo_gym.config.global_config import (
     _find_open_port_using_range,
     get_global_config_dict,
 )
-from nemo_gym.core.failure_kinds import SERVER_START_FAILED
+from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -330,7 +335,7 @@ def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
-_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = 600.0
+_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = float(DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS)
 
 # Longest single readiness probe of a Gym server. A probe is capped further by the time left before the deadline.
 _SERVER_PROBE_TIMEOUT_SEC: float = 5.0
@@ -548,6 +553,8 @@ class TestConfig(RunConfig):
 class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
 
+    failure_kind = SERVER_SPINUP_TIMEOUT
+
 
 class ServerStartFailedError(RuntimeError):
     """A Gym server process (or the head server) exited before it was ready.
@@ -562,6 +569,46 @@ class ServerStartFailedError(RuntimeError):
         super().__init__(message)
         self.server_name = server_name
         self.errno = errno
+
+
+class HeadServerUnresponsiveError(ServerStartFailedError):
+    """The head server's thread is running but it never answered within `head_server_spinup_timeout_seconds`.
+
+    Not resumable: the CLI exits with ``stop_exit_code`` (76), which a job chain reads as "another attempt cannot
+    help", instead of holding its allocation in the wait.
+    """
+
+    stop_exit_code = 76
+
+
+# How long the supervisor waits for a live head server to answer. 0 or a negative value waits forever.
+HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "head_server_spinup_timeout_seconds"
+_DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC = 900.0
+
+
+def _head_server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
+    value = global_config_dict.get(HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
+    if value is None:
+        return _DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"`{HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}` must be a number of seconds, got {value!r}."
+        ) from None
+
+
+def _port_bind_errno(host: str, port: int) -> int | None:
+    """The errno of binding ``host:port`` now, as uvicorn binds it, or None when the port is free."""
+    probe = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))
+    except OSError as error:
+        return error.errno
+    finally:
+        probe.close()
+    return None
 
 
 # uvicorn's report of a failed bind: "[Errno 98] error while attempting to bind on address (...)".
@@ -681,15 +728,19 @@ class RunHelper:  # pragma: no cover
         """After a server found its port in use, give it a fresh one in the config every server is started from.
 
         Each server learns every other server's port from that config when it starts, so the caller starts them all
-        again. Only a bind that failed with EADDRINUSE qualifies; the head server keeps its configured port.
+        again. Only a bind that failed with EADDRINUSE qualifies. The head server moves the same way: every server and
+        the collection client read its port from that config.
         """
         if not isinstance(error, ServerStartFailedError) or error.errno != errno.EADDRINUSE:
             return False
-        server_config = getattr(self, "_server_configs", {}).get(error.server_name)
+        global_config_dict = get_global_config_dict()
+        if error.server_name == HEAD_SERVER_KEY_NAME:
+            server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME)
+        else:
+            server_config = getattr(self, "_server_configs", {}).get(error.server_name)
         if server_config is None:
             return False
-        global_config_dict = get_global_config_dict()
-        taken = [config.get("port") for config in self._server_configs.values()]
+        taken = [config.get("port") for config in getattr(self, "_server_configs", {}).values()]
         taken.append(global_config_dict.get(HEAD_SERVER_KEY_NAME, {}).get("port"))
         port = _find_open_port_using_range(
             disallowed_ports=[port for port in taken if isinstance(port, int)],
@@ -714,6 +765,7 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
         self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
+        self._head_server_spinup_timeout_seconds = _head_server_spinup_timeout_seconds(global_config_dict)
         self._server_shutdown_timeout_seconds = _server_shutdown_timeout_seconds(global_config_dict)
         self._startup.mark("load_config")
 
@@ -881,17 +933,39 @@ class RunHelper:  # pragma: no cover
         return process
 
     def _wait_for_head_server(self) -> None:
-        """Wait until the head server answers; a head server thread that ended (a failed bind) never will."""
+        """Wait until the head server answers, for at most `head_server_spinup_timeout_seconds`.
+
+        A head server thread that ended (a failed bind) never will: that is a typed start failure, with EADDRINUSE when
+        its port is taken now, so `start` moves it to a fresh port once. A live head server that never answers is a
+        `HeadServerUnresponsiveError`, which stops the run instead of holding its allocation.
+        """
         print("Waiting for head server to spin up")
+        timeout_seconds = getattr(self, "_head_server_spinup_timeout_seconds", _DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC)
+        deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
         poll_count = 0
         while True:
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
             if status == "success":
                 return
             if not self._head_server_thread.is_alive():
+                head = getattr(getattr(self, "_head_server_instance", None), "config", None)
+                bind_errno = _port_bind_errno(head.host, head.port) if head is not None else None
                 raise ServerStartFailedError(
                     "server_start_failed: the head server exited before it was ready; its error is in the log "
-                    f"above. Is its port already in use? Set it with `++{HEAD_SERVER_KEY_NAME}.port=<port>`.",
+                    + (
+                        f"above. Its port {head.port} is already in use."
+                        if bind_errno == errno.EADDRINUSE
+                        else f"above. Set its port with `++{HEAD_SERVER_KEY_NAME}.port=<port>` if it is taken."
+                    ),
+                    server_name=HEAD_SERVER_KEY_NAME,
+                    errno=bind_errno,
+                )
+            if deadline is not None and monotonic() >= deadline:
+                raise HeadServerUnresponsiveError(
+                    f"server_start_failed: the head server did not answer within {timeout_seconds:g}s although it is "
+                    f"running (last status `{status}`). Stopping instead of waiting on the allocation. Raise the "
+                    f"limit with `++{HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, or set it to 0 to wait "
+                    "without a limit.",
                     server_name=HEAD_SERVER_KEY_NAME,
                     errno=None,
                 )
@@ -1806,6 +1880,67 @@ def _check_environment_server_configs(global_config_dict: DictConfig) -> List[st
     return unchecked
 
 
+class ServerConfigProblem(NamedTuple):
+    """A server block value that its server's config class rejects, or a block that could not be checked."""
+
+    path: str
+    """Dotted path in the merged config: the rejected field, else the block (or the unknown server type)."""
+    message: str
+    """The config class's message, or why the block's config class could not be loaded."""
+    config_class: Optional[str] = None
+    """The name of the config class that rejected the value; None when the block could not be checked."""
+    value: object = None
+    """The rejected input, as the config class received it."""
+
+
+def validate_server_configs(global_config_dict: DictConfig, server_types: Iterable[str]) -> List[ServerConfigProblem]:
+    """Validate each server block of the given server types against its own server's config class, starting nothing.
+
+    Each block is checked against the class its server validates it with at launch. This process imports the
+    entrypoint to find that class. A block whose entrypoint does not import here, for example because the server's
+    own venv has packages this one lacks, is one problem with ``config_class`` None, and its fields stay unchecked.
+    A server type that Gym does not define is such a problem too, at the type's name, so a caller written for
+    another Gym version still gets an answer. An empty list means every checked block is valid.
+    """
+    wanted = frozenset(server_types)
+    problems = [
+        ServerConfigProblem(name, f"Gym defines no server type '{name}'; it defines {', '.join(SERVER_TYPE_KEYS)}")
+        for name in sorted(wanted.difference(SERVER_TYPE_KEYS))
+    ]
+    for server in _configured_servers(global_config_dict):
+        if server.server_type not in wanted:
+            continue
+        block_path = f"{server.top_level_path}.{server.server_type}.{server.name}"
+        module_name = ".".join(
+            ["nemo_gym_server_config_check", server.server_type, server.name]
+            + list(server.entrypoint_fpath.with_suffix("").parts)
+        )
+        try:
+            config_class = _entrypoint_config_class(server.dir_path / server.entrypoint_fpath, module_name)
+        except Exception as error:  # Its own venv may have what this one lacks.
+            message = f"could not load {server.entrypoint_fpath}: {type(error).__name__}: {error}"
+            problems.append(ServerConfigProblem(block_path, message))
+            continue
+        try:
+            server_config = OmegaConf.to_container(server.config, resolve=True) | {"name": server.top_level_path}
+        except OmegaConfBaseException as error:
+            problems.append(ServerConfigProblem(block_path, f"could not resolve the block: {error}"))
+            continue
+        try:
+            config_class.model_validate(server_config)
+        except ValidationError as error:
+            problems.extend(
+                ServerConfigProblem(
+                    ".".join([block_path, *map(str, detail["loc"])]),
+                    detail["msg"],
+                    config_class.__name__,
+                    detail.get("input"),
+                )
+                for detail in error.errors()
+            )
+    return problems
+
+
 @exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
@@ -1887,10 +2022,119 @@ def _print_validation_report(report: EnvironmentValidationReport, *, json_output
         rich.print(f"[yellow]Warning:[/yellow] {warning}", file=sys.stderr)
 
 
+# Stands in for a value only the job supplies, under --allow-job-time-values.
+JOB_TIME_VALUE = "gym-job-time-value"
+# Each round of composition names at most three unset values, so this covers 48 of them.
+_JOB_TIME_VALUE_ROUNDS = 16
+
+
+_NO_DEFAULT = object()
+
+
+def _env_or_job_time_value(key: str, default: object = _NO_DEFAULT) -> Optional[str]:
+    """``oc.env`` that reads an unset variable without a default as a job-time value."""
+    if default is _NO_DEFAULT:
+        return os.environ.get(key, JOB_TIME_VALUE)
+    return _oc_env(key, default)
+
+
+def _compose_for_validation(*, allow_job_time_values: bool, supplied: List[str]) -> DictConfig:
+    """Compose the config as `gym eval run` does from the same run args; the job adds the policy model itself."""
+    for _ in range(_JOB_TIME_VALUE_ROUNDS):
+        try:
+            try:
+                return get_global_config_dict()
+            except ConfigError:
+                return get_global_config_dict(
+                    global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                        initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    ),
+                )
+        except ConfigError as error:
+            missing = [key for key in re.findall(r"\+\+([A-Za-z0-9_.]+)=<value>", str(error)) if key not in supplied]
+            if not allow_job_time_values or not missing:
+                raise
+            supplied.extend(missing)
+            sys.argv.extend(f"++{key}={JOB_TIME_VALUE}" for key in missing)
+    raise ConfigError(f"composition still needs values after {len(supplied)} job-time stand-ins")
+
+
+def _composition_failure(error: BaseException) -> Dict[str, str]:
+    """Why the config did not compose, and the key whose value did not resolve when the error names one.
+
+    A failing resolver (for example ``oc.decode`` given an int) is reported at its key with the resolver's own
+    message. Gym's own explanation, such as the override that supplies a missing key, is kept as it reads.
+    """
+    resolution = error if isinstance(error, OmegaConfBaseException) else error.__cause__
+    full_key = getattr(resolution, "full_key", None)
+    if not isinstance(resolution, OmegaConfBaseException) or not isinstance(full_key, str) or not full_key:
+        return {"why": f"{type(error).__name__}: {error}"}
+    # OmegaConf appends the key and the node type to its own message; the path field carries the key.
+    message = resolution.msg.split("\n    full_key:", 1)[0]
+    why = message if str(error) == str(resolution) else f"{type(error).__name__}: {error}"
+    return {"path": full_key, "why": why}
+
+
+def _validate_server_types(command_dict: DictConfig) -> int:
+    """`gym env validate --server-types`: print one finding per line; return 0, 1, 2, or 3 for a crash."""
+    # Importing entrypoints must write nothing into the checkout.
+    sys.dont_write_bytecode = True
+    allow_job_time_values = bool(command_dict.get("allow_job_time_values", False))
+    marks = [str(mark) for mark in command_dict.get("ignore_input_containing") or []]
+    marks += [JOB_TIME_VALUE] if allow_job_time_values else []
+    json_output = bool(command_dict.get(JSON_OUTPUT_KEY_NAME, False))
+
+    def emit(finding: dict) -> None:
+        if json_output:
+            print(json.dumps(finding), flush=True)
+        else:
+            print(" ".join(f"{key}={value}" for key, value in finding.items()), flush=True)
+
+    if allow_job_time_values:
+        OmegaConf.register_new_resolver("oc.env", _env_or_job_time_value, replace=True, use_cache=False)
+    try:
+        supplied: List[str] = []
+        # A block that fails Gym's generic server check is reported field by field below, not as a failed composition.
+        sys.argv.append("++error_on_almost_servers=false")
+        try:
+            global_config_dict = _compose_for_validation(
+                allow_job_time_values=allow_job_time_values, supplied=supplied
+            )
+        except (ConfigError, OmegaConfBaseException) as error:
+            emit({"kind": "uncomposed", **_composition_failure(error), "supplied": supplied})
+            return 2
+        invalid = 0
+        server_types = command_dict.server_types
+        server_types = [server_types] if isinstance(server_types, str) else list(server_types)
+        for problem in validate_server_configs(global_config_dict, server_types):
+            if problem.config_class is None:
+                emit({"kind": "unchecked", "path": problem.path, "why": problem.message})
+            elif not any(mark in repr(problem.value) for mark in marks):
+                invalid += 1
+                emit(
+                    {
+                        "kind": "invalid",
+                        "path": problem.path,
+                        "class": problem.config_class,
+                        "message": problem.message,
+                        "input": repr(problem.value)[:120],
+                    }
+                )
+        return 1 if invalid else 0
+    except Exception:  # A crash must not read as a finding: its exit code is neither 1 nor 2.
+        traceback.print_exc()
+        return 3
+    finally:
+        if allow_job_time_values:
+            OmegaConf.register_new_resolver("oc.env", _oc_env, replace=True, use_cache=False)
+
+
 @exit_cleanly_on_config_error
 def validate() -> None:
     """Validate a manifest-backed workload or a legacy Gym config without starting services."""
     command_dict = _command_overrides()
+    if command_dict.get("server_types") is not None:
+        sys.exit(_validate_server_types(command_dict))
     command_config = ManifestCommandConfig.model_validate(command_dict)
     entry = _manifest_entry(command_config)
     if command_config.manifest_path is not None or entry is not None:

@@ -14,10 +14,13 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from http.cookiejar import CookieJar
 from time import time
 from typing import Any, Optional
@@ -32,6 +35,7 @@ from verifiers.clients import NeMoRLChatCompletionsClient
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -46,7 +50,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, observe_verifier
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -252,6 +256,84 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
+# The reward functions of the request being scored that raised; verifiers scores such a function 0.0 and goes on.
+_RUBRIC_FAILURES: ContextVar[Optional[list[str]]] = ContextVar("verifiers_agent_rubric_failures", default=None)
+
+
+# The bookkeeping rubrics verifiers' own environments add (MultiTurnEnv, ToolEnv): metrics counted from the rollout's
+# state and messages, weight 0, no model asked. A member of exactly one of these classes is left out of the scoring.
+_MONITOR_RUBRICS = {
+    ("verifiers.legacy.envs.multiturn_env", "MultiTurnMonitorRubric"),
+    ("verifiers.legacy.envs.tool_env", "ToolMonitorRubric"),
+}
+
+
+def _monitor_rubric(rubric: Any) -> bool:
+    """Whether ``rubric`` is one of verifiers' own bookkeeping monitors, carrying only weight-0 metrics."""
+    weights = getattr(rubric, "weights", None)
+    return (
+        (type(rubric).__module__, type(rubric).__qualname__) in _MONITOR_RUBRICS
+        and isinstance(weights, list)
+        and all(weight == 0 for weight in weights)
+    )
+
+
+def _plain_rubrics(rubric: Any) -> Optional[list[Any]]:
+    """The plain verifiers ``Rubric`` objects a rubric scores with (itself, or a ``RubricGroup``'s members at any depth,
+    leaving out verifiers' own monitors), or None when any of them is another class.
+
+    A rubric subclass may score without its listed functions (a judge rubric asks a model), so only the two plain
+    classes are read.
+    """
+    if type(rubric) is getattr(vf, "RubricGroup", None):
+        plain: list[Any] = []
+        for member in getattr(rubric, "rubrics", None) or []:
+            if _monitor_rubric(member):
+                continue
+            members = _plain_rubrics(member)
+            if members is None:
+                return None
+            plain.extend(members)
+        return plain
+    if type(rubric) is getattr(vf, "Rubric", None) and isinstance(getattr(rubric, "funcs", None), list):
+        return [rubric]
+    return None
+
+
+def _watch_reward_func(func: Callable[..., Any]) -> Callable[..., Any]:
+    """``func``, recording in ``_RUBRIC_FAILURES`` that it raised before verifiers turns the error into 0.0."""
+
+    @functools.wraps(func)  # keeps the signature verifiers reads to pick the function's arguments
+    def watched(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            failures = _RUBRIC_FAILURES.get()
+            if failures is not None:
+                failures.append(getattr(func, "__name__", repr(func)))
+            raise
+
+    watched._ng_watched_reward_func = True
+    return watched
+
+
+def _programmatic_rubric(vf_env: Any) -> bool:
+    """Whether every reward function of the environment's rubric is synchronous, after watching each for errors.
+
+    Only such a rubric grades without asking a model, so only its rollouts carry the agent's own grading record. The
+    functions are wrapped in place once; any other rubric is left as it is and its rollouts carry no record.
+    """
+    rubrics = _plain_rubrics(getattr(vf_env, "rubric", None))
+    funcs = [f for rubric in rubrics or [] for f in rubric.funcs]
+    if not funcs or any(inspect.iscoroutinefunction(f) or not callable(f) for f in funcs):
+        return False
+    for rubric in rubrics:
+        rubric.funcs[:] = [
+            f if getattr(f, "_ng_watched_reward_func", False) else _watch_reward_func(f) for f in rubric.funcs
+        ]
+    return True
+
+
 class _NoStoreCookieJar(CookieJar):
     """A cookie jar that drops every Set-Cookie, so no request ever carries one.
 
@@ -320,11 +402,15 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
 
     envs_cache: dict[str, Any] = Field(default_factory=dict)
+    # Whether each loaded environment's rubric grades without asking a model (``_programmatic_rubric``).
+    programmatic_rubrics: dict[str, bool] = Field(default_factory=dict)
     client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
-            self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
+            env = vf.load_environment(vf_env_id, **self.config.vf_env_args)
+            self.programmatic_rubrics[vf_env_id] = _programmatic_rubric(env)
+            self.envs_cache[vf_env_id] = env
         return self.envs_cache[vf_env_id]
 
     def _rollout_id_for(self, body: Any = None, request: Optional[Request] = None) -> Optional[str]:
@@ -667,15 +753,37 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: VerifiersAgentRunRequest = Body(),
     ) -> VerifiersAgentVerifyResponse:
-        resp = await self.responses(request, response, body)
+        failures: list[str] = []
+        token = _RUBRIC_FAILURES.set(failures)
+        try:
+            resp = await self.responses(request, response, body)
+        finally:
+            _RUBRIC_FAILURES.reset(token)
 
-        return VerifiersAgentVerifyResponse(
-            ng_trajectory=resp.ng_trajectory,
-            ng_agent_observations=resp.ng_agent_observations,
-            responses_create_params=body.responses_create_params,
-            response=resp,
-            reward=resp.reward,
-        )
+        async def scored() -> VerifiersAgentVerifyResponse:
+            result = VerifiersAgentVerifyResponse(
+                ng_trajectory=resp.ng_trajectory,
+                ng_agent_observations=resp.ng_agent_observations,
+                responses_create_params=body.responses_create_params,
+                response=resp,
+                reward=resp.reward,
+            )
+            if failures:
+                # verifiers scored each reward function that raised as 0.0; that zero is no grade of the answer.
+                result.mask_sample = True
+                result.failure_kind = VERIFIER_ERROR
+                result.failure_reason = f"reward function raised: {', '.join(sorted(set(failures)))}"
+            return result
+
+        # This agent is its own verifier: the rubric graded inside the rollout above. Its result is its grading
+        # record when every reward function is synchronous (no model asked), observed like a resources server's.
+        # Any other rubric is not observed at all, as before: an invocation without a record would read as ungraded.
+        vf_env_id = body.vf_env_id or self.config.vf_env_id
+        return await observe_verifier(
+            scored,
+            enabled=self._model_call_capture_enabled() and self.programmatic_rubrics.get(vf_env_id, False),
+            verifier_name=self.config.name,
+        )()
 
 
 if __name__ == "__main__":
