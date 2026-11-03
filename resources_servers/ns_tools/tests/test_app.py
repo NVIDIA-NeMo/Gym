@@ -12,22 +12,31 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import subprocess
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp import ClientResponseError, web
+from anyio import CancelScope, get_cancelled_exc_class
 from app import (
     NSToolsConfig,
     NSToolsResourcesServer,
+    NSToolsToolManager,
     NSToolsVerifyRequest,
 )
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from nemo_skills.mcp.tool_manager import ToolManager
 
-from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import (
+    SESSION_ID_KEY,
+    GlobalAIOHTTPAsyncClientConfig,
+    ServerClient,
+    set_global_aiohttp_client,
+)
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
@@ -488,7 +497,7 @@ class FakePythonToolManager:
         pass
 
 
-def _session_server(tool_manager: FakePythonToolManager) -> tuple[NSToolsResourcesServer, FastAPI]:
+def _session_server(tool_manager: FakePythonToolManager | ToolManager) -> tuple[NSToolsResourcesServer, FastAPI]:
     config = NSToolsConfig(
         host="0.0.0.0",
         port=8080,
@@ -545,6 +554,140 @@ VERIFY_BODY = {
 
 
 class TestResourcesSessions:
+    async def test_cancelled_python_call_keeps_ownership_until_close(
+        self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        received, finish = asyncio.Event(), asyncio.Event()
+        sessions, scopes, cancellations = set(), [], []
+
+        async def execute(request: web.Request) -> web.Response:
+            await request.json()
+            received.set()
+            await finish.wait()
+            sessions.add(request.headers["X-Session-ID"])
+            return web.json_response(
+                {"process_status": "completed", "stdout": "4", "stderr": "", "new_session_created": True}
+            )
+
+        async def delete(request: web.Request) -> web.Response:
+            session_id = request.match_info["session_id"]
+            if session_id not in sessions:
+                return web.Response(status=404)
+            sessions.remove(session_id)
+            return web.Response(status=200)
+
+        backend = web.Application()
+        backend.router.add_post("/execute", execute)
+        backend.router.add_delete("/sessions/{session_id}", delete)
+        runner = web.AppRunner(backend)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", unused_tcp_port).start()
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+        http_client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        manager = NSToolsToolManager(
+            module_specs=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+            context={"sandbox": {"host": "127.0.0.1", "port": str(unused_tcp_port)}},
+        )
+        await manager.list_all_tools()
+        tool = manager._tools["DirectPythonTool"]
+        server, _ = _session_server(manager)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        request.json = AsyncMock(return_value={"code": "print(4)"})
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+
+        async def run_tool() -> None:
+            with CancelScope() as scope:
+                scopes.append(scope)
+                try:
+                    await server.execute_tool("stateful_python_code_exec", request)
+                except get_cancelled_exc_class():
+                    cancellations.append(True)
+                    raise
+
+        call = asyncio.create_task(run_tool())
+        try:
+            await asyncio.wait_for(received.wait(), timeout=5)
+            scopes[0].cancel()
+            await asyncio.sleep(0)
+            assert not call.done()
+            finish.set()
+            await asyncio.wait_for(call, timeout=5)
+            assert cancellations == [True]
+            assert tool.requests_to_sessions["rs-1"] in sessions
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            assert sessions == set()
+            assert "rs-1" not in tool.requests_to_sessions
+        finally:
+            finish.set()
+            await asyncio.gather(call, return_exceptions=True)
+            await tool._sandbox.close()
+            await http_client.close()
+            await runner.cleanup()
+
+    async def test_python_transport_error_keeps_generated_session_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sent = []
+
+        async def failed_send(sandbox, body, timeout):
+            sent.append(body["session_id"])
+            raise RuntimeError("reply could not be decoded")
+
+        monkeypatch.setattr("nemo_skills.code_execution.sandbox.LocalSandbox._send_request", failed_send)
+        manager = NSToolsToolManager(module_specs=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"])
+        await manager.list_all_tools()
+        tool = manager._tools["DirectPythonTool"]
+        try:
+            await manager.execute_tool("stateful_python_code_exec", {"code": "print(4)"}, {"request_id": "rs-1"})
+            assert len(sent) == 1
+            assert tool.requests_to_sessions["rs-1"] == sent[0]
+        finally:
+            await tool._sandbox.close()
+
+    @pytest.mark.parametrize("deleted_status", [200, 404])
+    async def test_real_python_tool_retains_failed_deletion_for_retry(
+        self, unused_tcp_port: int, deleted_status: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        status = 503
+        seen = []
+
+        async def delete_session(request: web.Request) -> web.Response:
+            seen.append((request.match_info["session_id"], request.headers.get("X-Session-ID")))
+            return web.Response(status=status)
+
+        backend = web.Application()
+        backend.router.add_delete("/sessions/{session_id}", delete_session)
+        runner = web.AppRunner(backend)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", unused_tcp_port).start()
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+        http_client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        tool_manager = NSToolsToolManager(
+            module_specs=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+            context={"sandbox": {"host": "127.0.0.1", "port": str(unused_tcp_port)}},
+        )
+        tool = tool_manager._tools["DirectPythonTool"]
+        tool.requests_to_sessions["rs-1"] = "python-session"
+        tool._sandbox.session_histories["python-session"] = ["x = 1"]
+        server, _ = _session_server(tool_manager)
+        server._session_episodes["rs-1"] = (EPISODE_ID, TaskId(taskset="ns_tools", task_id="0"))
+        try:
+            with pytest.raises(ClientResponseError, match="503"):
+                await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            assert tool.requests_to_sessions["rs-1"] == "python-session"
+            assert tool._sandbox.session_histories["python-session"] == ["x = 1"]
+            assert server._fence.closed_episode("rs-1") is None
+
+            status = deleted_status
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            assert "rs-1" not in tool.requests_to_sessions
+            assert "python-session" not in tool._sandbox.session_histories
+            assert server._fence.closed_episode("rs-1") == EPISODE_ID
+            assert seen == [("python-session", "python-session")] * 2
+        finally:
+            await tool._sandbox.close()
+            await http_client.close()
+            await runner.cleanup()
+
     def test_session_contract(self) -> None:
         tool_manager = FakePythonToolManager()
         server, app = _session_server(tool_manager)
@@ -609,24 +752,42 @@ class TestResourcesSessions:
         # The refused call opened no python session that nothing would release.
         assert tool_manager.python_sessions == {}
 
-    def test_tool_call_racing_close_releases_its_python_session(self) -> None:
+    async def test_close_waits_for_tool_ownership_and_retries_cleanup(self) -> None:
         tool_manager = FakePythonToolManager()
-        server, app = _session_server(tool_manager)
-        client = TestClient(app)
-        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        server, _ = _session_server(tool_manager)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        request.json = AsyncMock(return_value={"code": "print(1)"})
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        started, finish = asyncio.Event(), asyncio.Event()
 
-        async def close_mid_call(request_id: str) -> None:
-            tool_manager.during_execute = None
-            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close(request_id)))
+        async def pause_execution(request_id: str) -> None:
+            started.set()
+            await finish.wait()
 
-        tool_manager.during_execute = close_mid_call
-        response = client.post("/stateful_python_code_exec", json={"code": "print(1)"})
-
-        assert response.status_code == 404
-        # The close released the session before the call recorded it; the call released it after.
-        assert tool_manager.cleaned_up == ["rs-1", "rs-1"]
-        assert tool_manager.python_sessions == {}
-        assert "rs-1" not in server._timing_by_session
+        tool_manager.during_execute = pause_execution
+        tool_call = asyncio.create_task(server.execute_tool("stateful_python_code_exec", request))
+        await started.wait()
+        tool_manager.cleanup_error = RuntimeError("sandbox unreachable")
+        close = asyncio.create_task(
+            server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+        )
+        await asyncio.sleep(0)
+        closed_before_publish = close.done()
+        finish.set()
+        try:
+            assert not closed_before_publish
+            assert (await tool_call).body == b"4"
+            with pytest.raises(RuntimeError, match="sandbox unreachable"):
+                await close
+            assert "rs-1" in tool_manager.python_sessions
+            assert server._fence.closed_episode("rs-1") is None
+            tool_manager.cleanup_error = None
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            assert tool_manager.python_sessions == {}
+            assert "rs-1" not in server._timing_by_session
+        finally:
+            await asyncio.gather(tool_call, close, return_exceptions=True)
 
     def test_verify_then_close_releases_once_more_harmlessly(self) -> None:
         tool_manager = FakePythonToolManager()

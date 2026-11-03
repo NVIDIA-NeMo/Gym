@@ -29,16 +29,23 @@ import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
+from aiohttp import ClientTimeout
+from anyio import CancelScope
+from anyio.lowlevel import checkpoint_if_cancelled
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
+from nemo_skills.mcp.servers.python_tool import DirectPythonTool
 from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.mcp.utils import locate
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY, raise_for_status
+from nemo_gym.client import request as http_request
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
@@ -61,6 +68,93 @@ from nemo_gym.server_runtime import (
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _PythonExecution:
+    request_id: str
+    session_id: Optional[str] = None
+
+
+class NSToolsToolManager(ToolManager):
+    """Keep ownership of Python sessions until the sandbox acknowledges their deletion."""
+
+    def __init__(
+        self,
+        module_specs: Iterable[str],
+        overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(module_specs=module_specs, overrides=overrides, context=context)
+        self._execution: ContextVar[Optional[_PythonExecution]] = ContextVar("ns_tools_execution", default=None)
+        for tool in self._tools.values():
+            if isinstance(tool, DirectPythonTool):
+                self._track_python_requests(tool)
+
+    def _track_python_requests(self, tool: DirectPythonTool) -> None:
+        send_request = tool._sandbox._send_request
+
+        async def tracked_send_request(body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+            execution = self._execution.get()
+            if execution is not None and body.get("session_id") is not None:
+                execution.session_id = str(body["session_id"])
+                tool.requests_to_sessions[execution.request_id] = execution.session_id
+            # A DELETE must not overtake this POST and acknowledge 404 before it creates its session.
+            # Shield only this request (Skills bounds it by timeout + 5), never the full history replay.
+            try:
+                with CancelScope(shield=True):
+                    return await send_request(body, timeout)
+            finally:
+                await checkpoint_if_cancelled()
+
+        tool._sandbox._send_request = tracked_send_request
+
+    async def execute_tool(
+        self, raw_name: str, args: Dict[str, Any], extra_args: Optional[Dict[str, Any]] = None
+    ) -> object:
+        tool, _ = self._resolve(self._raw_to_qualified_map[raw_name])
+        request_id = (extra_args or {}).get("request_id")
+        if not isinstance(tool, DirectPythonTool) or request_id is None:
+            return await super().execute_tool(raw_name, args, extra_args)
+        execution = _PythonExecution(request_id=request_id)
+        token = self._execution.set(execution)
+        try:
+            return await super().execute_tool(raw_name, args, extra_args)
+        finally:
+            # Skills catches ordinary execution errors and overwrites the mapping with None; cancellation skips
+            # its assignment entirely. In either case the generated session may still need a DELETE.
+            if execution.session_id is not None and tool.requests_to_sessions.get(request_id) is None:
+                tool.requests_to_sessions[request_id] = execution.session_id
+            self._execution.reset(token)
+
+    async def cleanup_request(self, request_id: str) -> None:
+        for tool in self._tools.values():
+            if not isinstance(tool, DirectPythonTool):
+                await tool.cleanup_request(request_id)
+                continue
+            session_id = tool.requests_to_sessions.get(request_id)
+            if session_id is None:
+                tool.requests_to_sessions.pop(request_id, None)
+                continue
+
+            # Both cleanup_request and LocalSandbox.delete_session in the pinned Skills release suppress errors.
+            # Use the sandbox's resolved address and session routing header, and retain both maps on failure.
+            sandbox = tool._sandbox
+            session_id = str(session_id)
+            response = await http_request(
+                "DELETE",
+                f"http://{sandbox.host}:{sandbox.port}/sessions/{session_id}",
+                headers={"X-Session-ID": session_id},
+                timeout=ClientTimeout(total=10),
+            )
+            async with response:
+                if response.status not in (200, 404):
+                    await raise_for_status(response)
+                    raise RuntimeError(
+                        f"Sandbox did not acknowledge deletion of session {session_id}: {response.status}"
+                    )
+            sandbox.session_histories.pop(session_id, None)
+            tool.requests_to_sessions.pop(request_id, None)
 
 
 # ============================================================
@@ -297,7 +391,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             client_params["base_url"] = python_tool_url
             overrides["PythonTool"]["client_params"] = client_params
 
-        self.tool_manager = ToolManager(
+        self.tool_manager = NSToolsToolManager(
             module_specs=self.config.nemo_skills_tools,
             overrides=overrides,
             context=context,
@@ -314,6 +408,13 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         logger.info("NeMo Skills ToolManager initialized successfully")
 
     async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
+        """Run the tool before close can acknowledge releasing its Python session."""
+        # Skills records ownership only when execution returns. Close must wait for that record instead of
+        # fencing an empty session and relying on a later, unreported best-effort cleanup.
+        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+            return await self._execute_tool(tool_name, request)
+
+    async def _execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
         """
         Execute a nemo_skills tool by name.
 
