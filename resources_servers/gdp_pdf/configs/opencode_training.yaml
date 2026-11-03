@@ -5,11 +5,6 @@ config_paths:
   - resources_servers/gdp_pdf/configs/judge_model_openai.yaml
   - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
 
-token_id_capture:
-  enabled: true
-  dir: ${gdp_pdf_capture_dir}
-  delta_records: true
-
 gdp_pdf_opencode:
   responses_api_agents:
     opencode_agent:

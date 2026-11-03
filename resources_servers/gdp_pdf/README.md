@@ -265,34 +265,23 @@ Gym owns session cleanup and propagates infrastructure failures for retry.
 
 Use `configs/opencode_training.yaml` instead of the benchmark config. Set
 `gdp_pdf_train_jsonl` to your **training** JSONL, replace the dataset's `TBD`
-license with its actual license, set `gdp_pdf_capture_dir` to a
-run-specific capture directory, and `gdp_pdf_sandbox_image` as above. Rows use
+license with its actual license, and set `gdp_pdf_sandbox_image` as above. Rows use
 the existing GDP.pdf schema: `responses_create_params.input` contains the question;
 `verifier_metadata` contains `source_pdf`, `prompt` and `criteria`. Source paths
 resolve within `gdp_pdf_sandbox.resources_servers.gdp_pdf.documents_base_dir`.
 Never use the benchmark questions for optimization.
 
-The overlay enables Gym's shared exact-token/log-probability capture and disables
-OpenCode history compaction/pruning. Set sampling on the model server, matching
-the trainer; unsupported per-request sampling controls are rejected. NeMo RL
-must keep vLLM's tokenizer enabled (`skip_tokenizer_init: false`). This configuration
-uses the Environment Server integration in current Gym; it is not an overlay for
-an older NeMo RL/Gym checkout.
+The overlay opts the agent into shared capture and disables history compaction/pruning.
+The trainer owns capture storage and policy sampling; no GDP.pdf capture service is needed.
+For NeMo RL, use worker-owned token/media capture (`token_capture.enabled: true`)
+and history reconstruction (`token_capture.forest_training: true`, selection policy
+`returned_history`). Keep vLLM's tokenizer enabled (`skip_tokenizer_init: false`).
+See the [shared reconstruction guide](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/context-compaction.md)
+and [Omni capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml).
 
-Before optimization, inspect captured multi-tool rollouts: exact generated tokens
-and log probabilities must be present, `mask_sample` must be false, and the
-captured call chain must cover the graded answer. Incomplete/unresolved captures
-are masked by Gym, not re-tokenized or assigned zero reward. See the
-[shared training-capture guide](../../fern/versions/latest/pages/training-tutorials/external-agent-harnesses.mdx).
-
-Standalone file capture validates tokens, not learner image tensors. For NeMo RL
-vision training, use its worker-owned media capture (`token_capture.enabled: true`)
-and qualify the processed images through the learner. The existing
-[Omni capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml)
-and [capture design](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/design-docs/token-capture-ledger.md)
-describe that path. Successful evaluation alone does not qualify an RL optimizer run.
-
-The local Super smoke on November 2 produced tool/image rollouts, but standalone
-capture rejected token-prefix mismatches after tool-history serialization. That
-setup is not qualified for training. Preserve the masks; qualify the trainer's
-exact-prefix and media-capture path before using this overlay for optimization.
+**Training remains unqualified.** The Super tool/image smoke exposed token-prefix
+mismatches in standalone file capture. Use compatible Gym/NeMo-RL revisions and
+qualify a real optimizer update: captured tokens/log probabilities and processed
+images must reach the learner, and the accepted history must cover the graded
+answer without masking. Preserve capture failures; do not re-tokenize them or
+replace them with zero reward. Evaluation success alone does not establish this.
