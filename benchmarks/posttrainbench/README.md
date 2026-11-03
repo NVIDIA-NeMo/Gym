@@ -10,6 +10,10 @@ fails, weighted per benchmark with upstream's `scripts/factors.json` and average
 The tasks are upstream's own Harbor tasks (`src/harbor_adapter`, revision pinned in `prepare.py`), run on the
 `posttrainbench` environment server (the `harbor` server plus the weighted score) with Claude Code as the agent.
 
+For the walkthrough, see
+[Evaluate PostTrainBench](https://docs.nvidia.com/nemo/gym/latest/tutorials/evaluation-tutorials/posttrainbench).
+This file is the source-level reference.
+
 ## What differs from upstream's Harbor run
 
 Upstream runs the tasks with Harbor on Modal. `prepare.py` changes only what Modal provided:

@@ -1,0 +1,96 @@
+---
+title: "Evaluate PostTrainBench"
+description: "Give a coding agent 10 hours on one H100 to post-train a base model, then score the model it trained."
+position: 7
+---
+
+# Evaluate PostTrainBench
+
+[PostTrainBench](https://github.com/aisa-group/PostTrainBench) v1.2 ([paper](https://arxiv.org/abs/2603.08640), MIT)
+measures whether a coding agent can run a training job end to end. Each task gives the agent 10 hours on one H100 to
+post-train a small base model for one benchmark. The score is how well the model it trained does, not how its code
+reads.
+
+There are 24 tasks: six benchmarks (aime2025, arenahardwriting, gpqamain, gsm8k, healthbench, humaneval) times four
+base models (Qwen3-1.7B-Base, Qwen3-4B-Base, SmolLM3-3B-Base, gemma-3-4b-pt). Tasks are upstream's own Harbor task
+folders, run on the `posttrainbench` environment server (the
+[`harbor` server](https://github.com/NVIDIA-NeMo/Gym/blob/main/environment_servers/harbor/README.md) plus
+PostTrainBench's weighted score) with Claude Code as the agent.
+
+Source-level detail — what Gym changes from upstream's Modal run, and how the two prebuilt images are rebuilt — is in
+the [benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/posttrainbench/README.md).
+
+## Before you start
+
+<Warning>
+A full run is expensive. Every task holds two H100s in turn, one for the agent's 10 hours and one for the separate
+verifier, and each trained model is 3 to 9 GB that Gym carries from the agent sandbox to the verifier.
+</Warning>
+
+You need:
+
+- **An H100 sandbox deployment.** Set `OPENSANDBOX_DOMAIN_GPU` and `OPENSANDBOX_API_KEY_GPU`. See
+  [OpenSandbox](/infrastructure/sandbox/opensandbox).
+- **A registry the sandboxes can pull from.** All 24 tasks share two prebuilt `linux/amd64` images, pinned by digest
+  in `images.json`. The task image holds every benchmark's test data, as upstream's do, so keep it off a public
+  registry. If a task's files stop matching the digest, prepare stops and the benchmark README gives the rebuild
+  steps.
+- **`HF_TOKEN`**, read-only, with access to `google/gemma-3-4b-pt` and `Idavidrein/gpqa`. The agent can read this
+  token.
+- **A judge key**, `INFERENCE_API_KEY` by default.
+
+<Warning>
+**Give the agent a different key from the judges.** For arenahardwriting and healthbench, upstream also hands the
+agent a key for its own grader. The agent can read and use whatever key it is given, so point `agent_api_key_env` at a
+separate, budget-limited key on the same endpoint. Without one the agent gets no key at all, and its own grader for
+those two benchmarks cannot run; the final evaluation is unaffected.
+</Warning>
+
+## Run it
+
+The sandboxes call the policy model, so serve it somewhere they can reach and pass `++use_absolute_ip=true`. Only the
+model server is advertised at that address: the head server stays on loopback, because its configuration endpoint is
+unauthenticated.
+
+```bash
+gym eval prepare --benchmark posttrainbench
+gym eval run --benchmark posttrainbench --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
+  --model MODEL_NAME --output results/posttrainbench/rollouts.jsonl ++use_absolute_ip=true
+```
+
+`++ptb_max_concurrent_episodes=<n>` caps how many tasks run at once. A task that waits gives up after
+`ptb_queue_timeout_seconds` (default 72 h).
+
+## Smoke-test first
+
+Select a few tasks and shorten the agent's budget:
+
+```bash
+gym eval run --benchmark posttrainbench --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
+  --model MODEL_NAME --output results/posttrainbench/smoke.jsonl ++use_absolute_ip=true \
+  ++prepare_script_args.benchmarks=[gsm8k] ++prepare_script_args.models=[qwen3-1.7b] \
+  ++prepare_script_args.num_hours=1
+```
+
+<Warning>
+A selection is not the benchmark's score. Report `ptb/weighted_avg` only from a full 24-task run with the default
+10-hour budget.
+</Warning>
+
+## Read the metrics
+
+- **`ptb/weighted_avg`** — the run score, as upstream's `scripts/aggregate.py` computes it. It is reported only when
+  every expected task has a scored rollout in every repeat.
+- **`ptb/tasks_without_score`** — how many expected task/repeat pairs have no scored rollout. While this is above
+  zero, the weighted score is withheld rather than estimated.
+- **`ptb/<benchmark>`** — the mean reward over the scored base models for that benchmark.
+- **`ptb/judge_flagged`, `ptb/ptb_lookup_flagged`, `ptb/eval_failed`, `ptb/no_model`** — counts over the scored
+  rollouts.
+
+A missing score and an unsubmitted model are different outcomes, and the metrics keep them apart:
+
+- An episode that **explicitly submitted no model** is a measurement. It scores the base model's zero-shot baseline,
+  as upstream's `test.sh` records it, and it counts as scored.
+- An episode whose **judging did not finish** — a missing or unreadable verdict, or judges that ran without the
+  agent's transcript — is masked as inconclusive, as upstream's `collect.py` refuses unjudged runs. It is not scored,
+  so it raises `ptb/tasks_without_score` and withholds the weighted score. Resume the run to judge it again.
