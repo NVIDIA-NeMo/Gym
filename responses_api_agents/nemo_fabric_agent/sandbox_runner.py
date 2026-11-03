@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from shlex import quote
 
 from nemo_fabric import Fabric, FabricConfig, RunRequest
 from pydantic import BaseModel, ConfigDict, JsonValue
@@ -29,7 +30,12 @@ class Invocation(BaseModel):
 async def run(directory: Path) -> None:
     """Write Fabric's result atomically, including Relay files before close removes them."""
     invocation = Invocation.model_validate_json((directory / "input.json").read_text())
-    os.environ["ADAPTER_PYTHON"] = sys.executable
+    # Fabric launches adapters with `ADAPTER_PYTHON -m ...`. Isolate that interpreter
+    # too, while keeping the task's Python environment available to its shell tools.
+    adapter_python = directory / "adapter_python"
+    adapter_python.write_text(f'#!/bin/sh\nexec {quote(sys.executable)} -I -B "$@"\n')
+    adapter_python.chmod(0o700)
+    os.environ["ADAPTER_PYTHON"] = str(adapter_python)
     result = await Fabric().run(
         FabricConfig.from_mapping(invocation.config),
         base_dir=invocation.workdir,
