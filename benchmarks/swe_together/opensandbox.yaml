@@ -20,6 +20,9 @@ swe_together:
       # SWET adds the dedicated dependency proxy target per sandbox. Registry
       # domains must not be allowed directly: their request paths are filtered.
       sandbox_config:
+        # Keep the candidate sandbox alive when an individual process exhausts memory.
+        metadata:
+          nemo.nvidia.com/oom-kill: "process"
         provider_options:
           network_policy:
             defaultAction: deny
@@ -27,6 +30,8 @@ swe_together:
               - action: allow
                 target: ${oc.env:SWE_TOGETHER_POLICY_EGRESS_TARGET}
       judge_sandbox_config:
+        # The judge inherits sandbox_config keys it does not set.
+        metadata: {}
         provider_options:
           network_policy:
             defaultAction: deny

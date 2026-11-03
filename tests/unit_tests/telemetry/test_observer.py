@@ -27,6 +27,7 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk.metrics")
 
+import nemo_gym.client.http_client
 from nemo_gym.telemetry import observer  # noqa: E402
 from nemo_gym.telemetry import setup as telemetry_setup  # noqa: E402
 
@@ -211,7 +212,7 @@ class TestRequestCounters:
     @staticmethod
     def _serve(app, receive, collected=None):
         """Run one request through the outermost middleware and return the totals, read before the observer stops."""
-        from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+        from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 
         async def send(_message):
             pass
@@ -308,11 +309,11 @@ class TestRequestCounters:
 def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(collected, monkeypatch, prefix_middleware):
     from fastapi import FastAPI, Response
 
-    from nemo_gym import server_utils
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+    from nemo_gym.server_runtime import base_server
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
     async def run():
         ready = asyncio.Event()
@@ -338,7 +339,7 @@ def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(colle
             app.add_middleware(_CaptureMiddleware, store=None, model_server_name="test")
         elif prefix_middleware == "resources":
             app.add_middleware(RolloutContextMiddleware)
-        app.add_middleware(server_utils.ClientDisconnectCancellationMiddleware)
+        app.add_middleware(base_server.ClientDisconnectCancellationMiddleware)
 
         async def send(_message):
             pass
@@ -407,11 +408,11 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 ):
     from fastapi import FastAPI, Response
 
-    from nemo_gym import server_utils
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+    from nemo_gym.server_runtime import base_server
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
     async def run():
         app = FastAPI()
@@ -425,7 +426,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
             app.add_middleware(_CaptureMiddleware, store=None, model_server_name="test")
         elif prefix_middleware == "resources":
             app.add_middleware(RolloutContextMiddleware)
-        app.add_middleware(server_utils.ClientDisconnectCancellationMiddleware)
+        app.add_middleware(base_server.ClientDisconnectCancellationMiddleware)
 
         ready = asyncio.Event()
         statuses = []
@@ -476,9 +477,9 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 
 
 def test_cancellation_before_routing_uses_one_unmatched_bucket(collected, monkeypatch):
-    from nemo_gym import server_utils
+    from nemo_gym.server_runtime import base_server
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
     async def run():
         ready = asyncio.Event()
@@ -490,7 +491,7 @@ def test_cancellation_before_routing_uses_one_unmatched_bucket(collected, monkey
         async def send(_message):
             pass
 
-        middleware = server_utils.ClientDisconnectCancellationMiddleware(unrouted)
+        middleware = base_server.ClientDisconnectCancellationMiddleware(unrouted)
         async with observer.observe_event_loop("server"):
             for index in range(3):
                 ready.clear()
@@ -534,20 +535,18 @@ def test_every_process_reports_its_pid_as_a_resource_attribute():
 
 
 def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, monkeypatch):
-    from nemo_gym import server_utils
-
     seen = []
 
     async def fake_send(*_args, **_kwargs):
         seen.append(observer.request_counts().outbound_in_flight)
         return "response"
 
-    monkeypatch.setattr(server_utils, "_request_with_retries", fake_send)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: False)
+    monkeypatch.setattr("nemo_gym.client.http_client._request_with_retries", fake_send)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _group: False)
 
     async def call():
         async with observer.observe_event_loop("server"):
-            assert await server_utils.request("GET", "http://example.invalid/x") == "response"
+            assert await nemo_gym.client.http_client.request("GET", "http://example.invalid/x") == "response"
             return observer.request_counts().outbound_in_flight
 
     assert asyncio.run(call()) == 0
@@ -559,7 +558,7 @@ def test_responses_are_counted_by_status_code_and_unhandled_errors_separately(co
     from fastapi import FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
-    from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+    from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 
     app = FastAPI()
 
@@ -658,11 +657,11 @@ class TestDriverMetrics:
     def test_output_writes_record_their_duration_and_size(self, collected):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollouts.rollout_store import _record_output_write
 
         async def run():
             async with observer.observe_event_loop("driver"):
-                _record_output_write(time.perf_counter(), b"x" * 999)
+                _record_output_write(time.perf_counter(), b"x" * 999 + b"\n")
                 return collected()
 
         exported = asyncio.run(run())
@@ -673,7 +672,7 @@ class TestDriverMetrics:
     def test_nothing_is_recorded_without_an_observer(self):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollouts.rollout_store import _record_output_write
 
         assert observer.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")
@@ -681,7 +680,7 @@ class TestDriverMetrics:
 
 class TestRolloutShape:
     def _record(self, collected, row, result):
-        from nemo_gym.rollout_collection import _record_rollout_shape
+        from nemo_gym.rollouts.rollout_collection import _record_rollout_shape
 
         async def run():
             async with observer.observe_event_loop("driver"):

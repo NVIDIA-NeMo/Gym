@@ -45,8 +45,10 @@ generative_reward_model_simple_agent:
 
 generative_reward_model_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: generative_reward_model_simple_agent
+      resources_tool_transports:
+      - direct_http

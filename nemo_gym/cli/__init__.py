@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nemo_gym.cli._compat import moved_attr_getter
+from nemo_gym.utils.compat import moved_attr_getter
 
 
 # The single `nemo_gym/cli.py` module was split into the `nemo_gym.cli` package. Its public
@@ -42,6 +42,6 @@ __getattr__ = moved_attr_getter(
         "VersionConfig": "nemo_gym.cli.general",
         "version": "nemo_gym.cli.general",
         # Never actually lived in cli; reachable via the old module's top-level import.
-        "GlobalConfigDictParserConfig": "nemo_gym.global_config",
+        "GlobalConfigDictParserConfig": "nemo_gym.config.global_config",
     },
 )

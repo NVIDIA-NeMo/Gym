@@ -7,7 +7,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.agent_registry import discover_agents
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 

@@ -20,7 +20,7 @@ cut off (`incomplete_details` set) or has no final answer scores 0 without judge
 A judge reply that was cut off or has no `\boxed{}` score is a failed judge call, as in the
 paper, which reruns incomplete panels: the rollout goes to the failures sidecar and is retried
 on resume, and a failure in any judge fails the whole panel. This departs from the default in
-`nemo_gym/judge.py` (an unparseable reply scores as wrong), as AA-LCR v1.1 does for its JSON
+`nemo_gym/verification/judge.py` (an unparseable reply scores as wrong), as AA-LCR v1.1 does for its JSON
 verdicts. Failed rollouts are left out of the metrics by default; for reported numbers, retry
 them on resume or count them as zero with `count_failure_classes_as_zero: [judge_failed]`.
 

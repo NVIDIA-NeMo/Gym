@@ -166,10 +166,9 @@ finish. For example, set `openclaw_agent.responses_api_agents.openclaw_agent.mod
 to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and EnvironmentServer episode
 deadline when a task needs more total time; increasing those alone does not raise the model-idle limit.
 
-The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64, with Python 3.8 or later for the
-supervisor. Session setup installs missing Python and Bash with apt-get or apk
-when running as root; otherwise preinstall Python 3.8+ and Bash. Existing tools
-are preserved. Node 22.19.0 and OpenClaw are installed under
+The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64. The task image needs no Python:
+the supervisor and harness runner are Bash scripts. Session setup installs a missing Bash with apt-get or apk
+when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 22.19.0 and OpenClaw are installed under
 `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
@@ -189,7 +188,21 @@ Per-session OpenClaw state/config, prompt, transcript, and supervisor output are
 or creating bootstrap files in the task repository. Task HOME, XDG directories, PATH and
 dependencies are preserved for tools and verification.
 The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
-execution and required external HTTP/MCP tools are unsupported. OpenClaw's internal `gateway`
+execution and required direct-HTTP tool grants are unsupported. MCP tool grants become streamable-HTTP
+`mcp.servers` entries, and the model sees their tools as `<grant>__<tool>`; `mcp_tool_timeout_seconds` sets
+their per-request timeout. Before the agent runs, the adapter connects to each grant with
+`openclaw mcp probe <grant> --json`: a required grant that does not connect fails the activation, and an optional
+one is left out and reported as an `mcp_server_skipped` gap. The pinned `probe --json` exits 0 when a connection
+fails, so a grant counts as connected only when the JSON lists it under `servers` with no diagnostic for it.
+Each probe runs under the same process supervisor as the agent, with its own directory and cleanup receipt, so a
+probe that exceeds its 120-second limit is stopped inside the sandbox (some providers stop only their local client on
+an exec timeout). The agent starts only after the probe's termination is confirmed, and session close stops a probe
+that is still running before it releases the sandbox. A grant can pass the probe and still fail when the agent
+starts; OpenClaw then logs `failed to start server "<grant>"` and runs on without its tools. The adapter reads that
+from the run's stderr: a required grant fails the activation with HTTP 502, and an optional one is reported as an
+`mcp_server_skipped` gap. A probe failure in a 502 or a gap names only the error kind, an HTTP status, a bootstrap
+class (such as a missing executable) and the configured server's URL origin; the probe's own output, which can
+echo server responses, stays in its files in the session directory. OpenClaw's internal `gateway`
 exec host refers to the embedded CLI process inside the borrowed sandbox.
 
 Sandbox request support is deliberately explicit:
@@ -222,8 +235,14 @@ Sandbox request support is deliberately explicit:
   same configured-system, request-instructions, input-system order.
 
 Successful and limit-truncated Responses retain reasoning, tool calls/results, and final or partial text.
-Runtime, provider, and upstream model failures raise an error before verification, with transcript
-evidence and failed status retained in the observations returned by close.
+Sandbox sessions forward their invocation ID as `x-session-id`, separately from the rollout URL,
+so capture can attach rejected model attempts without a response ID to the correct invocation.
+
+A terminal assistant model error returns a failed response with its original message, partial
+output, usage, and `ng_agent_outcome`. HTTP errors retain their upstream status as
+`model_request_error`; unrecognized causes remain `unknown`. The environment decides whether
+to verify, retry, or fail using its outcome policy. Runtime, cancellation, and cleanup failures
+still raise errors, with transcript evidence retained by close.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.
@@ -233,21 +252,22 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
-An explicit wall or model-output limit returns partial output as `incomplete`; upstream/model errors
-raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
+An explicit wall or model-output limit returns partial output as `incomplete`.
+Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 The sandbox launcher sets `OPENCLAW_NO_RESPAWN=1` to keep the CLI in the supervised group.
-The supervisor and the runner above OpenClaw run as `gym-supervisor` and `gym-runner` (links to the
-sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
-`pkill python3` or `killall python3` does not end OpenClaw.
+The supervisor and the runner above OpenClaw are bash scripts, so a task agent's
+`pkill -f python3`, `pkill python3` or `killall python3` does not end OpenClaw.
 Services must use task-owned files rather than the temporary agent session directory. Close is serialized and checks the receipt, process handle,
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative termination evidence block verification. Missing evidence remains retryable;
