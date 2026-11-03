@@ -235,7 +235,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             if failure is not None:
                 failure.agent_close = agent_close
                 failure.agent_observations = agent_close.agent_observations if agent_close else None
-                failure.trajectory = request.trajectory_for_collection(agent_close.trajectory) if agent_close else None
+                failure.trajectory = agent_close.trajectory if agent_close else None
                 failure.cleanup_receipts = state.cleanup_receipts
                 (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
 
@@ -370,7 +370,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(trajectory),
+                        "ng_trajectory": trajectory,
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -390,7 +390,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 activations=activations,
                 agent_close=agent_close,
                 agent_observations=agent_close.agent_observations if agent_close else None,
-                trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                trajectory=agent_close.trajectory if agent_close else None,
                 cleanup_receipts=state.cleanup_receipts,
                 artifact_directory=str(state.directory),
                 dependency_error=dependency,
