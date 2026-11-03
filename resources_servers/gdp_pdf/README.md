@@ -291,3 +291,8 @@ and qualify the processed images through the learner. The existing
 [Omni capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml)
 and [capture design](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/design-docs/token-capture-ledger.md)
 describe that path. Successful evaluation alone does not qualify an RL optimizer run.
+
+The local Super smoke on November 2 produced tool/image rollouts, but standalone
+capture rejected token-prefix mismatches after tool-history serialization. That
+setup is not qualified for training. Preserve the masks; qualify the trainer's
+exact-prefix and media-capture path before using this overlay for optimization.
