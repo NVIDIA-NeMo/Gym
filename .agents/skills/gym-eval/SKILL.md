@@ -154,9 +154,11 @@ with the same options without `--inspect`. The repin target must be the Gym that
 
 Where readers run in Slurm steps (`NEMO_GYM_REMOTE_READER_SRUN`), an inspect that could not read
 returns `UNKNOWN` with "nothing was read or decided". That is not a problem of the run: read the
-reason on stderr (`gym: the reader did not run: ...`). When it says that reader steps are already
-running or pending, the per-user limit is reached: raise `NEMO_GYM_REMOTE_READER_MAX` (default 8)
-and run the same command again. Other reasons (the step did not
+reason on stderr (`gym: the reader did not run: ...`). A reader at the per-user limit of reader steps
+(`NEMO_GYM_REMOTE_READER_MAX`, default 8) queues first, printing `gym-reader progress: queued behind N
+reader steps`, and runs once one ends; it waits up to `NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S` (default 1800,
+0 does not wait). When the reason still says that reader steps are already running or pending, raise the
+limit or the wait and run the same command again. Other reasons (the step did not
 start within its wait) have their own remedy.
 
 The output is one JSON line, the recovery outcome, and nothing is written; the exit code is 0 only
