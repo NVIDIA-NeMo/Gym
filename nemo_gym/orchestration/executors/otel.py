@@ -16,7 +16,8 @@
 """The OpenTelemetry collector that runs beside every benchmark job.
 
 One collector per benchmark job, in its own `srun --overlap` step like any other service. It
-scrapes each model service's Prometheus `/metrics` on localhost, accepts OTLP from the job's own
+scrapes each model service's Prometheus `/metrics` on the node that serves it (`localhost` for
+its own node, a hostname the batch script exports for any other), accepts OTLP from the job's own
 processes, stamps the resource attributes the shared dashboards filter on (`user`, `run_id`,
 `slurm_job_id`, plus `benchmark`, `cluster`, `model`), and exports to the configured OTLP/HTTP
 endpoint (when remote export is enabled) and to `<job dir>/otel/*.jsonl`.
@@ -29,6 +30,7 @@ attribute and silently drops payloads without it while still answering 200.
 import getpass
 import logging
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import yaml
@@ -47,6 +49,21 @@ COLLECTOR_HEALTH_PORT = 13133
 OTLP_GRPC_PORT = 4317
 OTLP_HTTP_PORT = 4318
 GYM_TELEMETRY_EXTRA = "telemetry"
+
+# The batch script exports these in a multi-node job: the hostname of each allocation node, and of
+# the node the collector runs on. Services on other nodes reach the collector through the latter.
+COLLECTOR_HOST_VAR = "GYM_OTEL_COLLECTOR_HOST"
+LOCALHOST = "localhost"
+
+
+def node_host_var(index: int) -> str:
+    """The env var the batch script exports with the hostname of allocation node `index`."""
+    return f"GYM_OTEL_NODE_{index}"
+
+
+def env_host(var: str) -> str:
+    """A scrape host the collector expands from its own environment when it starts."""
+    return f"${{env:{var}}}"
 
 
 def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True) -> dict[str, str]:
@@ -163,8 +180,20 @@ def _policy_model_name(config: SubmitConfig) -> str | None:
     return service.served_model_name or service.model
 
 
-def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path) -> str:
+def render_collector_config(
+    config: SubmitConfig,
+    benchmark_name: str,
+    remote_bench_dir: Path,
+    *,
+    scrape_hosts: Mapping[str, Sequence[str]] | None = None,
+    node_hosts: Sequence[str] = (LOCALHOST,),
+) -> str:
     """The collector's YAML for one benchmark job.
+
+    `scrape_hosts` names the host(s) each model service's `/metrics` answers on and `node_hosts`
+    the nodes whose DCGM and node exporters to scrape; both default to `localhost`, which is right
+    for a single-node job. The executor passes the placement it made for a multi-node job, with
+    hosts it only knows inside the job written as `${env:...}` (see `node_host_var`).
 
     `run_id` is the submission's gym job id, which is the job directory's parent by construction
     (`<output_path>/<gym_job_id>/<benchmark>`); `cluster` is the sole compute key, the same value
@@ -175,13 +204,19 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     otel_dir = remote_bench_dir / COLLECTOR_DIR
     token = f"${{env:{obs.token_env}}}"
     interval = f"{obs.scrape_interval_seconds}s"
+    scrape_hosts = scrape_hosts or {}
 
     # The job name is what scraped data carries as `service.name`, and so becomes its display identity.
     scrape_configs = [
         {
             "job_name": f"{obs.component}/{name}",
             "scrape_interval": interval,
-            "static_configs": [{"targets": [f"localhost:{port}"], "labels": {"gym_service": name}}],
+            "static_configs": [
+                {
+                    "targets": [f"{host}:{port}" for host in scrape_hosts.get(name, (LOCALHOST,))],
+                    "labels": {"gym_service": name},
+                }
+            ],
         }
         for name, port in scrape_targets(config).items()
     ]
@@ -193,7 +228,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
                 {
                     "job_name": job_name,
                     "scrape_interval": interval,
-                    "static_configs": [{"targets": [f"localhost:{port}"]}],
+                    "static_configs": [{"targets": [f"{host}:{port}" for host in node_hosts]}],
                 }
             )
     # Each producer's own `service.name` survives as the display identity before `resource` overwrites it.

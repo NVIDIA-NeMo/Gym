@@ -35,7 +35,7 @@ from nemo_gym.orchestration.executors.otel import (
     scrape_targets,
 )
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script, render_job_collector_config
 from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME
 
 
@@ -438,6 +438,128 @@ def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
     assert " --nodes=1 --ntasks=1" not in _collector_line(_script(_config()))
 
 
+def _vllm(**overrides):
+    return {"type": "vllm", "container": "vllm:latest", "model": "/checkpoint", "port": 8000, **overrides}
+
+
+def _one_node_pools(*names):
+    return {name: {"partition": "p", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 8} for name in names}
+
+
+def _replica_config(**otel):
+    """Three vLLM services, each pinned to its own one-node pool, as the multi-node eval configs lay them out."""
+    return _config(
+        services={
+            "policy": _vllm(node_pool="gpu"),
+            "policy_b": _vllm(node_pool="gpu2"),
+            "policy_c": _vllm(node_pool="gpu3"),
+        },
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": _one_node_pools("gpu", "gpu2", "gpu3"),
+            }
+        },
+        otel=otel,
+    )
+
+
+def _job_scrapes(config):
+    compute = next(iter(config.compute.values()))
+    doc = yaml.safe_load(render_job_collector_config(config, compute, "scicode", BENCH_DIR))
+    return {
+        s["job_name"]: s["static_configs"][0]["targets"]
+        for s in doc["receivers"]["prometheus"]["config"]["scrape_configs"]
+    }
+
+
+def test_job_collector_scrapes_each_pinned_service_on_its_own_node():
+    """The collector sits on the policy's node; a replica on another node is scraped by that node's
+    hostname, which the script exports, instead of as a second copy of the policy."""
+    scrapes = _job_scrapes(_replica_config())
+    assert scrapes["gym-vllm/policy"] == ["localhost:8000"]
+    assert scrapes["gym-vllm/policy_b"] == ["${env:GYM_OTEL_NODE_1}:8000"]
+    assert scrapes["gym-vllm/policy_c"] == ["${env:GYM_OTEL_NODE_2}:8000"]
+
+
+def test_job_collector_scrapes_the_exporters_of_every_node():
+    scrapes = _job_scrapes(_replica_config())
+    assert scrapes["dcgm"] == ["localhost:9400", "${env:GYM_OTEL_NODE_1}:9400", "${env:GYM_OTEL_NODE_2}:9400"]
+    assert scrapes["node"] == ["localhost:9100", "${env:GYM_OTEL_NODE_1}:9100", "${env:GYM_OTEL_NODE_2}:9100"]
+
+
+def test_job_collector_follows_the_collector_to_the_policys_pool():
+    """With the policy pinned to the second pool the driver and collector move there, and `localhost` with them."""
+    config = _config(
+        services={"judge": _vllm(node_pool="gpu"), "policy": _vllm(node_pool="gpu2")},
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": _one_node_pools("gpu", "gpu2"),
+            }
+        },
+    )
+    scrapes = _job_scrapes(config)
+    assert scrapes["gym-vllm/policy"] == ["localhost:8000"]
+    assert scrapes["gym-vllm/judge"] == ["${env:GYM_OTEL_NODE_0}:8000"]
+    assert scrapes["dcgm"] == ["${env:GYM_OTEL_NODE_0}:9400", "localhost:9400"]
+
+
+def test_job_collector_scrapes_every_server_of_a_server_per_node_tier():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm_pd",
+                "container": "vllm:latest",
+                "model": "/checkpoint",
+                "port": 8000,
+                "server_per_node": True,
+                "prefill": {"node_pool": "prefill"},
+                "decode": {"node_pool": "decode"},
+            }
+        },
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": {
+                    "prefill": {"partition": "p", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 8},
+                    "decode": {"partition": "p", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 8},
+                },
+            }
+        },
+    )
+    scrapes = _job_scrapes(config)
+    assert scrapes["gym-vllm/policy-prefill"] == ["localhost:8001", "${env:GYM_OTEL_NODE_1}:8001"]
+    assert scrapes["gym-vllm/policy-decode"] == ["${env:GYM_OTEL_NODE_2}:8002", "${env:GYM_OTEL_NODE_3}:8002"]
+    assert scrapes["gym-vllm/policy"] == ["localhost:8000"]  # the router, beside the driver
+
+
+def test_job_collector_of_a_single_node_job_scrapes_localhost_only():
+    config = _config(services={"policy": _vllm(), "policy_b": _vllm(port=8001)})
+    scrapes = _job_scrapes(config)
+    assert scrapes["gym-vllm/policy"] == ["localhost:8000"]
+    assert scrapes["gym-vllm/policy_b"] == ["localhost:8001"]
+    assert scrapes["dcgm"] == ["localhost:9400"]
+    assert "GYM_OTEL_NODE_" not in _script(config)
+
+
+def test_script_exports_the_node_hostnames_the_collector_config_refers_to():
+    script = _script(_replica_config())
+    exports = script.index('export GYM_OTEL_NODE_1="${gym_nodes[1]}"')
+    assert 'export GYM_OTEL_NODE_0="${gym_nodes[0]}"' in script
+    assert 'export GYM_OTEL_NODE_2="${gym_nodes[2]}"' in script
+    assert 'export GYM_OTEL_COLLECTOR_HOST="${gym_nodes[0]}"' in script
+    # Declared before the collector step, which inherits them.
+    assert script.index("gym_nodes=($(scontrol") < exports < script.index("# service: otel_collector")
+    assert "GYM_OTEL_NODE_" not in _script(_replica_config(enabled=False))
+
+
 def test_script_runs_the_collector_on_the_node_by_default():
     line = next(
         line for line in _script(_config()).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
@@ -636,8 +758,9 @@ def test_vllm_traces_need_the_collector():
     assert "--otlp-traces-endpoint" not in _script(_config(otel={"enabled": False, "vllm_traces": True}))
 
 
-def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
-    config = _config(
+def _pd_config(nodes_per_pool=1, **pd_overrides):
+    pool = {"partition": "batch", "nodes": nodes_per_pool, "ntasks_per_node": 1, "gpus_per_node": 8}
+    return _config(
         services={
             "policy": {
                 "type": "vllm_pd",
@@ -646,6 +769,7 @@ def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
                 "port": 8000,
                 "prefill": {"node_pool": "prefill"},
                 "decode": {"node_pool": "decode"},
+                **pd_overrides,
             }
         },
         compute={
@@ -653,15 +777,57 @@ def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
                 "type": "slurm",
                 "account": "acct",
                 "hostname": None,
-                "node_pools": {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}},
+                "node_pools": {"prefill": pool, "decode": pool},
             }
         },
         otel={"vllm_traces": True},
     )
-    script = _script(config)
-    traced = [line for line in script.splitlines() if "--otlp-traces-endpoint" in line]
-    assert len(traced) == 1
-    assert "--port 8001" in traced[0]  # the prefill tier, on the collector's node
+
+
+def test_vllm_traces_from_another_node_go_to_the_collectors_host():
+    """A tier on another node cannot reach the collector on localhost; it exports to the collector's node."""
+    script = _script(_pd_config())
+    traced = {
+        ("8001" if "--port 8001" in line else "8002"): line
+        for line in script.splitlines()
+        if "--otlp-traces-endpoint" in line
+    }
+    assert (
+        f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in traced["8001"]
+    )  # prefill, beside it
+    assert f"--otlp-traces-endpoint http://$GYM_OTEL_COLLECTOR_HOST:{OTLP_HTTP_PORT}/v1/traces" in traced["8002"]
+    assert 'export GYM_OTEL_COLLECTOR_HOST="${gym_nodes[0]}"' in script
+
+
+def test_vllm_traces_skip_a_ray_serve_service_on_another_node():
+    """The gateway hands `--extra-args` to vLLM as an argv without a shell, so `$GYM_OTEL_COLLECTOR_HOST`
+    would arrive unexpanded; beside the collector the literal `localhost` still works."""
+    remote = _config(
+        services={"policy": _vllm(node_pool="gpu"), "scorer": _vllm(node_pool="gpu2", use_ray_serve=True)},
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": _one_node_pools("gpu", "gpu2"),
+            }
+        },
+        otel={"vllm_traces": True},
+    )
+    script = _script(remote)
+    scorer = next(line for line in script.splitlines() if "--output=logs/scorer-" in line)
+    assert "--otlp-traces-endpoint" not in scorer
+    assert "$GYM_OTEL_COLLECTOR_HOST" not in scorer
+    assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in _policy_line(script)
+
+    local = _script(_config(services={"policy": _vllm(use_ray_serve=True)}, otel={"vllm_traces": True}))
+    assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in _policy_line(local)
+
+
+def test_vllm_traces_skip_a_tier_with_a_server_on_every_node():
+    """Its command builder starts one server per node; none of them is handed the flag."""
+    script = _script(_pd_config(nodes_per_pool=2, server_per_node=True))
+    assert "--otlp-traces-endpoint" not in script
 
 
 def test_script_leaves_the_driver_alone_when_disabled():

@@ -729,6 +729,62 @@ def test_resubmit_without_auth_updates_the_collector_and_can_restore_remote_expo
     assert _sbatch_env(slurm_bin)["NVAUTH_TOKEN"] == "new-token"
 
 
+def _two_node_config(tmp_path: Path) -> SubmitConfig:
+    """A policy beside the driver and a second server pinned to a second one-node pool."""
+    pool = {"partition": "p", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 8}
+    vllm = {"type": "vllm", "container": "vllm:latest", "model": "org/model", "port": 8000}
+    return SubmitConfig.model_validate(
+        {
+            "services": {"policy": {**vllm, "node_pool": "gpu"}, "policy_b": {**vllm, "node_pool": "gpu2"}},
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "a",
+                    "hostname": None,
+                    "node_pools": {"gpu": pool, "gpu2": pool},
+                }
+            },
+            "driver": {"container": "python:3.12", "policy_model": "policy", "benchmarks": {"gsm8k": {}, "mmlu": {}}},
+            "job": {"output_path": str(tmp_path)},
+            "otel": {"token_env": "NVAUTH_TOKEN", "endpoint": "https://otel.example", "service_name": "s"},
+        }
+    )
+
+
+def _scrape_targets(collector_path: Path) -> dict[str, list[str]]:
+    doc = yaml.safe_load(collector_path.read_text())
+    return {
+        s["job_name"]: s["static_configs"][0]["targets"]
+        for s in doc["receivers"]["prometheus"]["config"]["scrape_configs"]
+    }
+
+
+def test_resubmit_refreshes_the_collector_only_with_hosts_the_queued_job_sh_exports(
+    tmp_path: Path, slurm_bin: Path, ssh_like_shell: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job.sh written before the script exported the nodes' hostnames keeps scraping localhost;
+    one that exports them gets the remote targets."""
+    monkeypatch.setenv("NVAUTH_TOKEN", "t")
+    job_dir = _staged_run(tmp_path, config=_two_node_config(tmp_path))
+    collector_path = job_dir / "otel" / "collector.yaml"
+    legacy_job_sh = (job_dir / "job.sh").read_text()
+    assert 'export GYM_OTEL_NODE_0="' not in legacy_job_sh
+
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+    assert "GYM_OTEL_NODE_" not in collector_path.read_text()
+    assert _scrape_targets(collector_path)["gym-vllm/policy_b"] == ["localhost:8000"]
+    assert (job_dir / "job.sh").read_text() == legacy_job_sh
+
+    (job_dir / "job.sh").write_text(legacy_job_sh + 'export GYM_OTEL_NODE_0="${gym_nodes[0]}"\n')
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+    targets = _scrape_targets(collector_path)
+    assert targets["gym-vllm/policy"] == ["localhost:8000"]
+    assert targets["gym-vllm/policy_b"] == ["${env:GYM_OTEL_NODE_1}:8000"]
+    assert targets["dcgm"] == ["localhost:9400", "${env:GYM_OTEL_NODE_1}:9400"]
+
+
 def test_resubmit_missing_auth_does_not_change_an_active_runs_collector(
     tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
