@@ -85,9 +85,10 @@ def ungraded(task: int = 0, **extra) -> dict:
     return ident(task, reward=1.0, response=ANSWER, ng_trajectory=trajectory, **extra)
 
 
-def verifier_patch_masked(task: int = 0, *, intact: bool = True) -> dict:
-    """A result masked because its verifier produced no verdict for the workspace patch it was given, saved with the
-    patch and its sha256 (``intact`` False: the saved patch does not hash to the saved digest)."""
+def verifier_patch_masked(task: int = 0, *, intact: bool = True, collected: bool = True) -> dict:
+    """A result masked because its verifier produced no verdict for the workspace patch it collected, saved with the
+    patch and its sha256 (``intact`` False: the saved patch does not hash to the saved digest). ``collected`` False: a
+    verifier that read the patch from the agent session at verify time, with no patch collection of its own."""
     import hashlib
 
     patch = "diff --git a/x b/x\n+fix\n"
@@ -112,6 +113,7 @@ def verifier_patch_masked(task: int = 0, *, intact: bool = True) -> dict:
         _ng_failure_events={event["event_id"]: event},
         model_patch=patch,
         model_patch_sha256=digest,
+        **({"patch_collection_time_s": 1.5, "verification_time_s": 30.0} if collected else {}),
     )
 
 
@@ -576,4 +578,14 @@ def test_the_cluster_projection_reverifies_a_saved_patch_without_carrying_it(tmp
         CollectedEvidence.model_validate_json(raw.stdout), max_infra_retries=3, max_walltime_s=None, live_job=False
     )
     assert d.identities[IdentityState.JUDGE_RECOVERABLE] == [(0, 0)]
+    assert d.identities[IdentityState.MASKED] == [(1, 0)]
+
+
+def test_a_saved_patch_of_a_verifier_that_reads_the_agent_session_is_not_reverified() -> None:
+    # Such a verifier would grade an empty patch without its session: the mask stays, as before.
+    row = verifier_patch_masked(collected=False)
+    assert reverification_cause(saved_row_evidence(row)) is None
+    d = decide_recovery(
+        materialized=inventory(2), results=[scored(0), row | {"_ng_task_index": 1}], failures=[], budget=OK_BUDGET
+    )
     assert d.identities[IdentityState.MASKED] == [(1, 0)]

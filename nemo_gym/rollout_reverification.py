@@ -702,6 +702,29 @@ def _rollout_response(rollout: Dict[str, Any]) -> Any:
     return rollout["response"]
 
 
+# Resources server implementations whose /verify grades a saved workspace patch given back to it
+# (``saved_model_patch``) on a fresh sandbox. Every other server reads the patch from the agent session at verify
+# time and would grade an empty one, so a saved patch is never sent to it.
+_SAVED_PATCH_REPLAY_SERVERS = frozenset({"deepswe"})
+
+
+def check_saved_patch_replay(
+    row: Dict[str, Any], resources_server_name: str, global_config_dict: Union[Dict[str, Any], "DictConfig"]
+) -> None:
+    """Refuse to send a saved patch (``saved_model_patch``) to a resources server that does not replay one."""
+    if "saved_model_patch" not in row:
+        return
+    block = global_config_dict.get(resources_server_name)
+    implementations = (
+        list((block.get("resources_servers") or {}).keys()) if isinstance(block, (dict, DictConfig)) else []
+    )
+    if len(implementations) != 1 or implementations[0] not in _SAVED_PATCH_REPLAY_SERVERS:
+        raise ConfigError(
+            f"reverify: saved model_patch replay is unsupported by resources server {resources_server_name!r} "
+            f"({implementations}); retain the original patch and failure"
+        )
+
+
 # Collection's stamps naming the Environment Server and its result type: kept on the re-verified row, never sent
 # to /verify.
 _IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
@@ -856,6 +879,7 @@ def _run_verification_payloads(
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
             rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
+            check_saved_patch_replay(row, rs_name, server_client.global_config_dict)
             request_row = {
                 key: value
                 for key, value in row.items()

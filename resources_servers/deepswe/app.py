@@ -530,7 +530,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 else:
                     model_patch = saved
                     replayed = True
-                    session_id = f"replay-{body.saved_model_patch_sha256[:16]}"
+                    session_id = f"replay-{body.saved_model_patch_sha256[:16]}-{uuid.uuid4().hex[:8]}"
             elif agent_session is None:
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
                 failure_kind = SESSION_LOST
