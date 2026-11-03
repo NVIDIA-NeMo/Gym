@@ -22,6 +22,7 @@ to add a new environment.
 """
 
 import importlib
+import logging
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request
@@ -45,6 +46,9 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _import_class(dotted_path: str) -> type:
@@ -86,6 +90,8 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     config: OpenEnvResourcesServerConfig
     # Keyed by the session cookie's SESSION_ID_KEY, which a typed seed binds to its resources_session_id.
     _sessions: Dict[str, SessionState] = {}
+    # Failed resets whose cleanup also failed still belong to the session's eventual close.
+    _pending_envs: Dict[str, Any] = {}
     # The episode and task each Environment Server session was seeded for, keyed by resources_session_id.
     _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = {}
     _fence: Optional[ResourcesSessionFence] = None
@@ -96,6 +102,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         """Initialize private attributes: session stores and dynamically imported classes."""
         self._sessions = {}
+        self._pending_envs = {}
         self._session_episodes = {}
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
         self._env_class = _import_class(self.config.env_class)
@@ -216,23 +223,35 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionLostError("No active OpenEnv session for this request. Call /seed_session first.")
         return session
 
-    def _new_session(self) -> SessionState:
+    def _new_session(self, session_id: str) -> SessionState:
         """Create an environment instance, call reset(), and wrap it in session state.
 
         Calls env.reset() directly with only the configured reset_kwargs, because
         some OpenEnv environments don't accept the extra seed/episode_id kwargs
         that reset_async() injects.
         """
+        self._close_pending_env(session_id)
         env = self._env_class()
+        self._pending_envs[session_id] = env
         try:
             initial_obs = env.reset(**self.config.reset_kwargs)
+            initial_reward = float(initial_obs.reward) if initial_obs.reward is not None else 0.0
+            session = SessionState(env=env, accumulated_reward=initial_reward, done=initial_obs.done)
         except BaseException:
-            # The seed fails, so nothing would ever close this instance.
-            if hasattr(env, "close"):
-                env.close()
+            try:
+                self._close_pending_env(session_id)
+            except Exception:
+                # Preserve the reset error and ownership so the caller's close or seed retry can release it.
+                logger.exception("Failed to close OpenEnv instance after reset failed for session %s", session_id)
             raise
-        initial_reward = float(initial_obs.reward) if initial_obs.reward is not None else 0.0
-        return SessionState(env=env, accumulated_reward=initial_reward, done=initial_obs.done)
+        self._pending_envs.pop(session_id)
+        return session
+
+    def _close_pending_env(self, session_id: str) -> None:
+        env = self._pending_envs.get(session_id)
+        if env is not None and hasattr(env, "close"):
+            env.close()
+        self._pending_envs.pop(session_id, None)
 
     async def seed_session(
         self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
@@ -245,7 +264,8 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         environment it already has. The rows carry no task fields, so there is no task_data to validate.
         """
         if not isinstance(body, ResourcesSeedSessionRequest):
-            self._sessions[request.session[SESSION_ID_KEY]] = self._new_session()
+            session_id = request.session[SESSION_ID_KEY]
+            self._sessions[session_id] = self._new_session(session_id)
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
@@ -253,7 +273,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             self._fence.raise_if_closed(session_id)
             identity = self._session_episodes.get(session_id)
             if identity is None:
-                self._sessions[session_id] = self._new_session()
+                self._sessions[session_id] = self._new_session(session_id)
                 self._session_episodes[session_id] = (body.episode_id, body.task_id)
             elif identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
@@ -274,6 +294,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             identity = self._session_episodes.get(session_id)
             if identity is not None and identity[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            self._close_pending_env(session_id)
             session = self._sessions.get(session_id)
             if session is not None and hasattr(session.env, "close"):
                 # A failure raises before the session is forgotten or fenced, so the caller can retry the close.
@@ -295,11 +316,11 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     # Works correctly for: terminal-only rewards (chess, coding), zero rewards
     # (echo MCP), and true per-step deltas (maze).
     async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        """Return accumulated reward, close the environment, and clean up session state.
+        """Return accumulated reward, retaining typed sessions until their explicit close.
 
-        Verify releases the environment because an Agent's /run never closes its session. An Environment Server's
-        close after this finds nothing left to release. A verify for a session this server no longer holds (never
-        seeded, already verified or closed, or lost to a restart) has no reward to report, so its sample is masked.
+        An Agent's /run never closes its session, so its verify still releases the environment. An Environment
+        Server closes after verification; retaining that session lets a lost verify reply be retried without
+        discarding the measured reward. A verify for a missing session has no reward to report and is masked.
         """
         session_id = request.session[SESSION_ID_KEY]
         session = self._sessions.get(session_id)
@@ -309,9 +330,10 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             )
 
         reward = session.accumulated_reward
-        if hasattr(session.env, "close"):
-            session.env.close()
-        del self._sessions[session_id]
+        if session_id not in self._session_episodes:
+            if hasattr(session.env, "close"):
+                session.env.close()
+            del self._sessions[session_id]
 
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 

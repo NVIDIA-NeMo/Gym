@@ -886,6 +886,22 @@ class TestResourcesSessions:
         assert server._sessions == {}
         assert server._session_episodes == {}
 
+    def test_typed_verify_retry_preserves_reward_until_close(self) -> None:
+        server, envs = _session_server(reset_obs=MagicMock(reward=0.5, done=False))
+
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            for _ in range(2):
+                response = client.post("/verify", json=VERIFY_BODY)
+                assert response.status_code == 200
+                assert response.json()["reward"] == pytest.approx(0.5)
+                assert response.json()["mask_sample"] is False
+            envs[0].close.assert_not_called()
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        envs[0].close.assert_called_once()
+        assert server._sessions == {}
+
     def test_failed_env_close_raises_and_a_retried_close_releases(self) -> None:
         server, envs = _session_server()
 
@@ -932,3 +948,41 @@ class TestResourcesSessions:
         assert response.status_code == 500
         envs[0].close.assert_called_once()
         assert server._sessions == {}
+
+    def test_failed_reset_and_cleanup_remains_owned_until_close(self) -> None:
+        server, envs = _session_server()
+        env = _make_mock_env()
+        env.reset.side_effect = RuntimeError("reset failed")
+        env.close.side_effect = [RuntimeError("cleanup failed"), None]
+        server._env_class = MagicMock(return_value=env)
+
+        with TestClient(server.setup_webserver()) as client:
+            with pytest.raises(RuntimeError, match="reset failed"):
+                client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            assert server._sessions == {}
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        assert env.close.call_count == 2
+        server._env_class.assert_called_once()
+
+    def test_seed_retry_releases_failed_reset_before_allocating_again(self) -> None:
+        server, envs = _session_server()
+        failed_env = _make_mock_env()
+        failed_env.reset.side_effect = RuntimeError("reset failed")
+        failed_env.close.side_effect = [RuntimeError("cleanup failed"), RuntimeError("still unavailable"), None]
+        replacement_env = _make_mock_env()
+        server._env_class = MagicMock(side_effect=[failed_env, replacement_env])
+
+        with TestClient(server.setup_webserver()) as client:
+            with pytest.raises(RuntimeError, match="reset failed"):
+                client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            with pytest.raises(RuntimeError, match="still unavailable"):
+                client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            server._env_class.assert_called_once()
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert server._sessions["resources-session"].env is replacement_env
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        assert failed_env.close.call_count == 3
+        replacement_env.close.assert_called_once()
