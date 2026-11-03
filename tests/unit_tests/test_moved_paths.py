@@ -756,3 +756,20 @@ def test_harbor_cli_imports_from_the_old_package(first: str) -> None:
         "    raise AssertionError('unknown attribute resolved')\n"
     )
     subprocess.run([sys.executable, "-W", "ignore::DeprecationWarning", "-c", code], check=True)
+
+
+def test_package_facade_warns_once_for_a_renamed_name() -> None:
+    # In a fresh interpreter: a from-import looks the name up on the package more than once.
+    # nemo_gym.config serves TOKEN_ID_CAPTURE_BLOCK only through MOVED_NAMES, by way of lazy_exports.
+    code = (
+        "import warnings\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    from nemo_gym.config import TOKEN_ID_CAPTURE_BLOCK\n"
+        "    import nemo_gym.config\n"
+        "    nemo_gym.config.TOKEN_ID_CAPTURE_BLOCK\n"
+        "messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]\n"
+        "assert len(messages) == 1, messages\n"
+        "assert messages[0].startswith('`nemo_gym.config.TOKEN_ID_CAPTURE_BLOCK` moved to'), messages\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
