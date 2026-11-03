@@ -384,7 +384,7 @@ def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish
     assert task["trial_counts"] == expected_counts
     assert task["evaluation_health"]["evaluation"]["kinds"] == {"judge_unparseable": 1}
     assert task["failures"]["trial_failures"]["by_cause"]["judge"] == {"count": 1, "rate": 1.0}
-    assert d.expected == 1 and d.action.value == "noop"
+    assert d.expected == 1 and d.action.value == "reverify"  # the unparsed grading is planned for a re-judge
     assert c.model_dump() == before
     # The unknown outcome alone counts the trial (a known lower bound over the limit), whatever joins its calls.
     grade["dependencies"] = []

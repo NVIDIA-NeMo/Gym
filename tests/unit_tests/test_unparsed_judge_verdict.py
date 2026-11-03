@@ -15,13 +15,20 @@
 """A saved judge evaluation without a verdict is a grading fault, never a healthy grade.
 
 A scored row whose judge evaluation recorded no verdict (a null label, or a parse/judge error label such as XSTest's
-``judge_parsing_error``) is counted as ``judge_unparseable`` and selected for re-judging. On the artifact path the
+``judge_parsing_error``) is counted as ``judge_unparseable`` and selected for re-judging: recovery plans the re-judge, the gate reads PLANNED,
+and evaluation health counts the row as an evaluation-side fault until the re-judge settles it. On the artifact path the
 verifier's captured judge reply must also have completed; a truncated reply leaves the trial unobserved.
 """
 
 import pytest
 
-from nemo_gym.orchestration.recovery import grading_artifact, reverification_cause, saved_row_evidence
+from nemo_gym.orchestration.recovery import (
+    RecoveryBudget,
+    decide_recovery,
+    grading_artifact,
+    reverification_cause,
+    saved_row_evidence,
+)
 from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 from tests.unit_tests.test_evaluation_health import _run
 from tests.unit_tests.test_grading_artifacts import _judge_call, _observed, _ungraded
@@ -66,22 +73,28 @@ def _unparsed(row: dict) -> None:
     row["reward"] = 0.0
 
 
-def test_the_gate_counts_an_unparsed_judge_verdict_as_a_grading_fault():
+def test_the_gate_counts_an_unparsed_judge_verdict_as_a_grading_fault_while_a_rejudge_is_planned():
+    # Health counts the row as an evaluation-side fault of a scored trial; the gate itself reads PLANNED, because
+    # recovery plans a re-judge of its saved answer.
     collected = _run(100)
     _unparsed(collected.results[0])
     passed, reason, report, task = _observed(collected)
     assert passed is True and report["exact"] is True, reason
     assert report["evaluation"]["kinds"] == {"judge_unparseable": 1}
     assert task["trial_counts"]["unhealthy"] == 1 and task["trial_counts"]["observed_healthy"] == 99
+    assert task["status"] == "PLANNED"
+    # The row's reward is in the metric while the re-judge is pending: coverage and failure facts count it as scored.
+    assert task["failures"]["metric_coverage"]["trials"] == 100
 
 
 def test_unparsed_judge_verdicts_at_the_limit_fail_evaluation_health():
     collected = _run(100)
     for row in collected.results[:2]:
         _unparsed(row)
-    passed, reason, report, _ = _observed(collected)
+    passed, reason, report, task = _observed(collected)
     assert passed is False and report["status"] == "FAIL", reason
     assert report["evaluation"]["kinds"] == {"judge_unparseable": 2}
+    assert task["status"] == "PLANNED"
 
 
 @pytest.mark.parametrize("truncated", [False, True])
@@ -146,6 +159,7 @@ def test_the_gate_counts_a_grading_with_an_unknown_outcome_as_judge_unparseable(
     collected, _, grade = _recovered_fixture()
     grade["outcome"] = "unknown"
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert decision.action.value == "reverify" and decision.counts == {"judge_recoverable": 1}
     expected = {"observed_healthy": 0, "unhealthy": 1, "unobserved": 0, "verifier_recorded": 0}
     assert trial_counts(decision, collected) == expected
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
@@ -193,3 +207,24 @@ def test_the_gate_counts_a_pairwise_row_with_a_game_lacking_its_verdict_as_judge
     assert passed is True and report["exact"] is True, reason
     assert report["evaluation"]["kinds"] == {"judge_unparseable": 1}
     assert task["trial_counts"]["unhealthy"] == 1 and task["trial_counts"]["observed_healthy"] == 99
+    assert task["status"] == "PLANNED"
+
+
+def _decide_one(row: dict):
+    budget = RecoveryBudget(max_infra_retries=2, infra_retries_used=0, walltime_used_s=0.0, live_job=False)
+    return decide_recovery(
+        materialized=[{"_ng_task_index": 0, "_ng_rollout_index": 0}], results=[row], failures=[], budget=budget
+    )
+
+
+def test_recovery_plans_a_rejudge_for_a_scored_row_whose_judge_gave_no_verdict(tmp_path):
+    decision = _decide_one(_collected(tmp_path, _xstest_row("judge_parsing_error")))
+    assert decision.action.value == "reverify", decision.reason
+    assert decision.counts == {"judge_recoverable": 1}
+    assert [e.failure_kind for e in decision.evidence] == ["judge_unparseable"]
+
+
+def test_a_scored_row_with_a_parsed_verdict_needs_no_recovery(tmp_path):
+    decision = _decide_one(_collected(tmp_path, _xstest_row("full_compliance")))
+    assert decision.action.value == "noop", decision.reason
+    assert decision.counts == {"scored": 1}
