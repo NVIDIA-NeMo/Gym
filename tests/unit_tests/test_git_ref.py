@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not 
 def _no_waits_and_no_own_clone(monkeypatch, tmp_path):
     # Retries do not wait in tests, and the local check looks at no real clone unless a test gives it one.
     sleeps = []
-    monkeypatch.setattr(git_ref.time, "sleep", sleeps.append)
+    monkeypatch.setattr(git_ref, "time", SimpleNamespace(sleep=sleeps.append))
     monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", tmp_path / "no-clone")
     return sleeps
 
