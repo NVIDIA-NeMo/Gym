@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""AutomationBench with simulated business days.
+"""Multi-day workflow environment with simulated time.
 
-A `wait` tool moves the world clock forward and applies the task's dated events in time order. Every successful
-state-changing `api_fetch` call is logged with the simulated time, so a task can grade when the agent acted, not only
-what the world holds at the end. Two assertion types use that log:
+Tasks run against the AutomationBench app simulator (its world state, API routes and assertion checks) with a clock
+the agent controls. A `wait` tool moves the clock forward and applies the task's dated events in time order. Every
+successful state-changing `api_fetch` call is logged with the simulated time, so a task can grade when the agent
+acted, not only what the world holds at the end. Two assertion types use that log:
 
 - `acted_on_day` (`record`, `day`, optional `body_contains`): the first write whose URL names `record` happened on
   `day` (YYYY-MM-DD).
 - `not_acted` (`record`): no write named `record`. It is a guardrail.
 
-The reward is the guardrail-gated headline of `automationbench_env` over the world assertions plus these day
-assertions. The `wait` tool's description and the description of its `until` parameter come from each task
-(`info.wait_tool_description`, `info.wait_until_description`), so the dataset owns all text the policy reads.
+The reward is the guardrail-gated share of objectives over the world assertions plus these day assertions. Tasks
+come from the dataset, not from the benchmark. The `wait` tool's description and the description of its `until`
+parameter come from each task (`info.wait_tool_description`, `info.wait_until_description`), so the dataset owns all
+text the policy reads.
 """
 
 import copy

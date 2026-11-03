@@ -9,7 +9,7 @@ import unittest
 
 from automationbench.schema.world import WorldState
 
-from environments.automationbench_time import automationbench_time_env as env
+from environments.ab_synth import ab_synth_env as env
 
 
 INITIAL_STATE = {

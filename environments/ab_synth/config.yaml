@@ -1,15 +1,15 @@
-automationbench_time:
+ab_synth:
   responses_api_agents:
     verifiers_agent:
       entrypoint: app.py
       domain: agent
-      description: AutomationBench tasks over simulated business days, scored on the final world and on the day each write happened.
+      description: Synthetic multi-day SaaS workflows on the AutomationBench app simulator with simulated time, scored on the final world and on the day each write happened.
       value: Improve multi-day workflow execution (waiting for the right day, re-reading the world, acting on the due day).
       model_server:
         type: responses_api_models
         name: policy_model
       model_name: ""
-      vf_env_id: automationbench_time_env
+      vf_env_id: ab_synth_env
       vf_env_args:
         # The same Gym rows as the dataset below (verifiers builds its dataset from them). Required.
         tasks_path: ???
@@ -26,4 +26,4 @@ automationbench_time:
       datasets:
         - name: train
           type: train
-          jsonl_fpath: environments/automationbench_time/data/train.jsonl
+          jsonl_fpath: environments/ab_synth/data/train.jsonl
