@@ -19,7 +19,7 @@ from nemo_gym.environment.manifest import (
 )
 
 
-REPO_ROOT = Path(__file__).parents[2]
+REPO_ROOT = Path(__file__).parents[3]
 
 
 def test_dump_preserves_existing_benchmark_manifest_format() -> None:

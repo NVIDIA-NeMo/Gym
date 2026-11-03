@@ -17,7 +17,7 @@
 A resources server (verifier + per-task state) is one *component* of an environment, selected by name
 with ``--resources-server``. This module maps each config flavor to its ``(domain, description)`` — read
 the same way ``gym list environments``/``benchmarks`` read theirs (via
-:func:`~nemo_gym.discovery.read_config_metadata`) — so they can be enumerated by name.
+:func:`~nemo_gym.environment.discovery.read_config_metadata`) — so they can be enumerated by name.
 """
 
 from dataclasses import dataclass
@@ -27,7 +27,7 @@ from typing import Dict, Optional
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components, iter_server_configs, read_config_metadata
+from nemo_gym.environment.discovery import discover_components, iter_server_configs, read_config_metadata
 
 
 RESOURCES_SERVERS_SUBDIR = "resources_servers"
@@ -96,7 +96,7 @@ def _discover_resources_servers_in_dir(resources_servers_dir: Path) -> Dict[str,
 def discover_resources_servers() -> Dict[str, ResourcesServerEntry]:
     """Map resources-server name -> :class:`ResourcesServerEntry` for every discoverable server.
 
-    Scans the ``resources_servers/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
+    Scans the ``resources_servers/`` subdir of every :func:`~nemo_gym.environment.discovery.component_search_roots`
     root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user servers shadow same-named built-ins.
     """
     return discover_components(RESOURCES_SERVERS_SUBDIR, _discover_resources_servers_in_dir)

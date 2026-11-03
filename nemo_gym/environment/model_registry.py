@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components
+from nemo_gym.environment.discovery import discover_components
 
 
 MODELS_SUBDIR = "responses_api_models"
@@ -66,7 +66,7 @@ def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
 def discover_models() -> Dict[str, ModelEntry]:
     """Map model name -> :class:`ModelEntry` for every discoverable model server.
 
-    Scans the ``responses_api_models/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
+    Scans the ``responses_api_models/`` subdir of every :func:`~nemo_gym.environment.discovery.component_search_roots`
     root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user models shadow same-named built-ins.
     """
     return discover_components(MODELS_SUBDIR, _discover_models_in_dir)
