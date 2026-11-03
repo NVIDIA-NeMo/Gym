@@ -33,7 +33,8 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.models import AnthropicConverter, TokenEntry, resolve_terminal, stamp_continuation
+from nemo_gym.models import AnthropicConverter
+from nemo_gym.models.token_capture import TokenEntry, resolve_terminal, stamp_continuation
 from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
