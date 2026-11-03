@@ -70,7 +70,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict, trace_context_path_segment
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
@@ -285,7 +285,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     # Mount the OpenHands capture overlay into the agent container.
     # The pinned OpenHands nemo-gym client resolves the model server from
     # the global config and ignores ``llm.base_url``; the overlay redirects
-    # it to ``model_server_base_url``.
+    # it to ``model_server_base_url``. Set for token capture, and while
+    # traces export, so the model calls join the rollout's trace.
     install_openhands_capture_overlay: bool = False
 
     # Set later
@@ -3815,6 +3816,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             rollout_id,
             token_capture=token_capture_enabled,
         )
+        # The OpenHands model client resolves the model server by name and ignores ``llm.base_url``, so this URL
+        # reaches the model server only through the capture overlay. Install it when the URL carries token capture's
+        # route or this rollout's trace context, which is what attaches the model calls to the rollout's trace.
+        route_model_calls_through_url = token_capture_enabled or bool(trace_context_path_segment())
         # ``model_server_base_url`` also appears in the server config dump; the
         # resolved rollout-specific URL must win.
         config_kwargs = {**self.config.model_dump(), **self._swe_bench_wrapper_server_config.model_dump()}
@@ -3827,7 +3832,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
-            install_openhands_capture_overlay=token_capture_enabled,
+            install_openhands_capture_overlay=route_model_calls_through_url,
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
