@@ -372,9 +372,11 @@ allocation; cancelling the successor and the sentinels saves that allocation and
 (the inspection reads the state from the scheduler either way). Then inspect (step 3) before deciding
 anything else, and keep the run directory.
 
-A segment whose driver exits 76 (nothing is eligible for another attempt) stops the chain itself: it
-writes that stop to `.gym_chain_incomplete`, cancels the successor and sentinel it queued, and journals
-the end in `chain-end-journal.jsonl`, so no allocation starts just to write the stop.
+A segment whose driver exits 76 (nothing is eligible for another attempt) and left no typed failure
+kind stops the chain itself: it writes that stop to `.gym_chain_incomplete`, cancels the successor and
+sentinel it queued, and journals the end in `chain-end-journal.jsonl`, so no allocation starts just to
+write the stop. A typed stop (credentials rejected, resume refused, spin-up timeout, install failed) is
+still written by the next segment's guard, with its own remedy.
 
 ## Exit checks
 

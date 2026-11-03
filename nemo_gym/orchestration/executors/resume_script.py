@@ -783,9 +783,11 @@ _EPILOGUE_TEMPLATE = """\
 _gym_driver_rc=$?
 _gym_end_own_chain() {{
     local _rc=$1 _ended=run_complete _role _file _id _result _cancelled=""
-    if [[ $_rc == {no_eligible_retry_exit} ]]; then
+    if [[ $_rc == {no_eligible_retry_exit} && ! -e "$OUTPUT_DIR/{driver_failure_name}.$SLURM_JOB_ID" ]]; then
         # Nothing is eligible for another attempt: the follow-up would start on a full allocation only to write this
-        # stop and exit, so the job writes it and cancels what it queued. A deliberate stop already there stays.
+        # stop and exit, so the job writes it and cancels what it queued. A deliberate stop already there stays. A
+        # driver that left a typed failure kind exits 76 too; its follow-up's prologue turns that kind into its own
+        # stop and remedy, so that job keeps its follow-up (below).
         _ended={no_eligible_retry}
         if [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
             echo "{no_eligible_retry_reason}" > "$_incomplete_file"
@@ -944,12 +946,14 @@ def render_resume_epilogue() -> str:
     have written, cancels the sentinel and then the follow-up it queued, and journals both in
     ``CHAIN_END_JOURNAL_NAME``, so no allocation starts for a finished run. A driver that exits
     ``NO_ELIGIBLE_RETRY_EXIT`` (nothing is eligible for another attempt) ends its chain the same way, with the
-    ``NO_ELIGIBLE_RETRY_REASON`` stop. The job keeps the driver step's status.
+    ``NO_ELIGIBLE_RETRY_REASON`` stop, unless it left a typed failure kind in ``DRIVER_FAILURE_NAME``: the follow-up's
+    prologue writes that kind's own stop. The job keeps the driver step's status.
     """
     return _EPILOGUE_TEMPLATE.format(
         no_eligible_retry_exit=NO_ELIGIBLE_RETRY_EXIT,
         no_eligible_retry=NO_ELIGIBLE_RETRY,
         no_eligible_retry_reason=NO_ELIGIBLE_RETRY_REASON,
+        driver_failure_name=DRIVER_FAILURE_NAME,
         provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
         export_receipt_missing=EXPORT_RECEIPT_MISSING,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,

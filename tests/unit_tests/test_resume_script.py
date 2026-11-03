@@ -28,6 +28,7 @@ import pytest
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
     CHAIN_END_JOURNAL_NAME,
+    DRIVER_FAILURE_NAME,
     EXPORT_RECEIPT_MISSING,
     EXPORT_RECEIPT_MISSING_REASON,
     INCOMPLETE_MARKER_NAME,
@@ -1585,6 +1586,28 @@ def test_a_segment_with_nothing_eligible_for_retry_ends_its_own_chain(tmp_path, 
         "sentinel": {"job_id": "998", "result": "cancelled"},
         "follow_up": {"job_id": "999", "result": "cancelled"},
     }
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("kind", ["provider_credentials_rejected", "collection_resume_refused"])
+def test_a_driver_that_exits_76_with_a_typed_failure_leaves_the_stop_to_its_follow_up(tmp_path, monkeypatch, kind):
+    # The follow-up's prologue turns the kind into its own stop and remedy, so the segment keeps its queued jobs.
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    failure = tmp_path / f"{DRIVER_FAILURE_NAME}.200"
+    result = _run_prologue(
+        tmp_path,
+        ResumeConfig(),
+        "TIMEOUT",
+        driver=f"echo {kind} > {shlex.quote(str(failure))}; ( exit {NO_ELIGIBLE_RETRY_EXIT} )",
+        sentinel_id="998",
+    )
+
+    assert result.returncode == NO_ELIGIBLE_RETRY_EXIT, result.stdout + result.stderr
+    marker = tmp_path / INCOMPLETE_MARKER_NAME
+    assert not marker.exists() or NO_ELIGIBLE_RETRY_REASON not in marker.read_text()
+    assert NO_ELIGIBLE_RETRY_REASON not in result.stdout
+    assert _scancel_calls(tmp_path) == []
+    assert _chain_end_entries(tmp_path) == []
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")

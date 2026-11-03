@@ -500,7 +500,9 @@ def _reader_env_lines() -> list[str]:
     """The settings a remote reader takes from its caller: the reader's command starts from a cleared environment on
     another host, so without this a cold install there waits uv's own default for the lock and gives up early."""
     raw = os.environ.get("UV_LOCK_TIMEOUT", "").strip()
-    lock_timeout = raw if raw.isdecimal() and int(raw) > 0 else str(_READER_UV_LOCK_TIMEOUT_DEFAULT_S)
+    lock_timeout = (
+        raw if raw.isascii() and raw.isdecimal() and int(raw) > 0 else str(_READER_UV_LOCK_TIMEOUT_DEFAULT_S)
+    )
     return [f"export UV_LOCK_TIMEOUT={lock_timeout}"]
 
 
