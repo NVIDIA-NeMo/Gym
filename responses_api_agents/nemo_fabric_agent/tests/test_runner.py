@@ -21,6 +21,7 @@ async def test_worker_isolates_adapter_python_but_keeps_task_environment(tmp_pat
     task.mkdir()
     invocation = {
         "config": {
+            "metadata": {"name": "test"},
             "harness": {"adapter_id": "nvidia.fabric.mini-swe-agent"},
             "environment": {"provider": "local", "workspace": str(task)},
             "models": {"default": {"provider": "openai", "model": "policy"}},
