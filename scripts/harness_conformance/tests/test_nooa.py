@@ -18,8 +18,7 @@ from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.providers import create_provider
+from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.server_runtime import ResourcesSeedSessionResponse
 
 

@@ -13,9 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.providers import SandboxHandle, SandboxSpec, register_provider
-from nemo_gym.sandbox.providers.local.provider import LocalProvider
+from nemo_gym.sandbox import AsyncSandbox, LocalProvider, SandboxHandle, SandboxSpec, register_provider
 
 from .provider import Probe
 

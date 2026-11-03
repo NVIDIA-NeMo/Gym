@@ -23,8 +23,7 @@ from shlex import quote
 
 from omegaconf import OmegaConf
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, resolve_provider_config
 from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 
 
