@@ -336,9 +336,11 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             evaluated_steps = list(await asyncio.gather(*tasks))
         except BaseException:
             # A failed request must not leave sibling sandboxes running after its caller retries.
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Canceling a local executor await cannot stop its subprocess or release its permit safely.
+            if self.config.sandbox:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             raise
         step_results = [passed for passed, _, _, _ in evaluated_steps]
         step_environment_results = [per_environment for _, per_environment, _, _ in evaluated_steps]

@@ -132,3 +132,117 @@ async def test_failed_step_cancels_and_awaits_sibling_cleanup():
         with pytest.raises(RuntimeError, match="infrastructure failure"):
             await server.verify(_request({"1.1": "fail", "1.2": "wait"}))
     assert sibling_cleaned.is_set()
+
+
+@pytest.mark.asyncio
+async def test_local_failure_keeps_running_sibling_permit_on_retry(tmp_path):
+    import threading
+
+    data = tmp_path / "targets.h5"
+    data.touch()
+    server = _server(str(data), num_processes=2)
+    loop = asyncio.get_running_loop()
+    first_started = threading.Event()
+    release = threading.Event()
+    two_active = asyncio.Event()
+    lock = threading.Lock()
+    active = peak = 0
+
+    def execute(program, *args, **kwargs):
+        nonlocal active, peak
+        if program.startswith("fail"):
+            assert first_started.wait(5)
+            return {"passed": False, "error": "broken environment", "infrastructure_error": True}
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                loop.call_soon_threadsafe(two_active.set)
+        first_started.set()
+        try:
+            assert release.wait(5)
+            return {"passed": True, "error": ""}
+        finally:
+            with lock:
+                active -= 1
+
+    retry = None
+    with patch.object(app, "run_substep", side_effect=execute):
+        try:
+            with pytest.raises(RuntimeError, match="broken environment"):
+                await server.verify(_request({"1.1": "wait", "1.2": "fail"}))
+            retry = asyncio.create_task(server.verify(_request({"1.1": "retry a", "1.2": "retry b"})))
+            await asyncio.wait_for(two_active.wait(), 2)
+            # Let all runnable executor submissions start while the first request still owns a slot.
+            await asyncio.sleep(0.05)
+            assert peak == 2
+        finally:
+            release.set()
+            if retry is not None:
+                await asyncio.wait_for(retry, 5)
+            # Drain both permits so no first-request executor work survives test cleanup.
+            async with server._semaphore:
+                async with server._semaphore:
+                    pass
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("through_verify", [False, True])
+async def test_repeated_cancellation_awaits_remote_deletion(through_verify):
+    executing = asyncio.Event()
+    deleting = asyncio.Event()
+    release = asyncio.Event()
+    deleted = asyncio.Event()
+    sandbox = MagicMock()
+    sandbox.start = AsyncMock()
+
+    async def execute(*args, **kwargs):
+        executing.set()
+        await asyncio.Event().wait()
+
+    async def stop():
+        deleting.set()
+        await release.wait()
+        deleted.set()
+
+    sandbox.exec = AsyncMock(side_effect=execute)
+    sandbox.stop = AsyncMock(side_effect=stop)
+    server = _server(
+        "/data/targets.h5",
+        sandbox={"image": "test-image"},
+        num_processes=1,
+        grading_interpreters=[{"name": "2024", "python_executable": "/opt/python"}],
+    )
+    with (
+        patch.object(runner, "get_global_config_dict", return_value={"sandbox": {"opensandbox": {}}}),
+        patch.object(runner, "AsyncSandbox", return_value=sandbox),
+    ):
+        call = (
+            server.verify(_request({"1.1": "running", "1.2": "waiting"}))
+            if through_verify
+            else runner.run_sandbox_substep(
+                "assert True",
+                config=runner.ScicodeSandboxConfig(image="test-image"),
+                python_executable="/opt/python",
+                timeout_secs=30,
+                test_data_path="/data/targets.h5",
+                test_data_md5=None,
+                output_tail_chars=40,
+            )
+        )
+        task = asyncio.create_task(call)
+        try:
+            await asyncio.wait_for(executing.wait(), 2)
+            task.cancel()
+            await asyncio.wait_for(deleting.wait(), 2)
+            task.cancel()
+            await asyncio.sleep(0.01)
+            assert not task.done()
+            assert not deleted.is_set()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+    assert deleted.is_set()
+    sandbox.stop.assert_awaited_once()

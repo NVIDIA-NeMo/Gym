@@ -11,6 +11,24 @@ Running at scale? Read [OpenSandbox Best Practices](/infrastructure/sandbox/open
 for resource requests vs limits, timeout and retry guidance, and the failure signatures that are not bugs.
 </Tip>
 
+## SciCode-Verified grading
+
+Local grading remains the default. Select `--benchmark scicode_verified/configs/opensandbox`
+to run scientific grading remotely. Configure `OPENSANDBOX_DOMAIN`,
+`OPENSANDBOX_API_KEY`, and `SCICODE_SANDBOX_IMAGE` with an immutable image digest.
+The [overlay](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/scicode_verified/configs/opensandbox.yaml)
+expects `/opt/scicode/2024/bin/python`, `/opt/scicode/2025/bin/python`, and the corrected
+HDF5 at `/data/test_data_cleaned.h5`; see the
+[image instructions](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/scicode/sandbox_image).
+
+`scicode_verified_resources_server.resources_servers.scicode.num_processes`
+limits concurrent grading attempts, including creation and cleanup (20 by default).
+Each attempt requests one CPU and 8 GiB; adjust concurrency and
+`sandbox.memory_mib` to your service quota and measured workload. Model generation
+concurrency is independent. Infrastructure failures propagate without being scored
+as incorrect answers; ordinary assertions and code timeouts retain the existing
+grading semantics. Failed rows need investigation before retrying.
+
 ## Setup
 
 ### Obtain service access

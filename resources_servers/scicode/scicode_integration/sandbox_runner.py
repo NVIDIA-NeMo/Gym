@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Execute the existing SciCode grader in a fresh sandbox per environment attempt."""
 
+import asyncio
 import json
 import shlex
 from pathlib import Path
@@ -100,4 +101,14 @@ async def run_sandbox_substep(
             )
         return result
     finally:
-        await sandbox.stop()
+        # Keep the attempt's permit until deletion finishes, even if cancellation is repeated.
+        cleanup = asyncio.create_task(sandbox.stop())
+        cancellation = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        cleanup.result()
+        if cancellation is not None:
+            raise cancellation
