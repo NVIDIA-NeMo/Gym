@@ -114,7 +114,7 @@ These behaviors apply to all Tavily configurations:
 - Each session's Tavily call metrics, returned by `/verify` in `metrics`, are released when
   the session ends: `/close_session` releases a session an Environment Server seeded, and
   `/verify` releases any other. A tool call after `/close_session` gets 404 rather than
-  starting a new record. With `dump_session_id_to_metrics_on_exit: true`, released metrics
+  starting a new record, and a `/verify` after it returns a masked sample. With `dump_session_id_to_metrics_on_exit: true`, released metrics
   stay in memory until shutdown so the dump still lists every session.
 - Search requests disable Tavily's aggregate answer, and returned aggregate answers
   are discarded. The former `Search Answer` output section is removed because its

@@ -99,6 +99,7 @@ def test_follows_the_session_contract() -> None:
         ),
         keeps_state=True,
         holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_metrics,
+        verify_body=verify_json(),
     )
 
 
@@ -136,10 +137,9 @@ def test_a_late_tool_call_does_not_recreate_a_closed_session() -> None:
     assert called.status_code == 404
     assert called.json()["detail"]["failure_kind"] == SESSION_LOST
     assert "resources-session" not in server._session_id_to_metrics
-    # The score reads only the response, so a verify after the close still scores it, without metrics.
+    # Masked like every server under the contract, although the answer alone would score 1.
     verified = client.post("/verify", json=verify_json()).json()
-    assert verified["reward"] == 1.0
-    assert not verified.get("mask_sample")
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
     assert verified["metrics"] == {"async_tavily_calls": []}
 
 
@@ -157,6 +157,7 @@ def test_a_seed_whose_task_data_is_not_a_task_is_refused_for_good() -> None:
 
 
 def test_an_unseeded_callers_metrics_are_released_by_verify() -> None:
+    """A caller that never sends a typed seed, such as an Agent's /run or an MCP client, is scored as before."""
     server = make_server()
     client = TestClient(server.setup_webserver())
 
@@ -167,6 +168,7 @@ def test_an_unseeded_callers_metrics_are_released_by_verify() -> None:
 
     verified = client.post("/verify", json=verify_json()).json()
 
+    assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
     assert len(verified["metrics"]["async_tavily_calls"]) == 1
     assert server._session_id_to_metrics == {}
 

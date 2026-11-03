@@ -46,6 +46,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
+    BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -55,6 +56,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionFence,
     ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
@@ -173,7 +175,7 @@ class TavilySearchMetrics(BaseModel):
     async_tavily_calls: List[TavilySearchSingleAsyncTavilyMetrics] = Field(default_factory=list)
 
 
-class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
+class TavilySearchVerifyResponse(TavilySearchVerifyRequest, BaseVerifyResponse, JudgeEvaluation):
     num_tool_calls: int
     metrics: TavilySearchMetrics
 
@@ -632,8 +634,20 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
-        # The score reads only the response, so a session this server no longer holds still verifies, with no metrics.
         session_id = request.session[SESSION_ID_KEY]
+        num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
+        if self._fence.closed_episode(session_id) is not None:
+            # Masked although the score reads only the response, so every server under the resources session contract
+            # treats a closed session alike. single_agent_turn verifies before it closes, so only an out-of-order verify
+            # lands here. A session nobody seeded, such as an MCP client's, holds no state and is scored as usual.
+            lost = lost_session_verification("This tavily_search session is already closed")
+            return TavilySearchVerifyResponse(
+                **(body.model_dump() | lost),
+                reasoning="",
+                extracted_final_answer="",
+                num_tool_calls=num_tool_calls,
+                metrics=TavilySearchMetrics(),
+            )
         try:
             question = body.question
             ground_truth = body.ground_truth
@@ -649,7 +663,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             response = TavilySearchVerifyResponse(
                 **body.model_dump(),
                 **judge_evaluation.model_dump(),
-                num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
+                num_tool_calls=num_tool_calls,
                 metrics=self._session_id_to_metrics.get(session_id) or TavilySearchMetrics(),
             )
             if judge_error is not None:
