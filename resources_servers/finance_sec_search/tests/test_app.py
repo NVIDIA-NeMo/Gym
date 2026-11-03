@@ -1727,6 +1727,38 @@ class TestResourcesSessions:
             assert error.value.detail["failure_kind"] == "session_lost"
         assert _TEST_SESSION_ID not in server._data_storage
 
+    @pytest.mark.asyncio
+    async def test_verify_after_close_is_masked_and_verify_before_close_is_scored(self, server) -> None:
+        verify_body = TestVerify._make_verify_request(
+            None,
+            NeMoGymResponse(
+                id="r",
+                created_at=0.0,
+                model="m",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[],
+            ),
+            "$391.0 billion",
+        )
+        seed = _typed_seed()
+        await server.seed_session(_mock_request(), seed)
+        await server.close_resources_session(_close(seed))
+
+        masked = await server.verify(_mock_request(), verify_body)
+
+        assert masked.mask_sample is True
+        assert masked.failure_kind == "session_lost"
+        assert masked.reward == 0.0
+
+        # A legacy session is never closed, so its verify is scored and releases the session.
+        await server.seed_session(_mock_request("legacy"), BaseSeedSessionRequest())
+        scored = await server.verify(_mock_request("legacy"), verify_body)
+        assert not getattr(scored, "mask_sample", False)
+        assert "legacy" not in server._data_storage
+
     def test_eviction_ends_the_routing_claim_and_checkpoint_tracking(self, server, temp_cache_dir) -> None:
         """An evicted session's claim must become releasable; a seed's own route keeps it open forever otherwise."""
         (Path(temp_cache_dir) / "tickers.json").write_text(json.dumps(TestTickerLoading.MOCK_TICKERS_RAW))
