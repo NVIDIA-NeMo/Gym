@@ -2827,6 +2827,40 @@ class TestSWEBenchWrapperSetupParams:
             assert params.eval_command is not None
             assert params.agent_command is not None
             assert params.metrics_fpath.exists()
+            # No token capture and no trace context: the model URL is the bare server and OpenHands is not rerouted.
+            assert params.install_openhands_capture_overlay is False
+            assert "/ng-" not in params.model_server_base_url
+
+    def test_trace_context_installs_the_overlay_and_rides_the_model_url(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container_file = Path(tmpdir) / "django__django-12345.sif"
+            container_file.touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                temperature=1.0,
+                top_p=1.0,
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+            segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+            monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: segment)
+            monkeypatch.setattr("responses_api_agents.swe_agents.app.trace_context_path_segment", lambda: segment)
+
+            params, _ = wrapper._setup_params(body)
+
+            assert params.install_openhands_capture_overlay is True
+            assert params.model_server_base_url.endswith(segment)
+            assert segment in params.agent_script
 
     def test_token_capture_flag_rides_setup_params(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
