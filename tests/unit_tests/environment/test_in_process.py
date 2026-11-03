@@ -330,8 +330,8 @@ class TestDottedOverrides:
         assert in_process._checked_overrides(None) == {}
 
 
-class _FakeRunHelper:
-    """Stands in for `RunHelper`: records the config it is started with and whether it was shut down."""
+class _FakeServerSupervisor:
+    """Stands in for `ServerSupervisor`: records the config it is started with and whether it was shut down."""
 
     started_with = None
     shut_down = 0
@@ -352,9 +352,11 @@ class _FakeRunHelper:
 class TestServeBenchmark:
     @pytest.fixture(autouse=True)
     def fakes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _FakeRunHelper.started_with, _FakeRunHelper.shut_down, _FakeRunHelper.start_error = None, 0, None
-        _FakeRunHelper.registry_port = None
-        monkeypatch.setattr("nemo_gym.environment.in_process.RunHelper", _FakeRunHelper)
+        _FakeServerSupervisor.started_with = None
+        _FakeServerSupervisor.shut_down = 0
+        _FakeServerSupervisor.start_error = None
+        _FakeServerSupervisor.registry_port = None
+        monkeypatch.setattr("nemo_gym.environment.in_process.ServerSupervisor", _FakeServerSupervisor)
         monkeypatch.setattr(
             "nemo_gym.environment.in_process.asset_config_path",
             lambda flag, name: f"{'benchmarks' if flag == 'benchmark' else 'responses_api_models'}/{name}.yaml",
@@ -362,7 +364,9 @@ class TestServeBenchmark:
         monkeypatch.setattr(
             ServerClient,
             "load_head_server_config",
-            classmethod(lambda cls: BaseServerConfig(host=HEAD.host, port=_FakeRunHelper.registry_port or HEAD.port)),
+            classmethod(
+                lambda cls: BaseServerConfig(host=HEAD.host, port=_FakeServerSupervisor.registry_port or HEAD.port)
+            ),
         )
 
     def test_serves_from_a_config_dict_and_stops_on_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,29 +375,29 @@ class TestServeBenchmark:
 
         with serve_benchmark("bench", overrides=overrides) as registry_server:
             assert registry_server == HEAD
-            assert _FakeRunHelper.shut_down == 0
+            assert _FakeServerSupervisor.shut_down == 0
 
-        parser_config = _FakeRunHelper.started_with
+        parser_config = _FakeServerSupervisor.started_with
         assert parser_config.skip_load_from_cli
         assert parser_config.initial_global_config_dict == {
             "config_paths": ["benchmarks/bench.yaml", "responses_api_models/openai_model.yaml"],
             "judge": {"model": "x"},
             "policy_base_url": "http://model/v1",
         }
-        assert _FakeRunHelper.shut_down == 1
+        assert _FakeServerSupervisor.shut_down == 1
         assert sys.argv == ["gym", "unrelated=1"]
 
     def test_the_registry_port_is_set_in_the_config(self) -> None:
         with serve_benchmark("bench", registry_port=5555):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["head_server"] == {"port": 5555}
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["head_server"] == {"port": 5555}
 
     def test_the_registry_port_keeps_the_rest_of_the_registry_server_config(self) -> None:
         with serve_benchmark("bench", overrides={"head_server": {"host": "0.0.0.0"}}, registry_port=5555):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["head_server"] == {
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["head_server"] == {
             "host": "0.0.0.0",
             "port": 5555,
         }
@@ -402,7 +406,7 @@ class TestServeBenchmark:
         with serve_benchmark("bench"):
             pass
 
-        assert "head_server" not in _FakeRunHelper.started_with.initial_global_config_dict
+        assert "head_server" not in _FakeServerSupervisor.started_with.initial_global_config_dict
 
     @pytest.mark.parametrize("port", [0, -1, 65536, 70000])
     def test_a_registry_port_that_is_not_a_port_is_refused_before_anything_starts(self, port: int) -> None:
@@ -410,13 +414,13 @@ class TestServeBenchmark:
             with serve_benchmark("bench", registry_port=port):
                 pass
 
-        assert _FakeRunHelper.started_with is None
+        assert _FakeServerSupervisor.started_with is None
 
     def test_the_model_type_is_a_parameter(self) -> None:
         with serve_benchmark("bench", model_type="vllm_model"):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["config_paths"][1] == (
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["config_paths"][1] == (
             "responses_api_models/vllm_model.yaml"
         )
 
@@ -424,7 +428,7 @@ class TestServeBenchmark:
         with serve_benchmark("bench", overrides={"config_paths": ["mine.yaml"]}):
             pass
 
-        assert _FakeRunHelper.started_with.initial_global_config_dict["config_paths"] == ["mine.yaml"]
+        assert _FakeServerSupervisor.started_with.initial_global_config_dict["config_paths"] == ["mine.yaml"]
 
     @pytest.mark.parametrize("overrides", DOTTED_OVERRIDES)
     def test_serving_refuses_a_dotted_key_before_starting_anything(self, overrides: dict) -> None:
@@ -432,23 +436,23 @@ class TestServeBenchmark:
             with serve_benchmark("bench", overrides=overrides):
                 pytest.fail("the body must not run")
 
-        assert _FakeRunHelper.started_with is None
+        assert _FakeServerSupervisor.started_with is None
 
     def test_stops_the_servers_when_the_caller_fails(self) -> None:
         with pytest.raises(RuntimeError, match="boom"):
             with serve_benchmark("bench"):
                 raise RuntimeError("boom")
 
-        assert _FakeRunHelper.shut_down == 1
+        assert _FakeServerSupervisor.shut_down == 1
 
     def test_a_failed_start_raises_and_leaves_the_clean_up_to_start(self) -> None:
-        _FakeRunHelper.start_error = ConfigError("model endpoint never answered")
+        _FakeServerSupervisor.start_error = ConfigError("model endpoint never answered")
 
         with pytest.raises(ConfigError, match="never answered"):
             with serve_benchmark("bench"):
                 pytest.fail("the body must not run")
 
-        assert _FakeRunHelper.shut_down == 0
+        assert _FakeServerSupervisor.shut_down == 0
 
     def test_a_registry_port_in_use_stops_the_servers_and_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
@@ -461,14 +465,14 @@ class TestServeBenchmark:
             with serve_benchmark("bench", registry_port=5555):
                 pytest.fail("the body must not run")
 
-        assert _FakeRunHelper.shut_down == 1
+        assert _FakeServerSupervisor.shut_down == 1
 
     @pytest.mark.parametrize(
         "error",
         [ServerSpinupTimeoutError("too slow"), ServerStartFailedError("it exited", server_name="agent", errno=None)],
     )
     def test_a_server_that_does_not_start_is_a_config_error_with_the_cause(self, error: RuntimeError) -> None:
-        _FakeRunHelper.start_error = error
+        _FakeServerSupervisor.start_error = error
 
         with pytest.raises(ConfigError, match="did not start") as raised:
             with serve_benchmark("bench"):
@@ -482,4 +486,4 @@ class TestServeBenchmark:
         with serve_benchmark("bench"):
             pass
 
-        assert _FakeRunHelper.started_with.skip_exporters
+        assert _FakeServerSupervisor.started_with.skip_exporters

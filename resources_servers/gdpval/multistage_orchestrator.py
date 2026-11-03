@@ -2715,7 +2715,7 @@ async def run_e2e_multistage(
     """Drive a multi-stage ELO run through the standard rollout-collection helper.
 
     Called by ``ng_e2e_collect_rollouts`` when ``multistage.enabled=true``. Brings
-    nothing up itself (the caller's ``RunHelper`` has already started the servers);
+    nothing up itself (the caller's ``ServerSupervisor`` has already started the servers);
     it preprocesses the prepared dataset into materialized rows, samples/judges
     stage-by-stage via the helper's ``_run_examples_with_metadata``, writes the
     merged rollouts, and runs the standard stage-aware ``_call_aggregate_metrics``.

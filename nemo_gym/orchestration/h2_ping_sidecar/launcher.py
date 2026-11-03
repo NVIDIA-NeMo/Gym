@@ -15,8 +15,8 @@
 """Start, supervise and stop the h2-ping-sidecar for ``gym env start``, and point model URLs at it.
 
 ``H2PingSidecarManager`` is the entry point. It runs the proxy as an ordinary child process of
-the process that starts the Gym servers (``RunHelper``), so the proxy is always on the same node
-as the model servers that call it, including when ``RunHelper`` itself runs inside a Ray actor.
+the process that starts the Gym servers (``ServerSupervisor``), so the proxy is always on the same node
+as the model servers that call it, including when ``ServerSupervisor`` itself runs inside a Ray actor.
 """
 
 import hashlib

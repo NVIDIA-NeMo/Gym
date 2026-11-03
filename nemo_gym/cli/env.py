@@ -77,7 +77,7 @@ from nemo_gym.environment.registry import (
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
 from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
 from nemo_gym.orchestration.server_supervisor import (
-    RunHelper,
+    ServerSupervisor,
     _configured_servers,
     _resolve_server_dir,
 )
@@ -199,7 +199,7 @@ def prefetch(
         print(f"Pre-warming venv for: {dir_path}")
 
         # Run only the setup (venv creation + dep install) — no server start.
-        # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
+        # Serial execution reduces uv cache size (same reasoning as dry_run in ServerSupervisor.start).
         setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
         process = run_command(setup_cmd, dir_path, server_name=top_level_path)
         returncode = process.wait()
@@ -236,9 +236,9 @@ def run(
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    rh = RunHelper()
-    rh.start(global_config_dict_parser_config)
-    rh.run_forever()
+    supervisor = ServerSupervisor()
+    supervisor.start(global_config_dict_parser_config)
+    supervisor.run_forever()
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover

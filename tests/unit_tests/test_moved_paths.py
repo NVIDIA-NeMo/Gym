@@ -737,6 +737,34 @@ if __name__ == "__main__":
     )
 
 
+@pytest.mark.parametrize("old_module", ["nemo_gym.cli", "nemo_gym.cli.env", "nemo_gym.cli.eval"])
+def test_run_helper_resolves_to_server_supervisor_with_a_warning(old_module: str) -> None:
+    # `RunHelper` shipped at each of these paths before its rename. In a fresh interpreter, so no earlier access in
+    # this process has used up the once-per-path warning.
+    code = textwrap.dedent(
+        f"""
+        import importlib
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            old = importlib.import_module("{old_module}")
+        from nemo_gym.orchestration.server_supervisor import ServerSupervisor
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert old.RunHelper is ServerSupervisor
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning]
+        assert len(messages) == 1, messages
+        assert "`{old_module}.RunHelper` moved to `nemo_gym.orchestration.server_supervisor.ServerSupervisor`" in (
+            messages[0]
+        ), messages
+        assert "removed in nemo_gym 0.10.0" in messages[0], messages
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 @pytest.mark.parametrize("first", ["", "import nemo_gym.data.tasks.harbor\n"])
 def test_harbor_cli_imports_from_the_old_package(first: str) -> None:
     # In a fresh interpreter: an earlier `import nemo_gym.tasks.harbor.cli` would bind `cli` on the package.

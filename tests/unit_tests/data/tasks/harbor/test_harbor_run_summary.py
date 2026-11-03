@@ -616,7 +616,7 @@ def test_fresh_start_that_dies_before_the_collector_clears_its_outputs_reports_n
     only once its servers are up. One that dies before that (servers that fail to start) must not pass the files
     an earlier run left under those names off as its own; a resumed run's cached rows are its own; a fresh start
     that reaches the collector rewrites the files and owns them."""
-    from nemo_gym.cli.eval import RunHelper
+    from nemo_gym.cli.eval import ServerSupervisor
 
     write_task(tmp_path / "ds" / "a")
     output_dir = tmp_path / "results" / "harbor" / "validation" / "ds"
@@ -649,7 +649,7 @@ def test_fresh_start_that_dies_before_the_collector_clears_its_outputs_reports_n
         raise RuntimeError("environment server failed to start")
 
     # Resumed (the fixture's default): the servers fail to start, and the cached rows are still this run's.
-    monkeypatch.setattr(RunHelper, "start", failing_start)
+    monkeypatch.setattr(ServerSupervisor, "start", failing_start)
     with pytest.raises(RuntimeError, match="failed to start"):
         oracle_collection.invoke()
     resumed = json.loads(summary_path.read_text())
@@ -682,7 +682,7 @@ def test_fresh_start_that_dies_before_the_collector_clears_its_outputs_reports_n
     assert {path: path.read_bytes() for path in earlier} == earlier
 
     # A fresh start that reaches the collector: it clears and rewrites the files, which are then this run's.
-    monkeypatch.setattr(RunHelper, "start", lambda *args: None)
+    monkeypatch.setattr(ServerSupervisor, "start", lambda *args: None)
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
     validation_cli("+disable_aggregation=true", "+resume_from_cache=false")
     assert len(oracle_collection.dispatched) == 2
@@ -707,7 +707,7 @@ def test_a_resumed_run_that_fails_at_startup_does_not_link_another_stems_newer_r
     """Review (round 38): reports for `rollouts.jsonl`, then for `second.jsonl` in the same folder; resuming the
     first and failing during server startup (before the collector's `_remove_health_reports`) must not link the
     second run's newer reports as the first's."""
-    from nemo_gym.cli.eval import RunHelper
+    from nemo_gym.cli.eval import ServerSupervisor
 
     write_task(tmp_path / "ds" / "a")
     output_dir = tmp_path / "results" / "harbor" / "validation" / "ds"
@@ -724,7 +724,7 @@ def test_a_resumed_run_that_fails_at_startup_does_not_link_another_stems_newer_r
     def failing_start(*args):
         raise RuntimeError("environment server failed to start")
 
-    monkeypatch.setattr(RunHelper, "start", failing_start)
+    monkeypatch.setattr(ServerSupervisor, "start", failing_start)
     with pytest.raises(RuntimeError, match="failed to start"):
         oracle_collection.invoke()
     resumed = json.loads(run_summary_path_for(first).read_text())
