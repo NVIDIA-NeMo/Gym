@@ -46,8 +46,8 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_REQUEST_FAILED,
 )
 from nemo_gym.failure_transport import observe_failure
-from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxPtySpec
+from nemo_gym.sandbox.providers.opensandbox.failures import opensandbox_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 
@@ -156,7 +156,7 @@ class OpenSandboxPtySession:
         failure_kind: str = PROVIDER_PTY_UNAVAILABLE,
         cause: BaseException | None = None,
     ) -> NgFailureEvent:
-        return sandbox_failure(
+        return opensandbox_failure(
             operation="pty", sandbox_id=self._sandbox_id, failure_kind=failure_kind, reason=reason, cause=cause
         )
 
@@ -576,7 +576,7 @@ async def open_pty_session(
                         session_id = (await response.json())["session_id"]
                         break
                     detail = f"HTTP {response.status}: {(await response.text()).strip()}"
-                    failure = sandbox_failure(
+                    failure = opensandbox_failure(
                         operation="create_pty",
                         sandbox_id=sandbox_id,
                         http_status=response.status,
@@ -586,7 +586,7 @@ async def open_pty_session(
                     if response.status not in (404, 502, 503) or delay is None:
                         raise failure
             except aiohttp.ClientConnectorError as e:
-                failure = sandbox_failure(operation="create_pty", sandbox_id=sandbox_id, cause=e)
+                failure = opensandbox_failure(operation="create_pty", sandbox_id=sandbox_id, cause=e)
                 observe_failure(failure)
                 if delay is None:
                     raise failure from e
@@ -614,7 +614,7 @@ async def open_pty_session(
         raise
     except Exception as e:
         await client.close()
-        raise sandbox_failure(
+        raise opensandbox_failure(
             operation="create_pty", sandbox_id=sandbox_id, cause=e, reason=f"Failed to open PTY session: {e}"
         ) from e
     except BaseException:
@@ -674,7 +674,7 @@ async def attach_pty_session(
         raise
     except Exception as e:
         await client.close()
-        raise sandbox_failure(
+        raise opensandbox_failure(
             operation="attach_pty",
             sandbox_id=sandbox_id,
             cause=e,
@@ -719,7 +719,7 @@ async def _connect_ws(
                 timeout=request_timeout_s,
             )
         except aiohttp.WSServerHandshakeError as e:
-            failure = sandbox_failure(
+            failure = opensandbox_failure(
                 operation="attach_pty",
                 sandbox_id=sandbox_id,
                 cause=e,
@@ -734,7 +734,7 @@ async def _connect_ws(
             if e.status not in (502, 503) or delay is None:
                 raise failure from e
         except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as e:
-            failure = sandbox_failure(operation="attach_pty", sandbox_id=sandbox_id, cause=e)
+            failure = opensandbox_failure(operation="attach_pty", sandbox_id=sandbox_id, cause=e)
             observe_failure(failure)
             if delay is None:
                 raise failure from e
@@ -773,7 +773,7 @@ async def _start_session(
         await session.close()
         if isinstance(error, NgFailureEvent):
             raise
-        raise sandbox_failure(operation="attach_pty", sandbox_id=sandbox_id, cause=error) from error
+        raise opensandbox_failure(operation="attach_pty", sandbox_id=sandbox_id, cause=error) from error
     except BaseException:
         await session.close()
         raise
