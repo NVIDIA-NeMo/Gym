@@ -1077,6 +1077,8 @@ async def test_no_progress_resume_uses_bounded_infrastructure_retries(runner_con
     from tests.unit_tests.test_resume_script import _run_prologue
 
     client = install_fake_server_client(monkeypatch, AsyncMock())
+    (tmp_path / "artifacts").mkdir()
+    runner_config.output_jsonl_fpath = str(tmp_path / "artifacts" / "rollouts.jsonl")
     runner_config.dispatch_budget_s = 0
     runner_config.num_samples_in_parallel = 1
     for attempt in range(3):

@@ -17,7 +17,9 @@
 
 import asyncio
 import logging
+import socket
 import sys
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -25,17 +27,20 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, TypeVar
 from uuid import uuid4
 
+import aiohttp
 from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+from nemo_gym.agents.utils.verify_call import is_verify_transport_error
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId, current_verifier_invocation_id
+from nemo_gym.exception_inspection import explicit_causes
 from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -126,6 +131,82 @@ def _attempt_budget(attempt_timeout: float | None, deadline: float | None) -> fl
 
 class PatchCaptureLostError(RuntimeError):
     """The agent sandbox did not report how ``git diff`` ended or did not return its output, so the patch is unknown."""
+
+
+PATCH_CAPTURE_TRANSPORT_RETRIES = 2
+"""Extra attempts of the patch capture's ``git diff`` exec, and of its download, after a transport failure.
+
+The agent sandbox is stopped once the capture ends, so a capture lost to a transient network failure loses the
+rollout's patch for good."""
+PATCH_CAPTURE_RETRY_DELAY_S = 0.5
+"""Wait before the first retry of a patch capture step; it doubles before each later one."""
+
+# Failures to reach the sandbox at all: no request was sent, so nothing ran. These are the connect failures Gym's HTTP
+# client resends unasked (``ClientConnectorError``, which covers refused connections, DNS and "Connect call failed")
+# and the unsent timeouts the OpenSandbox provider recognises (connect and pool timeouts).
+_CONNECT_ERRORS: tuple[type[BaseException], ...] = (
+    aiohttp.ClientConnectorError,
+    aiohttp.ConnectionTimeoutError,
+    ConnectionRefusedError,
+    socket.gaierror,
+)
+_SENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = ()
+try:  # Sandbox SDKs speak httpx; Gym's aiohttp transport maps its errors onto httpx ones.
+    import httpx
+
+    _CONNECT_ERRORS += (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+    _SENT_TRANSPORT_ERRORS = (httpx.TransportError,)
+except ModuleNotFoundError:  # pragma: no cover - httpx comes with the sandbox SDKs this server requires
+    pass
+
+_T = TypeVar("_T")
+
+
+def _transport_failure_phase(error: BaseException) -> Literal["connect", "sent"] | None:
+    """How ``error`` failed in transport: ``"connect"`` before any request was sent, ``"sent"`` after one may have
+    been (a dropped connection, a read timeout), or ``None`` when it is no transport failure.
+
+    The innermost transport error in the explicit cause chain decides. A sandbox SDK wraps its client's error, and
+    Gym's aiohttp transport re-raises an aiohttp error as an httpx one, so an outer ``httpx.ConnectError`` may carry a
+    connection reset after the request was written; the aiohttp error underneath says what happened on the wire.
+    """
+    phase: Literal["connect", "sent"] | None = None
+    for link in explicit_causes(error):
+        if isinstance(link, _CONNECT_ERRORS):
+            phase = "connect"
+        elif is_verify_transport_error(link) or isinstance(link, _SENT_TRANSPORT_ERRORS):
+            phase = "sent"
+    return phase
+
+
+async def _retry_patch_capture_step(
+    step: str, call: Callable[[], Awaitable[_T]], *, idempotent: bool
+) -> tuple[_T, int]:
+    """``call()`` and its attempt count, retried after a transport failure another attempt can repair.
+
+    A connect failure sent nothing, so it is always retried. A failure after sending is retried only for an
+    idempotent ``step``. The last failure, and any other one, propagates.
+    """
+    attempts = PATCH_CAPTURE_TRANSPORT_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return await call(), attempt
+        except Exception as exc:
+            phase = _transport_failure_phase(exc)
+            if attempt == attempts or not (phase == "connect" or (phase == "sent" and idempotent)):
+                raise
+            delay_s = PATCH_CAPTURE_RETRY_DELAY_S * 2 ** (attempt - 1)
+            LOG.warning(
+                "Patch capture %s failed in transport (%s, attempt %d/%d); retrying in %.1fs: %r",
+                step,
+                phase,
+                attempt,
+                attempts,
+                delay_s,
+                exc,
+            )
+            await asyncio.sleep(delay_s)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
@@ -494,10 +575,16 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
         patch_path = f"/tmp/nemo-gym-swebench-pro-{uuid4().hex}.diff"
         try:
+            # Only a connect failure is retried. After a request may have been sent, the first git process could
+            # still hold the index lock while a second one starts.
             try:
-                result = await original_sandbox.exec(
-                    f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
-                    f" > {quote(patch_path)}"
+                result, exec_attempts = await _retry_patch_capture_step(
+                    "git diff exec",
+                    lambda: original_sandbox.exec(
+                        f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                        f" > {quote(patch_path)}"
+                    ),
+                    idempotent=False,
                 )
             except Exception as exc:
                 raise PatchCaptureLostError(f"git diff exec failed: {exc}") from exc
@@ -505,13 +592,22 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             if error_type is not None:
                 raise PatchCaptureLostError(f"git diff exec reported no exit code ({error_type})")
             if result.return_code != 0:
+                if exec_attempts > 1:
+                    # With background exec a connect failure can come from a status poll of a command that did run,
+                    # so the retry may have collided with it; that failure says nothing about the agent.
+                    raise PatchCaptureLostError(
+                        f"git diff failed on a retry after a transport failure: {result.stderr or result.return_code}"
+                    )
                 raise RuntimeError(result.stderr or "git diff failed")
             # Command logs can drop line endings; download the patch bytes instead. A failed cleanup of the local copy
             # must not discard bytes already read.
             try:
                 with TemporaryDirectory(prefix="nemo-gym-swebench-pro-", ignore_cleanup_errors=True) as directory:
                     local_patch = Path(directory) / "model.diff"
-                    await original_sandbox.download(patch_path, local_patch)
+                    # Reading the patch file again is idempotent, so any transport failure is retried.
+                    await _retry_patch_capture_step(
+                        "patch download", lambda: original_sandbox.download(patch_path, local_patch), idempotent=True
+                    )
                     patch = local_patch.read_bytes().decode("utf-8", errors="replace")
             except Exception as exc:
                 raise PatchCaptureLostError(f"patch download failed: {exc}") from exc

@@ -99,6 +99,7 @@ from nemo_gym.core.failure_kinds import (
     ENVIRONMENT_PROTOCOL_VIOLATION,
     ENVIRONMENT_SERVER_FAILED,
     JUDGE_FAILED,
+    PROVIDER_CREDENTIALS_REJECTED,
     is_namespaced,
     is_registered,
 )
@@ -1056,6 +1057,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "model_operations",
                 "error_category",
                 "latency_ttft_ms",
+                "requested_max_tokens",
+                "applied_max_tokens",
+                "output_budget_refit",
             )
             if raw_call.get(key) is not None
         }
@@ -1117,6 +1121,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         # Contradictory returned facts cannot establish authoritative verifier coverage.
                         gaps.append(ObservationGap(code=f"verifier_{field}_conflict"))
                         setattr(existing, field, [])
+                if invocation.grading_record is not None:
+                    existing.grading_record = invocation.grading_record
                 if invocation.status != "unknown":
                     existing.status = invocation.status
                     existing.failure_kind = invocation.failure_kind
@@ -1571,6 +1577,20 @@ class SharedRolloutCollectionConfig(
                 retryable=retryable,
                 made_progress=made_progress,
             )
+
+
+def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+    """The end of a run whose sandbox provider refused its credentials: no attempt succeeds until they are fixed."""
+    rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
+    if not rejected:
+        return None
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the sandbox provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
+        "rollout(s); another attempt cannot succeed until they are fixed. Fix the credentials, then continue "
+        "with gym eval resubmit --recover.",
+        retryable=False,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -3324,9 +3344,6 @@ class RolloutCollectionHelper(BaseModel):
     _store: RolloutStore | None = PrivateAttr(default=None)
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
-        if config.limit:
-            print(f"Limiting the number of tasks to {config.limit}")
-
         # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
@@ -3355,7 +3372,14 @@ class RolloutCollectionHelper(BaseModel):
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
-        return RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+        rows = RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+        if config.limit:
+            # Operators read --limit as rows; it counts tasks, each with every saved copy and num_repeats.
+            tasks = len({row_str for _, row_str, _ in raw_rows})
+            print(
+                f"Limiting to {tasks} tasks ({len(rows)} rows with their repeats); --limit={config.limit} counts tasks"
+            )
+        return rows
 
     def preprocess_examples(
         self,
@@ -3743,16 +3767,19 @@ class RolloutCollectionHelper(BaseModel):
             has_recorded_grade,
             has_saved_generation,
             has_unclassified_execution_failure,
+            is_infrastructure_agent_timeout,
             keeps_partial_response,
         )
 
+        # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
         unclassified = {
             k
             for k, row in latest_by_key.items()
             if has_unclassified_execution_failure(row)
-            or has_saved_generation(row)
-            or has_recorded_grade(row)
-            or keeps_partial_response(row)
+            or (
+                (has_saved_generation(row) or has_recorded_grade(row) or keeps_partial_response(row))
+                and not is_infrastructure_agent_timeout(row)
+            )
         }
         gated = successes_seen | terminal_keys | maxed_out | unclassified
 
@@ -4355,7 +4382,7 @@ class RolloutCollectionHelper(BaseModel):
                             )
 
                 if failure_class is not None:
-                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.manifest.max_rollout_attempts
+                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.attempt_cap
                 completed_count += 1
                 if config.retain_results_in_memory:
                     rows.append(row)
@@ -4580,6 +4607,9 @@ class RolloutCollectionHelper(BaseModel):
                 if latency_tracker.drained
                 else ""
             )
+            stop = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            if stop is not None:
+                raise stop
             raise IncompleteEvaluationError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report.",
@@ -4702,10 +4732,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
         # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
+        if config.require_complete and (
+            stop := await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+        ):
+            raise stop
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,
-            completed=completion["successful"] + completion["final_zeros"],
+            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.progress_outcomes_recorded > 0,
