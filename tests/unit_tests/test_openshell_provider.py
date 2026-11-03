@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+from nemo_gym.sandbox import attribution
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.registry import get_provider_class
 
@@ -39,7 +40,7 @@ pytestmark = pytest.mark.sandbox
 pytest.importorskip("openshell", reason="openshell optional dependency is not installed")
 
 import grpc  # noqa: E402  (grpcio ships with the openshell SDK)
-from openshell import SandboxError, SandboxRef, SandboxStatusRef
+from openshell import SandboxError, SandboxRef, SandboxStatusRef, TlsConfig
 from openshell._proto import openshell_pb2, sandbox_pb2  # noqa: E402
 from openshell.mutations import DeletionOutcome, DeletionResult  # noqa: E402
 from openshell.sandbox import SandboxConditionRef  # noqa: E402
@@ -116,8 +117,10 @@ class FakeClient:
         self.get_results: list[Any] = [make_ref(openshell_pb2.SANDBOX_PHASE_READY)]
         self.exec_results: list[Any] = [make_exec_result()]
         self.delete_gate: threading.Event | None = None  # set -> delete blocks until the test opens it
+        self.create_gate: threading.Event | None = None  # set -> create blocks (after recording) until opened
         self.exec_delay_s = 0.0
-        self.delete_gate: threading.Event | None = None  # set -> delete blocks until the test opens it
+        self.deleted: set[str] = set()  # names a delete took; get() then answers NOT_FOUND unless get_results is set
+        self._default_get_results = self.get_results
         self.delete_results: list[Any] = [DeletionResult(DeletionOutcome.COMPLETED, "sbx-1")]
 
     @staticmethod
@@ -136,20 +139,26 @@ class FakeClient:
         labels: dict[str, str] | None = None,
     ) -> Any:
         self.create_calls.append({"workspace": workspace, "spec": spec, "name": name, "labels": labels})
+        if self.gateway_labels is not None and name is not None:
+            self.gateway_labels[name] = dict(labels or {})
+        if self.create_gate is not None:
+            self.create_gate.wait(timeout=5)
         result = self._next(self.create_results)
         return make_ref(result.phase, sandbox_id=result.id, name=name or result.name, workspace=workspace)
 
     def get(self, sandbox_name: str, *, workspace: str) -> Any:
         self.get_calls.append({"name": sandbox_name, "workspace": workspace})
+        if sandbox_name in self.deleted and self.get_results is self._default_get_results:
+            raise FakeRpcError(grpc.StatusCode.NOT_FOUND)
         return self._next(self.get_results)
 
     def delete(self, sandbox_name: str, *, workspace: str, allow_missing: bool = False) -> Any:
         self.delete_calls.append({"name": sandbox_name, "workspace": workspace, "allow_missing": allow_missing})
         if self.delete_gate is not None:
             self.delete_gate.wait(timeout=5)
-        if self.delete_gate is not None:
-            self.delete_gate.wait(timeout=5)
-        return self._next(self.delete_results)
+        result = self._next(self.delete_results)
+        self.deleted.add(sandbox_name)
+        return result
 
     def exec(
         self,
@@ -294,6 +303,20 @@ def test_provider_call_shapes_bind_against_installed_sdk() -> None:
         None, "n", ["/bin/sh", "-c", "true"], workspace="w", workdir=None, env=None, stdin=None, timeout_seconds=None
     )
     inspect.signature(SandboxClient.close).bind(None)
+    inspect.signature(SandboxClient.delete).bind(None, "n", workspace="w", allow_missing=True)
+    inspect.signature(SandboxClient.list_all).bind(None, workspace="w", label_selector="a=b")
+    inspect.signature(SandboxClient).bind("localhost:1", tls=None, bearer_token=None, timeout=5.0)
+    inspect.signature(TlsConfig).bind(ca_path=None, cert_path=None, key_path=None)
+    assert {"COMPLETED", "ACCEPTED", "ALREADY_ABSENT"} <= {member.name for member in DeletionOutcome}
+
+
+def test_every_sdk_sandbox_phase_has_a_status_mapping() -> None:
+    mapped = openshell_provider._phase_to_status_map()
+    phases = {number for name, number in openshell_pb2.SandboxPhase.items()}
+    assert phases <= set(mapped), f"unmapped SandboxPhase values: {sorted(phases - set(mapped))}"
+    assert mapped[openshell_pb2.SANDBOX_PHASE_STOPPING] == SandboxStatus.STOPPED
+    assert mapped[openshell_pb2.SANDBOX_PHASE_SUSPENDING] == SandboxStatus.STOPPED
+    assert mapped[openshell_pb2.SANDBOX_PHASE_SUSPENDED] == SandboxStatus.STOPPED
 
 
 def test_constructor_builds_real_client_and_config_coercion() -> None:
@@ -370,18 +393,20 @@ def test_generated_sandbox_names_fit_routable_name_limit() -> None:
 
 
 async def _drain_deletes_only() -> None:
-    while openshell_provider._PENDING_DELETES:
-        pending = [f for f in openshell_provider._PENDING_DELETES.values() if not f.cancelled()]
-        done, _ = await asyncio.to_thread(concurrent.futures.wait, pending, 5)
-        await asyncio.sleep(0)
+    """Wait for every delete handed to a worker; a done callback that never clears an entry fails after 10 s."""
+
+    async def drain() -> None:
+        while openshell_provider._PENDING_DELETES:
+            pending = [f for f in openshell_provider._PENDING_DELETES.values() if not f.cancelled()]
+            await asyncio.to_thread(concurrent.futures.wait, pending, 5)
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(drain(), 10)
 
 
 async def _drain(provider: OpenShellProvider) -> None:
     """Wait for every delete handed to a worker, then release the provider."""
-    while openshell_provider._PENDING_DELETES:
-        pending = list(openshell_provider._PENDING_DELETES.values())
-        await asyncio.to_thread(concurrent.futures.wait, pending)
-        await asyncio.sleep(0)
+    await _drain_deletes_only()
     await provider.aclose()
 
 
@@ -403,7 +428,7 @@ async def test_create_adds_attribution_labels_with_spec_keys_winning(
         "nemo-gym.nvidia.com/user": "alice",
         "nemo-gym.nvidia.com/workload": "bench",
         "nemo-gym.nvidia.com/run": "run-1",
-        "nemo-gym.nvidia.com/process": openshell_provider._process_id(),
+        "nemo-gym.nvidia.com/process": openshell_provider.resolve_process_id(),
         "task": "demo",
         SANDBOX_LABEL: "1",
     }
@@ -524,7 +549,6 @@ async def test_create_policy_from_mapping_and_path(make_provider, fake_client: F
 
     with pytest.raises(OpenShellCreateError, match="not a valid SandboxPolicy"):
         await provider.create(SandboxSpec(provider_options={"policy": {"not_a_policy_field": 1}}))
-    assert isinstance(sandbox_pb2.SandboxPolicy(), object)  # policy parses against the real proto
 
 
 async def test_create_network_policies_mapping_builds_a_valid_sandbox_policy(
@@ -594,11 +618,34 @@ async def test_create_polls_until_ready(make_provider, fake_client: FakeClient) 
     assert len(fake_client.get_calls) == 4
 
 
+async def test_create_error_phase_reports_the_gateway_conditions(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    ref = make_ref(openshell_pb2.SANDBOX_PHASE_ERROR)
+    failed = dataclasses.replace(
+        ref,
+        status=dataclasses.replace(
+            ref.status,
+            conditions=(
+                SandboxConditionRef(type="Ready", status="False", reason="ImagePull", message="no such image"),
+            ),
+        ),
+    )
+    fake_client.get_results = [failed]
+    with pytest.raises(OpenShellCreateError, match=r"ERROR phase.*Ready=False \(ImagePull: no such image\)"):
+        await provider.create(SandboxSpec())
+    await _drain(provider)
+
+
 @pytest.mark.parametrize(
     ("phase", "match"),
     [
         (openshell_pb2.SANDBOX_PHASE_ERROR, "ERROR phase"),
         (openshell_pb2.SANDBOX_PHASE_DELETING, "being deleted"),
+        (openshell_pb2.SANDBOX_PHASE_STOPPED, "deleted or stopped"),
+        (openshell_pb2.SANDBOX_PHASE_STOPPING, "deleted or stopped"),
+        (openshell_pb2.SANDBOX_PHASE_SUSPENDING, "deleted or stopped"),
+        (openshell_pb2.SANDBOX_PHASE_SUSPENDED, "deleted or stopped"),
+        (openshell_pb2.SANDBOX_PHASE_COMPLETED, "deleted or stopped"),
     ],
 )
 async def test_create_terminal_phase_cleans_up(make_provider, fake_client: FakeClient, phase: int, match: str) -> None:
@@ -766,6 +813,24 @@ async def test_exec_gateway_timeout_maps_to_timeout(make_provider, fake_client: 
     assert result.stdout == "partial"
     assert "timed out after 1s" in result.stderr
     assert "did not kill the process" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("return_code", "elapsed_s", "timeout_s", "expected"),
+    [
+        (124, 30.0, 30, True),
+        (124, 29.6, 30, True),  # within the slack below the timeout
+        (124, 2.0, 30, False),  # exits 124 on its own, early
+        (124, 29.0, 30, False),  # slack is capped at EXEC_TIMEOUT_SLACK_S
+        (124, 0.95, 1, True),  # slack is a fraction of a short timeout
+        (124, 0.5, 1, False),
+        (1, 30.0, 30, False),
+        (124, None, 30, False),
+        (124, 30.0, None, False),
+    ],
+)
+def test_exec_timed_out(return_code: int, elapsed_s: float | None, timeout_s: int | None, expected: bool) -> None:
+    assert openshell_provider._exec_timed_out(return_code, elapsed_s, timeout_s) is expected
 
 
 async def test_exec_own_exit_124_is_not_a_timeout(make_provider, fake_client: FakeClient) -> None:
@@ -968,15 +1033,35 @@ async def test_close_twice_schedules_one_delete(make_provider, fake_client: Fake
     assert len(fake_client.delete_calls) == 1
 
 
-async def test_close_delete_deadline_exceeded_reissues_delete(make_provider, fake_client: FakeClient, caplog) -> None:
-    # A client deadline cancels the gateway's delete before it commits (observed live: the sandbox stays READY),
-    # so DEADLINE_EXCEEDED must trigger another DeleteSandbox, not just polling.
+async def test_close_delete_deadline_exceeded_waits_for_the_gateway_delete(
+    make_provider, fake_client: FakeClient, caplog
+) -> None:
+    # The gateway finishes a delete it has started after the client deadline, so a deadline goes to the
+    # deletion wait and does not issue another DeleteSandbox when the sandbox disappears.
     provider = make_provider()
+    fake_client.delete_results = [FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED)]
+    fake_client.get_results = [
+        make_ref(openshell_pb2.SANDBOX_PHASE_DELETING),
+        FakeRpcError(grpc.StatusCode.NOT_FOUND),
+    ]
+    with caplog.at_level("ERROR"):
+        await provider.close(_make_handle(name="nemo-gym-x"))
+        await _drain(provider)
+    assert len(fake_client.delete_calls) == 1
+    assert len(fake_client.get_calls) == 2
+    assert "may be leaked" not in caplog.text
+
+
+async def test_close_delete_deadline_exceeded_reissues_when_the_sandbox_stays(
+    make_provider, fake_client: FakeClient, caplog
+) -> None:
+    # A delete that timed out waiting on a lifecycle lock never started: the sandbox stays READY, so re-issue.
+    provider = make_provider(operations={"close_timeout_s": 0.05})
     fake_client.delete_results = [
         FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED),
         DeletionResult(DeletionOutcome.COMPLETED),
     ]
-    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+    # get() answers READY until the second delete lands, then NOT_FOUND.
     with caplog.at_level("ERROR"):
         await provider.close(_make_handle(name="nemo-gym-x"))
         await _drain(provider)
@@ -987,8 +1072,9 @@ async def test_close_delete_deadline_exceeded_reissues_delete(make_provider, fak
 async def test_close_delete_deadline_exceeded_every_attempt_logs_failure(
     make_provider, fake_client: FakeClient, caplog
 ) -> None:
-    provider = make_provider()
+    provider = make_provider(operations={"close_timeout_s": 0.05})
     fake_client.delete_results = [FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED)]
+    fake_client.get_results = [make_ref(openshell_pb2.SANDBOX_PHASE_READY)]
     with caplog.at_level("ERROR"):
         await provider.close(_make_handle(name="nemo-gym-x"))
         await _drain(provider)
@@ -1002,6 +1088,33 @@ async def test_close_delete_deadline_exceeded_never_gone_logs_failure(
     provider = make_provider(operations={"close_timeout_s": 0.05})
     fake_client.delete_results = [FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED)]
     fake_client.get_results = [make_ref(openshell_pb2.SANDBOX_PHASE_DELETING)]
+    with caplog.at_level("ERROR"):
+        await provider.close(_make_handle(name="nemo-gym-x"))
+        await _drain(provider)
+    assert "'nemo-gym-x'" in caplog.text and "may be leaked" in caplog.text
+
+
+async def test_close_accepted_outcome_waits_for_the_sandbox_to_go(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    fake_client.delete_results = [DeletionResult(DeletionOutcome.ACCEPTED)]
+    fake_client.get_results = [make_ref(openshell_pb2.SANDBOX_PHASE_DELETING), FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+    await provider.close(_make_handle(name="nemo-gym-x"))
+    await _drain(provider)
+    assert len(fake_client.get_calls) == 2
+
+
+async def test_close_non_rpc_delete_error_is_logged_as_failure(make_provider, fake_client: FakeClient, caplog) -> None:
+    provider = make_provider()
+    fake_client.delete_results = [ValueError("bad")]
+    with caplog.at_level("ERROR"):
+        await provider.close(_make_handle(name="nemo-gym-x"))
+        await _drain(provider)
+    assert "'nemo-gym-x'" in caplog.text and "may be leaked" in caplog.text
+
+
+async def test_close_wait_non_rpc_error_is_logged_as_failure(make_provider, fake_client: FakeClient, caplog) -> None:
+    provider = make_provider()
+    fake_client.get_results = [ValueError("bad")]
     with caplog.at_level("ERROR"):
         await provider.close(_make_handle(name="nemo-gym-x"))
         await _drain(provider)
@@ -1044,10 +1157,33 @@ async def test_close_missing_sandbox_is_success(make_provider, fake_client: Fake
     assert "may be leaked" not in caplog.text
 
 
+@pytest.mark.parametrize("code", [grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.FAILED_PRECONDITION])
+async def test_close_retries_transient_delete_failures_in_the_worker(
+    make_provider, fake_client: FakeClient, caplog, code: grpc.StatusCode
+) -> None:
+    provider = make_provider()
+    fake_client.delete_results = [FakeRpcError(code), DeletionResult(DeletionOutcome.ALREADY_ABSENT)]
+    with caplog.at_level("ERROR"):
+        await provider.close(_make_handle(name="nemo-gym-x"))
+        await _drain(provider)
+    assert len(fake_client.delete_calls) == 2
+    assert "may be leaked" not in caplog.text
+
+
+async def test_close_gives_up_on_a_delete_that_keeps_failing(make_provider, fake_client: FakeClient, caplog) -> None:
+    provider = make_provider(operations={"close_timeout_s": 0.1})
+    fake_client.delete_results = [FakeRpcError(grpc.StatusCode.UNAVAILABLE)]
+    with caplog.at_level("ERROR"):
+        await provider.close(_make_handle(name="nemo-gym-x"))
+        await _drain(provider)
+    assert len(fake_client.delete_calls) >= 2
+    assert "'nemo-gym-x'" in caplog.text and "may be leaked" in caplog.text
+
+
 async def test_close_delete_failure_is_logged_and_retryable(make_provider, fake_client: FakeClient, caplog) -> None:
     provider = make_provider()
     fake_client.delete_results = [
-        FakeRpcError(grpc.StatusCode.UNAVAILABLE),
+        SandboxError("boom"),
         DeletionResult(DeletionOutcome.ALREADY_ABSENT),
     ]
     handle = _make_handle(name="nemo-gym-x")
@@ -1102,18 +1238,14 @@ async def test_close_tracks_live_sandboxes(make_provider, fake_client: FakeClien
     await _drain(provider)
 
 
-async def test_aclose_sweeps_untracked_sandboxes_of_this_run(
-    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("NEMO_GYM_RUN_ID", "run 1/x")
+async def test_aclose_reaps_orphaned_sandboxes_of_this_process(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
     fake_client.list_results = [
         [
-            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="leftover"),
+            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="orphan"),
             make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="pending"),
         ]
     ]
-    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
     in_flight: concurrent.futures.Future[None] = concurrent.futures.Future()  # a delete already handed to a worker
     openshell_provider._PENDING_DELETES[("default", "pending")] = in_flight
     await provider.aclose()
@@ -1123,34 +1255,29 @@ async def test_aclose_sweeps_untracked_sandboxes_of_this_run(
     assert fake_client.list_calls == [
         {
             "workspace": "default",
-            "label_selector": (
-                f"nemo-gym.nvidia.com/run=run_1_x,nemo-gym.nvidia.com/process={openshell_provider._process_id()},"
-                f"{SANDBOX_LABEL}=1"
-            ),
+            "label_selector": f"nemo-gym.nvidia.com/process={attribution.resolve_process_id()},{SANDBOX_LABEL}=1",
         }
     ]
-    assert [call["name"] for call in fake_client.delete_calls] == ["leftover"]
+    assert [call["name"] for call in fake_client.delete_calls] == ["orphan"]
 
 
-async def test_sweep_never_deletes_another_process_sandboxes_of_the_same_run(
+async def test_reap_never_deletes_another_process_sandboxes_of_the_same_run(
     make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Two processes of one job share the run id (NEMO_GYM_RUN_ID is inherited), so the run label alone must not
+    # Two processes of one job share the run id (NEMO_GYM_RUN_ID is inherited), so the run label must not
     # decide what this process may delete: process B's live sandbox shares the run but not the process label.
     monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared-run")
-    monkeypatch.setattr(openshell_provider, "_process_id", lambda: "process-a")
+    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-a")
     provider = make_provider()
     prefix = "nemo-gym.nvidia.com/"
     fake_client.gateway_labels = {
-        "a-leftover": {f"{prefix}run": "shared-run", f"{prefix}process": "process-a", SANDBOX_LABEL: "1"},
+        "a-orphan": {f"{prefix}run": "shared-run", f"{prefix}process": "process-a", SANDBOX_LABEL: "1"},
         "b-live": {f"{prefix}run": "shared-run", f"{prefix}process": "process-b", SANDBOX_LABEL: "1"},
-        "other-run": {f"{prefix}run": "other", f"{prefix}process": "process-a", SANDBOX_LABEL: "1"},
         "unlabeled": {},
     }
-    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
     await provider.aclose()
     await _drain_deletes_only()
-    assert [call["name"] for call in fake_client.delete_calls] == ["a-leftover"]
+    assert [call["name"] for call in fake_client.delete_calls] == ["a-orphan"]
 
 
 async def test_create_process_label_differs_per_process(
@@ -1158,9 +1285,9 @@ async def test_create_process_label_differs_per_process(
 ) -> None:
     monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared-run")
     provider = make_provider()
-    monkeypatch.setattr(openshell_provider, "_process_id", lambda: "process-a")
+    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-a")
     await provider.create(SandboxSpec())
-    monkeypatch.setattr(openshell_provider, "_process_id", lambda: "process-b")
+    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-b")
     await provider.create(SandboxSpec())
     first, second = (call["labels"] for call in fake_client.create_calls)
     assert first["nemo-gym.nvidia.com/run"] == second["nemo-gym.nvidia.com/run"] == "shared-run"
@@ -1168,49 +1295,160 @@ async def test_create_process_label_differs_per_process(
 
 
 def test_process_id_is_stable_in_a_process_and_new_after_fork(monkeypatch: pytest.MonkeyPatch) -> None:
-    first = openshell_provider._process_id()
-    assert openshell_provider._process_id() == first
-    monkeypatch.setattr(openshell_provider.os, "getpid", lambda: os_getpid() + 1)
-    assert openshell_provider._process_id() != first
+    first = attribution.resolve_process_id()
+    assert attribution.resolve_process_id() == first
+    monkeypatch.setattr(attribution.os, "getpid", lambda: os_getpid() + 1)
+    assert attribution.resolve_process_id() != first
 
 
-async def test_aclose_sweep_skips_sandboxes_still_live_in_this_process(make_provider, fake_client: FakeClient) -> None:
+async def test_aclose_reap_skips_when_a_sandbox_is_still_live_in_this_process(
+    make_provider, fake_client: FakeClient
+) -> None:
     provider = make_provider()
     fake_client.list_results = [[make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="live")]]
     openshell_provider._LIVE_SANDBOXES.add(("default", "live"))
     await provider.aclose()
-    # Another sandbox of this process is still live, so no sweep happens at all (it could not tell whose is whose).
     assert not fake_client.list_calls and not fake_client.delete_calls
 
 
-async def test_sweep_never_deletes_a_live_sandbox_of_this_run(make_provider, fake_client: FakeClient) -> None:
+async def test_reap_never_deletes_a_live_sandbox(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
     fake_client.list_results = [
         [
             make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="live"),
-            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="leftover"),
+            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="orphan"),
         ]
     ]
-    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
     openshell_provider._LIVE_SANDBOXES.add(("default", "live"))
-    await provider._sweep_leftovers()
+    await provider._reap_orphans()
     await _drain_deletes_only()
-    assert [call["name"] for call in fake_client.delete_calls] == ["leftover"]
+    assert [call["name"] for call in fake_client.delete_calls] == ["orphan"]
     await provider.aclose()
 
 
-async def test_sweep_skipped_without_attribution(make_provider, fake_client: FakeClient) -> None:
+async def test_reap_skipped_without_attribution(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider(attribution={"enabled": False})
     await provider.aclose()
     assert not fake_client.list_calls
 
 
-async def test_sweep_list_failure_is_logged_not_raised(make_provider, fake_client: FakeClient, caplog) -> None:
+async def test_reap_list_failure_is_logged_not_raised(make_provider, fake_client: FakeClient, caplog) -> None:
     provider = make_provider()
     fake_client.list_results = [FakeRpcError(grpc.StatusCode.UNAVAILABLE)]
     with caplog.at_level("WARNING"):
         await provider.aclose()
-    assert "Could not list leftover" in caplog.text
+    assert "Could not list orphaned" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"nemo-gym.nvidia.com/process": "mine", "nemo-gym.nvidia.com/run": "task-run"},
+        {SANDBOX_LABEL: "0"},
+    ],
+)
+async def test_caller_metadata_cannot_replace_the_process_or_marker_label(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch, metadata: dict[str, str]
+) -> None:
+    monkeypatch.setattr(openshell_provider, "resolve_process_id", lambda: "process-a")
+    provider = make_provider()
+    await provider.create(SandboxSpec(metadata=metadata))
+    labels = _create_labels(fake_client)
+    assert labels["nemo-gym.nvidia.com/process"] == "process-a"
+    assert labels[SANDBOX_LABEL] == "1"
+    assert labels["nemo-gym.nvidia.com/run"] == metadata.get(
+        "nemo-gym.nvidia.com/run", labels["nemo-gym.nvidia.com/run"]
+    )
+
+
+async def test_reap_leaves_a_create_in_flight_alone(make_provider, fake_client: FakeClient) -> None:
+    # The gateway lists a sandbox as soon as it stores it, before CreateSandbox returns; another episode's
+    # aclose() in the same process must not delete it.
+    fake_client.gateway_labels = {}
+    create_gate = fake_client.create_gate = threading.Event()
+    creating = make_provider()
+    other = make_provider()
+    task = asyncio.create_task(creating.create(SandboxSpec()))
+    for _ in range(200):
+        if fake_client.create_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert fake_client.gateway_labels  # listable on the gateway while its create has not returned
+    await other.aclose()
+    assert not fake_client.delete_calls
+    create_gate.set()
+    handle = await task
+    assert handle.raw.name == fake_client.create_calls[0]["name"]
+    await creating.close(handle)
+    await _drain(creating)
+
+
+async def test_create_cancelled_while_waiting_for_ready_submits_the_delete(
+    make_provider, fake_client: FakeClient
+) -> None:
+    provider = make_provider()
+    fake_client.get_results = [make_ref(openshell_pb2.SANDBOX_PHASE_PROVISIONING)]
+    task = asyncio.create_task(provider.create(SandboxSpec()))
+    for _ in range(200):
+        if fake_client.get_calls:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    name = fake_client.create_calls[0]["name"]
+    assert ("default", name) not in openshell_provider._LIVE_SANDBOXES
+    await _drain(provider)
+    assert [call["name"] for call in fake_client.delete_calls] == [name]
+
+
+async def test_create_cancelled_during_the_rpc_deletes_a_late_commit(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    create_gate = fake_client.create_gate = threading.Event()
+    task = asyncio.create_task(provider.create(SandboxSpec()))
+    for _ in range(200):
+        if fake_client.create_calls:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    create_gate.set()  # the create commits after the caller is gone
+    for _ in range(200):
+        if len(fake_client.delete_calls) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    await _drain(provider)
+    name = fake_client.create_calls[0]["name"]
+    assert {call["name"] for call in fake_client.delete_calls} == {name}
+    assert fake_client.delete_calls[-1]["allow_missing"] is True
+
+
+async def test_failed_create_rpc_submits_an_idempotent_delete(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider(create={"retries": 0})
+    fake_client.create_results = [FakeRpcError(grpc.StatusCode.UNAVAILABLE)]
+    fake_client.delete_results = [DeletionResult(DeletionOutcome.ALREADY_ABSENT)]
+    with pytest.raises(OpenShellCreateError):
+        await provider.create(SandboxSpec())
+    await _drain(provider)
+    assert [call["name"] for call in fake_client.delete_calls] == [fake_client.create_calls[0]["name"]]
+    assert not openshell_provider._LIVE_SANDBOXES
+
+
+async def test_close_deletes_synchronously_when_the_executor_refuses_work(
+    make_provider, fake_client: FakeClient
+) -> None:
+    provider = make_provider()
+    handle = _make_handle(name="nemo-gym-x")
+    openshell_provider._LIVE_SANDBOXES.add(("default", "nemo-gym-x"))
+
+    def refuse(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+
+    provider._delete_shared.executor.submit = refuse  # type: ignore[method-assign]
+    await provider.close(handle)
+    assert [call["name"] for call in fake_client.delete_calls] == ["nemo-gym-x"]
+    assert ("default", "nemo-gym-x") not in openshell_provider._LIVE_SANDBOXES
 
 
 async def test_aclose_idempotent(make_provider, fake_client: FakeClient) -> None:

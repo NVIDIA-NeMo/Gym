@@ -30,7 +30,6 @@ import dataclasses
 import functools
 import logging
 import math
-import os
 import posixpath
 import shlex
 import threading
@@ -42,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.sandbox.attribution import RUN_KEY, AttributionConfig, resolve_run_id, sanitize_label_value
+from nemo_gym.sandbox.attribution import PROCESS_KEY, AttributionConfig, resolve_process_id, sanitize_label_value
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -233,7 +232,7 @@ class OpenShellConnectionConfig:
             raise ValueError("connection.tls_cert_path and connection.tls_key_path must be set together")
 
 
-def _killed_at_timeout(return_code: int, elapsed_s: float | None, timeout_s: int | None) -> bool:
+def _exec_timed_out(return_code: int, elapsed_s: float | None, timeout_s: int | None) -> bool:
     """Whether the exec stream ended at the ``timeout_seconds`` the provider passed it.
 
     The 0.1.x exec stream reports the timeout as exit code 124 with no timeout flag. The gateway
@@ -312,9 +311,13 @@ class OpenShellProbeConfig:
 
 @dataclass(frozen=True)
 class OpenShellOperationsConfig:
-    # DeleteSandbox only commits after the sandbox pod's termination grace period (~31s on a Kubernetes-backed gateway) and a
-    # client deadline that ends first cancels it, so deletes run on their own client with a long deadline.
+    # DeleteSandbox takes the sandbox pod's termination grace period (~31s on a Kubernetes-backed gateway). The gateway
+    # finishes a delete it has started even after the client deadline, but a delete still waiting on a lifecycle lock
+    # can hit the deadline first, so deletes run on their own client with a long deadline.
     delete_rpc_timeout_s: float = 120
+    # Workers for deletes, separate from exec.concurrency. Each holds a worker for the delete plus the wait until
+    # gone, so this bounds how fast queued deletes drain.
+    delete_concurrency: int = 32
     close_wait_deleted: bool = True
     close_timeout_s: float = 60
     poll_interval_s: float = 1.0
@@ -322,6 +325,8 @@ class OpenShellOperationsConfig:
     def __post_init__(self) -> None:
         if self.delete_rpc_timeout_s <= 0:
             raise ValueError("operations.delete_rpc_timeout_s must be > 0")
+        if self.delete_concurrency < 1:
+            raise ValueError("operations.delete_concurrency must be >= 1")
         if self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
         if self.poll_interval_s <= 0:
@@ -398,7 +403,9 @@ _SHARED_CLIENTS_LOCK = threading.Lock()
 # the (non-daemon) worker threads at interpreter exit, so a delete handed to a worker finishes even after the
 # event loop is gone. The SDK fixes one deadline per client, hence a separate long-deadline client for deletes.
 _DELETE_STATES: dict[tuple[Any, ...], _SharedClientState] = {}
-# Sandboxes this process created and has not closed, and deletes handed to a worker, by (workspace, name).
+# Sandboxes this process is creating or has created and not closed, and deletes handed to a worker, by
+# (workspace, name). A name is added before CreateSandbox is issued (the client generates it), so the orphan
+# reap never takes a sandbox that is still being created.
 _LIVE_SANDBOXES: set[tuple[str, str]] = set()
 _PENDING_DELETES: dict[tuple[str, str], Future[None]] = {}
 
@@ -461,22 +468,6 @@ def _release_shared_client(state: _SharedClientState) -> None:
     state.client.close()
 
 
-PROCESS_KEY = "process"
-_process_id_by_pid: dict[int, str] = {}
-
-
-def _process_id() -> str:
-    """An id unique to this process (a forked child gets its own), used to scope the leftover sweep.
-
-    The run id can be shared by every process of a job, so it alone cannot tell this process's sandboxes
-    from a sibling's live ones.
-    """
-    pid = os.getpid()
-    if pid not in _process_id_by_pid:
-        _process_id_by_pid[pid] = uuid.uuid4().hex[:12]
-    return _process_id_by_pid[pid]
-
-
 def _forget_delete(key: tuple[str, str], future: Future[None]) -> None:
     with _SHARED_CLIENTS_LOCK:
         if _PENDING_DELETES.get(key) is future:
@@ -486,9 +477,11 @@ def _forget_delete(key: tuple[str, str], future: Future[None]) -> None:
 def _delete_sandbox(client: Any, inst: _OpenShellSandbox, operations: OpenShellOperationsConfig) -> None:
     """Delete one sandbox and (optionally) wait until it is gone, logging the outcome; runs in a worker thread.
 
-    A client deadline cancels the gateway's delete before it commits (the sandbox stays READY), so a deadline
-    re-issues the delete; ``allow_missing`` makes that idempotent. The total is bounded by
-    ``MAX_DELETE_ATTEMPTS * operations.delete_rpc_timeout_s`` plus ``operations.close_timeout_s``.
+    A client deadline does not cancel a delete the gateway has already started, so after one the worker waits for
+    the sandbox to disappear and only re-issues the delete if it is still there; ``allow_missing`` makes the
+    re-issue idempotent. Transient transport failures and FAILED_PRECONDITION (a create's driver operation is
+    still pending) are retried until ``operations.close_timeout_s``. Each job can use up to
+    ``MAX_DELETE_ATTEMPTS`` delete deadlines, plus retry delays and the deletion wait.
     """
     try:
         _delete_and_wait(client, inst, operations)
@@ -498,10 +491,19 @@ def _delete_sandbox(client: Any, inst: _OpenShellSandbox, operations: OpenShellO
         LOGGER.info(f"openshell sandbox {inst.name!r} deleted")
 
 
+def _is_delete_retryable(e: Exception) -> bool:
+    """Transient transport failures, or FAILED_PRECONDITION while a create's driver operation is pending."""
+    import grpc
+
+    return _is_retryable_create_error(e) or _grpc_status_code(e) == grpc.StatusCode.FAILED_PRECONDITION
+
+
 def _delete_and_wait(client: Any, inst: _OpenShellSandbox, operations: OpenShellOperationsConfig) -> None:
     from openshell.mutations import DeletionOutcome
 
-    for attempt in range(1, MAX_DELETE_ATTEMPTS + 1):
+    deadlines = 0
+    retry_until = time.monotonic() + operations.close_timeout_s
+    while True:
         try:
             result = client.delete(inst.name, workspace=inst.workspace, allow_missing=True)
             break
@@ -509,18 +511,29 @@ def _delete_and_wait(client: Any, inst: _OpenShellSandbox, operations: OpenShell
             if _is_not_found(e):
                 return
             if _is_grpc_timeout(e):
+                deadlines += 1
                 LOGGER.warning(
-                    f"DeleteSandbox for {inst.name!r} hit its deadline (attempt {attempt}/{MAX_DELETE_ATTEMPTS})"
+                    f"DeleteSandbox for {inst.name!r} hit its deadline (attempt {deadlines}/{MAX_DELETE_ATTEMPTS}); "
+                    "waiting to see whether the gateway deleted it"
                 )
+                try:
+                    _wait_deleted(client, inst, operations)
+                    return
+                except RuntimeError:
+                    pass
+                if deadlines >= MAX_DELETE_ATTEMPTS:
+                    raise RuntimeError(
+                        f"DeleteSandbox for {inst.name!r} hit its deadline {deadlines} times and the sandbox is still "
+                        f"there (operations.delete_rpc_timeout_s={operations.delete_rpc_timeout_s:g})"
+                    ) from e
+                continue
+            if _is_delete_retryable(e) and time.monotonic() < retry_until:
+                LOGGER.warning(f"Retrying DeleteSandbox for {inst.name!r} after {e}")
+                time.sleep(operations.poll_interval_s)
                 continue
             if _is_runtime_failure(e):
                 raise RuntimeError(f"DeleteSandbox failed for {inst.name!r}: {e}") from e
             raise
-    else:
-        raise RuntimeError(
-            f"DeleteSandbox for {inst.name!r} hit its deadline {MAX_DELETE_ATTEMPTS} times "
-            f"(operations.delete_rpc_timeout_s={operations.delete_rpc_timeout_s:g})"
-        )
     if result.outcome == DeletionOutcome.ALREADY_ABSENT:
         return
     if result.outcome not in (DeletionOutcome.COMPLETED, DeletionOutcome.ACCEPTED):
@@ -573,11 +586,11 @@ class OpenShellProvider:
         _require_openshell()
         self._shared = _acquire_shared_client(self._connection, self._exec_config.concurrency)
         self._closed = False
-        # DeleteSandbox blocks for the pod's termination grace period (~31s on a Kubernetes-backed gateway), so close() hands it to a
-        # delete worker (see _DELETE_STATES) and returns; aclose() never waits for it.
+        # DeleteSandbox blocks for the pod's termination grace period (~31s on a Kubernetes-backed gateway), so
+        # close() hands it to a delete worker (see _DELETE_STATES) and returns; aclose() never waits for it.
         self._delete_shared = _delete_state(
             dataclasses.replace(self._connection, request_timeout_s=self._operations.delete_rpc_timeout_s),
-            self._exec_config.concurrency,
+            self._operations.delete_concurrency,
         )
 
     @property
@@ -587,6 +600,21 @@ class OpenShellProvider:
     async def _call(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._shared.executor, functools.partial(func, *args, **kwargs))
+
+    async def _call_create(self, name: str, workspace: str, **kwargs: Any) -> Any:
+        """Run CreateSandbox on a worker. Cancelling the await does not stop a call already running, so a create
+        that commits after the cancel is deleted when it returns."""
+        future = self._shared.executor.submit(
+            functools.partial(self._client.create, workspace=workspace, name=name, **kwargs)
+        )
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            inst = _OpenShellSandbox(name=name, sandbox_id="", workspace=workspace, image=None)
+            future.add_done_callback(
+                lambda done: None if done.cancelled() or done.exception() else self._submit_delete(inst)
+            )
+            raise
 
     def _build_policy(self, policy: str | Mapping[str, Any]) -> Any:
         from google.protobuf import json_format
@@ -657,9 +685,7 @@ class OpenShellProvider:
         attempt = 0
         while True:
             try:
-                return await self._call(
-                    self._client.create, workspace=workspace, spec=pb_spec, name=name, labels=labels
-                )
+                return await self._call_create(name, workspace, spec=pb_spec, labels=labels)
             except Exception as e:
                 if _is_already_exists(e):
                     return await self._call(self._client.get, name, workspace=workspace)
@@ -696,22 +722,28 @@ class OpenShellProvider:
         options = OpenShellProviderOptions.from_mapping(spec.provider_options)
         pb_spec = self._build_sandbox_spec(spec, image, options)
         name = _generate_sandbox_name()
-        # Explicit spec keys win over attribution keys; the marker label goes last so nothing clobbers it.
-        # Label values must be valid Kubernetes label values (at most 63 characters), so sanitize them all.
+        # Explicit spec keys win over attribution keys. The marker label and the process label (which the orphan
+        # reap selects on) go last so no caller metadata replaces them. Label values must be valid Kubernetes label
+        # values (at most 63 characters), so sanitize them all.
         attribution = self._attribution.metadata()
-        if attribution:
-            attribution[f"{self._attribution.key_prefix}{PROCESS_KEY}"] = _process_id()
+        owner = {f"{self._attribution.key_prefix}{PROCESS_KEY}": resolve_process_id()} if attribution else {}
         labels = {
             str(key): sanitize_label_value(value)
-            for key, value in {**attribution, **spec.metadata, SANDBOX_LABEL: "1"}.items()
+            for key, value in {**attribution, **spec.metadata, **owner, SANDBOX_LABEL: "1"}.items()
         }
+        workspace = self._connection.workspace
+        key = (workspace, name)
+        _LIVE_SANDBOXES.add(key)
 
+        stub = _OpenShellSandbox(name=name, sandbox_id="", workspace=workspace, image=image)
         try:
             ref = await self._create_sandbox_with_retries(pb_spec, name, labels)
-        except Exception as e:
-            if not _is_runtime_failure(e) and not isinstance(e, (ConnectionError, TimeoutError)):
-                raise
-            raise OpenShellCreateError(f"CreateSandbox failed for image={image!r}: {e}") from e
+        except BaseException as e:
+            # The gateway may have committed the sandbox even though no ref came back; delete is idempotent.
+            self._submit_delete(stub)
+            if isinstance(e, Exception) and (_is_runtime_failure(e) or isinstance(e, (ConnectionError, TimeoutError))):
+                raise OpenShellCreateError(f"CreateSandbox failed for image={image!r}: {e}") from e
+            raise
 
         workspace = getattr(ref, "workspace", "") or self._connection.workspace
         _LIVE_SANDBOXES.add((workspace, ref.name))
@@ -731,7 +763,7 @@ class OpenShellProvider:
             ready_timeout_s = spec.ready_timeout_s or self._create_config.ready_timeout_s
             await self._wait_ready(handle, timeout_s=ready_timeout_s)
             await self._verify_created_handle(handle)
-        except Exception:
+        except BaseException:
             await self._cleanup_failed_create_handle(handle)
             raise
         return handle
@@ -759,7 +791,7 @@ class OpenShellProvider:
                     raise OpenShellCreateError(
                         f"sandbox {inst.name!r} entered the ERROR phase while provisioning{conditions}"
                     )
-                if ref.phase in (_phase("SANDBOX_PHASE_DELETING"), _phase("SANDBOX_PHASE_STOPPED")):
+                if _phase_to_status_map().get(ref.phase) == SandboxStatus.STOPPED:
                     raise OpenShellCreateError(
                         f"sandbox {inst.name!r} is being deleted or stopped while provisioning (phase={ref.phase})"
                     )
@@ -855,7 +887,7 @@ class OpenShellProvider:
                     stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
                 )
             raise
-        if _killed_at_timeout(result.exit_code, elapsed_s, timeout_seconds):
+        if _exec_timed_out(result.exit_code, elapsed_s, timeout_seconds):
             note = (
                 f"Command timed out after {timeout_seconds}s; the OpenShell gateway ended the exec "
                 "but did not kill the process, which may still be running in the sandbox"
@@ -931,56 +963,71 @@ class OpenShellProvider:
     async def close(self, handle: SandboxHandle) -> None:
         """Hand the sandbox's delete to a worker thread and return without waiting for the gateway.
 
-        The worker deletes (re-issuing on a deadline), then waits until the sandbox is gone when
-        ``operations.close_wait_deleted`` is set. It is already queued when this returns and runs to
-        completion at interpreter exit even if the event loop is gone. Every outcome is logged with the
-        sandbox name; a failed delete is forgotten, so a later ``close()`` of the same handle retries.
+        The worker deletes, waits until the sandbox is gone when ``operations.close_wait_deleted`` is set, and
+        retries transient failures. It is already queued when this returns and runs to completion at interpreter
+        exit even if the event loop is gone. Every outcome is logged with the sandbox name; a delete that fails
+        for good is logged as possibly leaked and then forgotten.
         """
         self._submit_delete(handle.raw)
 
     def _submit_delete(self, inst: _OpenShellSandbox) -> None:
         key = (inst.workspace, inst.name)
-        _LIVE_SANDBOXES.discard(key)
         with _SHARED_CLIENTS_LOCK:
             pending = _PENDING_DELETES.get(key)
             if pending is not None and not pending.done():
+                _LIVE_SANDBOXES.discard(key)
                 return
-            future = self._delete_shared.executor.submit(
-                _delete_sandbox, self._delete_shared.client, inst, self._operations
+            try:
+                future = self._delete_shared.executor.submit(
+                    _delete_sandbox, self._delete_shared.client, inst, self._operations
+                )
+            except RuntimeError:
+                # The interpreter is shutting down and takes no new work: delete here, blocking.
+                LOGGER.warning(f"Deleting openshell sandbox {inst.name!r} synchronously at interpreter shutdown.")
+                future = None
+            else:
+                _PENDING_DELETES[key] = future
+            _LIVE_SANDBOXES.discard(key)
+        if future is None:
+            _delete_sandbox(self._delete_shared.client, inst, self._operations)
+            return
+        queued = len(_PENDING_DELETES)
+        if queued > self._operations.delete_concurrency:
+            LOGGER.warning(
+                f"{queued} openshell deletes are pending on {self._operations.delete_concurrency} workers; "
+                "sandboxes stay allocated until they drain."
             )
-            _PENDING_DELETES[key] = future
         future.add_done_callback(lambda done, key=key: _forget_delete(key, done))
 
-    async def _sweep_leftovers(self) -> None:
-        """Delete this process's sandboxes that it no longer tracks (for example a create that was cancelled
-        after the gateway committed it). Needs attribution: the run label is what scopes the listing."""
+    async def _reap_orphans(self) -> None:
+        """Delete this process's orphaned sandboxes: ones it no longer tracks, for example a create cancelled
+        after the gateway committed it. Selected by the process label, which needs attribution to be enabled."""
         if not self._attribution.enabled:
             return
-        run = sanitize_label_value(resolve_run_id(self._attribution.run))
         prefix = self._attribution.key_prefix
-        selector = f"{prefix}{RUN_KEY}={run},{prefix}{PROCESS_KEY}={_process_id()},{SANDBOX_LABEL}=1"
+        selector = f"{prefix}{PROCESS_KEY}={resolve_process_id()},{SANDBOX_LABEL}=1"
         workspace = self._connection.workspace
         try:
             refs = await self._call(self._client.list_all, workspace=workspace, label_selector=selector)
         except Exception as e:
-            LOGGER.warning(f"Could not list leftover OpenShell sandboxes ({selector}): {e}")
+            LOGGER.warning(f"Could not list orphaned OpenShell sandboxes ({selector}): {e}")
             return
         for ref in refs:
             key = (ref.workspace or workspace, ref.name)
             if key in _LIVE_SANDBOXES or key in _PENDING_DELETES:
                 continue
-            LOGGER.warning(f"Deleting leftover OpenShell sandbox {ref.name!r} of this run ({selector}).")
+            LOGGER.warning(f"Deleting orphaned OpenShell sandbox {ref.name!r} of this process ({selector}).")
             self._submit_delete(_OpenShellSandbox(name=ref.name, sandbox_id=ref.id, workspace=key[0], image=None))
 
     async def aclose(self) -> None:
         """Release the shared client/pool (closed for real when the last provider releases it).
 
         Does not wait for deletes: they run on their own workers. When no sandbox of this process is still
-        live, it first deletes this run's leftovers (see ``_sweep_leftovers``).
+        live or being created, it first deletes this process's orphaned sandboxes (see ``_reap_orphans``).
         """
         if self._closed:
             return
         self._closed = True
         if not _LIVE_SANDBOXES:
-            await self._sweep_leftovers()
+            await self._reap_orphans()
         await asyncio.to_thread(_release_shared_client, self._shared)

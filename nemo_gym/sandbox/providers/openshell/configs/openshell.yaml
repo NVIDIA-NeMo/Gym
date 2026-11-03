@@ -32,7 +32,7 @@ sandbox:
       # tls_ca_path: /path/to/ca.pem
       # tls_cert_path: /path/to/client.pem
       # tls_key_path: /path/to/client-key.pem
-      # Per-RPC deadline. A DeleteSandbox that exceeds it is treated as in progress (see operations).
+      # Per-RPC deadline for everything except deletes, which use operations.delete_rpc_timeout_s.
       request_timeout_s: 30
     create:
       # Provisioning can include an image pull on the gateway host.
@@ -66,11 +66,14 @@ sandbox:
       # Backoff between probe attempts against the remote gateway.
       stable_delay_s: 1.0
     operations:
-      # close() hands the delete to a worker thread and returns. DeleteSandbox only commits after the
-      # ~31s pod grace period (a shorter client deadline cancels it), so the worker uses a client with this
-      # deadline and re-issues the delete (up to 3 attempts) on a deadline. The worker outlives the event
-      # loop, so the delete finishes even when the process exits right after close().
+      # close() hands the delete to a worker thread and returns. DeleteSandbox takes the ~31s pod grace
+      # period, so the worker uses a client with this deadline. A deadline does not cancel a delete the
+      # gateway has started: the worker waits for the sandbox to go and re-issues the delete (up to 3
+      # deadlines) only if it is still there. The worker outlives the event loop, so the delete finishes
+      # even when the process exits right after close().
       delete_rpc_timeout_s: 120
+      # Delete workers, separate from exec.concurrency. Queued deletes drain at roughly this many per ~30s.
+      delete_concurrency: 32
       # After delete, the worker polls until the gateway reports the sandbox gone (logged either way).
       close_wait_deleted: true
       close_timeout_s: 60

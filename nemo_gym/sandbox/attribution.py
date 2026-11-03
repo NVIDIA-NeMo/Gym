@@ -44,6 +44,7 @@ TEAM_KEY = "team"
 USER_KEY = "user"
 WORKLOAD_KEY = "workload"
 RUN_KEY = "run"
+PROCESS_KEY = "process"
 
 TEAM_ENV_VARS = ("NEMO_GYM_TEAM", "SLURM_JOB_ACCOUNT")
 USER_ENV_VARS = ("NEMO_GYM_USER", "SLURM_JOB_USER")
@@ -65,6 +66,7 @@ DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
 
 _process_run_id: str | None = None
+_process_id_by_pid: dict[int, str] = {}
 _logged_attribution = False
 
 
@@ -145,6 +147,19 @@ def resolve_run_id(run: str | None = None, environ: Mapping[str, str] | None = N
     return _process_run_id
 
 
+def resolve_process_id() -> str:
+    """An id unique to this process (a forked child gets its own).
+
+    ``run`` (see :func:`resolve_run_id`) can be shared by every process of a job and is overridable through
+    ``NEMO_GYM_RUN_ID``, so it cannot tell this process's sandboxes from a sibling's. This id can, which is what
+    lets a provider clean up only its own process's sandboxes.
+    """
+    pid = os.getpid()
+    if pid not in _process_id_by_pid:
+        _process_id_by_pid[pid] = uuid.uuid4().hex[:12]
+    return _process_id_by_pid[pid]
+
+
 def log_attribution_once(metadata: Mapping[str, str]) -> None:
     """Log the resolved attribution metadata once per process.
 
@@ -159,7 +174,12 @@ def log_attribution_once(metadata: Mapping[str, str]) -> None:
 
 
 def sanitize_label_value(value: object) -> str:
-    """Make ``value`` a valid Kubernetes label value: invalid characters become ``_``, at most 63 characters."""
+    """Make ``value`` a valid Kubernetes label value: invalid characters become ``_``, at most 63 characters.
+
+    An empty value stays empty; a value with no valid character becomes ``metadata``.
+    """
+    if not str(value):
+        return ""  # an empty label value is valid
     normalized = METADATA_VALUE_RE.sub("_", str(value)).strip("._-")
     normalized = normalized[:LABEL_VALUE_MAX_LENGTH].strip("._-")
     return normalized or "metadata"
