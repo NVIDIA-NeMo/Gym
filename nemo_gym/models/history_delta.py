@@ -9,7 +9,9 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
-from nemo_gym.agents.utils.model_history_transport import MAX_HISTORY_BODY_BYTES
+
+# Match the standalone sandbox transport's request-body limit.
+MAX_HISTORY_BODY_BYTES = 32 * 1024 * 1024
 
 
 class HistoryResync(ValueError):
