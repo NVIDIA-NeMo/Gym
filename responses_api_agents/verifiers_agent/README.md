@@ -118,6 +118,10 @@ The patch to include prompt and generation token ids for preventing retokenizati
 
 For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `gym env start` after any environment changes to ensure the pinned version of verifiers is used.
 
+### Policy model server failures
+
+When the policy model server was unreachable, timed out or answered 5xx during a rollout, `/run` fails with a 500 instead of scoring the aborted rollout, so a dead server cannot pass as low scores. Errors caused by the model's output or by a tool are still scored. Set `fail_rollout_on_model_server_error: false` in the agent config to score such rollouts as before. To make a dead `vllm_model` server fail a call in bounded time, also set its `endpoint_connection_retry_timeout_s`.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A

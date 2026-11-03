@@ -43,6 +43,7 @@ from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.client.http_client import (
     MAX_NUM_TRIES,
     ClientResponse,
+    ConnectionRetryWindow,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
@@ -178,6 +179,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ),
     )
 
+    connection_retry_timeout_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Wall-clock seconds one call may spend retrying connection errors, counted from the first one, "
+            "before that error is raised. HTTP-status retries of the same call share the window. "
+            "None retries connection errors without a time limit."
+        ),
+    )
+
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     max_rate_limit_wait_seconds: float = Field(
@@ -280,6 +291,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 total=self.request_timeout_seconds,
                 connect=self.connect_timeout_seconds,
             )
+        if self.connection_retry_timeout_s is not None:
+            request_kwargs["_connection_retry_window"] = ConnectionRetryWindow(self.connection_retry_timeout_s)
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
@@ -332,6 +345,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # after the last attempt. Reading intermediate bodies releases sockets.
             if tries >= max_num_tries:
                 await raise_for_status(response, content)
+
+            # A connection error already opened the window: a status wait must not outlast it.
+            window = request_kwargs.get("_connection_retry_window")
+            remaining = window.remaining() if window is not None else None
+            if remaining is not None:
+                wait = max(0.0, min(wait, remaining))
 
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
             print(

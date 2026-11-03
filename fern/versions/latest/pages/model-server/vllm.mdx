@@ -256,6 +256,7 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `drop_unrepresentable_request_fields` | `bool` | `false` | How the Responses-to-Chat-Completions conversion treats a request field with no Chat Completions representation. When `false`, the conversion refuses the request with `NotImplementedError`, so the caller can route it to a server that serves Responses natively. When `true`, the reporting-only fields are dropped and the request proceeds: a non-empty `include` (every value; an empty `include` is already treated as absent), `reasoning.summary` and `reasoning.generate_summary`, and a message `phase`. A `reasoning.context` of `auto` or `all_turns` (the Codex CLI sends `all_turns` when its model catalog enables reasoning context) is dropped too: the conversion passes every reasoning item the request carries to the engine and leaves what is rendered to its chat template, which is what those values ask for. An image part in a tool's output is replaced with the text placeholder `[image omitted from tool output]`, so the model does not see that image, unless `inline_tool_output_images` is on. Every other unrepresentable field, a `current_turn` reasoning context included, is still refused. The setting also applies to the compaction model server (`vllm_model_with_compaction`) and has no effect when `is_responses_native` is `true`, because that path skips the conversion. |
 | `forward_unvalidated_reasoning_effort` | `bool` | `false` | Requires `is_responses_native: false` and `use_completions_api: false`. Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list (for example `max`, which the Codex CLI sends when its model catalog offers it) verbatim as the chat `reasoning_effort`, instead of refusing the request with 422. The engine validates the value. Efforts the SDK lists keep their existing path. The compaction model server (`vllm_model_with_compaction`) rejects it. |
 | `inline_tool_output_images` | `bool` | `false` | Requires `is_responses_native: false`. Send each image part of a Responses tool call output, such as the Codex CLI's `view_image` returns, to the engine as an `image_url` part of the chat tool message. OpenAI's chat tool messages carry text only, so by default such an output is refused, or replaced with a text placeholder under `drop_unrepresentable_request_fields`. vLLM accepts image parts in a tool message and leaves their rendering to the chat template, so a vision model sees the image inside the tool result. Detail `original`, which chat lacks, is sent as `high`. Other part types a tool message cannot carry are still refused. |
+| `endpoint_connection_retry_timeout_s` | `float` | `null` | Wall-clock seconds one model call may spend retrying connection errors before the last one is raised. See [Bound retries to a dead model server](#bound-retries-to-a-dead-model-server). |
 
 ### Advanced: `chat_template_kwargs`
 
@@ -283,6 +284,16 @@ extra_body:
   min_tokens: 10
   repetition_penalty: 1.1
 ```
+
+### Bound retries to a dead model server
+
+By default a model call retries a refused or dropped connection without a time limit, so a training run can ride out an engine restart. For evaluation, where a dead engine should fail the run, set a cap:
+
+```yaml
+endpoint_connection_retry_timeout_s: 300
+```
+
+The value must be positive. The window starts at the call's first connection error, and HTTP-status retries of the same call (for example a 503 with `Retry-After`) share it and never wait past it. It bounds only connection setup: a call that has connected and is generating is not cut short. `null` adds no time cap, but does not lift the attempt cap that `endpoint_connection_retries` sets when `endpoint_file` or `route_around_failing_endpoints` is used.
 
 ## Use VLLMModel with multiple replicas of a model endpoint
 
