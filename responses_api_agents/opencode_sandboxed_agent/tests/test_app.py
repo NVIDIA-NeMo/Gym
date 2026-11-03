@@ -1914,7 +1914,7 @@ def _failing_upload(error):
 
 async def _run_observing_failures(server, request, body):
     """The failure the route raises and the report its reply would carry, as the server middleware builds it."""
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core import RequestFailureLog
 
     with RequestFailureLog.capture() as log:
         with raises(Exception) as caught:
@@ -1935,11 +1935,8 @@ def _ended_timeout(reason="OOMKilled", container_line="container sandbox exited 
 
 
 async def test_a_staging_upload_that_times_out_is_observed_as_a_seed_stage_transport_timeout(tmp_path):
-    from nemo_gym.rollouts.rollout_collection import (
-        NG_FAILURE_COUNTS_AS_ZERO_KEY,
-        NG_TERMINAL_KEY,
-        _agent_request_failure_row,
-    )
+    from nemo_gym.rollouts import NG_TERMINAL_KEY
+    from nemo_gym.rollouts.rollout_collection import NG_FAILURE_COUNTS_AS_ZERO_KEY, _agent_request_failure_row
     from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
 
     error = TimeoutError(_RIPGREP_TIMEOUT)
@@ -1972,8 +1969,8 @@ _NO_ANSWER = mark.parametrize(
 
 @_NO_ANSWER
 async def test_an_agent_exec_that_gets_no_answer_is_observed_as_an_agent_stage_failure(tmp_path, error, kind):
+    from nemo_gym.core import NgFailureEvent
     from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
-    from nemo_gym.typed_exceptions import NgFailureEvent
 
     sandbox = MagicMock(upload=AsyncMock(), exec=AsyncMock(side_effect=error), download=AsyncMock())
     server, request, body = _staged_agent(tmp_path, sandbox)
