@@ -99,3 +99,20 @@ def test_a_cut_off_answer_that_is_not_the_models_observed_answer_withholds_a_pas
     passed, reason, evaluation = _verdict(collected)
     assert passed is None, reason
     assert evaluation["status"] == "UNVERIFIED" and evaluation["exact"] is False
+
+
+def test_an_agents_own_answer_envelope_cut_off_on_its_last_call_is_the_models_observed_answer():
+    # A sandboxed agent saves its own answer envelope (its own response id), not the model's reply: the cut-off is
+    # observed on the model's own last call, which finished on its output cap.
+    collected = _cut_off(call_status=None, invalid_answer=False)
+    row = collected.results[0]
+    row["response"] |= {"id": "resp_agent_envelope", "incomplete_details": {"reason": "max_output_tokens"}}
+    [call] = row["ng_trial_observations"]["model_calls"]
+    call["response_metadata"] |= {"dialect": "chat", "response_status": None, "finish_reason": "length"}
+    passed, reason, evaluation = _verdict(collected)
+    assert passed is True, reason
+    assert evaluation["model"]["kinds"] == {"truncated_answer": 1}
+    # The same envelope whose last call did not finish on a cutoff is not the model's observed answer.
+    call["response_metadata"]["finish_reason"] = "stop"
+    passed, reason, _ = _verdict(collected)
+    assert passed is None, reason

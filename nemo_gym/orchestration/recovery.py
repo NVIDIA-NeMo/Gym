@@ -5366,7 +5366,9 @@ def _observed_incomplete_answer(row: Mapping[str, Any]) -> bool:
     joined. Its answer must still be observed: the row recorded no failure, its one agent
     invocation ended completed or incomplete (an agent marks a cut-off answer incomplete) without an error, its last
     model call is exactly one captured call that answered in one completed operation, and that call's response is
-    the saved answer. A verifier that ran must have completed: a verifier error is never read as the model's fault.
+    the saved answer, or, for an agent that saves its own answer envelope (its own response id), that call itself
+    finished on a cutoff (``CUTOFF_REASONS``): the cut-off answer is observed on the model's own last reply. A verifier
+    that ran must have completed: a verifier error is never read as the model's fault.
     """
     observed = row.get("ng_trial_observations")
     if (
@@ -5435,7 +5437,9 @@ def _observed_incomplete_answer(row: Mapping[str, Any]) -> bool:
         and operations[0].get("failure_id") is None
         and isinstance(meta.get("response_id"), str)
         and bool(meta["response_id"])
-        and meta["response_id"] == (row.get("response") or {}).get("id")
+        and (
+            meta["response_id"] == (row.get("response") or {}).get("id") or meta.get("finish_reason") in CUTOFF_REASONS
+        )
     )
 
 
