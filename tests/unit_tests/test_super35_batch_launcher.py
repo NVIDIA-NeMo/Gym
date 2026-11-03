@@ -66,6 +66,7 @@ def checkout(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         SERVING,
         BUILDER,
         BENCHMARK / "sbatch_external_vllm.sh",
+        BENCHMARK / "save_warmed_vllm_container.py",
         BENCHMARK / "batch_configs/core.yaml",
         BENCHMARK / "batch_configs/swe.yaml",
     ):
