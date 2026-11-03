@@ -21,6 +21,8 @@ The Gym pages are the reference; when they and this skill disagree, the pages wi
 [Resume](../../../fern/versions/latest/pages/evaluation/resume.mdx). For servers you started yourself
 (`gym env start`, then `gym eval run --no-serve`) and for reading health while you build a benchmark or
 a harness, follow [add-benchmark](../add-benchmark/SKILL.md) and [add-harness](../add-harness/SKILL.md).
+The page links point into a full Gym checkout (`fern/...`); a copy of this skill installed on its own does not
+contain those pages, so read them in the Gym repository.
 
 ## How to act
 
@@ -36,6 +38,18 @@ a harness, follow [add-benchmark](../add-benchmark/SKILL.md) and [add-harness](.
    "What the stack does not decide for you" and every operator action with its reason.
 
 ## 1. Before you submit
+
+The `gym` commands below need the `gym` CLI on the host you submit from. Install it at the commit you pin in
+step 1 (or a newer one), in a directory that persists (not `/tmp`), with `uv` on `PATH`:
+
+```bash
+SHA=<the full 40-character commit>
+git clone -q https://github.com/NVIDIA-NeMo/Gym.git ~/gym-${SHA:0:12} && cd ~/gym-${SHA:0:12} && git checkout -q $SHA && uv venv --seed .venv && . .venv/bin/activate && uv pip install -e . && gym --help
+```
+
+Without `uv`, install it with `curl -LsSf https://astral.sh/uv/install.sh | sh` and
+`export PATH="$HOME/.local/bin:$PATH"`. The submitted run installs its own extras and `ray`; the launcher
+commands do not need them.
 
 1. Pin Gym: `driver.gym_install.ref` is a full commit, not a branch. Recovery reads a run with the Gym
    that wrote it and refuses an unpinned ref.
@@ -78,7 +92,7 @@ sentinel (`afterany`), then reads its predecessor's final state:
 | --- | --- |
 | `TIMEOUT` | Continues from the saved rows, within `max_walltime`. A rollout in flight when an allocation ends is rerun from the start: the first such cut is free, every later one charges one attempt of that row (`rollout_allocation_ended`, evaluation-side, final at the attempt cap). |
 | `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Retries, spending one of `max_retries`. |
-| `COMPLETED` | Ends; a job that finishes the run cancels its sentinel and successor (`chain-end-journal.jsonl`). |
+| `COMPLETED` | Ends. The job that finishes the run cancels its successor and sentinel and journals both in `chain-end-journal.jsonl`; on a pin that predates this, the sentinel starts, runs for seconds and writes `Run complete: ... ends the chain with nothing to recover`. |
 | `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. A segment the scheduler requeued has unknown elapsed time and stops this way. |
 | `TIMEOUT` before the task inventory was written | Stops and names the fresh-restart command. |
 
@@ -120,8 +134,10 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   <old>"), and `--inspect` shows the same decision. `--no-auto-repin` keeps the pin and refuses that case,
   naming `--repin`; `--repin <full commit> --repin-reason "<why>"` stays the explicit way to move a run,
   and the repin target must be the Gym that runs the command.
-- **`UNKNOWN`, "nothing was read or decided"** (readers in Slurm steps, `NEMO_GYM_REMOTE_READER_SRUN`): not
-  a problem of the run. Read the reason on stderr (`gym: the reader did not run: ...`). A reader at the
+- **`UNKNOWN`, "nothing was read or decided"** (heavy readers run as a Slurm step; `NEMO_GYM_REMOTE_READER_SRUN`
+  holds the extra `srun` arguments of that step, for example
+  `export NEMO_GYM_REMOTE_READER_SRUN='-p <cpu partition> -q <qos> -c 4 --mem=128G'`, and a launcher may set it
+  for you): not a problem of the run. Read the reason on stderr (`gym: the reader did not run: ...`). A reader at the
   per-user limit of reader steps (`NEMO_GYM_REMOTE_READER_MAX`, default 8) queues first, printing
   `gym-reader progress: queued behind N reader steps`, and runs once one ends; it waits up to
   `NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S` (default 600, 0 does not wait). When the reason still says that
@@ -131,7 +147,9 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   refused (...); retrying in N s`). Other reasons (the step did not start within its wait) have their
   own remedy. A remote reader installs the run's pinned Gym on the login host (or in its step) and
   takes your `UV_LOCK_TIMEOUT` for that install (default 1800 s); raise it on a host where many installs
-  wait for the same uv lock.
+  wait for the same uv lock. A refused or queued step needs no other command: run the identical inspect again
+  when the reason clears. Changing the step's partition or QOS, or raising the per-user limit, is a cluster-policy
+  choice for the operator.
 - **Exit code**: 0 only when `gate_task.status` is `SUCCESS`. A dispatching call exits 1 when it carries
   a score, MLflow or health-limit option, and a call handed to a queue can exit 0 while the gate still
   reads `RESUMING`: read `ok`, `dispatched` and `job_id` from the JSON line, not the exit code.
@@ -164,7 +182,10 @@ Where the evidence lives, relative to the run directory: `gym-job.json` (the sub
 still there after the segment ended), `retry-extension-journal.jsonl`; in `artifacts/`, `rollouts.jsonl`,
 `rollouts_failures.jsonl`, `rollouts_materialized_inputs.jsonl`, `rollouts_coverage.json`,
 `rollouts_aggregate_metrics.json`, `quality_summary.json` and `rollouts_mlflow_export_done`. Read them;
-never edit or delete them.
+never edit or delete them. The run directory also holds chain bookkeeping (`chain-end-journal.jsonl`,
+`.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_rows_at_start.<job id>`, `.gym_walltime_before.<job id>`):
+read it, do not edit it. `quality_summary.json` and `rollouts_aggregate_metrics.json` are written readable by the
+submitting user only (mode 0600) in the runs read: as another user, say they are unreadable rather than absent.
 
 ## 4. Act on the decision
 
@@ -180,7 +201,8 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | Eligible work, `PLANNED` | Run it, with the variables the saved config forwards (`compute.forward_env`, `HF_TOKEN`) set in that shell; a missing one stops the dispatch. |
 | `reverify`, `PLANNED` (only rows with a saved answer remain: a judge failure, or a verify call lost in transport) | Run it: the saved answers are judged again and the policy is not called. A run that served its own model, and nothing else beside it, gets a judge-only job on one CPU node. Its partition is the first of: `--judge-partition <partition>`, a node pool of the saved config with `gpus_per_node: 0`, or the partition `NEMO_GYM_REMOTE_READER_SRUN` names. Its QOS is the first of: `--judge-qos <qos>`, the QOS of the saved CPU pool, the `-q`/`--qos` of `NEMO_GYM_REMOTE_READER_SRUN` when it names this partition or none, the partition's default. Slurm refuses a GPU QOS on a CPU partition (`QOSMinGRES`): pass `--judge-qos`. With no CPU pool and no reader placement, pass `--judge-partition`, or the recovery stops with nothing queued (next row). The job runs `gym eval reverify --settle-receipt`: the Gym that runs it must define that option, or the queued job stops at argument parsing. A run that serves its judge on a node pool of its own gets a judge-only job on that saved pool instead and keeps the run's QOS; `--judge-partition` and `--judge-qos` are not used (when you pass them the report says `--judge-partition/--judge-qos apply to the CPU judge profile only; not used`). A run with both judge failures and policy work is resubmitted; it re-judges the saved failures before its policy work and again at the end. |
 | STOP on a `reverify` of a GPU-served run: `... has no existing CPU-only judge execution profile and none can be derived: no CPU partition is known` | Nothing was queued and no row was lost. Run it again with `--judge-partition <cpu partition>` (and `--judge-qos <qos>` on `QOSMinGRES`). If the message says `this submission has no served-judge execution profile: service(s) <names> run on the policy's nodes (...)`, no partition helps: the judge-only job does not start the policy's allocation and policy services are not restarted. Give each of those services a node pool of its own, beside the policy's, in the submission config, or report that the saved answers cannot be re-judged. |
-| STOP on a `reverify`: `the last 2 judge-only job(s) (<ids>) ended without settling a saved answer; read their receipts and logs ...` | Nothing was queued. Read those jobs' receipts and logs under `<job dir>/reverification`, then allow exactly one more with `--recover --acknowledge-failed-judge-jobs --acknowledge-reason "<why>"`; it is journaled with the job ids it covers in `judge-job-acknowledgement-journal.jsonl`, never covers a later pair of failures, and `--inspect` names the block without writing anything. Never edit the judge-job journal. |
+| STOP on a `reverify`: `the last 2 judge-only job(s) (<ids>) ended without settling a saved answer; read their receipts and logs ...` | Nothing was queued. Read those jobs' receipts and logs under `<job dir>/reverification` (the message prints the path; in a finished run it is
+`<run dir>/<benchmark>/artifacts/reverification`), then allow exactly one more with `--recover --acknowledge-failed-judge-jobs --acknowledge-reason "<why>"`; it is journaled with the job ids it covers in `judge-job-acknowledgement-journal.jsonl`, never covers a later pair of failures, and `--inspect` names the block without writing anything. Never edit the judge-job journal. |
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (N above the recorded limit, 0 for none; 600 s unless the benchmark's `run` sets it). |
 | STOP typed `driver_install_failed` (the installer's error is quoted; `logs/driver-<job id>.log` has the rest) | Fix the cause (the ref, the network, the image), then `--recover`. |
 | STOP typed `provider_credentials_rejected` (the sandbox provider answered 401 or 403) | Fix the credentials, then `--recover`. |
@@ -193,7 +215,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | STOP: N completed result(s) are masked and not measured | They are kept and a resume would run nothing; the run is not complete. Report the count and the reason. Nothing re-grades a masked row that has a saved answer but neither a gradeable artifact (no intact patch, say) nor a recorded grade; `--inspect` names those rows apart ("without a gradeable artifact") and keeps them masked. Only when the operator wants them sampled again: `--recover --rerun-masked-without-artifact --rerun-reason "<why>"` (see section 4). |
 | `fresh-restart` (no task inventory) | Step 8. |
 | NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (warning `MLflow delivery <state>: <reasons>`) | The results are complete; delivery is reported beside the gate, never inside it. Close it: `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values from the run's `artifacts/rollouts_resolved_config.yaml`, and the token as `+mlflow_tracking_token=<token>` or `MLFLOW_TRACKING_TOKEN`. A repeat on an exported run verifies without touching the run lock; `--recover` on a complete run that requires tracking and has no receipt runs the export too. "although the saved config snapshot names a tracking URI...": tracking was required and the export did not finish: read the exporter's failure in the driver log, repair, export. "does not name all of the tracking URI, experiment and run name": nothing tracked the run; set `mlflow_tracking_required: false` next time. From a host without access to the tracking server the inspect reports `unverified` with `status query failed: ...`: inspect with `--mlflow-run-id <receipt run_id> --mlflow-status FINISHED` once you observed that status yourself (`GET <tracking uri>/api/2.0/mlflow/runs/get?run_id=<id>`, field `info.status`); `ModuleNotFoundError` means the reader's environment lacks `mlflow`. |
-| `SUCCESS` | Done. Keep the run directory as the record. Cancel the last segment's pending sentinel (`scancel` the id in `.gym_followup_sentinel.<job id>`). |
+| `SUCCESS` | Done. Keep the run directory as the record. Nothing needs cancelling: the finishing job cancelled its successor and sentinel (`chain-end-journal.jsonl`), and on an older pin the sentinel runs for seconds and ends the chain. A sentinel still pending after the run ended costs nothing; `scancel` the id in `.gym_followup_sentinel.<job id>` only to clear the queue. |
 
 Three limits, each counting something different: the **chain cap** (`max_walltime`, summed over
 segments) is raised with `--max-walltime`; the **infra-retry budget** (preemptions, node failures) with
@@ -306,7 +328,9 @@ serving; it moves the timeout to the evaluation side and changes nothing else).
   of the expected trials and every trial's grading is traceable; `FAIL` at or above 2%; `UNVERIFIED`
   below 2% when some grading is not traceable (the count is a lower bound). The 2% is fixed in Gym; no
   flag changes it. The classes are in `nemo_gym/core/failure_kinds.py`; every `provider_*` kind, any 5xx
-  and another model's 4xx are evaluation-side.
+  and another model's 4xx are evaluation-side. A verifier-timeout row can still count as measured and healthy in
+  `rollouts_coverage.json` and `quality_summary.json` while the recovery evidence marks it masked: trust the
+  recovery evidence until the fix lands.
 - A trial counts as observed when its server recorded the grading operation or saved a grading artifact
   bound to the answer, or the model's own failed answer settles it. A verifier that calls a judge without
   recording it is unobserved: its run reads `UNVERIFIED` with `trial_counts.unobserved_reason` naming the
