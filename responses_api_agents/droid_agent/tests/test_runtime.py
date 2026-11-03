@@ -1,0 +1,175 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import base64
+import hashlib
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from responses_api_agents.droid_agent import runtime
+
+
+PACKAGE = b"fake droid package bytes"
+INTEGRITY = "sha512-" + base64.b64encode(hashlib.sha512(PACKAGE).digest()).decode()
+SHA256 = hashlib.sha256(PACKAGE).hexdigest()
+
+
+class Reply:
+    def __init__(self, body: bytes):
+        self.body = body
+        self.content = SimpleNamespace(iter_chunked=self.chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    async def text(self):
+        return self.body.decode()
+
+    async def chunks(self, size):
+        for start in range(0, len(self.body), 4):
+            yield self.body[start : start + 4]
+
+
+@pytest.fixture
+def registry(monkeypatch, tmp_path):
+    """Serve npm metadata and one tarball; record each requested URL."""
+    monkeypatch.setattr(runtime, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(runtime, "_VERIFIED", {})
+    served = {"package": PACKAGE, "urls": []}
+
+    async def request(method, url, **kwargs):
+        served["urls"].append(url)
+        if url.endswith(".tgz"):
+            return Reply(served["package"])
+        tarball = "https://registry.npmjs.org/@factory/cli-linux-x64/-/cli-linux-x64-9.9.9.tgz"
+        return Reply(json.dumps({"dist": {"tarball": tarball, "integrity": INTEGRITY}}).encode())
+
+    monkeypatch.setattr(runtime, "request", request)
+    return served
+
+
+@pytest.mark.parametrize(
+    "probe,target",
+    [
+        ("Linux\nx86_64\ngnu\navx2\n", "linux-x64"),
+        ("Linux\nx86_64\ngnu\nbaseline\n", "linux-x64-baseline"),
+        ("Linux\naarch64\ngnu\nbaseline\n", "linux-arm64"),
+    ],
+)
+def test_platform_probe_selects_the_matching_package(probe, target):
+    assert runtime.package_target(probe) == target
+
+
+@pytest.mark.parametrize(
+    "probe,message",
+    [
+        ("Linux\nx86_64\nmusl\navx2\n", "glibc"),
+        ("Linux\nriscv64\ngnu\nbaseline\n", "architecture"),
+        ("Darwin\narm64\ngnu\nbaseline\n", "platform"),
+        ("Linux\nx86_64\n", "platform"),
+    ],
+)
+def test_unsupported_platforms_are_named(probe, message):
+    with pytest.raises(ValueError, match=message):
+        runtime.package_target(probe)
+
+
+def test_default_version_has_pinned_integrity_for_every_target():
+    assert {target for version, target in runtime.PINNED_INTEGRITY if version == "1.1.0"} == runtime.TARGETS
+
+
+@pytest.mark.asyncio
+async def test_package_is_verified_cached_and_reused(registry):
+    path, checksum = await runtime.cached_package("9.9.9", "linux-x64")
+    assert path.read_bytes() == PACKAGE and checksum == SHA256
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    again, _ = await runtime.cached_package("9.9.9", "linux-x64")
+    assert again == path
+    assert sum(url.endswith(".tgz") for url in registry["urls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_integrity_mismatch_leaves_no_cached_package(registry):
+    registry["package"] = b"tampered"
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        await runtime.cached_package("9.9.9", "linux-x64")
+    assert not list((runtime.CACHE_DIR / "9.9.9").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_pinned_version_does_not_trust_registry_metadata(registry):
+    # The pinned integrity of 1.1.0 does not match the fake bytes, whatever the registry says.
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        await runtime.cached_package("1.1.0", "linux-x64")
+    assert registry["urls"] == ["https://registry.npmjs.org/@factory/cli-linux-x64/-/cli-linux-x64-1.1.0.tgz"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version,target", [("1.1", "linux-x64"), ("1.1.0", "linux-x64-musl")])
+async def test_inexact_version_or_unknown_target_is_rejected(version, target):
+    with pytest.raises(ValueError, match="exact version"):
+        await runtime.cached_package(version, target)
+
+
+def result(code=0, stdout=""):
+    return SimpleNamespace(return_code=code, error_type=None, stdout=stdout, stderr="installer said no")
+
+
+@pytest.mark.asyncio
+async def test_present_runtime_is_reused_without_upload(monkeypatch, tmp_path):
+    package = tmp_path / "droid.tgz"
+    package.write_bytes(PACKAGE)
+    monkeypatch.setattr(runtime, "cached_package", AsyncMock(return_value=(package, SHA256)))
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(side_effect=[result(stdout="Linux\nx86_64\ngnu\navx2\n"), result()]), upload=AsyncMock()
+    )
+    await runtime.install_sandbox_runtime(
+        sandbox, version="1.1.0", directory="/tmp/s", runtime="/tmp/nemo-gym-droid-runtime-1.1.0", timeout=5
+    )
+    runtime.cached_package.assert_awaited_once_with("1.1.0", "linux-x64")
+    check = sandbox.exec.await_args_list[1].args[0]
+    assert "--check-only" in check and f"--sha256 {SHA256}" in check
+    sandbox.upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_absent_runtime_uploads_the_package_in_pieces(monkeypatch, tmp_path):
+    package = tmp_path / "droid.tgz"
+    package.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+    monkeypatch.setattr(runtime, "cached_package", AsyncMock(return_value=(package, SHA256)))
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(side_effect=[result(stdout="Linux\nx86_64\ngnu\navx2\n"), result(3), result(), result()]),
+        upload=AsyncMock(),
+    )
+    await runtime.install_sandbox_runtime(
+        sandbox, version="1.1.0", directory="/tmp/s", runtime="/tmp/nemo-gym-droid-runtime-1.1.0", timeout=5
+    )
+    assert sandbox.upload.await_count == 3
+    assembled, installed = (call.args[0] for call in sandbox.exec.await_args_list[2:])
+    assert assembled.endswith(
+        "> /tmp/s/droid-package.tgz && rm -f /tmp/s/droid-upload-0000.part "
+        "/tmp/s/droid-upload-0001.part /tmp/s/droid-upload-0002.part"
+    )
+    assert installed.endswith("--source /tmp/s/droid-package.tgz") and "--check-only" not in installed
+
+
+@pytest.mark.asyncio
+async def test_failed_check_or_install_reports_the_installer_output(monkeypatch, tmp_path):
+    package = tmp_path / "droid.tgz"
+    package.write_bytes(PACKAGE)
+    monkeypatch.setattr(runtime, "cached_package", AsyncMock(return_value=(package, SHA256)))
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(side_effect=[result(stdout="Linux\nx86_64\ngnu\navx2\n"), result(2)]), upload=AsyncMock()
+    )
+    with pytest.raises(RuntimeError, match="installer said no"):
+        await runtime.install_sandbox_runtime(sandbox, version="1.1.0", directory="/tmp/s", runtime="/r", timeout=5)
+    sandbox.upload.assert_not_awaited()
