@@ -24,7 +24,7 @@ installed upstream package, so a pin bump that changes the harness fails here.
 | `submit_final_result` | Submit the final answer; ends the loop (`SubmitFinalResult`) | — |
 
 `parse_html_page` and `retrieve_information` share a per-session data storage
-(`state`) dict, scoped by the HTTP session cookie. `edgar_search` is the only
+(`state`) dict, scoped by the resources session (see [Sessions](#sessions)). `edgar_search` is the only
 way to find filing URLs, so its source must be configured or the server fails at
 startup. Any other tool whose required key or model is not configured is
 registered as unavailable and its endpoint returns a clear error, so the agent
@@ -337,6 +337,15 @@ python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
   --cache-dir /shared/cache/finance_agent_v2 \
   --tickers AAPL MSFT NVDA --asset-class equity
 ```
+
+## Sessions
+
+Each rollout has its own session, which holds the documents `parse_html_page` stored and the start of the rollout's time budget (`max_rollout_time_seconds`). The judge reads only the verify request, so the reward does not depend on this state, and `gym eval reverify` needs no session.
+
+- **Seed.** An Environment Server seeds with a typed `ResourcesSeedSessionRequest`, keyed by `resources_session_id`. A retry of the same seed keeps the stored documents, and a seed that binds the ID to another episode or task gets 409. An Agent's `/run` seeds with the legacy body, which starts the session afresh and returns `{}`.
+- **Release.** `/verify` releases the session, because an Agent's `/run` never closes it. `/close_session` releases it by `resources_session_id`, with or without the session cookie, and is idempotent. A seed for a session closed within `session_close_retry_window_seconds` gets 409.
+- **Lost sessions.** `parse_html_page` and `retrieve_information` answer 404 with `failure_kind: session_lost` when the session is not open, instead of creating storage that nothing would release. The other tools keep no session state and answer as before.
+- **Abandoned sessions.** Each seed discards sessions older than `session_ttl_seconds` (default 6 hours) that were never verified or closed, such as a rollout whose `/run` failed before `/verify`. Set it longer than the longest rollout.
 
 ## Verification
 

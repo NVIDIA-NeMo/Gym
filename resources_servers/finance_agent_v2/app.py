@@ -31,7 +31,7 @@ Upstream tool surface (``finance_agent.tools``):
   - submit_final_result (SubmitFinalResult)
 
 Tools implement ``async execute(args, state, logger)`` and share a per-session
-``state`` dict, which this server scopes by HTTP session cookie.
+``state`` dict, which this server scopes by resources session (the HTTP session cookie).
 """
 
 import asyncio
@@ -73,6 +73,13 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -106,6 +113,8 @@ _JUDGE_MAX_OUTPUT_TOKENS_CAP = 32768
 # along in every rollout row.
 _MAX_FAILED_REPLY_SAMPLES = 3
 _FAILED_REPLY_SAMPLE_CHARS = 600
+# Tools that read or write the session's stored documents.
+_SESSION_STATE_TOOLS = frozenset({"parse_html_page", "retrieve_information"})
 
 
 class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
@@ -239,6 +248,14 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         default="2026-03-01",
         description="Informational only. The upstream finance_agent tools self-clamp dates to their "
         "own MAX_END_DATE (2026-03-01); this server does not re-clamp.",
+    )
+    session_ttl_seconds: float = Field(
+        default=6 * 3600,
+        gt=0,
+        allow_inf_nan=False,
+        description="Age at which a seeded session that was never verified or closed is discarded, "
+        "so a rollout that fails before /verify does not keep its parsed documents for the server's lifetime. "
+        "Must exceed the longest rollout.",
     )
 
 
@@ -424,8 +441,12 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context):
         # session_id -> {key -> stored text}; shared `state` dict the upstream
         # parse_html_page / retrieve_information tools read and write.
+        # A session is open while it has an entry here, from its seed until its verify or close.
         self._data_storage: Dict[str, Dict[str, str]] = {}
         self._session_start_times: Dict[str, float] = {}
+        # The typed seed of each open session an Environment Server seeded, to answer a retried seed.
+        self._typed_seeds: Dict[str, ResourcesSeedSessionRequest] = {}
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
         # Shared disk cache for pricing / edgar / SEC docs (disabled when use_cache is False).
         self._cache = ToolCache(self.config.cache_dir, use_cache=self.config.use_cache, app_name="finance_agent_v2")
@@ -568,10 +589,37 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
     # ------------------------------------------------------------------
     # Session helpers
     # ------------------------------------------------------------------
-    def _get_session_storage(self, session_id: str) -> Dict[str, str]:
-        if session_id not in self._data_storage:
-            self._data_storage[session_id] = {}
-        return self._data_storage[session_id]
+    def _require_session_storage(self, session_id: str) -> Dict[str, str]:
+        """Return the open session's data storage; a session never seeded, verified or closed gets a 404.
+
+        A tool call never creates storage: nothing would release storage made for a closed or unknown session.
+        """
+        storage = self._data_storage.get(session_id)
+        if storage is None:
+            raise ResourcesSessionLostError("No seeded finance_agent_v2 session for this request")
+        return storage
+
+    def _release_session(self, session_id: str) -> None:
+        self._data_storage.pop(session_id, None)
+        self._session_start_times.pop(session_id, None)
+        self._typed_seeds.pop(session_id, None)
+
+    def _evict_stale_sessions(self, request: Request) -> None:
+        # An Agent's legacy /run never closes its session, so one that fails before /verify would otherwise stay.
+        cutoff = time.monotonic() - self.config.session_ttl_seconds
+        # Verify and close end a session's checkpoint tracking and routing claim through their routes; an evicted
+        # session has no such request, so end both here. With several workers its claim would otherwise stay open.
+        participant = self.checkpoint_participant
+        app_state = getattr(getattr(request, "app", None), "state", None)
+        lifetimes = getattr(app_state, "nemo_gym_resources_session_lifetimes", None)
+        for session_id, started in list(self._session_start_times.items()):
+            if started <= cutoff:
+                logger.warning("Discarding session %s: not verified or closed after its TTL", session_id)
+                self._release_session(session_id)
+                if participant is not None:
+                    participant.ended(session_id)
+                if lifetimes is not None:
+                    lifetimes.ended(session_id)
 
     def _check_time_budget(self, session_id: str) -> Optional[str]:
         """Return an error message if the rollout exceeded its time budget, else None."""
@@ -596,9 +644,40 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             )
         return None
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
-        """Reset per-question data storage for this session."""
-        session_id = request.session[SESSION_ID_KEY]
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Start per-question data storage and the time budget for this session.
+
+        An Environment Server's typed seed is idempotent: a retry returns the open session unchanged.
+        An Agent's legacy seed resets the session. Either is refused for a session closed within
+        ``session_close_retry_window_seconds``.
+        """
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            # An Agent's legacy /run names its session only by its cookie.
+            session_id = request.session[SESSION_ID_KEY]
+            self._fence.raise_if_closed(session_id)
+            self._start_session(request, session_id)
+            return BaseSeedSessionResponse()
+
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
+            previous = self._typed_seeds.get(session_id)
+            if previous is not None and previous != body:
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            if previous is None:
+                self._typed_seeds[session_id] = body.model_copy(deep=True)
+                self._start_session(request, session_id)
+            # The session router already names a typed seed's cookie session by its resources_session_id
+            # (see nemo_gym.server_runtime.request_handling.session_routing). Binding it here keeps the tools on
+            # that key in an app served without the router too; only after the checks, so a refused seed's reply
+            # carries no cookie for this session.
+            request.session[SESSION_ID_KEY] = session_id
+        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    def _start_session(self, request: Request, session_id: str) -> None:
+        self._evict_stale_sessions(request)
         self._data_storage[session_id] = {}
         self._session_start_times[session_id] = time.monotonic()
         logger.debug("seed_session: reset data storage for session %s", session_id)
@@ -607,7 +686,29 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 "data_storage has %d active sessions — possible leak (verify cleanup failing?)",
                 len(self._data_storage),
             )
-        return await super().seed_session(body)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Release the session's data storage and time budget, and refuse a later seed of it.
+
+        Closing a session that is already closed, verified or never seeded succeeds. State is keyed by
+        ``resources_session_id``, so a close without the session cookie releases it too. Releasing only drops
+        in-memory entries, so it cannot fail part way.
+        """
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            closed_episode = self._fence.closed_episode(session_id)
+            if closed_episode is not None and closed_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+            seeded = self._typed_seeds.get(session_id)
+            if seeded is not None and seeded.episode_id != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            self._release_session(session_id)
+            self._fence.mark_closed(session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=session_id)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        # A checkpoint retired the session's attempt, and its later requests are refused, so nothing would release it.
+        self._release_session(session_id)
 
     # ------------------------------------------------------------------
     # Webserver wiring
@@ -650,7 +751,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 )
             }
 
-        state = self._get_session_storage(session_id)
+        # Only these tools read or write the session's documents; the others ignore `state`.
+        state = self._require_session_storage(session_id) if tool_name in _SESSION_STATE_TOOLS else {}
         if not isinstance(args, dict):
             args = {}
 
@@ -1008,10 +1110,10 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         not passed and gates like one, but also sets ``judge_error`` so a judge outage
         never reads as a model failure.
         """
+        # Verify ends the session: an Agent's legacy /run never closes it.
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id:
-            self._data_storage.pop(session_id, None)
-            self._session_start_times.pop(session_id, None)
+            self._release_session(session_id)
 
         question = ""
         for msg in body.responses_create_params.input or []:
