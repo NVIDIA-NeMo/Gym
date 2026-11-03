@@ -44,6 +44,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
 )
+from nemo_gym.failure_transport import RequestFailureLog
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 from nemo_gym.typed_exceptions import NgFailureEvent
@@ -2655,11 +2656,34 @@ async def test_close_recovers_an_early_lost_delete_reply(already_deleted: bool) 
         probe={"command": None},
     )
 
-    await provider.close(handle)
+    with RequestFailureLog.capture() as log:
+        await provider.close(handle)
+        report = log.reply_report(None)
+    assert [event.failure_kind for event in report.events.values()] == [PROVIDER_IO_TIMEOUT]
 
     assert raw.kill.await_count == 2
     raw.close.assert_awaited_once_with()
     assert handle.raw is raw
+
+
+async def test_delete_recovery_respects_configured_fail_action() -> None:
+    from opensandbox.exceptions import SandboxApiException
+
+    error = SandboxApiException("temporarily unavailable", status_code=503)
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=[error, None]), close=AsyncMock())
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "outcome_policy": {"by_status_code": {503: "fail"}}},
+        probe={"command": None},
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+
+    with raises_failure(PROVIDER_UNAVAILABLE) as caught:
+        await provider.close(handle)
+
+    assert caught.value.http_status == 503
+    assert caught.value.__cause__ is error
+    raw.kill.assert_awaited_once_with()
+    raw.close.assert_not_awaited()
 
 
 @pytest.mark.parametrize("after_timeout", [False, True], ids=["first-attempt", "after-lost-reply"])
@@ -2683,10 +2707,16 @@ async def test_delete_recovery_keeps_permission_and_cancellation_terminal(failur
         probe={"command": None},
     )
 
-    with pytest.raises(type(error)) as caught:
+    with pytest.raises(asyncio.CancelledError if failure == "cancelled" else NgFailureEvent) as caught:
         await provider.close(handle)
 
-    assert caught.value is error
+    if failure == "cancelled":
+        assert caught.value is error
+    else:
+        assert caught.value.__cause__ is error
+        assert caught.value.failure_kind == (
+            "provider_credentials_rejected" if failure in ("unauthorized", "forbidden") else "provider_request_failed"
+        )
     assert raw.kill.await_count == 1 + after_timeout
     raw.close.assert_not_awaited()
     assert handle.raw is raw
@@ -2721,10 +2751,11 @@ async def test_delete_recovery_keeps_wrapped_terminal_errors(failure: str, after
         probe={"command": None},
     )
 
-    with pytest.raises(type(error)) as caught:
+    with pytest.raises(NgFailureEvent) as caught:
         await provider.close(handle)
 
-    assert caught.value is error
+    assert caught.value.__cause__ is error
+    assert caught.value.failure_kind == "provider_internal_error"
     assert raw.kill.await_count == 1 + after_timeout
     raw.close.assert_not_awaited()
     assert handle.raw is raw
@@ -2743,10 +2774,10 @@ async def test_delete_terminal_error_check_handles_cyclic_causes(terminal: bool)
         probe={"command": None},
     )
 
-    with pytest.raises(ValueError) as caught:
+    with raises_failure(PROVIDER_REQUEST_FAILED) as caught:
         await provider.close(handle)
 
-    assert caught.value is error
+    assert caught.value.__cause__ is error
     raw.kill.assert_awaited_once_with()
     raw.close.assert_not_awaited()
     assert handle.raw is raw
@@ -2761,7 +2792,7 @@ async def test_delete_recovery_exhaustion_keeps_the_handle_available_for_owner_r
         probe={"command": None},
     )
 
-    with pytest.raises(TimeoutError):
+    with raises_failure(PROVIDER_IO_TIMEOUT):
         await provider.close(handle)
 
     assert raw.kill.await_count == 3
@@ -2825,7 +2856,7 @@ async def test_delete_recovery_attempts_share_one_close_deadline() -> None:
         probe={"command": None},
     )
 
-    with pytest.raises(TimeoutError):
+    with raises_failure(PROVIDER_IO_TIMEOUT):
         await asyncio.wait_for(provider.close(handle), 1)
 
     assert entered.is_set() and cancelled.is_set()
@@ -2865,8 +2896,10 @@ async def test_delete_recovery_backoff_shares_the_deadline_and_allows_cancellati
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         assert done, "DELETE deadline must interrupt retry backoff before the outer test guard"
-    with pytest.raises(asyncio.CancelledError if cancel_caller else TimeoutError):
+    with pytest.raises(asyncio.CancelledError if cancel_caller else NgFailureEvent) as caught:
         await asyncio.wait_for(task, 1)
+    if not cancel_caller:
+        assert caught.value.failure_kind == PROVIDER_IO_TIMEOUT
 
     raw.kill.assert_awaited_once_with()
     raw.close.assert_not_awaited()
@@ -2906,10 +2939,12 @@ async def test_delete_timeout_recovery_does_not_enable_disabled_create_retries()
         create={"retries": 0}, operations={"retries": 3}, probe={"command": None}
     )
     provider._create_once = AsyncMock(
-        side_effect=opensandbox_provider.OpenSandboxCreateTimeoutError("ambiguous create")
+        side_effect=sandbox_failure(
+            operation="create", failure_kind="provider_create_timeout", reason="ambiguous create"
+        )
     )
 
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+    with raises_failure("provider_create_timeout"):
         await provider.create(SandboxSpec(image="task"))
 
     provider._create_once.assert_awaited_once()
