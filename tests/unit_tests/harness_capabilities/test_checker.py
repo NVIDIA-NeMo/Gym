@@ -47,6 +47,41 @@ def test_external_media_is_not_a_complete_payload(record):
     assert verdict(record, "TE-7") == "not_fulfilled"
 
 
+@pytest.mark.parametrize("wrapper", ["function", "chat", "namespace"])
+@pytest.mark.parametrize("parameter", ["file_id", "file_url", "image_url", "encrypted_content"])
+def test_response_tool_parameter_schemas_are_not_media(record, wrapper, parameter):
+    tool = {
+        "type": "function",
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {parameter: {"type": "string"}}},
+    }
+    if wrapper == "chat":
+        tool = {"type": "function", "function": {key: value for key, value in tool.items() if key != "type"}}
+    elif wrapper == "namespace":
+        tool = {"type": "namespace", "name": "files", "tools": [tool]}
+    record["ng_trajectory"]["model_calls"][0]["response"]["tools"] = [tool]
+    original = json.dumps(record, sort_keys=True)
+
+    assert verdict(record, "TE-4") == "fulfilled"
+    assert verdict(record, "TE-7") == "fulfilled"
+    assert json.dumps(record, sort_keys=True) == original
+
+
+@pytest.mark.parametrize("location", ["tools", "output"])
+def test_response_media_still_requires_payloads_beside_tool_schemas(record, location):
+    response = record["ng_trajectory"]["model_calls"][0]["response"]
+    response["tools"] = [
+        {"type": "function", "name": "lookup", "parameters": {"properties": {"file_id": {"type": "string"}}}}
+    ]
+    if location == "tools":
+        response["tools"].append({"type": "image_generation", "input_image_mask": {"file_id": "missing-mask"}})
+    else:
+        response["output"] = [{"type": "file", "file_id": "missing-output"}]
+
+    assert verdict(record, "TE-4") == "not_fulfilled"
+    assert verdict(record, "TE-7") == "not_fulfilled"
+
+
 def test_payload_removal_fails_even_with_complete_conversation(record):
     record["ng_trajectory"]["model_calls"][0]["request"] = None
     assert verdict(record, "TE-4") == "not_fulfilled"
