@@ -8,11 +8,15 @@ the real executor, collector and settle path."""
 import json
 import os
 import shlex
+import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
+from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from nemo_gym.cli import eval as eval_cli
+from nemo_gym.cli import main as cli_main
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
@@ -154,26 +158,26 @@ def _queued_script(job_dir: Path) -> str:
 
 
 def _queued_reverify_config(script: str) -> RolloutReverificationConfig:
-    """The configuration the queued script's `gym eval reverify` line hands the job, as the CLI would parse it."""
+    """The configuration the queued script's `gym eval reverify` line hands the job, parsed by the real `gym` CLI.
+
+    A flag the launcher renders but the CLI does not define fails here as it fails in the job (exit 2).
+    """
     (line,) = [line.strip() for line in script.splitlines() if line.strip().startswith("gym eval reverify")]
     words = shlex.split(line.replace("'\"'\"'", "'"))
-    flags = {
-        "--rollouts": "rollouts_jsonl_fpath",
-        "--inputs": "materialized_inputs_jsonl_fpath",
-        "--output": "output_jsonl_fpath",
-        "--settle-receipt": "settle_receipt_fpath",
-        "--settle-source-snapshot": "settle_source_snapshot_json",
-    }
-    values: dict = {
-        "judge_failed_only": "--judge-failed-only" in words,
-        "settle_into_source": "--settle-into-source" in words,
-        "withdraw_unresolved_admissions": "--withdraw-unresolved-admissions" in words,
-    }
-    for index, word in enumerate(words):
-        if word in flags:
-            values[flags[word]] = words[index + 1]
-    values |= {"skip_spent_judge_failures": "--skip-spent-judge-failures" in words, "disable_aggregation": True}
-    return RolloutReverificationConfig.model_validate(values)
+    dispatched = []
+    with (
+        mock.patch.object(sys, "argv", words),
+        mock.patch.object(cli_main, "dispatch", lambda target, overrides: dispatched.append((target, overrides))),
+    ):
+        cli_main.main()
+    ((target, overrides),) = dispatched
+    assert target == "nemo_gym.cli.eval:reverify_rollouts"
+    values: dict = {}
+    for override in OverridesParser.create().parse_overrides(overrides):
+        values[override.key_or_group] = override.value()
+    values.pop("config_paths", None)
+    values.pop("model_type", None)
+    return RolloutReverificationConfig.model_validate(values | {"disable_aggregation": True})
 
 
 def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served_run(

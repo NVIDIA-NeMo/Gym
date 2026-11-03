@@ -1791,6 +1791,12 @@ COMMANDS = {
                 "Expected source artifact SHA256 snapshot, checked under the source lock before judging.",
                 quote=True,
             ),
+            _value_flag(
+                "settle-receipt",
+                "settle_receipt_fpath",
+                "With --settle-into-source: write the judge-only recovery job's receipt to this file.",
+                quote=True,
+            ),
             _bool_flag(
                 "settle-into-source",
                 "settle_into_source",
