@@ -96,6 +96,7 @@ from nemo_gym.core.failure_kinds import (
     ENVIRONMENT_PROTOCOL_VIOLATION,
     ENVIRONMENT_SERVER_FAILED,
     JUDGE_FAILED,
+    JUDGE_FAILURE_KINDS,
     PROVIDER_CREDENTIALS_REJECTED,
     is_namespaced,
     is_registered,
@@ -1887,7 +1888,7 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailureReco
     # Transport phases are not episode execution stages. A timeout does not
     # establish whether an earlier transport attempt reached the server.
     episode_stage = failure.get("_ng_failure_stage")
-    if episode_stage is None and failure.get(NG_FAILURE_CLASS_KEY) in ("judge_failed", "judge_invalid"):
+    if episode_stage is None and failure.get(NG_FAILURE_CLASS_KEY) in JUDGE_FAILURE_KINDS:
         episode_stage = "verification"
     message = str(
         failure.get("failure_reason") or failure.get("_ng_failure_message") or "Agent reported a no-result failure"
@@ -1960,7 +1961,7 @@ def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailureR
 
 def _judge_failure_response(result: Any) -> Optional[Dict]:
     """Legacy judge_failsafe carries real generation that can be judged again."""
-    if isinstance(result, dict) and result.get(NG_FAILURE_CLASS_KEY) in ("judge_failed", "judge_invalid"):
+    if isinstance(result, dict) and result.get(NG_FAILURE_CLASS_KEY) in JUDGE_FAILURE_KINDS:
         response = result.get("response")
         if isinstance(response, dict):
             return response
@@ -1983,7 +1984,7 @@ def _failure_diagnostics(result: Any) -> Dict:
     if (
         isinstance(response, dict)
         and response
-        and result.get(NG_FAILURE_CLASS_KEY) not in ("judge_failed", "judge_invalid")
+        and result.get(NG_FAILURE_CLASS_KEY) not in JUDGE_FAILURE_KINDS
         and (response.get("output") or response.get("status") is not None)
     ):
         # This is producer evidence, possibly including synthetic failure text.
@@ -2011,7 +2012,7 @@ def _failure_compatibility_row(failure: RolloutFailureRecord, verification_respo
     }
     if failure.failure.terminal:
         row[NG_TERMINAL_KEY] = True
-    if failure.failure.failure_kind in ("judge_failed", "judge_invalid") and verification_response is not None:
+    if failure.failure.failure_kind in JUDGE_FAILURE_KINDS and verification_response is not None:
         row["response"] = verification_response
     return row
 
@@ -3208,6 +3209,8 @@ class RolloutCollectionHelper(BaseModel):
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
 - {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
+- {len(unclassified - successes_seen - terminal_keys - maxed_out)} kept answers, judge failures or unclassified \
+executions → not run again (left to recovery)
 - {len(input_rows)} rows that still need to be run"""
         )
 
@@ -3642,9 +3645,7 @@ class RolloutCollectionHelper(BaseModel):
                     legacy_class = diagnostics.get(NG_FAILURE_CLASS_KEY)
                     if isinstance(legacy_class, str) and legacy_class != result.sidecar_failure_class:
                         compatibility[NG_FAILURE_LEGACY_CLASS_KEY] = legacy_class
-                    if verification_response is not None and matches_failure_class(
-                        compatibility, {"judge_failed", "judge_invalid"}
-                    ):
+                    if verification_response is not None and matches_failure_class(compatibility, JUDGE_FAILURE_KINDS):
                         compatibility["response"] = verification_response
                     # Keep producer evidence without making it the canonical failure reason.
                     if diagnostics.get("error"):
@@ -3732,9 +3733,9 @@ class RolloutCollectionHelper(BaseModel):
                 # It leaves harness output and reward unchanged.
                 # Direct callers of run_examples finalize each record themselves.
                 token_capture_build = None
-                recoverable_generation = matches_failure_class(
-                    result, {"judge_failed", "judge_invalid"}
-                ) and isinstance(result.get("response"), dict)
+                recoverable_generation = matches_failure_class(result, JUDGE_FAILURE_KINDS) and isinstance(
+                    result.get("response"), dict
+                )
                 if (not no_result or recoverable_generation) and token_capture_enabled_for_row(row):
                     token_capture_build = await finalize_rollout_token_capture(
                         result, token_source, mask_incomplete_when_attributed=mask_incomplete_when_attributed

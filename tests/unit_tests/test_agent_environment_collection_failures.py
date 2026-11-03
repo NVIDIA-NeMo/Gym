@@ -22,7 +22,7 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig
 from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.rollouts import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
 
 MODEL_REPLY = {

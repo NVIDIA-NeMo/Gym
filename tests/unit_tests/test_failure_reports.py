@@ -502,10 +502,40 @@ def test_all_report_decode_paths_reject_invalid_canonical_fields(recovered, inva
     report["events"][failure.event_id].update(invalid)
     with pytest.raises(ValidationError):
         FailureReport.model_validate(report)
-    assert FailureHeader.decode({FailureHeader.NAME: json.dumps(report)}) == FailureReport(omitted=True)
+    decoded = FailureHeader.decode({FailureHeader.NAME: json.dumps(report)})
+    if invalid == {"failure_kind": "unknown_kind"}:
+        # A kind from another Gym version travels namespaced (see the next test); other invalid fields drop it.
+        assert decoded.events[failure.event_id].failure_kind == "unregistered:unknown_kind"
+    else:
+        assert decoded == FailureReport(omitted=True)
     row = {FailureReportRow.EVENTS: report["events"]}
     if not recovered:
         row[FailureReportRow.FAILURE_ID] = failure.event_id
     assert FailureReportRow.report(row).omitted
     with pytest.raises((ValidationError, ValueError)):
         NgFailureEvent.from_record({"failure_id": failure.event_id, "failure_events": report["events"]})
+
+
+def test_an_event_of_a_kind_this_gym_does_not_register_is_kept_namespaced_not_dropped() -> None:
+    # A server pinned to another Gym version reports a kind this one does not know: the report survives.
+    event = {"event_id": "e1", "boundary": "model", "failure_kind": "kind_from_a_newer_gym", "failure_reason": "x"}
+    value = json.dumps({"failure_id": "e1", "events": {"e1": event}})
+    decoded = FailureHeader.decode({FailureHeader.NAME: value})
+    assert not decoded.omitted and decoded.failure_id == "e1"
+    assert decoded.events["e1"].failure_kind == "unregistered:kind_from_a_newer_gym"
+    streamed = FailureHeader.decode_stream_event({FailureHeader.STREAM_FIELD: json.loads(value)})
+    assert streamed.events["e1"].failure_kind == "unregistered:kind_from_a_newer_gym"
+    # Any other invalid report is still omitted.
+    broken = {**event, "boundary": "nowhere"}
+    assert FailureHeader.decode({FailureHeader.NAME: json.dumps({"events": {"e1": broken}})}) == FailureReport(
+        omitted=True
+    )
+
+
+def test_a_full_request_log_says_once_that_it_drops_events(caplog) -> None:
+    log = RequestFailureLog()
+    with caplog.at_level("WARNING"):
+        for _ in range(RequestFailureLog.MAX_EVENTS + 3):
+            log.add(failure_report_for(_model()))
+    assert log.dropped_events == 3 and log.report.omitted
+    assert sum("later events are dropped" in record.getMessage() for record in caplog.records) == 1

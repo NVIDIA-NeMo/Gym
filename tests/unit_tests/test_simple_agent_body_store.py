@@ -25,7 +25,7 @@ from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
-from nemo_gym.rollouts import RolloutStore
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 from tests.unit_tests.models.test_responses_api_model_streaming import _EchoModel
 from tests.unit_tests.test_agent_environment_collection_failures import MODEL_REPLY, _serve
@@ -224,10 +224,12 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
                 assert report.events[observed[-1].event_id].http_status == (500 if mode == "omitted" else 200)
                 if mode == "omitted":
                     assert report.omitted
-                assert store.pending() == []
+                # An omitted report vetoes nothing: the model's 500 (no answer was produced) is retried like any
+                # other. A failed body behind a 2xx header (truncated, timeout) is never run again.
+                assert len(store.pending()) == (1 if mode == "omitted" else 0)
             before = len(hits)
             await collect(cfg.model_copy(update={"resume_from_cache": True}))
-            assert len(hits) == before
+            assert (len(hits) > before) is (mode == "omitted")
             (tmp_path / "persisted-proof.json").write_text(
                 json.dumps(
                     {
@@ -237,7 +239,7 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
                         "selected_failure_id": saved.get("_ng_failure_id"),
                         "observed_event_ids": [x.event_id for x in observed],
                         "pending": len(store.pending()),
-                        "resume_no_new_request": True,
+                        "resume_no_new_request": mode != "omitted",
                         "saved_reward": saved.get("reward"),
                     },
                     indent=2,

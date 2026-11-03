@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.server_runtime.episode_types import ModelFailureDetails
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 

@@ -13820,7 +13820,7 @@ class TestUnroutedRunFailure:
         assert row[NG_UNROUTED_RUN_ERROR_KEY] is True and NG_DISPATCH_DRAINED_KEY not in row
         assert row["_ng_failure_http_status"] == status and row["_ng_failure_type"] == type(failure).__name__
         # The run store stamps every dispatched outcome with the run's saved cap; the evidence still spends none of it.
-        from nemo_gym.rollouts import RolloutStore
+        from nemo_gym.rollouts.rollout_store import RolloutStore
 
         assert row[NG_FAILURE_MAX_ATTEMPTS_KEY] == RolloutStore.read(output).manifest.max_rollout_attempts
         assert RolloutStore.read(output).coverage()["counted_failures"] == 0
@@ -13846,7 +13846,7 @@ class TestUnroutedRunFailure:
         # Both reservations remain recorded, and the diagnostic debits no failure budget.
         assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {2: 1}
         output = Path(config.output_jsonl_fpath)
-        from nemo_gym.rollouts import RolloutStore
+        from nemo_gym.rollouts.rollout_store import RolloutStore
 
         assert RolloutStore.read(output).coverage()["counted_failures"] == 0
         assert (
@@ -13932,7 +13932,7 @@ class TestUnroutedRunFailure:
         dispatched, *_ = RolloutCollectionHelper()._load_from_cache(resumed)
         # Attempt 1 may have executed. Keep the older failure's score and debit, but do not dispatch attempt 2.
         assert dispatched == []
-        from nemo_gym.rollouts import RolloutStore
+        from nemo_gym.rollouts.rollout_store import RolloutStore
 
         store = RolloutStore.read(output)
         assert store.manifest.next_attempt["1-0"] == 2
@@ -14155,6 +14155,15 @@ class TestResumeTerminalGateUsesTheLatestAttempt:
         )
         assert [row[TASK_INDEX_KEY_NAME] for row in counted] == ([] if 1 in got else [1])
 
+    def test_the_summary_names_a_judge_failure_left_to_recovery(self, tmp_path: Path, capsys) -> None:
+        # A non-terminal judge failure is not run again (verification recovery judges its answer): resume says so.
+        judge = {**failing_row(1), NG_FAILURE_CLASS_KEY: "judge_failed", "reward": 0.0}
+        _, got = self._resume(tmp_path, [judge])
+        assert got == {2: None}
+        out = capsys.readouterr().out
+        assert "- 1 kept answers, judge failures or unclassified executions → not run again (left to recovery)" in out
+        assert "- 0 sidecar-terminal → not retried" in out
+
     def test_a_final_failure_after_the_interruption_is_terminal_again(self, tmp_path: Path) -> None:
         judge = {**failing_row(1), **self._JUDGE}
         sidecar = [
@@ -14223,8 +14232,9 @@ def test_an_episode_result_keeps_only_a_complete_final_zero_marker(markers, acce
 
 def test_historical_unrouted_diagnostic_does_not_erase_judge_zero(tmp_path):
     """The historical judge-then-unrouted sequence keeps its score denominator without replaying an agent."""
-    from nemo_gym.rollouts import RolloutStore, RunManifest
     from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     rows = [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0} for i in range(2)]
     source = tmp_path / "input.jsonl"

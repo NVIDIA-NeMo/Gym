@@ -19,8 +19,7 @@ import pytest
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.rollout_reverification import InputRolloutPair, _build_verify_payload, check_saved_patch_replay
-from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.rollouts.rollout_collection import failures_path_for
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, failures_path_for
 
 
 @pytest.mark.parametrize(

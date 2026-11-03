@@ -1144,7 +1144,7 @@ def test_older_manifest_defaults_to_no_timeout_override_until_resumed(prepared_r
 
 @pytest.mark.parametrize("retry_timeouts", [False, True])
 def test_a_producer_final_zero_settles_its_rollout_through_save_and_reload(tmp_path, retry_timeouts) -> None:
-    from nemo_gym.rollouts import RunManifest
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
     from tests.unit_tests.rollouts.test_rollout_collection import TestRolloutAggregationHelper
 
     rollout = TestRolloutAggregationHelper._rollout
@@ -1180,7 +1180,7 @@ def test_a_producer_final_zero_settles_its_rollout_through_save_and_reload(tmp_p
 
 
 def test_an_interruption_with_no_recorded_cause_stops_automatic_recovery_and_keeps_its_debits(tmp_path) -> None:
-    from nemo_gym.rollouts import RunManifest
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
     from tests.unit_tests.rollouts.test_rollout_collection import TestRolloutAggregationHelper
 
     rollout = TestRolloutAggregationHelper._rollout
@@ -1218,8 +1218,9 @@ def test_an_interruption_with_no_recorded_cause_stops_automatic_recovery_and_kee
 )
 def test_a_known_interruption_retries_only_before_an_answer(prepared_run, stage, partial, retried) -> None:
     from nemo_gym.core.episode import EpisodeId
-    from nemo_gym.rollouts import RolloutFailureRecord, logical_rollout_id
     from nemo_gym.rollouts.rollout_collection import _failure_compatibility_row
+    from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+    from nemo_gym.rollouts.rollout_records import logical_rollout_id
     from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     output, prepare = prepared_run
@@ -1245,8 +1246,9 @@ def test_a_known_interruption_retries_only_before_an_answer(prepared_run, stage,
 @pytest.mark.parametrize("saved_answer", [True, False])
 def test_a_delivered_verification_failure_with_its_answer_is_not_regenerated(prepared_run, saved_answer) -> None:
     from nemo_gym.core.episode import EpisodeId
-    from nemo_gym.rollouts import RolloutFailureRecord, logical_rollout_id
     from nemo_gym.rollouts.rollout_collection import _failure_compatibility_row
+    from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+    from nemo_gym.rollouts.rollout_records import logical_rollout_id
     from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     answer = {
@@ -1283,7 +1285,7 @@ def test_a_delivered_verification_failure_with_its_answer_is_not_regenerated(pre
 
 @pytest.mark.parametrize("answered", [True, False])
 def test_a_reservation_without_outcome_never_regenerates_an_earlier_saved_answer(prepared_run, answered) -> None:
-    from nemo_gym.rollouts import logical_rollout_id
+    from nemo_gym.rollouts.rollout_records import logical_rollout_id
 
     answer = {"id": "kept", "status": "completed", "output": [{"type": "message", "role": "assistant"}]}
     output, prepare = prepared_run
@@ -1306,7 +1308,7 @@ def test_a_reservation_without_outcome_never_regenerates_an_earlier_saved_answer
 def test_missing_reservation_preserves_prior_replay_gate_and_explicit_budget_reset(
     prepared_run, monkeypatch, case, resubmit
 ) -> None:
-    from nemo_gym.rollouts import logical_rollout_id
+    from nemo_gym.rollouts.rollout_records import logical_rollout_id
 
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
     output, prepare = prepared_run
@@ -1391,8 +1393,12 @@ def test_current_unrouted_dispatch_gates_admission_without_replacing_history(pre
 async def test_offline_dropped_summary_excludes_producer_and_selected_zeros(
     tmp_path, monkeypatch, capsys, legacy_selector
 ):
-    from nemo_gym.rollouts import RolloutCollectionHelper, coverage_path_for
-    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_collection import (
+        RolloutAggregationConfig,
+        RolloutAggregationHelper,
+        RolloutCollectionHelper,
+    )
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
 
     output = tmp_path / "rollouts.jsonl"
     inputs = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(3)]

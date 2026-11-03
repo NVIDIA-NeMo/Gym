@@ -48,6 +48,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT,
     COLLECTION_RESUME_REFUSED,
     JUDGE_FAILED,
+    JUDGE_FAILURE_KINDS,
     JUDGE_UNPARSEABLE,
     MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -360,7 +361,7 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     A request that was possibly delivered permits a fresh run only while the row keeps no full or partial
     response: then no saved answer can be duplicated or replaced.
     """
-    if matches_failure_class(row, {"judge_failed", "judge_invalid"}):
+    if matches_failure_class(row, JUDGE_FAILURE_KINDS):
         return True  # Verification recovery may reuse an answer; it never reruns the agent.
     record = row.get("_ng_failure_record")
     failure = record.get("failure") if isinstance(record, Mapping) else None
@@ -383,8 +384,10 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     if possibly_delivered and holds_response(row):
         return True
     if row.get("_ng_failure_events_omitted"):
-        # Missing causal evidence cannot authorize another agent execution.
-        return True
+        # The transport's size bound omitted the report, so its events say nothing either way: the row's own failure
+        # record and kind decide, as for a row without a report. The answer gates above (and a saved generation,
+        # recorded grade or partial response, which every caller checks beside this) still keep a saved answer.
+        return False
     events = row.get("_ng_failure_events")
     selected = row.get("_ng_failure_id")
     if "_ng_failure_id" not in row:
