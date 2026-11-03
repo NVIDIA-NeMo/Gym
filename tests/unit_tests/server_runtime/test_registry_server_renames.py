@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""What the head server was called before it was renamed the registry server keeps working, with a warning."""
+"""What the head server and its dependency keys were called before their renames keeps working, with a warning."""
 
 import importlib
 import os
@@ -115,6 +115,14 @@ def test_the_old_and_the_new_key_set_to_different_values_is_an_error() -> None:
 def test_the_old_and_the_new_key_set_to_the_same_value_parse_like_the_new_key(expected: dict) -> None:
     with pytest.warns(DeprecationWarning):
         parsed = _parse(initial={"head_server": {"port": 12345}, "registry_server": {"port": 12345}})
+    assert parsed == expected
+
+
+@pytest.mark.parametrize("old_key", ["head_server_deps", "head_server_constraints"])
+def test_an_old_dependency_key_is_dropped(old_key: str, expected: dict) -> None:
+    # The parser computes the dependency keys on every parse, so a value a config sets was never used, before or after.
+    parsed = _parse(initial={"registry_server": {"port": 12345}, old_key: ["ignored==1.0"]})
+    assert old_key not in parsed
     assert parsed == expected
 
 

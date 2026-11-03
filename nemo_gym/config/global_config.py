@@ -106,10 +106,10 @@ ENTRYPOINT_KEY_NAME = "entrypoint"
 DEFAULT_HOST_KEY_NAME = "default_host"
 REGISTRY_SERVER_KEY_NAME = "registry_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
-# "Head" in these two names is the parent `gym` process, not the registry server: they carry pins from the parent,
-# such as its exact Ray version, into every server venv.
-HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
-HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
+# Pins from the parent `gym` process, such as its exact Ray version, that every server venv installs. Computed on
+# every parse.
+PARENT_PROCESS_DEPS_KEY_NAME = "parent_process_deps"
+PARENT_PROCESS_CONSTRAINTS_KEY_NAME = "parent_process_constraints"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
@@ -170,8 +170,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DEFAULT_HOST_KEY_NAME,
     REGISTRY_SERVER_KEY_NAME,
     DISALLOWED_PORTS_KEY_NAME,
-    HEAD_SERVER_DEPS_KEY_NAME,
-    HEAD_SERVER_CONSTRAINTS_KEY_NAME,
+    PARENT_PROCESS_DEPS_KEY_NAME,
+    PARENT_PROCESS_CONSTRAINTS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
@@ -493,7 +493,7 @@ def _nemo_gym_openai_requirement() -> Optional[str]:
 def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
     """True when `version` satisfies nemo-gym's own openai requirement.
 
-    head_server_deps normally pins the parent process's openai version into every
+    parent_process_deps normally pins the parent process's openai version into every
     sub-venv for consistency. When the parent environment ships an openai release
     outside nemo-gym's own constraint (e.g. the base image preinstalls a newer
     openai than nemo-gym's cap allows), that pin makes every
@@ -1814,12 +1814,17 @@ Set the keys individually, in a config or as overrides, e.g.:
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
+            # The parser computes these pins on every parse, so a config never set them. Drop them under their names
+            # from before the registry server rename, so they do not linger next to the computed ones.
+            global_config_dict.pop("head_server_deps", None)
+            global_config_dict.pop("head_server_constraints", None)
+
             # Constrain sensitive package versions
-            head_server_deps = []
+            parent_process_deps = []
             # The ray version is very sensitive: a server that joins this process's Ray cluster must run exactly
             # the same version. Pin it as a constraint rather than a requirement, so a server venv gets Ray only
             # when that server's own dependencies ask for it.
-            global_config_dict[HEAD_SERVER_CONSTRAINTS_KEY_NAME] = [f"ray=={ray_version}"] if ray_version else []
+            global_config_dict[PARENT_PROCESS_CONSTRAINTS_KEY_NAME] = [f"ray=={ray_version}"] if ray_version else []
             # OpenAI version is also sensitive since it changes so often and may introduce subtle
             # incompatibilities — but only pin the parent's version when nemo-gym's own constraint
             # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come
@@ -1830,7 +1835,7 @@ Set the keys individually, in a config or as overrides, e.g.:
                     f"{ALLOW_OPENAI_VERSION_SKEW_KEY_NAME} must be a boolean (true/false), got {allow_openai_skew!r}."
                 )
             if _openai_version_matches_nemo_gym_constraint(openai_version):
-                head_server_deps.append(f"openai=={openai_version}")
+                parent_process_deps.append(f"openai=={openai_version}")
             elif allow_openai_skew:
                 logger.warning(
                     f"Not pinning the parent process's openai=={openai_version} into server venvs: "
@@ -1856,15 +1861,15 @@ Set the keys individually, in a config or as overrides, e.g.:
             # hole in the middle. Translating the config into the environment first is what
             # lets server_venv_requirements() see that telemetry is on.
             configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
-            head_server_deps.extend(server_venv_requirements())
+            parent_process_deps.extend(server_venv_requirements())
             # A server venv is built from that server's own requirements, so a provider
             # installed only in this process would be unknown there.
             for dist_name in plugin_distributions():
                 requirement = installed_requirement(dist_name, dist_name)
                 if requirement is not None:
-                    head_server_deps.append(requirement)
+                    parent_process_deps.append(requirement)
 
-            global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
+            global_config_dict[PARENT_PROCESS_DEPS_KEY_NAME] = parent_process_deps
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()

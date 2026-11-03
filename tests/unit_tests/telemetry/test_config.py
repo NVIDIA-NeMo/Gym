@@ -463,15 +463,15 @@ def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_o
             telemetry_setup.installed_requirement = original
 
 
-def test_head_server_deps_carry_telemetry_into_server_venvs(clean_otel_env):
+def test_parent_process_deps_carry_telemetry_into_server_venvs(clean_otel_env):
     """The end of the chain: what `uv pip install` actually receives for each server."""
     pytest.importorskip("nemo.lens")
     clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
 
     from nemo_gym.telemetry.setup import server_venv_requirements
 
-    head_server_deps = ["ray[default]==2.56.1", *server_venv_requirements()]
-    assert any(dep.startswith("nemo-lens[sdk]") for dep in head_server_deps)
+    parent_process_deps = ["ray[default]==2.56.1", *server_venv_requirements()]
+    assert any(dep.startswith("nemo-lens[sdk]") for dep in parent_process_deps)
 
 
 # --------------------------------------------------------------------------- #

@@ -802,8 +802,8 @@ for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
     assert not set(_listed) & set(_renamed), f"{_module} lists a renamed token capture name twice"
     _listed.update(_renamed)
 
-# Names renamed with the head server (head server -> registry server), at each old module path that defined or
-# imported them. Kept apart, like the token capture renames above.
+# Names renamed with the head server (head server -> registry server, and its two dependency keys -> parent process
+# keys), at each old module path that defined or imported them. Kept apart, like the token capture renames above.
 _REGISTRY_SERVER_CLASS = MovedPath(new="nemo_gym.server_runtime.registry_server:RegistryServer", since="0.8.0")
 _REGISTRY_SERVER_KEY = MovedPath(new="nemo_gym.config.global_config:REGISTRY_SERVER_KEY_NAME", since="0.8.0")
 _REGISTRY_SERVER_PORT = MovedPath(
@@ -814,6 +814,10 @@ _REGISTRY_SERVER_UNREACHABLE = MovedPath(
 )
 _REGISTRY_SERVER_CONFIG_MALFORMED = MovedPath(
     new="nemo_gym.config.config_types:RegistryServerConfigMalformedError", since="0.8.0"
+)
+_PARENT_PROCESS_DEPS_KEY = MovedPath(new="nemo_gym.config.global_config:PARENT_PROCESS_DEPS_KEY_NAME", since="0.8.0")
+_PARENT_PROCESS_CONSTRAINTS_KEY = MovedPath(
+    new="nemo_gym.config.global_config:PARENT_PROCESS_CONSTRAINTS_KEY_NAME", since="0.8.0"
 )
 _RENAMED_REGISTRY_SERVER_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.server_utils": {
@@ -834,8 +838,15 @@ _RENAMED_REGISTRY_SERVER_NAMES: dict[str, dict[str, MovedPath]] = {
         "DEFAULT_HEAD_SERVER_PORT": MovedPath(
             new="nemo_gym.config.global_config:DEFAULT_REGISTRY_SERVER_PORT", since="0.8.0"
         ),
+        "HEAD_SERVER_CONSTRAINTS_KEY_NAME": _PARENT_PROCESS_CONSTRAINTS_KEY,
+        "HEAD_SERVER_DEPS_KEY_NAME": _PARENT_PROCESS_DEPS_KEY,
         "HEAD_SERVER_KEY_NAME": _REGISTRY_SERVER_KEY,
         "HeadServerConfigMalformedError": _REGISTRY_SERVER_CONFIG_MALFORMED,
+    },
+    # The two dependency keys were named for the head server, but hold pins from the parent gym process.
+    "nemo_gym.cli.setup_command": {
+        "HEAD_SERVER_CONSTRAINTS_KEY_NAME": _PARENT_PROCESS_CONSTRAINTS_KEY,
+        "HEAD_SERVER_DEPS_KEY_NAME": _PARENT_PROCESS_DEPS_KEY,
     },
 }
 for _module, _renamed in _RENAMED_REGISTRY_SERVER_NAMES.items():

@@ -85,8 +85,8 @@ class TestGlobalConfig:
             "port_range_low": 10_001,
             "port_range_high": 20_000,
             # From self._mock_versions_for_testing
-            "head_server_deps": ["openai==test openai version"],
-            "head_server_constraints": ["ray==test ray version"],
+            "parent_process_deps": ["openai==test openai version"],
+            "parent_process_constraints": ["ray==test ray version"],
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
@@ -238,8 +238,8 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
-        assert global_config_dict["head_server_constraints"] == ["ray==test ray version"]
-        assert not any(dep.startswith("ray") for dep in global_config_dict["head_server_deps"])
+        assert global_config_dict["parent_process_constraints"] == ["ray==test ray version"]
+        assert not any(dep.startswith("ray") for dep in global_config_dict["parent_process_deps"])
 
     def test_config_parses_without_ray_installed(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
@@ -247,25 +247,25 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
-        assert global_config_dict["head_server_constraints"] == []
+        assert global_config_dict["parent_process_constraints"] == []
 
-    def test_head_server_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
-        assert "openai==2.6.0" in global_config_dict["head_server_deps"]
+        assert "openai==2.6.0" in global_config_dict["parent_process_deps"]
 
-    def test_head_server_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
         monkeypatch.setattr(nemo_gym.config.global_config, "plugin_distributions", lambda: ["gym-substrate"])
         monkeypatch.setattr(nemo_gym.config.global_config, "installed_requirement", lambda dist, req: f"{req}==0.1.0")
 
         global_config_dict = get_global_config_dict()
-        assert "gym-substrate==0.1.0" in global_config_dict["head_server_deps"]
+        assert "gym-substrate==0.1.0" in global_config_dict["parent_process_deps"]
 
-    def test_head_server_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
@@ -275,7 +275,7 @@ class TestGlobalConfig:
         assert "openai==2.52.0" in str(excinfo.value)
         assert "openai<=2.7.2" in str(excinfo.value)
 
-    def test_head_server_deps_omits_pin_with_explicit_skew_opt_in(
+    def test_parent_process_deps_omits_pin_with_explicit_skew_opt_in(
         self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
     ) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
@@ -283,13 +283,13 @@ class TestGlobalConfig:
 
         with caplog.at_level("WARNING"):
             global_config_dict = get_global_config_dict()
-        assert not any(dep.startswith("openai") for dep in global_config_dict["head_server_deps"])
+        assert not any(dep.startswith("openai") for dep in global_config_dict["parent_process_deps"])
         assert global_config_dict["allow_openai_version_skew"] is True
         # The warning must name both sides of the skew.
         assert "openai==2.52.0" in caplog.text
         assert "openai<=2.7.2" in caplog.text
 
-    def test_head_server_deps_rejects_non_boolean_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_rejects_non_boolean_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
         # YAML/CLI plumbing can hand the key through as a string; "false" is
         # truthy and must not silently enable the skew.

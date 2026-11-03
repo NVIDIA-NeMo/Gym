@@ -235,7 +235,7 @@ RUN uv venv /opt/nemo-gym/cache/seed-venv && \
 # lock, so the seed above does not cover them, and together they are large
 # (about 25 GB more cache for all 212 servers in October 2026), hence opt-in.
 # `ng_test_all +setup_only=true` installs each venv exactly as the server suite
-# does (same discovery, component locks, and head-server checks), outside the source
+# does (same discovery, component locks, and parent-process pins), outside the source
 # tree, and deletes it; only the downloaded and built distributions stay.
 ARG NEMO_GYM_SEED_SERVER_ENVS=""
 RUN <<"EOF" bash -exu
