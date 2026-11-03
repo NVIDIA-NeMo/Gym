@@ -33,6 +33,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
+    AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     AgentServerRef,
@@ -662,6 +663,7 @@ async def test_aggregation_preserves_execution_metrics_without_valid_scores(
 
     assert result.perf_summary["total_completion_tokens"] == 40
     assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [10, 30]
+    assert all(AGENT_REF_KEY_NAME not in row for row in result.repeat_level_metrics)
     assert result.agent_metrics["mean_across_repeats/mean_completion_tokens"] == 20
     assert result.agent_metrics["ci_low_95_across_repeats/mean_completion_tokens"] < 20
     assert result.agent_metrics["ci_high_95_across_repeats/mean_completion_tokens"] > 20
@@ -735,6 +737,45 @@ async def test_aggregation_counts_execution_before_resources_filters_quality() -
     assert result.agent_metrics["mean/reward"] == 1.0
     assert result.perf_summary["total_completion_tokens"] == 40
     assert result.repeat_level_metrics[0]["mean_completion_tokens"] == 20
+
+
+async def test_aggregation_withholds_observations_of_any_type_from_resources() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "ng_perf": None},
+        {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "ng_perf": "not-a-summary"},
+        {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "reward": 1.0,
+            "ng_perf": {"completion_tokens": 12, "num_turns": 3},
+        },
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    client.responses = [_Response(compute_aggregate_metrics(benchmark_rows).model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+    assert result.perf_summary["overall_observability_coverage"] == pytest.approx(1 / 3)
+    assert result.perf_summary["total_completion_tokens"] == 12
+    assert result.key_metrics["mean/reward"] == pytest.approx(2 / 3)
+
+
+async def test_aggregation_returns_resources_repeat_rows_as_published_when_nothing_was_observed() -> None:
+    environment_server, client = _environment_server()
+    published = AggregateMetrics(
+        agent_metrics={"mean/reward": 1.0},
+        key_metrics={"mean/reward": 1.0},
+        repeat_level_metrics=[{"mean/reward": 1.0}],
+    )
+    client.responses = [_Response(published.model_dump())]
+
+    result = await environment_server.aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}])
+    )
+
+    assert result == published
 
 
 def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:

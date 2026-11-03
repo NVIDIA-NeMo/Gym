@@ -1152,6 +1152,9 @@ def _add_completion_token_metrics(
         if isinstance(response.get("ng_perf"), dict):
             perf_by_repeat[response.get(ROLLOUT_INDEX_KEY_NAME, 0)].append(response["ng_perf"])
 
+    if not perf_by_repeat:
+        return
+
     repeat_rows = {row[ROLLOUT_INDEX_KEY_NAME]: row for row in repeat_level_metrics}
     token_repeat_rows = []
     for repeat_idx, records in perf_by_repeat.items():
@@ -1186,6 +1189,10 @@ def add_execution_metrics(
     benchmark scoring or requiring unique task/repeat identities. Merge token statistics
     into the corresponding repeat rows and compute their across-repeat confidence intervals.
     Missing observations do not imply zero usage. Neither input is modified.
+
+    This function owns the execution statistics: it replaces ``perf_summary`` rather than merging
+    into one already in ``metrics``, and it removes ``agent_ref`` from every repeat row. When any
+    row carries ``ng_perf``, the repeat rows already in ``metrics`` must carry ``_ng_rollout_index``.
     """
     result = metrics.model_copy(deep=True)
     result.perf_summary = compute_perf_summary(

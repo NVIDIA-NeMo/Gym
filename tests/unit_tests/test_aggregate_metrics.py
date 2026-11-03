@@ -1321,6 +1321,38 @@ class TestAddExecutionMetrics:
                 assert "mean_completion_tokens" not in result.perf_summary
                 assert result.repeat_level_metrics == benchmark.repeat_level_metrics
 
+    def test_benchmark_repeat_rows_without_a_rollout_index_pass_through_when_nothing_was_observed(self) -> None:
+        # A Resources server may publish repeat rows of its own. With no observations there is
+        # nothing to merge, so the rows come back as they were instead of failing the request.
+        benchmark = AggregateMetrics(repeat_level_metrics=[{"mean/reward": 1.0}])
+
+        result = add_execution_metrics(benchmark, [{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}])
+
+        assert result == benchmark
+
+    def test_repeats_missing_from_the_benchmark_rows_are_added_in_order_without_agent_ref(self) -> None:
+        # Repeat 0 is fully masked, so Resources publishes repeat rows for repeats 1 and 2 only.
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: repeat,
+                "reward": float(repeat == 2),
+                "mask_sample": repeat == 0,
+                "ng_perf": {"completion_tokens": 10 * (repeat + 1), "num_turns": 2},
+            }
+            for repeat in range(3)
+        ]
+        benchmark = compute_aggregate_metrics([{k: v for k, v in row.items() if k != "ng_perf"} for row in rows])
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in benchmark.repeat_level_metrics] == [1, 2]
+
+        result = add_execution_metrics(benchmark, rows)
+
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in result.repeat_level_metrics] == [0, 1, 2]
+        assert all(AGENT_REF_KEY_NAME not in row for row in result.repeat_level_metrics)
+        assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [10, 20, 30]
+        assert "mean/reward" not in result.repeat_level_metrics[0]
+        assert [row["mean/reward"] for row in result.repeat_level_metrics[1:]] == [0.0, 1.0]
+
 
 class TestMaskedSamplesAreNotScored:
     """A masked sample is a completed rollout whose reward is not a valid measurement."""
