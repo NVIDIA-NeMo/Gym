@@ -32,12 +32,18 @@ if python -c "import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio, p
     exit 0
 fi
 
+# Hold torch at the installed version: --no-config drops the project's constraints, so a pin
+# below that needs another torch would otherwise swap torch and its CUDA/triton wheels
+# underneath vLLM instead of failing.
+torch_version=$(python -c "import torch; print(torch.__version__.split('+')[0])")
+
 echo "[excluded-deps] Installing excluded packages..."
 uv pip install --no-config \
+    "torch==${torch_version}" \
     "opencv-python-headless==5.0.0.93" \
     "pynvvideocodec==2.0.4" \
     "torchcodec==0.16.0" \
-    "torchvision==0.26.0" \
+    "torchvision==0.28.0" \
     "torchaudio==2.11.0" \
     "pycountry==26.2.16"
 
