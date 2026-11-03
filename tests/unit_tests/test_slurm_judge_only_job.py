@@ -7,6 +7,7 @@ the real executor, collector and settle path."""
 
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.slurm import READER_SRUN_ENV, SlurmExecutor
+from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionRecord
 from nemo_gym.orchestration.recovery import JUDGE_JOB_JOURNAL_NAME, RecoveryAction
 from nemo_gym.orchestration.submit import inspect_recovery, recover
@@ -168,6 +170,26 @@ def _queued_script(job_dir: Path) -> str:
     return script.read_text()
 
 
+def _rendered_gym_commands(script: str) -> list[list[str]]:
+    """Every `gym ...` command a rendered script runs, as its words: one-line commands and the `GYM_CMD=( ... )`
+    array of a collection job."""
+    commands = [
+        shlex.split(line.strip().replace("'\"'\"'", "'"))
+        for line in script.splitlines()
+        if line.strip().startswith("gym ")
+    ]
+    for body in re.findall(r"GYM_CMD=\(\n(.*?)\n\)", script, re.S):
+        commands.append(shlex.split(" ".join(line.strip() for line in body.splitlines() if line.strip())))
+    return commands
+
+
+def _unrecognized_flags(words: list[str]) -> list[str]:
+    """The flags of a rendered `gym ...` command the real CLI does not define: what `main()` rejects with
+    "unrecognized arguments" (exit 2) before any work."""
+    _, rest = cli_main.build_parser().parse_known_args(words[1:])
+    return [token for token in rest if token.startswith("-")]
+
+
 def _queued_reverify_config(script: str) -> RolloutReverificationConfig:
     """The configuration the queued script's `gym eval reverify` line hands the job, parsed by the real `gym` CLI.
 
@@ -215,7 +237,8 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     assert "afternotok" not in script
     assert "--judge-failed-only" in script and "--settle-into-source" in script and "--settle-receipt" in script
     # A pass that died left admissions without an outcome: the job withdraws them instead of refusing.
-    assert _queued_reverify_config(script).withdraw_unresolved_admissions is True
+    queued = _queued_reverify_config(script)
+    assert queued.withdraw_unresolved_admissions is True and queued.skip_spent_judge_failures is True
     assert "--model-type openai_model" in script
     # The judge-only job is not a segment of the policy chain: no chain entry, no walltime charged, no retry spent.
     assert _accounting(job_dir) == before
@@ -371,3 +394,31 @@ def test_the_queued_job_settles_the_run_through_its_own_settle_path_and_inspect_
     assert (job_dir / "artifacts" / "quality_summary.json").exists()
     # The chain accounting is still the policy chain's.
     assert (job_dir / ".gym_job_chain").read_text() == "100\n"
+
+
+@pytest.mark.parametrize("render", ["judge-only job", "judge-only job on a saved CPU pool", "the run's own job"])
+def test_every_gym_command_a_rendered_script_runs_parses_with_the_real_cli(
+    tmp_path, judge_slurm_bin, render: str
+) -> None:
+    """A flag the launcher renders but the CLI does not define stops the Slurm job at argument parsing (exit 2):
+    every `gym ...` command of every script the launcher renders here must parse with the real CLI."""
+    submitted = []
+    persist = SlurmExecutor.persist
+    with mock.patch.object(
+        SlurmExecutor,
+        "persist",
+        lambda self, record, config, write: submitted.append(config) or persist(self, record, config, write),
+    ):
+        job_dir = _model_served_run(tmp_path, cpu_pool=render.endswith("CPU pool"))
+    if render == "the run's own job":
+        (config,) = submitted
+        bench = config.driver.benchmarks["bench"]
+        script = build_sbatch_script(config, "bench", bench, config.compute["cluster"], job_dir)
+    else:
+        out = recover(*_handle(job_dir), **({} if render.endswith("CPU pool") else {"judge_partition": "cpu"}))
+        assert out.dispatched == "reverify", out.decision.reason
+        script = _queued_script(job_dir)
+    commands = _rendered_gym_commands(script)
+    assert commands
+    for words in commands:
+        assert _unrecognized_flags(words) == [], words

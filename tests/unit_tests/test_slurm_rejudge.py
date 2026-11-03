@@ -11,6 +11,7 @@ from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.recovery import CollectedEvidence, RecoveryAction, RecoveryDecision
+from tests.unit_tests.test_slurm_judge_only_job import _rendered_gym_commands, _unrecognized_flags
 
 
 @pytest.mark.parametrize("case", ["ok", "large", "exhausted", "unknown", "stale", "live"])
@@ -136,6 +137,11 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
     else:
         out = sm.SlurmExecutor().reverify_judge_failures(record, "judge", decision)
         assert out.ok is (case == "ok")
+        if case == "ok":
+            # The queued script's `gym eval reverify` parses with the real CLI (a renamed flag would exit 2 there).
+            (script,) = job.glob("reverify-*.sh")
+            commands = _rendered_gym_commands(script.read_text())
+            assert commands and all(_unrecognized_flags(words) == [] for words in commands), commands
     assert (tmp_path / "calls").exists() is (case == "ok")
     assert (job / ".gym_infra_retries").read_text() == "0\n"
     if case == "ok":
