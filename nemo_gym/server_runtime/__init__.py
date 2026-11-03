@@ -21,7 +21,6 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
-    from nemo_gym.server_runtime.base_server import async_rollout_prefix_hook, rollout_prefix_hook, with_rollout_prefix
     from nemo_gym.server_runtime._checkpoint.agent import (
         Activation,
         ActivationOutOfOrderError,
@@ -88,7 +87,12 @@ if TYPE_CHECKING:
         SimpleResourcesServer,
         lost_session_verification,
     )
-    from nemo_gym.server_runtime.base_server import SimpleServer
+    from nemo_gym.server_runtime.base_server import (
+        SimpleServer,
+        async_rollout_prefix_hook,
+        rollout_prefix_hook,
+        with_rollout_prefix,
+    )
     from nemo_gym.server_runtime.episode_types import (
         BaseEpisodeRequest,
         BaseEpisodeResponse,
