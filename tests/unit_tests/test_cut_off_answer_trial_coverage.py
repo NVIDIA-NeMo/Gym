@@ -116,3 +116,16 @@ def test_an_agents_own_answer_envelope_cut_off_on_its_last_call_is_the_models_ob
     call["response_metadata"]["finish_reason"] = "stop"
     passed, reason, _ = _verdict(collected)
     assert passed is None, reason
+
+
+def test_an_empty_envelope_whose_last_call_was_cut_is_not_the_models_observed_answer():
+    # The envelope itself carries no cutoff: an empty or malformed envelope can be the agent's own assembly problem,
+    # so a last call that happened to be cut does not bind it.
+    collected = _cut_off(call_status=None, invalid_answer=False)
+    row = collected.results[0]
+    row["response"] |= {"id": "resp_agent_envelope", "incomplete_details": None}
+    row["response"].pop("usage", None)
+    [call] = row["ng_trial_observations"]["model_calls"]
+    call["response_metadata"] |= {"dialect": "chat", "response_status": None, "finish_reason": "length"}
+    passed, reason, _ = _verdict(collected)
+    assert passed is None, reason
