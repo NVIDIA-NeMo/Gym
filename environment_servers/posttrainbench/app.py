@@ -88,7 +88,12 @@ class PostTrainBenchEnvironmentServer(HarborEnvironmentServer):
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         # Masked rows never reach compute_metrics, so a repeat whose every task was masked would vanish from it.
         self._repeats = {response.get(ROLLOUT_INDEX_KEY_NAME, 0) for response in body.verify_responses}
-        return await super().aggregate_metrics(body)
+        aggregated = await super().aggregate_metrics(body)
+        # A wholly masked run returns before compute_metrics, exactly when every task is missing its score.
+        if body.verify_responses and all(response.get("mask_sample") for response in body.verify_responses):
+            aggregated.agent_metrics.update(self.compute_metrics([]))
+            aggregated.key_metrics.update(self.get_key_metrics(aggregated.agent_metrics))
+        return aggregated
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         rollouts = [rollout for task in tasks for rollout in task]

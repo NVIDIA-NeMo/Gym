@@ -637,6 +637,26 @@ def test_judges_without_the_agent_transcript_did_not_check_the_run(gym_score, tm
     assert fields["reward"] == 0.1
 
 
+def test_a_failed_evaluation_without_the_transcript_is_still_unjudged(gym_score, tmp_path: Path) -> None:
+    """Clean verdicts, no transcript and no accuracy: the judges did not see the run, whatever the evaluation did."""
+    write_verdicts(tmp_path, accuracy=None)
+    (tmp_path / "solve_out.txt").unlink()
+
+    fields = gym_score.score(str(tmp_path), 0.1)
+
+    assert fields["trace_missing"] == fields["judgement_missing"] == 1.0
+    assert fields["reward"] == 0.1
+
+
+def test_a_failed_evaluation_with_the_transcript_keeps_its_baseline(gym_score, tmp_path: Path) -> None:
+    write_verdicts(tmp_path, accuracy=None)
+
+    fields = gym_score.score(str(tmp_path), 0.1)
+
+    assert fields["trace_missing"] == fields["judgement_missing"] == 0.0
+    assert fields["reward"] == 0.1 and fields["eval_failed"] == 1.0
+
+
 def test_an_unreadable_verdict_takes_the_baseline_and_says_so(gym_score, tmp_path: Path) -> None:
     write_verdicts(tmp_path)
     (tmp_path / "judgement_api.json").write_text("[]")

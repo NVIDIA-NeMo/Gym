@@ -155,6 +155,44 @@ def test_every_rollout_masked_withholds_the_score(tmp_path: Path) -> None:
     assert metrics[MISSING_KEY] == len(TASKS)
 
 
+@pytest.mark.asyncio
+async def test_every_rollout_masked_still_counts_the_missing_tasks_on_the_aggregate_path(tmp_path: Path) -> None:
+    """Shared aggregation returns before compute_metrics when nothing is scored; the count must survive that."""
+    server = make_server(tmp_path)
+    perf = {"total_duration_s": 1.0}
+
+    def row(index: int, task: str, repeat: int) -> dict:
+        return rollout(task, 0.0, repeat) | {TASK_INDEX_KEY_NAME: index, "mask_sample": True, "ng_perf": perf}
+
+    responses = [row(i, task, repeat) for repeat in (0, 1) for i, task in enumerate(TASKS)]
+
+    metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+
+    assert metrics.agent_metrics[MISSING_KEY] == 2 * len(TASKS)
+    assert metrics.key_metrics[MISSING_KEY] == 2 * len(TASKS)
+    assert SCORE_KEY not in metrics.agent_metrics and SCORE_KEY not in metrics.key_metrics
+    # The generic coverage block the shared path produced is untouched.
+    assert metrics.agent_metrics["coverage/masked_rollouts"] == len(responses)
+    assert metrics.agent_metrics["coverage/measured_rollouts"] == 0
+    assert metrics.agent_metrics["coverage/fully_masked_tasks"] == len(TASKS)
+    assert metrics.perf_summary is not None
+
+
+@pytest.mark.asyncio
+async def test_a_complete_run_reports_no_missing_tasks(tmp_path: Path) -> None:
+    server = make_server(tmp_path)
+    responses = [
+        rollout(task, 1.0, repeat) | {TASK_INDEX_KEY_NAME: index}
+        for repeat in (0, 1)
+        for index, task in enumerate(TASKS)
+    ]
+
+    metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+
+    assert metrics.agent_metrics[MISSING_KEY] == 0
+    assert metrics.agent_metrics[SCORE_KEY] == pytest.approx(sum(FACTORS.values()))
+
+
 @pytest.mark.parametrize("fields", [{"judgement_missing": 1.0}, {"judgement_unreadable": 1.0}])
 def test_unfinished_judging_is_inconclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fields: dict) -> None:
     server = make_server(tmp_path)
@@ -238,13 +276,24 @@ def task_folder(tmp_path: Path) -> Path:
     return tmp_path / "task"
 
 
-@pytest.mark.parametrize("judged, masked", [(True, False), (False, True)])
+@pytest.mark.parametrize(
+    "judged, traced, masked",
+    [
+        # The judges finished with the agent's transcript; only the final evaluation ran out of time.
+        (True, True, False),
+        # Verdicts without the transcript: the judges never saw the run, so this is not a measurement.
+        (True, False, True),
+        (False, True, True),
+    ],
+)
 def test_a_verifier_that_stopped_before_its_reward_is_scored_from_its_logs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judged: bool, masked: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judged: bool, traced: bool, masked: bool
 ) -> None:
     server = make_server(tmp_path)
     logs = tmp_path / "logs"
     logs.mkdir()
+    if traced:
+        (logs / "solve_out.txt").write_text("transcript")
     if judged:  # the judges finished; the final evaluation ran out of time and left no metrics.json
         (logs / "judgement_gpt5_4.json").write_text('{"contamination": false, "disallowed_model": false}')
         (logs / "judgement_api.json").write_text('{"disallowed_api_usage": false}')
@@ -277,6 +326,8 @@ def test_the_benchmark_config_validates_with_and_without_a_concurrency_cap(tmp_p
 
     assert config.max_concurrent_episodes == cap
     assert config.queue_timeout_seconds == 259200
+    # The documented run sets use_absolute_ip; only the model server may be advertised to the sandboxes.
+    assert merged.absolute_ip_server_types == ["responses_api_models"]
 
 
 def test_a_missing_taskset_file_names_the_prepare_command(tmp_path: Path) -> None:

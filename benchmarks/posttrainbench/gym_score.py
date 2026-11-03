@@ -63,7 +63,7 @@ def score(logs_dir: str, baseline: float) -> dict[str, float]:
     # test.sh copies the agent's transcript here; judges that ran without one did not check the run. Without a
     # model there was nothing to judge.
     traced = os.path.isfile(os.path.join(logs_dir, "solve_out.txt"))
-    trace_missing = accuracy is not None and not no_model and not traced
+    trace_missing = not no_model and not traced
     missing = missing or trace_missing
     unchecked = missing and not flagged
     fallback = accuracy is None or no_model or flagged or ptb_lookup or unchecked or unreadable
