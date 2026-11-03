@@ -42,7 +42,10 @@ from nemo_gym.orchestration.executors.otel import (
 from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
+    ARTIFACTS_DIRNAME,
+    LOGS_DIRNAME,
     RESOLVED_CONFIG_NAME,
+    ROLLOUTS_FILENAME,
     BenchmarkJob,
     SubmissionRecord,
     installed_gym_commit,
@@ -272,7 +275,7 @@ class SlurmExecutor(BaseExecutor):
                         'fail "A job of this run is still pending or running in $PWD."; done',
                         # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
                         # `gym eval run` on a line of its own (see `render_gym_cmd`).
-                        "if [ -s artifacts/rollouts.jsonl ] && grep -qx -- '[[:space:]]*gym eval run' job.sh "
+                        f"if [ -s {ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME} ] && grep -qx -- '[[:space:]]*gym eval run' job.sh "
                         "&& ! grep -qF -- ++resubmit=True job.sh; then "
                         'fail "job.sh in $PWD predates resubmit, so it could start the run fresh and delete its '
                         'rollouts; submit the run again instead"; fi',
@@ -361,8 +364,8 @@ class SlurmExecutor(BaseExecutor):
         for name, benchmark in config.driver.benchmarks.items():
             bench_dir = staging / name
             bench_dir.mkdir()
-            (bench_dir / "logs").mkdir()
-            (bench_dir / "artifacts").mkdir()
+            (bench_dir / LOGS_DIRNAME).mkdir()
+            (bench_dir / ARTIFACTS_DIRNAME).mkdir()
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
             job_script = bench_dir / "job.sh"
             job_script.write_text(script)

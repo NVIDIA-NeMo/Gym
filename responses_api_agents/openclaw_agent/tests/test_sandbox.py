@@ -1568,7 +1568,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(
 
     import orjson
 
-    import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollouts.rollout_collection as collection
     from environment_servers.single_agent_turn_legacy.app import (
         SingleAgentTurnLegacyEnvironmentServer,
         SingleAgentTurnLegacyEnvironmentServerConfig,
@@ -2242,8 +2242,7 @@ def test_supervisor_timeout_is_not_a_model_transport_error(setup):
 
 @pytest.mark.parametrize("transcript_available", [False, True])
 async def test_capture_header_owns_rejected_attempts_in_each_session(setup, transcript_available):
-    from nemo_gym.observability.model_calls import ModelCallRecord
-    from nemo_gym.trajectory import join_agent_model_calls
+    from nemo_gym.trajectory import ModelCallRecord, join_agent_model_calls
 
     agent, sandbox = setup
     if not transcript_available:

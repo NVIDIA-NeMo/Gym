@@ -181,7 +181,7 @@ def _collector_task_identity(task_id: TaskId) -> str:
     """The task identity rollout collection expects on a session run's trajectory.
 
     A materialized row carries ``task_id`` as the ``TaskId`` mapping, and the collector's canonical
-    identity for it is that mapping's ``str`` (``_trajectory_identity`` in ``rollout_collection``).
+    identity for it is that mapping's ``str`` (``_trajectory_identity`` in ``nemo_gym.rollouts.trajectory_builder``).
     The environment server posts only the task's ``responses_create_params`` on the turn, so the
     seeded session request is the harness's only copy of that identity.
     """

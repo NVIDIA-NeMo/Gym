@@ -15,8 +15,11 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.terminal_bench_4 import app as app_module
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
