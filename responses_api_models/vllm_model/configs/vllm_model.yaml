@@ -15,6 +15,7 @@ policy_model:
       endpoint_file: null
       endpoint_stale_grace_s: 300.0
       endpoint_connection_retries: 8
+      endpoint_connection_retry_timeout_s: null
       endpoint_check_interval_s: 10.0
       route_around_failing_endpoints: false
       endpoint_failure_threshold: 3

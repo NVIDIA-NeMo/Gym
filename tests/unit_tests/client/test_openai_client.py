@@ -15,15 +15,17 @@
 """Tests of the OpenAI-compatible client in `nemo_gym.client.openai_client`."""
 
 import re
+import time
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from aiohttp import ClientResponseError, ClientTimeout
+from aiohttp import ClientOSError, ClientResponseError, ClientTimeout
 from pydantic import ValidationError
 
 from nemo_gym.client import openai_client as openai_client_module
+from nemo_gym.client.http_client import ConnectionRetryWindow
 from nemo_gym.client.openai_client import (
     MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
@@ -637,3 +639,68 @@ class TestProviderBackoff:
 
         assert await client._request_with_retry(url="https://example.com/v1/responses") is success
         sleep.assert_awaited_once_with(3.0)
+
+    async def test_status_retries_of_one_call_share_one_connection_retry_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(retry_after="1"), success, success])
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", connection_retry_timeout_s=30.0)
+
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+
+        windows = [c.kwargs["_connection_retry_window"] for c in request.await_args_list]
+        assert isinstance(windows[0], ConnectionRetryWindow) and windows[0].timeout_s == 30.0
+        # The 503 retry keeps the call's window; the next call gets its own.
+        assert windows[0] is windows[1]
+        assert windows[2] is not windows[0]
+
+    async def test_an_opened_window_cuts_a_status_wait_short(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        connection_error = ClientOSError(111, "refused")
+        transport = MagicMock()
+        transport.request = AsyncMock(side_effect=[connection_error, _busy(status=503, retry_after="60")])
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            request_timeout_seconds=30,
+            max_rate_limit_wait_seconds=0,
+            connection_retry_timeout_s=1.0,
+        )
+
+        started = time.monotonic()
+        with pytest.raises(ClientOSError) as raised:
+            await client._request(method="POST", url="https://example.com/v1/responses")
+        elapsed = time.monotonic() - started
+
+        # The 60 s Retry-After is cut to the window's remainder, then the saved error is raised without reconnecting.
+        assert raised.value is connection_error
+        assert transport.request.await_count == 2
+        assert 0.9 <= elapsed < 1.8
+
+    async def test_an_unopened_window_keeps_the_full_status_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(status=503, retry_after="60"), success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            max_rate_limit_wait_seconds=0,
+            connection_retry_timeout_s=1.0,
+        )
+
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        sleep.assert_awaited_once_with(60.0)
+
+    async def test_no_connection_retry_window_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        request = AsyncMock(return_value=SimpleNamespace(status=200))
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        await client._request(method="POST", url="https://example.com/v1/responses")
+        assert "_connection_retry_window" not in request.await_args.kwargs
