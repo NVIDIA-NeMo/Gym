@@ -597,7 +597,10 @@ def test_final_model_zeros_stay_done_and_are_not_dispatched_again(tmp_path, fake
     # Unknown health is a warning, never missing work; the unread score fails the gate.
     assert out.gate_task["status"] == "FAILED" and any("unknown" in w for w in out.gate_task["warnings"])
     assert "missing" not in out.decision.counts
-    assert out.gate_task["errors"][0] == "score unavailable: no requested metric was read"
+    assert (
+        out.gate_task["errors"][0]
+        == "score unavailable: no requested metric was read (pass --score-key, and --score-agent or --score-environment for a Gym aggregate)"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1498,7 +1501,10 @@ def test_cli_recover_reads_a_score_path_into_the_aggregate_list(tmp_path, fake_e
     assert code == 1 and out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert out["gate_task"]["score"] == score and out["gate_task"]["status"] == "FAILED"
     if score is None:
-        assert "score unavailable: no requested metric was read" in out["gate_task"]["errors"]
+        assert (
+            "score unavailable: no requested metric was read (pass --score-key, and --score-agent or --score-environment for a Gym aggregate)"
+            in out["gate_task"]["errors"]
+        )
 
 
 def test_cli_recover_still_reads_a_string_key_path(tmp_path, fake_executor, capsys) -> None:

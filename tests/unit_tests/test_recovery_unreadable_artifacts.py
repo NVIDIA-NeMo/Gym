@@ -81,7 +81,10 @@ def test_an_unreadable_metric_or_summary_is_unknown_never_a_crash_or_a_pass(tmp_
     assert f"unreadable artifacts, read as unknown: ['artifacts/{name}']" in task["errors"]
     if name == "rollouts_aggregate_metrics.json":
         assert collected.score is None
-        assert "score unavailable: no requested metric was read" in task["errors"]
+        assert (
+            "score unavailable: no requested metric was read (pass --score-key, and --score-agent or --score-environment for a Gym aggregate)"
+            in task["errors"]
+        )
 
 
 @pytest.mark.parametrize("name", ["rollouts.jsonl", "rollouts_failures.jsonl", "rollouts_materialized_inputs.jsonl"])
