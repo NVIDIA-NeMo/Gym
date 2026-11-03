@@ -37,6 +37,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -199,10 +200,13 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
     # The episode and task each Environment Server seed bound to its resources_session_id.
     _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _fence: ResourcesSessionFence = PrivateAttr()
+    # Verify unbinds checkpoint ownership; keep only expiring identity for retries and the eventual close.
+    _verified_sessions: ClosedResourcesSessionRecords[tuple[EpisodeId, TaskId]] = PrivateAttr()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -220,7 +224,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         # Close removes the worker in a thread before marking the fence. Serialize publication with that whole
         # operation, so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
         async with self._fence.locked(sid):
-            if self._fence.closed_episode(sid) is not None:
+            if self._fence.closed_episode(sid) is not None or sid in self._verified_sessions:
                 raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
             try:
                 if sid not in self._sessions:
@@ -274,12 +278,22 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         resources_session_id = body.resources_session_id
         async with self._fence.locked(resources_session_id):
             self._fence.raise_if_closed(resources_session_id)
+            if resources_session_id in self._verified_sessions:
+                raise ResourcesSessionConflictError("resources session has already been verified")
             identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         # execute_python and verify find the worker by the cookie, so it must name this resources session.
         request.session[SESSION_ID_KEY] = resources_session_id
         return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        """Stop the worker before checkpoint retirement forgets its owning attempt."""
+        async with self._fence.locked(session_id):
+            await self._cleanup_session(session_id)
+            identity = self._session_episodes.pop(session_id, None)
+            if identity is not None:
+                self._fence.mark_closed(session_id, identity[0])
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Stop the session's worker process, even when verify never ran.
@@ -294,7 +308,9 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 if closed_episode != body.episode_id:
                     raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
-            identity = self._session_episodes.get(resources_session_id)
+            identity = self._session_episodes.get(resources_session_id) or self._verified_sessions.get(
+                resources_session_id
+            )
             if identity is not None and identity[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             # Verify has already stopped a verified episode's worker, so this finds none.
@@ -351,11 +367,13 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 accuracy=accuracy,
             )
         finally:
-            try:
+            # A successful verify reply ends checkpoint ownership. Keep failures retriable, and serialize
+            # cleanup with a tool's first allocation so no worker can be published after we release it.
+            async with self._fence.locked(session_id):
                 await self._cleanup_session(session_id)
-            except RuntimeError:
-                # The score stands; the worker stays registered, so /close_session retries and reports it.
-                logger.exception("Could not stop the Python worker of session %s", session_id)
+                identity = self._session_episodes.pop(session_id, None)
+                if identity is not None:
+                    self._verified_sessions.remember(session_id, identity)
 
     async def _cleanup_session(self, session_id: str) -> None:
         """Stop the session's worker process; one that survives stays registered, so a later cleanup retries it."""

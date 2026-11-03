@@ -24,6 +24,7 @@ from app import (
     ExecutePythonRequest,
     PythonExecutorResourcesServer,
     PythonExecutorResourcesServerConfig,
+    PythonMathVerifyRequest,
     _answers_match,
     _extract_boxed_answer,
     _normalize_answer,
@@ -204,6 +205,107 @@ class _UnstoppableHandle:
 
 
 class TestResourcesSessions:
+    async def test_verify_cleanup_prevents_late_worker_allocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        stopped, release = asyncio.Event(), asyncio.Event()
+        original_cleanup = PythonExecutorResourcesServer._cleanup_session
+
+        async def delayed_cleanup(server, session_id):
+            await original_cleanup(server, session_id)
+            stopped.set()
+            await asyncio.wait_for(release.wait(), timeout=5)
+
+        monkeypatch.setattr(PythonExecutorResourcesServer, "_cleanup_session", delayed_cleanup)
+        verification = asyncio.create_task(server.verify(request, PythonMathVerifyRequest.model_validate(VERIFY_BODY)))
+        await asyncio.wait_for(stopped.wait(), timeout=5)
+        tool = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1")))
+        try:
+            await asyncio.sleep(0.05)
+            assert not tool.done() and server._sessions == {}
+            release.set()
+            assert (await verification).reward == 1.0
+            with pytest.raises(ResourcesSessionLostError):
+                await tool
+            assert server._sessions == {}
+        finally:
+            release.set()
+            await asyncio.gather(verification, tool, return_exceptions=True)
+
+    def test_checkpoint_failed_verify_cleanup_stays_owned_until_retry(self) -> None:
+        server, app = _session_server()
+        server.server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test-only"}}
+        server.setup_resources_checkpoint(app)
+        client = TestClient(app, raise_server_exceptions=False)
+        prefix = "/ng-rollout/rollout"
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 200
+        handle = _UnstoppableHandle()
+        server._sessions["rs-1"] = handle
+        first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
+        assert first.status_code == 500
+        assert server.checkpoint_participant.is_open("rs-1")
+        assert "rs-1" in server._session_episodes
+        assert server._sessions["rs-1"] is handle
+        handle.stoppable = True
+        second = client.post(prefix + "/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["reward"] == 1.0
+        assert not server.checkpoint_participant.is_open("rs-1")
+        assert server._session_episodes == {}
+        assert server._sessions == {}
+
+    def test_checkpoint_verify_releases_active_identity_but_allows_score_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import nemo_gym.server_runtime.base_resources_server as base_resources
+
+        server, app = _session_server()
+        server.server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test-only"}}
+        server.setup_resources_checkpoint(app)
+        client = TestClient(app)
+        prefix = "/ng-rollout/rollout"
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post(prefix + "/execute_python", json={"code": "print(4)"}).status_code == 200
+        assert server.checkpoint_participant.is_open("rs-1")
+
+        first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
+        assert first.status_code == 200 and first.json()["reward"] == 1.0
+        # Default wait verification unbinds before the HTTP reply. A replacement may never send close.
+        assert not server.checkpoint_participant.is_open("rs-1")
+        assert server._session_episodes == {}
+        assert server._verified_sessions.get("rs-1") == (EPISODE_ID, TaskId.model_validate(_seed("rs-1")["task_id"]))
+        second = client.post(prefix + "/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["reward"] == 1.0
+        assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 409
+        assert client.post(prefix + "/execute_python", json={"code": "print(4)"}).status_code == 404
+        wrong_close = _close("rs-1") | {"episode_id": {"rollout_id": "different", "attempt": 0}}
+        assert client.post(prefix + "/close_session", json=wrong_close).status_code == 409
+
+        now = base_resources.monotonic()
+        monkeypatch.setattr(
+            base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
+        )
+        assert server._verified_sessions.get("rs-1") is None
+
+    async def test_checkpoint_retire_releases_owned_worker_and_retries_failure(self) -> None:
+        from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        handle = _UnstoppableHandle()
+        server._sessions["rs-1"] = handle
+        participant = ResourcesParticipant(server, "restart_only")
+        participant.seeded("rs-1", EPISODE_ID)
+        with pytest.raises(RuntimeError):
+            await participant.retire(EPISODE_ID)
+        assert server._sessions["rs-1"] is handle and "rs-1" in participant._sessions
+        handle.stoppable = True
+        await participant.retire(EPISODE_ID)
+        assert server._sessions == {} and server._session_episodes == {} and participant._sessions == {}
+
     async def test_tool_waiting_for_close_does_not_create_a_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
         server, _ = _session_server()
         request = MagicMock()
@@ -327,16 +429,16 @@ class TestResourcesSessions:
         assert server._sessions == {}
         assert server._fence.closed_episode("rs-1") == EPISODE_ID
 
-    def test_failed_stop_at_verify_keeps_the_score(self) -> None:
+    def test_failed_stop_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
         server, app = _session_server()
-        client = TestClient(app)
+        client = TestClient(app, raise_server_exceptions=False)
         assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
         handle = _UnstoppableHandle()
         server._sessions["rs-1"] = handle
 
         verified = client.post("/verify", json=VERIFY_BODY)
 
-        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
+        assert verified.status_code == 500
         assert handle.close_attempts == 1
         # The worker stays registered, so the close retries the stop and reports a failure.
         assert server._sessions["rs-1"] is handle
