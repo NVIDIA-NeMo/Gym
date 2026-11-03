@@ -4232,8 +4232,9 @@ def _observed_trial_operations(
             if not graded and not recorded:
                 artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
             # An agent without a resources server is observed through its own grading record, or, when no verifier
-            # ran, through the environment's own reward record.
-            if resource is None and not recorded and not (artifact == "environment_reward" and verifiers == []):
+            # ran, through a saved grading artifact (the environment's reward record, or the agent rubric's own saved
+            # score); its own failed answer alone does not observe it.
+            if resource is None and not recorded and not (artifact not in (None, "model_failure") and verifiers == []):
                 return False
             if artifact is not None and single is not None and isinstance(calls, list):
                 owned = single.get("model_calls")
@@ -4267,7 +4268,7 @@ def _observed_trial_operations(
                 calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
             # Grading coverage: the trial's one verifier (none only beside an environment reward) and how it graded.
             if not isinstance(verifiers, list) or len(verifiers) != (
-                0 if artifact == "environment_reward" and not verifiers else 1
+                0 if not verifiers and (artifact == "environment_reward" or resource is None) else 1
             ):
                 return False
             verifier = verifiers[0] if verifiers else None
