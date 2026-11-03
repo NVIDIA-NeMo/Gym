@@ -37,7 +37,7 @@ from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, L
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.metrics import RewardProfiler
-from nemo_gym.rollout_outcomes import RolloutFailureRecord
+from nemo_gym.rollouts import RolloutFailureRecord
 from nemo_gym.server_runtime import BaseVerifyResponse
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
@@ -330,7 +330,7 @@ async def test_production_graceful_shutdown_releases_active_state(services):
 async def test_collector_saves_actual_cohort_failure_class_and_reason(
     services, tmp_path, monkeypatch, judge_failure, count_failure
 ):
-    import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollouts.rollout_collection as collection
 
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: OmegaConf.create({}))
@@ -403,7 +403,7 @@ async def test_collector_saves_actual_cohort_failure_class_and_reason(
 
 
 async def test_collector_can_repeat_legacy_task_on_same_live_server(services, tmp_path, monkeypatch):
-    import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollouts.rollout_collection as collection
 
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: OmegaConf.create({}))
@@ -438,7 +438,7 @@ async def test_collector_can_repeat_legacy_task_on_same_live_server(services, tm
 
 
 async def test_failed_legacy_collector_requires_fresh_explicit_group(services, tmp_path, monkeypatch):
-    import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollouts.rollout_collection as collection
 
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: OmegaConf.create({}))

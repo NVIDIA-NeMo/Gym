@@ -13,7 +13,7 @@ from nemo_gym.config import (
     GlobalConfigDictParserConfig,
     taskset_environment_server_name,
 )
-from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
+from nemo_gym.rollouts import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 
 
 @pytest.mark.asyncio
