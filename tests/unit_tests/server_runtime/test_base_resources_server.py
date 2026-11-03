@@ -46,7 +46,7 @@ from nemo_gym.server_runtime.base_resources_server import (
 )
 from nemo_gym.server_runtime.request_handling.session_routing import ResourcesSessionLifetimes
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnResult
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 
 
 def _resources_server() -> SimpleResourcesServer:

@@ -31,23 +31,22 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    SandboxSession,
-)
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -66,7 +65,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -699,7 +698,6 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "grant that also offers one is left out."
         ),
     )
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     # An OpenAI-compatible base URL (including /v1) that Pi calls directly, as a generated
     # `openai-completions` provider, instead of a Gym model_server. It must be reachable from the
     # sandbox. Such calls do not pass through Gym, so Gym does not capture them.

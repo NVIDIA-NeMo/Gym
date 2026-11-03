@@ -94,7 +94,7 @@ def test_pinned_pi_classifies_model_server_http_error(
         raise error
 
     if delayed:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
     server._client = MagicMock(create_chat_completion=AsyncMock(side_effect=reject))
     with TestClient(server.setup_webserver()) as client:
         response = client.post(

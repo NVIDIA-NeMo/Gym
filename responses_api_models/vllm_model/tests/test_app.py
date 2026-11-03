@@ -28,12 +28,14 @@ from aiohttp import ClientResponseError, RequestInfo
 from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.server_runtime.base_server
 from nemo_gym import PARENT_DIR
-from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
+from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI, PermanentEndpointError, ServerClient, raise_for_status
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymChatCompletion,
@@ -66,16 +68,9 @@ from nemo_gym.core import (
     NeMoGymSummary,
     rollout_context,
 )
-from nemo_gym.models import PolicyModelParticipant, generation_cut_requester
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
-from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.server_runtime import (
-    CheckpointRequest,
-    GenerationCutInventory,
-    GenerationCutPrefixAck,
-    GenerationCutReceipt,
-)
-from nemo_gym.token_id_capture import (
+from nemo_gym.failure_transport import FailureHeader
+from nemo_gym.models import PolicyModelParticipant, VLLMWorkerCaptureHandler, generation_cut_requester
+from nemo_gym.models.token_capture import (
     CaptureContext,
     InMemoryLineageStore,
     ParentResolutionStatus,
@@ -84,8 +79,17 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+from nemo_gym.models.token_capture.staging import CaptureAdmission
+from nemo_gym.rollouts import is_terminal_failure
+from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row
+from nemo_gym.server_runtime import (
+    CheckpointRequest,
+    FailureBoundary,
+    GenerationCutInventory,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
@@ -957,6 +961,14 @@ class TestApp:
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
         error.response_content = error_content
+        model = NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="HTTP 400 from the model",
+            operation="model_request",
+            http_status=400,
+        )
+        error.__cause__ = model
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=error)
         mock_client.create_completion = AsyncMock(side_effect=error)
@@ -984,8 +996,12 @@ class TestApp:
                     "code": expected_code,
                 }
             }
+            # The refusal ends the request: the reply names the model failure that caused it.
+            report = FailureHeader.decode(response.headers)
+            assert report is not None and report.failure_id == model.event_id
         else:
             assert response.status_code == 200
+            assert FailureHeader.decode(response.headers) is None
             if responses_api:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
                 assert response.json()["usage"]["input_tokens"] == 0
@@ -1032,7 +1048,7 @@ class TestApp:
     ) -> None:
         # Once the keepalive has committed the SSE headers, the refusal can only be an error event;
         # it carries the same envelope as the HTTP path, so a chat-SSE harness can classify it too.
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
@@ -1130,7 +1146,7 @@ class TestApp:
         )
         refusal = self._engine_window_refusal()
         if route == "chat-stream-after-keepalive":
-            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+            monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
 
             async def slow_refusal(**_kwargs):
                 await asyncio.sleep(0.05)
@@ -2001,7 +2017,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2160,7 +2176,7 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2415,7 +2431,7 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2559,7 +2575,7 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=single_input)
@@ -2757,6 +2773,66 @@ class TestApp:
         data = response_2_2.json()
         assert data["output"][0]["content"][0]["text"] == routed_output_2
 
+    @mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+    @mark.parametrize("format_type", ["json_schema", "json_object"])
+    def test_structured_responses_preserve_literal_tags_and_judge_schema(
+        self, monkeypatch, reasoning_field, format_type
+    ):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        verdict = {"coverage_outcome": "fulfilled", "justification": "Literal <think>text</think> stays"}
+        final = json.dumps(verdict)
+        upstream = AsyncMock(
+            return_value={
+                "id": "judge",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": final,
+                            reasoning_field: "Check the claim",
+                        },
+                    }
+                ],
+            }
+        )
+        server._clients = [MagicMock(create_chat_completion=upstream)]
+        schema = {
+            "type": "object",
+            "properties": {"coverage_outcome": {"type": "string"}, "justification": {"type": "string"}},
+            "required": ["coverage_outcome", "justification"],
+            "additionalProperties": False,
+        }
+        format_config = {"type": format_type}
+        if format_type == "json_schema":
+            format_config.update(name="verdict", schema=schema, strict=True)
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "input": [{"role": "user", "content": "Judge this claim"}],
+                    "text": {"format": format_config},
+                    "temperature": 0,
+                    "max_output_tokens": 2048,
+                },
+            )
+        assert response.status_code == 200
+        output = response.json()["output"]
+        assert [item["type"] for item in output] == ["reasoning", "message"]
+        assert output[0]["summary"][0]["text"] == "Check the claim"
+        assert output[1]["content"][0]["text"] == final
+        sent = upstream.await_args.kwargs
+        expected = {"type": format_type}
+        if format_type == "json_schema":
+            expected["json_schema"] = {"name": "verdict", "schema": schema, "strict": True}
+        assert sent["response_format"] == expected
+        assert sent["temperature"] == 0 and sent["max_tokens"] == 2048
+
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         server.config.uses_reasoning_parser = True
@@ -2940,7 +3016,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -3391,7 +3467,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -3718,7 +3794,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         response = client.post(
             "/v1/responses",
@@ -3856,7 +3932,7 @@ class TestVLLMConverter:
         ChatCompletion output -> Response output
         """
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
@@ -3886,7 +3962,7 @@ class TestVLLMConverter:
         assert main_content_none == "Just plain content here."
 
     def test_postprocess_chat_response_multiple_reasoning_items(self, monkeypatch: MonkeyPatch):
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         raw_model_response = (
@@ -4179,7 +4255,7 @@ class TestVLLMConverter:
         assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         message = NeMoGymChatCompletionMessage(
             content="<think> \n \n I'm thinking \n \n </think> \n \n I'm chatting! \n \n ",
@@ -4688,6 +4764,70 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+
+    def test_benchmark_extra_body_survives_model_type_config_and_reaches_vllm(self, tmp_path) -> None:
+        # `gym eval run --benchmark <b> --model-type vllm_model` merges the vllm_model config after the benchmark
+        # config; the per-request budget and template kwargs a benchmark sets must still reach the engine.
+        benchmark_settings = {
+            "extra_body": {"thinking_token_budget": 17408},
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        benchmark_config = tmp_path / "config.yaml"
+        benchmark_config.write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": benchmark_settings}}})
+        )
+        model_type_config = PARENT_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "config_paths": [str(benchmark_config), str(model_type_config)],
+                        "policy_base_url": "http://api.openai.com/v1",
+                        "policy_api_key": "dummy_key",  # pragma: allowlist secret
+                        "policy_model_name": "dummy_model",
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+        block = OmegaConf.to_container(resolved["policy_model"]["responses_api_models"]["vllm_model"], resolve=True)
+        config = VLLMModelConfig.model_validate({"name": "policy_model", **block})  # the parser assigns host/port
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="response", tool_calls=[]),
+                )
+            ],
+        )
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")]
+        )
+        response = TestClient(app).post("/v1/responses", json=request.model_dump(exclude_unset=True, mode="json"))
+
+        assert response.status_code == 200
+        assert captured_kwargs["thinking_token_budget"] == 17408
+        assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -5820,7 +5960,7 @@ class TestCompletionsBackendEndToEnd:
         monkeypatch.setattr(
             nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
         )
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         model = _make_completions_backend_model()
@@ -8440,3 +8580,23 @@ def test_streaming_sanitize_applies_the_configured_custom_tool_strategy() -> Non
     passthrough = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
     cleaned, _ = passthrough._sanitize_streaming_responses_body(body())
     assert cleaned["tools"] == []
+
+
+@mark.parametrize("request_timeout_seconds", [None, 30.0])
+def test_request_timeout_reaches_every_engine_client(request_timeout_seconds) -> None:
+    """Unset keeps the engine request unbounded; a value bounds each HTTP attempt of every client."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8081,
+        base_url=["http://engine-a/v1", "http://engine-b/v1"],
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        entrypoint="",
+        name="vllm_model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        **({} if request_timeout_seconds is None else {"request_timeout_seconds": request_timeout_seconds}),
+    )
+    server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    assert [client.request_timeout_seconds for client in server._clients] == [request_timeout_seconds] * 2

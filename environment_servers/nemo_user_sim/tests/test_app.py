@@ -33,9 +33,10 @@ from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRe
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.data import materialize_task
+from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.server_runtime import MaterializedTask
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.server_runtime.base_environment_server import is_handled_episode_failure
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
@@ -1036,9 +1037,10 @@ def test_an_agent_seed_refusal_fails_with_the_agents_reason() -> None:
     refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
     refusal.response_content = b'{"detail":"Simple Agent does not support sandbox access"}'
 
-    failure = UserSimEnvironmentServer._failure("agent", refusal).failure
+    failure = UserSimEnvironmentServer._failure("agent", refusal)
 
-    assert failure.terminal is True
+    assert is_handled_episode_failure(failure) and (failure.boundary, failure.stage) == ("environment", "agent")
+    assert failure.episode_terminal is True and failure.__cause__ is refusal
     assert "Simple Agent does not support sandbox access" in failure.failure_reason
 
 
@@ -1046,9 +1048,10 @@ def test_a_participant_turn_refusal_fails_with_the_agents_reason() -> None:
     refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
     refusal.response_content = b'{"detail":"user_model agent cannot serve this tool_choice"}'
 
-    failure = UserSimEnvironmentServer._failure("agent", _ParticipantActivationError("user_model", refusal)).failure
+    failure = UserSimEnvironmentServer._failure("agent", _ParticipantActivationError("user_model", refusal))
 
-    assert failure.terminal is True
+    assert is_handled_episode_failure(failure) and (failure.boundary, failure.stage) == ("environment", "agent")
+    assert failure.episode_terminal is True
     assert "user_model agent cannot serve this tool_choice" in failure.failure_reason
 
 
