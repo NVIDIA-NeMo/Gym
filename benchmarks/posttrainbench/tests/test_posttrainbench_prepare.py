@@ -445,6 +445,38 @@ def test_materialize_writes_the_taskset_the_server_serves(tmp_path: Path, monkey
     assert server._baselines == baselines
 
 
+def test_collation_takes_the_rows_as_the_benchmark_config_declares_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.config_types import maybe_get_server_instance_config
+    from nemo_gym.train_data_utils import TrainDataProcessor
+
+    tasks_dir = tmp_path / "tasks" / "posttrainbench"
+    write_ptb_task(tasks_dir, "posttrainbench-gsm8k-qwen3-1.7b", 0.12)
+    monkeypatch.setattr(prepare, "ROWS_ROOT", tmp_path / "rows")
+    monkeypatch.setattr(prepare, "TASKSET_PATH", tmp_path / "taskset.json")
+    rows_path = prepare.materialize(tasks_dir, builds={"enabled": False}, factors=FACTORS)
+    benchmark = OmegaConf.to_container(OmegaConf.load(prepare.BENCHMARK_DIR / "config.yaml"))
+    agent = benchmark["posttrainbench_claude_code_agent"]["responses_api_agents"]["claude_code_agent"]
+    dataset = {**agent["datasets"][0], "jsonl_fpath": str(rows_path)}
+    impl = {"entrypoint": "app.py", "datasets": [dataset]}
+    config, error = maybe_get_server_instance_config(
+        "posttrainbench_claude_code_agent", OmegaConf.create({"responses_api_agents": {"claude_code_agent": impl}})
+    )
+    assert error is None, error
+    monkeypatch.chdir(tmp_path)
+
+    # The rows are already materialized Harbor tasks: collation must pass them through, not materialize them again.
+    (collated,) = TrainDataProcessor()._collate_samples_single_type(type="benchmark", server_instance_configs=[config])
+
+    rows = [json.loads(line) for line in collated.read_text().splitlines()]
+    assert [row["task_id"] for row in rows] == [
+        {"taskset": "posttrainbench", "task_id": "posttrainbench-gsm8k-qwen3-1.7b"}
+    ]
+
+
 def test_materialize_refuses_a_task_that_cannot_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tasks_dir = tmp_path / "tasks" / "posttrainbench"
     write_ptb_task(tasks_dir, "posttrainbench-gsm8k-qwen3-1.7b", 0.12)

@@ -47,9 +47,9 @@ posttrainbench_claude_code_agent:
       timeout: 36000
       concurrency: 24
       datasets:
+        # The rows are materialized Harbor tasks that route by their own taskset, so the entry declares none.
         - name: posttrainbench
           type: benchmark
-          taskset: posttrainbench
           jsonl_fpath: benchmarks/posttrainbench/data/rows/posttrainbench/tasks.jsonl
           prepare_script: benchmarks/posttrainbench/prepare.py
           prepare_dependencies:
