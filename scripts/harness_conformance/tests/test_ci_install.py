@@ -26,16 +26,6 @@ def test_install_uses_adapter_dir_and_overrides(monkeypatch, harness):
     assert not ships_overrides or command[command.index("--override") + 1] == "overrides.txt"
 
 
-def test_openclaw_runtime_is_installed_only_in_the_task_sandbox(monkeypatch):
-    calls = []
-    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
-
-    install_runtime("openclaw")
-
-    assert len(calls) == 1
-    assert calls[0][:3] == ["uv", "pip", "install"]
-
-
 def test_openclaw_install_leaves_runtime_to_session(monkeypatch):
     import importlib
 

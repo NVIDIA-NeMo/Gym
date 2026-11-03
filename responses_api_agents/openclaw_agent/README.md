@@ -210,7 +210,9 @@ Gym model responses. OpenClaw's generic custom-provider policy otherwise strips 
 from IDs, breaking tool-result identity. The adapter requires the plugin's per-session
 readiness receipt before accepting a response. This detects a missing hook after execution;
 it does not prevent earlier model or tool calls. Missing readiness retains transcript evidence
-and fails activation before verification.
+and fails activation before verification. A supervisor timeout before any model/tool activity
+remains an incomplete response eligible for verification, even if startup ended before the
+receipt was written; the missing receipt is still recorded as an observation gap.
 
 Sandbox request support is deliberately explicit:
 

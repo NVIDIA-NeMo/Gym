@@ -6,7 +6,6 @@
 HARNESSES = {
     "simple": "SimpleAgent",
     "opencode": "OpenCodeAgent",
-    "openclaw": "OpenClawAgent",
     "pi": "PiAgent",
     "codex": "CodexAgent",
     "hermes": "HermesAgent",

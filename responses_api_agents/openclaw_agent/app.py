@@ -870,15 +870,31 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         response = await self._collect_sandbox_response(
             state, body, prompt=prompt, system=system, capture_correlated=True
         )
-        # Retain transcript evidence even when the runtime ignores a provider plugin failure.
-        if (state.session.artifacts or {}).get("provider_plugin/policy.ready") != "nemo-gym-replay-v1\n":
-            state.observations.gaps.append(ObservationGap(code="provider_replay_policy_unconfirmed"))
-            for record in state.observations.records:
-                if record.kind == "agent_invocation":
-                    record.status = "failed"
-            raise RuntimeError(
-                "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
+        artifacts = state.session.artifacts or {}
+        policy_receipt = artifacts.get("provider_plugin/policy.ready")
+        if policy_receipt != "nemo-gym-replay-v1\n":
+            transcript = artifacts.get(f"home/.openclaw/agents/main/sessions/{session_id}.jsonl", "")
+            model_or_tool_activity = any(
+                isinstance(event.get("message"), dict) and event["message"].get("role") in {"assistant", "toolResult"}
+                for event in parse_openclaw_session_events(transcript)
             )
+            # Startup counts toward the task budget. A supervisor timeout before
+            # any model/tool activity needs no replay policy and remains gradable.
+            startup_timeout = (
+                policy_receipt is None
+                and (state.session.cleanup or {}).get("timed_out")
+                and response.status == "incomplete"
+                and not response.output
+                and response.usage.total_tokens == 0
+                and not model_or_tool_activity
+            )
+            if not startup_timeout:
+                for record in state.observations.records:
+                    if record.kind == "agent_invocation":
+                        record.status = "failed"
+                raise RuntimeError(
+                    "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
+                )
         # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
         # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
         stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
@@ -1042,6 +1058,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         gaps = []
         artifacts = state.session.artifacts or {}
+        # Record this on interrupted activations too, before close releases the sandbox.
+        if artifacts.get("provider_plugin/policy.ready") != "nemo-gym-replay-v1\n":
+            gaps.append(ObservationGap(code="provider_replay_policy_unconfirmed"))
         stdout = artifacts.get("stdout.log", "")
         if "stdout.log" not in artifacts:
             gaps.append(ObservationGap(code="agent_stdout_unavailable"))

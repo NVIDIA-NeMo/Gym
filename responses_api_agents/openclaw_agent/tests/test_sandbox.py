@@ -2186,6 +2186,52 @@ def test_missing_provider_policy_receipt_fails_closed_and_releases_borrowed_sand
     sandbox.stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize("activity", ["empty", "input", "empty_assistant", "tools"])
+@pytest.mark.parametrize("receipt", [None, "wrong-policy"])
+def test_startup_timeout_without_replay_policy_remains_incomplete(setup, activity, receipt):
+    agent, sandbox = setup
+    sandbox.result.update(timed_out=True, return_code=143)
+    sandbox.events = {
+        "empty": "",
+        "input": json.dumps({"type": "session", "id": "session"})
+        + "\n"
+        + json.dumps({"type": "message", "message": {"role": "user", "content": "task"}}),
+        "empty_assistant": json.dumps(
+            {"type": "message", "message": {"role": "assistant", "content": [], "stopReason": "aborted"}}
+        ),
+        "tools": events(stop_reason="aborted"),
+    }[activity]
+    download = sandbox.download
+
+    async def missing_policy(source, destination):
+        if source.endswith("/provider_plugin/policy.ready"):
+            if receipt is None:
+                raise FileNotFoundError(source)
+            Path(destination).write_text(receipt)
+        else:
+            await download(source, destination)
+
+    sandbox.download = missing_policy
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        startup_timeout = receipt is None and activity in {"empty", "input"}
+        assert response.status_code == (200 if startup_timeout else 500), response.text
+        if startup_timeout:
+            assert response.json()["status"] == "incomplete"
+            assert response.json()["error"] is None
+            assert response.json()["output"] == []
+            assert "ng_agent_outcome" not in response.json()["metadata"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200
+        observations = closed.json()["agent_observations"]
+        assert "provider_replay_policy_unconfirmed" in [gap["code"] for gap in observations["gaps"]]
+        assert observations["records"][0]["status"] == ("incomplete" if startup_timeout else "failed")
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 @pytest.mark.parametrize("interrupted", [False, True])
 async def test_rejected_model_attempts_keep_invocation_ownership(setup, interrupted: bool) -> None:
     from nemo_gym.observability.model_calls import ModelCallRecord
