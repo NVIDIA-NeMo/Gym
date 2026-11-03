@@ -67,6 +67,28 @@ from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.registry import EnvironmentCatalogEntry
 
 
+@pytest.fixture(autouse=True)
+def mock_server_process_groups(monkeypatch):
+    signal_group = nemo_gym.cli.env._signal_server_group
+    group_exists = nemo_gym.cli.env._server_group_exists
+
+    def send(process, number):
+        if isinstance(process, MagicMock):
+            if number == nemo_gym.cli.env.SIGINT:
+                process.send_signal(number)
+            else:
+                process.kill()
+        else:
+            signal_group(process, number)
+
+    monkeypatch.setattr(nemo_gym.cli.env, "_signal_server_group", send)
+    monkeypatch.setattr(
+        nemo_gym.cli.env,
+        "_server_group_exists",
+        lambda process: bool(process.wait.side_effect) if isinstance(process, MagicMock) else group_exists(process),
+    )
+
+
 class TestSelectShard:
     def test_no_sharding_returns_all(self) -> None:
         paths = [Path(f"resources_servers/s{i}") for i in range(5)]
@@ -766,7 +788,7 @@ class TestRunHelperServerReadiness:
         from fastapi.testclient import TestClient
 
         from nemo_gym.config.config_types import BaseServerConfig
-        from nemo_gym.server_utils import HeadServer
+        from nemo_gym.server_runtime.registry_server import HeadServer
 
         runner = RunHelper()
         runner._head_server_instance = HeadServer(config=BaseServerConfig(host="", port=0))
@@ -802,8 +824,8 @@ class TestRunHelperServerReadiness:
         """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
         import socket
 
+        from nemo_gym.client.server_client import ServerClient
         from nemo_gym.config.config_types import BaseServerConfig
-        from nemo_gym.server_utils import ServerClient
 
         # A listening socket that never accepts completes the TCP handshake and then never answers.
         stalled_sockets = []
@@ -1269,10 +1291,9 @@ class TestValidate:
         out = capsys.readouterr().out
         assert (
             "'my_env' (environment_servers/single_agent_turn_legacy/app.py) does not match "
-            "SingleAgentTurnEnvironmentServerConfig:" in out
+            "SingleAgentTurnLegacyEnvironmentServerConfig:" in out
         )
         block_path = "my_env.environment_servers.single_agent_turn_legacy"
-        assert f"{block_path}.cleanup_timeout_seconds: Field required" in out
         assert f"{block_path}.resources_tool_transport: Extra inputs are not permitted" in out
         assert "Config is valid" not in out
 
@@ -1885,3 +1906,36 @@ def test_version_reports_a_missing_dependency_instead_of_failing(
     dependencies = json.loads(capsys.readouterr().out)["dependencies"]
     assert dependencies["ray"] == "not installed"
     assert dependencies["openai"] == installed_version("openai")
+
+
+def test_managed_servers_use_sessions_and_the_configured_shutdown_budget(monkeypatch):
+    fixture = TestRunHelperH2PingSidecar()
+    config = fixture._config(dry_run=False)
+    config["server_shutdown_timeout_seconds"] = "7"
+    fixture._patch_launch(monkeypatch, config, [])
+    process = MagicMock(**{"poll.return_value": None, "wait.return_value": 0})
+    launch = MagicMock(return_value=process)
+    monkeypatch.setattr(nemo_gym.cli.env, "run_command", launch)
+    monkeypatch.setattr(nemo_gym.cli.env, "start_h2_ping_sidecar", MagicMock())
+    runner = RunHelper()
+    runner.wait_for_server_readiness = MagicMock()
+    runner.start(MagicMock())
+    try:
+        assert launch.call_args.kwargs["start_new_session"] is True
+        assert runner._server_shutdown_timeout_seconds == 7
+    finally:
+        runner.shutdown()
+
+
+def test_invalid_shutdown_budget_fails_before_spawning(monkeypatch):
+    config = OmegaConf.create({"server_shutdown_timeout_seconds": "inf"})
+    monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
+    monkeypatch.setattr(nemo_gym.cli.env.GlobalConfigDictParser, "raise_on_no_server_instances", MagicMock())
+    initialize = MagicMock()
+    launch = MagicMock()
+    monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", initialize)
+    monkeypatch.setattr(nemo_gym.cli.env, "run_command", launch)
+    with raises(ConfigError, match="server_shutdown_timeout_seconds"):
+        RunHelper().start(None)
+    initialize.assert_not_called()
+    launch.assert_not_called()

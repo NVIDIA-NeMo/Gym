@@ -36,7 +36,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,

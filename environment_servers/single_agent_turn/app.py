@@ -10,59 +10,58 @@ from warnings import warn
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    HandledEpisodeError,
-    dependency_failure,
-)
-from nemo_gym.base_resources_server import (
-    ResourcesCloseSessionRequest,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    OutcomeAction,
+    agent_outcome_policy,
 )
+from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
+    TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
-    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ResourcesServerRef,
     get_first_server_config_dict,
 )
-from nemo_gym.core import NeMoGymResponse
-from nemo_gym.rollout_observability import (
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    DirectHTTPToolAccess,
+    HandledEpisodeError,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    SingleAgentTurnFailure,
+    SingleAgentTurnRequest,
+    SingleAgentTurnResponse,
+    SingleAgentTurnResult,
+    StepType,
+    ToolAccess,
+    dependency_failure,
+    seed_restarts,
+    seed_verify_step_type,
+)
+from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
     NG_VERIFIER_INVOCATIONS_KEY,
     AgentObservationBundle,
     TrajectoryRecord,
     VerifierInvocation,
-)
-from nemo_gym.server_utils import get_response_json, raise_for_status, rollout_path_prefix
-from nemo_gym.single_agent_turn_types import (
-    SingleAgentTurnFailure,
-    SingleAgentTurnRequest,
-    SingleAgentTurnResponse,
-    SingleAgentTurnResult,
-)
-from nemo_gym.tool_access import (
-    DirectHTTPToolAccess,
-    MCPStreamableHTTPConnection,
-    MCPToolAccess,
-    ToolAccess,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
@@ -76,6 +75,7 @@ class SessionHandles(BaseModel):
     agent_cookies: dict[str, str] = Field(default_factory=dict)
     # Whether a checkpoint may replay the resources server's /verify, as its seed reply reported.
     resources_verify_step_type: StepType = "wait"
+    observation: str | None = None
 
     @classmethod
     def new(cls) -> "SessionHandles":
@@ -350,6 +350,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 failure_model=SingleAgentTurnFailure,
                 stage="seed",
             ) from error
+        handles.observation = seed.observation
         return seed
 
     async def _seed_agent(
@@ -432,11 +433,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ) from error
 
     async def _invoke_agent(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> NeMoGymResponse:
+        params = request.task.task_input.responses_create_params
+        if handles.observation:
+            input_items = params.input
+            if isinstance(input_items, str):
+                input_items = [NeMoGymEasyInputMessage(role="user", content=input_items)] if input_items else []
+            params = params.model_copy(
+                update={"input": [*input_items, NeMoGymEasyInputMessage(role="user", content=handles.observation)]}
+            )
         try:
             agent_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path=self._agent_responses_path(request),
-                json=request.task.task_input.responses_create_params,
+                json=params,
                 cookies=handles.agent_cookies,
                 # The episode's only activation.
                 # A restore before its reply invokes it again, and the agent gives the reply it already gave.
@@ -562,7 +571,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return reward
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         agent_config = get_first_server_config_dict(
             self.server_client.global_config_dict,
             self.config.agent_server.name,

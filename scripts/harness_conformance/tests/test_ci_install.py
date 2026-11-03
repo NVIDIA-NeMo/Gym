@@ -34,3 +34,15 @@ def test_openclaw_runtime_is_installed_only_in_the_task_sandbox(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][:3] == ["uv", "pip", "install"]
+
+
+def test_openclaw_install_leaves_runtime_to_session(monkeypatch):
+    import importlib
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
+
+    def unexpected_setup(name):
+        raise AssertionError(f"Host runtime setup must not be imported: {name}")
+
+    monkeypatch.setattr(importlib, "import_module", unexpected_setup)
+    install_runtime("openclaw")

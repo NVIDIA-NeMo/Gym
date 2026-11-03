@@ -19,7 +19,7 @@ import reasoning_gym
 from fastapi import FastAPI
 from reasoning_gym.utils import extract_answer
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

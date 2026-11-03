@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import socket
@@ -19,12 +20,11 @@ from pathlib import Path
 import uvicorn
 import yaml
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-from nemo_gym.base_responses_api_model import NeMoGymResponse
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, SimpleResponsesAPIAgent
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
 
-from .provider import Probe
+from .provider import OpenClawProbe, Probe
 from .registry import HARNESSES
 from .scenarios import SCENARIOS
 
@@ -97,6 +97,10 @@ def _config(
         agent["max_steps"] = 6
     if harness in ("opencode", "pi", "openclaw"):
         agent["timeout"] = timeout
+        if not use_agent_sessions:
+            agent["workspace_root"] = str(directory / "workspace")
+    if harness == "openclaw":
+        agent["timeout"] = math.ceil(timeout)
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
     if harness == "opencode":
@@ -173,7 +177,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe = Probe(scenario, directory)
+    probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
+    probe = probe_cls(scenario, directory)
     probe.save()
     tasks = []
     servers = []
@@ -199,7 +204,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 SingleAgentTurnEnvironmentServerConfig,
             )
             from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-            from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
+            from nemo_gym.server_runtime import SingleAgentTurnRequest
 
             class ObservedEnvironment(SingleAgentTurnLegacyEnvironmentServer):
                 async def _invoke_agent(
@@ -226,8 +231,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
 
             environment_cls = LegacyAgentEnvironmentServer
             environment_config_cls = LegacyAgentEnvironmentServerConfig
+        from nemo_gym.client import get_global_aiohttp_client, setup_server_client
         from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-        from nemo_gym.server_utils import get_global_aiohttp_client, setup_server_client
 
         client = setup_server_client()
         agent = agent_cls(

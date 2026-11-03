@@ -26,11 +26,7 @@ import ray
 from fastapi import Body, FastAPI
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
@@ -42,6 +38,10 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
 )
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 

@@ -27,8 +27,8 @@ from app import (
     _SessionState,
 )
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
 class _DeadBackend:

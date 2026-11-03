@@ -990,6 +990,11 @@ class OpenSandboxProvider:
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
 
+    def uploads_independent_of_execs(self) -> bool:
+        """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
+        ``max_connections`` running commands leave an upload none; a background command is polled and holds none."""
+        return self._operations.background_exec
+
     def pull_policy_options(self, policy: str) -> dict[str, Any]:
         """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a
         per-sandbox value win over the deployment default)."""

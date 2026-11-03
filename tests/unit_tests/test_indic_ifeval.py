@@ -9,9 +9,9 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.ifeval import prepare as module
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
+from nemo_gym.data.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
 
 def source_row(key=1, *, tags=None):
@@ -152,7 +152,7 @@ def test_manifest_matches_config_and_routes_to_indic_environment():
             assert getattr(declared, key) == configured.get(key)
     assert dataset["num_repeats"] == 1
     environment = config["indic_ifeval_instruction_following_environment_server"]["environment_servers"][
-        "legacy_agent"
+        "single_agent_turn_legacy"
     ]
     assert environment["agent_server"]["name"] == "indic_ifeval_instruction_following_simple_agent"
     assert "instruction_following_environment_server" not in config
@@ -197,7 +197,7 @@ def _resolve_cli_config(flags):
 @pytest.mark.parametrize("override", [False, True])
 def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, override):
     from benchmarks.numb3rs.prepare import _format_row
-    from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+    from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--benchmark", "numb3rs"]
@@ -301,5 +301,7 @@ def test_english_and_indic_keep_separate_verifiers(english_first):
         assert agent["resources_server"]["name"] == expected_server
         verifier = config[expected_server]["resources_servers"]["instruction_following"]
         assert verifier.get("instruction_backend", "english") == backend
-        env = config[f"{prefix}_instruction_following_environment_server"]["environment_servers"]["legacy_agent"]
+        env = config[f"{prefix}_instruction_following_environment_server"]["environment_servers"][
+            "single_agent_turn_legacy"
+        ]
         assert env["agent_server"]["name"] == agent_name

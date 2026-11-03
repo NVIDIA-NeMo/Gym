@@ -10,7 +10,7 @@ import pytest
 from nemo_gym.observability.model_calls import ModelCallRecord
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, join_agent_model_calls
+from nemo_gym.trajectory import AgentInvocation, TrajectoryRecord, join_agent_model_calls
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
 
@@ -231,7 +231,7 @@ def test_invalid_json_and_tool_state_are_partial_evidence(tmp_path, parse):
 
 
 def test_activation_scoping_keeps_child_ownership_and_cross_activation_compaction(tmp_path):
-    from nemo_gym.rollout_observability import ContextCompactionObservation
+    from nemo_gym.trajectory import ContextCompactionObservation
     from responses_api_agents.opencode_agent.observability import scope_opencode_activation
 
     db = _session_db(
@@ -288,7 +288,7 @@ def test_activation_scoping_keeps_child_ownership_and_cross_activation_compactio
 @pytest.mark.parametrize("current", [False, True])
 @pytest.mark.parametrize("role", ["assistant", "user"])
 def test_compaction_boundary_uses_only_emitted_assistant_items(tmp_path, current, role):
-    from nemo_gym.rollout_observability import ContextCompactionObservation
+    from nemo_gym.trajectory import ContextCompactionObservation
 
     db = _session_db(
         tmp_path,
@@ -309,7 +309,7 @@ def test_compaction_boundary_uses_only_emitted_assistant_items(tmp_path, current
 
 @pytest.mark.parametrize("persisted_step", [False, True])
 def test_final_activation_preserves_native_step_or_explicit_gap(tmp_path, persisted_step):
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
+    from nemo_gym.agents import AgentCloseSessionResponse
     from responses_api_agents.opencode_agent.observability import scope_opencode_activation
     from responses_api_agents.opencode_agent.tests.test_model_call_correlation import (
         POLICY,

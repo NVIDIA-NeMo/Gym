@@ -29,13 +29,13 @@ from unittest.mock import MagicMock
 
 from pytest import approx, fixture
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.citation_if.app import (
     CitationIfResourcesServer,
     CitationIfResourcesServerConfig,

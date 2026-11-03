@@ -14,6 +14,7 @@ from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -22,7 +23,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.rollout_collection import _episode_record
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.runner import NOOARunFailure
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason

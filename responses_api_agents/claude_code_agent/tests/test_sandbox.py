@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, Request
 
-from nemo_gym.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY, AgentSeedSessionRequest
+from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter
 
@@ -592,8 +592,7 @@ def test_sandbox_accepts_one_text_turn_with_optional_system_message(input):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("confirmed", [True, False])
 async def test_close_distinguishes_borrowed_release_from_confirmed_termination(confirmed):
-    from nemo_gym.agent_utils.sandbox_session import SandboxSession
-    from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+    from nemo_gym.agents import HarnessTerminationError, SandboxSession
 
     remote = SimpleNamespace(exec=AsyncMock(return_value=result()), disconnect=AsyncMock())
     session = SandboxSession(sandbox=remote, session_dir="/tmp/session", workdir="/app", harness="Claude Code")

@@ -50,7 +50,7 @@ Before moving on, confirm each of these in the code:
 - [ ] A sandbox failure never falls back to running on the host.
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
 - [ ] The harness's own files (configuration, history, caches) stay out of the task repository. Where the harness has no setting to move them, the README says what it writes under the task's home.
-- [ ] A sandbox runner that needs only the standard library is uploaded as `RUNNER_FILE` from `nemo_gym.agent_utils.sandbox_session` and launched by a `SandboxCommand` with `stdlib_runner=True`, as `codex_agent` does. It then runs under a neutral process name with no `.py` in its command line, so a `pkill python3` or `pkill -f '\.py'` in the task cannot stop it.
+- [ ] A sandbox runner that needs only the standard library is uploaded as `RUNNER_FILE` from `nemo_gym.agents.utils.sandbox_session` and launched by a `SandboxCommand` with `stdlib_runner=True`, as `codex_agent` does. It then runs under a neutral process name with no `.py` in its command line, so a `pkill python3` or `pkill -f '\.py'` in the task cannot stop it.
 - [ ] Only an error that ends the harness's run fails the response, by the harness's own rule at the pinned version. See [Convert outputs without silent loss](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#convert-outputs-without-silent-loss).
 - [ ] Usage is reported only when every model call has a usage record, with call references collected from every record the harness writes. Otherwise usage stays unknown, with a gap.
 
@@ -183,5 +183,5 @@ pytest tests/unit_tests/test_session_contract_repo.py
 - One adapter per harness. Never add a pair-specific adapter or launcher.
 - Never change a benchmark's data, prompts, or verifier to fit a harness.
 - Keep credentials out of committed files; reference them from `env.yaml`.
-- Use aiohttp through `nemo_gym.server_utils.request()`, not httpx, for async HTTP.
+- Use aiohttp through `nemo_gym.client.request()`, not httpx, for async HTTP.
 - `/run` and activation code must be async; code must run on Linux.

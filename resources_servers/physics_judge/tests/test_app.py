@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pytest import approx, fixture, raises
 from starlette.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -35,8 +36,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import JudgeError
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,
@@ -221,7 +221,7 @@ class TestGenerateJudgeEvaluation:
         assert "2.998e8 m/s" in rendered
 
     async def test_non_text_content_yields_false(self, server: PhysicsJudgeResourcesServer) -> None:
-        from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
+        from nemo_gym.core import NeMoGymResponseOutputRefusal
 
         refusal_response = NeMoGymResponse(
             id="r",
