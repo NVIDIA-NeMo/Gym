@@ -8,6 +8,12 @@ slurm:
   gpus-per-node: "4"
   mem: "0"
 
+vllm:
+  repo: https://github.com/bxyu-nvidia/vllm.git
+  branch: bxyu/v0.32.0-prims
+  version: "0.32.0"
+  precompiled_wheel_commit: v0.32.0
+
 flashinfer:
   repo: https://github.com/bxyu-nvidia/flashinfer
   branch: bxyu/v0.7.0.post1-bxyudev
