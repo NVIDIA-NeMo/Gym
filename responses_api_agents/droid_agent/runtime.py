@@ -30,14 +30,15 @@ PINNED_INTEGRITY = {
     (
         "1.1.0",
         "linux-x64",
-    ): "sha512-9Hx1dy/vKTDWNGrlPkJwCsMg4z4k+Nza1suEhTMfIZ3+Gg1gyzA1txAaC/eotupdp1TWHhhe/Pk0uhyZcgL7bA==",
-    ("1.1.0", "linux-x64-baseline"): (
-        "sha512-6sHX/mMspih52TBqbN9cmywU2T29F55t08N2lRvQ59zyKd8WE63J11HDwxkAYyl977EvDeB0ST1A1LrIJUF2gw=="
-    ),
+    ): "sha512-9Hx1dy/vKTDWNGrlPkJwCsMg4z4k+Nza1suEhTMfIZ3+Gg1gyzA1txAaC/eotupdp1TWHhhe/Pk0uhyZcgL7bA==",  # pragma: allowlist secret
+    (
+        "1.1.0",
+        "linux-x64-baseline",
+    ): "sha512-6sHX/mMspih52TBqbN9cmywU2T29F55t08N2lRvQ59zyKd8WE63J11HDwxkAYyl977EvDeB0ST1A1LrIJUF2gw==",  # pragma: allowlist secret
     (
         "1.1.0",
         "linux-arm64",
-    ): "sha512-oNx51G1tWLydrpWWxdKKW98ws3g+pOKsibUkSaSq8hjOXVjyRrgsU1PHqn/a/CifdjxL2NLbBASuxwUhn5FZyw==",
+    ): "sha512-oNx51G1tWLydrpWWxdKKW98ws3g+pOKsibUkSaSq8hjOXVjyRrgsU1PHqn/a/CifdjxL2NLbBASuxwUhn5FZyw==",  # pragma: allowlist secret
 }
 PLATFORM_PROBE = (
     "uname -s && uname -m"
