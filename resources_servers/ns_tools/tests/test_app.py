@@ -965,6 +965,60 @@ class TestResourcesSessions:
         assert tool_manager.cleaned_up == ["rs-1", "rs-1"]
         assert tool_manager.python_sessions == {}
 
+    def test_two_legacy_runs_reusing_a_cookie_keep_separate_verification_metrics(self) -> None:
+        manager = FakePythonToolManager()
+        server, app = _session_server(manager)
+        client = TestClient(app)
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+
+        # SimpleAgent /run forwards its caller's cookies to seed, then uses the returned cookies for tools/verify.
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        first_cookies = dict(client.cookies)
+        assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        [first_session] = manager.python_sessions
+        first = client.post("/verify", json=VERIFY_BODY)
+        assert first.status_code == 200 and first.json()["num_tool_calls"] == 1
+        assert manager.python_sessions == {} and server._timing_by_session == {}
+
+        # The same external cookie starts a new legacy run rather than reviving the completed one.
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        [second_session] = manager.python_sessions
+        assert second_session != first_session
+        second = client.post("/verify", json=VERIFY_BODY)
+        assert second.status_code == 200 and second.json()["num_tool_calls"] == 1
+        assert manager.python_sessions == {} and server._timing_by_session == {}
+
+        # A resend for the old run still carries its old cookie and keeps the old aggregate.
+        retry_client = TestClient(app)
+        retry_client.cookies.update(first_cookies)
+        retried = retry_client.post("/verify", json=VERIFY_BODY)
+        assert retried.status_code == 200 and retried.json() == first.json()
+
+    @pytest.mark.parametrize("state", ["active", "verified", "closed"])
+    def test_legacy_seed_does_not_take_over_a_typed_cookie(self, state: str) -> None:
+        manager = FakePythonToolManager()
+        server, app = _session_server(manager)
+        client = TestClient(app)
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        if state == "verified":
+            assert client.post("/verify", json=VERIFY_BODY).status_code == 200
+        elif state == "closed":
+            assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+        cookies = dict(client.cookies)
+
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 409
+        # SessionMiddleware may refresh a cookie's signature timestamp, but its encoded session is unchanged.
+        assert {name: value.split(".")[0] for name, value in client.cookies.items()} == {
+            name: value.split(".")[0] for name, value in cookies.items()
+        }
+        assert manager.python_sessions == {}
+
     def test_legacy_seed_keeps_working(self) -> None:
         tool_manager = FakePythonToolManager()
         server, app = _session_server(tool_manager)

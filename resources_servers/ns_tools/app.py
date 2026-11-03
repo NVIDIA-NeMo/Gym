@@ -32,6 +32,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
+from uuid import uuid4
 
 import httpx
 from aiohttp import ClientTimeout
@@ -524,6 +525,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         body, which keeps no state here; verify releases that rollout's python session.
         """
         if not isinstance(body, ResourcesSeedSessionRequest):
+            session_id = request.session[SESSION_ID_KEY]
+            async with self._fence.locked(session_id):
+                self._fence.raise_if_closed(session_id)
+                if session_id in self._session_episodes or session_id in self._verified_sessions:
+                    raise ResourcesSessionConflictError("The session cookie belongs to a typed resources session")
+                if session_id in self._verification_metrics:
+                    # /run may reuse an external cookie. Its old verify can still retry against the old aggregate.
+                    request.session[SESSION_ID_KEY] = str(uuid4())
             return BaseSeedSessionResponse()
 
         resources_session_id = body.resources_session_id
