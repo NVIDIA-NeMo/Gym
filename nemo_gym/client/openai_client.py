@@ -52,7 +52,7 @@ from nemo_gym.client.http_client import (
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.failure_transport import FailureHeader, observe_failure, observe_model_operation
-from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
+from nemo_gym.server_runtime.episode_types import FailureBoundary, ModelFailureDetails, SdkErrorDetails
 from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
 
 
@@ -133,7 +133,7 @@ def _model_attempt_failure(
         operation_id=operation_id,
         attempt_id=attempt_id,
         http_status=http_status,
-        request_upload_complete=request_upload_complete,
+        details=ModelFailureDetails(request_upload_complete=request_upload_complete),
         foreign_error=foreign_error,
     )
 

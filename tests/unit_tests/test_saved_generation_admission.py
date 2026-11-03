@@ -9,6 +9,7 @@ from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.server_runtime.episode_types import ModelFailureDetails
 from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
 
 
@@ -205,7 +206,7 @@ async def test_selected_model_body_delivery_blocks_collection_resume(tmp_path, m
         operation_id="operation",
         attempt_id="operation-1",
         http_status=status,
-        request_upload_complete=False if status is None else None,
+        details=ModelFailureDetails(request_upload_complete=False if status is None else None),
     )
     from aiohttp import ClientResponseError
 

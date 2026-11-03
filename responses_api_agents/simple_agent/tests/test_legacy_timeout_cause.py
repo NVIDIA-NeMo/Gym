@@ -286,7 +286,9 @@ async def test_policy_failure_survives_vllm_agent_environment_store(
                 assert saved.get("_ng_failure_counts_as_zero") is not True
                 assert "reward" not in saved and len(hits) == (1 if mode == "disconnect" else 0)
                 assert len(store.pending()) == (1 if mode == "connect" else 0)
-                assert any(event.request_upload_complete is (mode == "disconnect") for event in report.events.values())
+                assert any(
+                    event.details.request_upload_complete is (mode == "disconnect") for event in report.events.values()
+                )
                 coverage = json.loads(out.with_name("rollouts_coverage.json").read_text())
                 assert coverage["attempts"] == (2 if mode == "connect" else 1)
                 assert coverage["max_rollout_attempts"] == 3

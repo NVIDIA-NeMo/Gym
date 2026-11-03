@@ -88,7 +88,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     StaleAttemptError,
 )
-from nemo_gym.server_runtime.episode_types import FailureEvent, SdkErrorDetails
+from nemo_gym.server_runtime.episode_types import FailureEvent, ModelFailureDetails, SdkErrorDetails
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.trajectory import TrajectoryRecord
@@ -3207,7 +3207,7 @@ def _model_attempt(outcome: str, *, operation_id: str = "final-call") -> Failure
         operation_id=operation_id,
         http_status=http_status,
         attempt_id=uuid4().hex,
-        request_upload_complete=True if outcome == "response_timeout" else None,
+        details=ModelFailureDetails(request_upload_complete=True if outcome == "response_timeout" else None),
         foreign_error=SdkErrorDetails(exception_type=exception_type, message="") if exception_type else None,
     )
 
@@ -3302,7 +3302,7 @@ class TestFinalOnModelTimeout:
         events = list(report.events.values())
         target = events[0]
         update = {
-            "upload": {"request_upload_complete": None},
+            "upload": {"details": ModelFailureDetails()},
             "attempt": {"attempt_id": None},
             "operation": {"operation_id": None},
             "unknown-peer-operation": {"operation_id": None},

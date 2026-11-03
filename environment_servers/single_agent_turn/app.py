@@ -62,6 +62,7 @@ from nemo_gym.server_runtime import (
     seed_verify_step_type,
 )
 from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_handled_episode_failure
+from nemo_gym.server_runtime.episode_types import ModelFailureDetails
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -645,7 +646,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         attempts = [event for event in observed if event.operation_id == selected.operation_id]
         connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
         return len({event.attempt_id for event in attempts}) == len(attempts) and all(
-            event.request_upload_complete is False
+            isinstance(event.details, ModelFailureDetails)
+            and event.details.request_upload_complete is False
             and event.foreign_error is not None
             and event.foreign_error.exception_type == connector_type
             for event in attempts

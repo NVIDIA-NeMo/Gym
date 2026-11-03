@@ -13,6 +13,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
@@ -35,11 +36,13 @@ def is_materialized_task_row(row: Mapping[str, object]) -> bool:
 
 
 class FailureBoundary(StrEnum):
-    """The six places a failure is observed, as the failure-boundaries RFC names them.
+    """The places a failure is observed, as the failure-boundaries RFC names them.
 
     Each one reports what it observed; none of them chooses retries, terminality or scores.
     """
 
+    SANDBOX = "sandbox"
+    """A sandbox provider operation, independently of its agent or environment caller."""
     MODEL = "model"
     """A model client's request or one HTTP attempt of it."""
     HARNESS = "harness"
@@ -68,13 +71,53 @@ class SdkErrorDetails(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
 
 
+class SandboxFailureDetails(BaseModel):
+    """Observed sandbox facts; missing evidence stays absent, with no inferred cause or policy.
+
+    A last execution ID identifies an observation, not the cause of a sandbox loss. Memory values describe
+    the named resource/process; peaks must be measured. Provider text is diagnostic, not proof of OOM.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    sandbox_id: str | None = Field(default=None, max_length=256)
+    execution_id: str | None = Field(default=None, max_length=256)
+    provider: str | None = Field(default=None, max_length=256)
+    provider_status_reason: str | None = Field(default=None, max_length=2000)
+    evidence_source: str | None = Field(default=None, max_length=256)
+    exit_code: int | None = None
+    signal: int | None = Field(default=None, ge=1)
+    memory_resource_id: str | None = Field(default=None, min_length=1, max_length=256)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    memory_peak_bytes: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _memory_has_a_resource(self) -> Self:
+        if (self.memory_limit_bytes is not None or self.memory_peak_bytes is not None) and not self.memory_resource_id:
+            raise ValueError("memory measurements require memory_resource_id")
+        return self
+
+
+class ModelFailureDetails(BaseModel):
+    """Observed model-request facts, independent of retry or scoring policy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    provider_request_id: str | None = Field(default=None, max_length=256)
+    request_upload_complete: bool | None = None
+
+
+FailureDetails = SandboxFailureDetails | ModelFailureDetails
+
+
 class FailureEvent(BaseModel):
     """One observed failure: who observed it, what failed, and which failure caused it.
 
     This is the validated wire projection of a ``NgFailureEvent``, whose fields and origin identity live on
     the exception itself. ``cause_id`` names another Gym failure in the same map. Foreign SDK facts live in
     ``foreign_error``; they are not boundary-less Gym events. Canonical projections validate kind and boundary
-    on both failed and recovered reports, independently of the legacy outcome envelope.
+    on both failed and recovered reports, independently of the legacy outcome envelope. ``details`` uses
+    the schema selected by ``boundary``; common facts stay on this event, without a second copy in details.
 
     Readers count each failure once by ``event_id``. Outcome policy stays with ``EpisodeFailure.terminal`` and
     the collector's existing rules.
@@ -92,9 +135,26 @@ class FailureEvent(BaseModel):
     attempt_id: str | None = Field(default=None, max_length=128)
     stage: FailureStage | None = None
     http_status: int | None = Field(default=None, ge=100, le=599)
-    request_upload_complete: bool | None = Field(default=None, strict=True)
+    details: FailureDetails | None = None
     foreign_error: SdkErrorDetails | None = None
     cause_id: str | None = Field(default=None, max_length=128)
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def _validate_details(cls, value: object, info: ValidationInfo) -> FailureDetails | None:
+        if value is None:
+            return None
+        boundary = info.data.get("boundary")
+        schema = {
+            FailureBoundary.SANDBOX: SandboxFailureDetails,
+            FailureBoundary.MODEL: ModelFailureDetails,
+        }.get(boundary)
+        if schema is None:
+            raise ValueError(f"details are not supported for boundary {boundary!r}")
+        # Select by boundary, including empty dictionaries; never guess a variant from its fields.
+        if isinstance(value, (SandboxFailureDetails, ModelFailureDetails)) and not isinstance(value, schema):
+            raise ValueError(f"details must be {schema.__name__} for boundary {boundary!r}")
+        return schema.model_validate(value)
 
     @field_validator("failure_kind")
     @classmethod

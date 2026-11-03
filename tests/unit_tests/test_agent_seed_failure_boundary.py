@@ -112,9 +112,7 @@ def test_over_http_a_rejected_sandbox_credential_keeps_the_selected_sdk_message_
 
     worker = _served()
     sdk = SdkError("Authentication credentials are invalid.")
-    rejected = sandbox_credentials_rejected(
-        sdk, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", sdk_message=sdk.args[0]
-    )
+    rejected = sandbox_credentials_rejected(sdk, operation="create", sdk_message=sdk.args[0])
     setup = RuntimeError("setup failed")
     setup.__cause__ = rejected
 

@@ -187,7 +187,9 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
         for writer in connections:
             writer.close()
     assert hits == 2 and len(upstream.events) == 2
-    assert all(e.request_upload_complete is True and e.attempt_id and e.operation_id for e in upstream.events.values())
+    assert all(
+        e.details.request_upload_complete is True and e.attempt_id and e.operation_id for e in upstream.events.values()
+    )
 
     def reply(report=None):
         response = MagicMock(
