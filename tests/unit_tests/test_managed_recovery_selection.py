@@ -172,7 +172,9 @@ def test_actual_local_slurm_executor_keeps_budget_and_never_regenerates_saved_an
     assert (result.dispatched == "resubmit") is (action == "resubmit")
     if case == "judge":
         assert not result.ok and result.unsupported
-        assert "no existing CPU-only judge execution profile" in result.unsupported
+        # Its one service has no node pool of its own: it runs on the whole allocation, so no judge-only job
+        # can start it without the policy's nodes.
+        assert "no served-judge execution profile" in result.unsupported and "vllm_model" in result.unsupported
         assert result.decision.counts == {"judge_recoverable": 1, "scored": 1}
         assert result.dispatched is None
     assert saved_bytes(job / "artifacts") == before

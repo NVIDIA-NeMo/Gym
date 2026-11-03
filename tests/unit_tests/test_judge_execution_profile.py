@@ -10,14 +10,19 @@ import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.judge_profile import (
+    CPU_PLACEMENT_UNUSED,
+    CPU_PROFILE,
     DEFAULT_JUDGE_WALLTIME,
     JUDGE_POOL_NAME,
+    SERVED_JUDGE_PROFILE,
     JudgeProfileUnsupported,
     choose_judge_partition,
     is_cpu_only_submission,
     judge_execution_profile,
     judge_job_config,
     reader_step_partition,
+    served_judge_placement,
+    served_judge_profile,
 )
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 
@@ -128,16 +133,114 @@ def test_no_cpu_partition_is_a_typed_refusal_naming_every_source(tmp_path) -> No
     assert "gpus_per_node" in text and "NEMO_GYM_REMOTE_READER_SRUN" in text and "--judge-partition" in text
 
 
-def test_a_submission_that_serves_more_than_its_policy_is_refused(tmp_path) -> None:
+def test_a_submission_that_serves_only_its_policy_takes_the_cpu_profile(tmp_path) -> None:
+    assert served_judge_placement(model_served(tmp_path), "cluster") is None
+
+
+# --- the served-judge profile ------------------------------------------------------------------------------------
+
+
+def served_judge(tmp_path: Path, **overrides) -> SubmitConfig:
+    """A submission that serves its policy on one GPU pool and its judge as a vLLM service on a pool of its own of the
+    same partition and shape, which the agent's judge server reaches at ``${GYM_POOL_JUDGE_NODES}:8001``."""
+    return model_served(
+        tmp_path,
+        pools={
+            "policy": {"partition": "batch", "nodes": 1, "gpus_per_node": 8},
+            "judge": {"partition": "batch", "nodes": 1, "gpus_per_node": 8, "extra_args": {"exclusive": "user"}},
+        },
+        services={
+            "policy": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "node_pool": "policy"},
+            "wildguard": {
+                "type": "vllm",
+                "container": "vllm:latest",
+                "model": "org/wildguard",
+                "port": 8001,
+                "node_pool": "judge",
+            },
+        },
+        extra_args={"qos": "gpu_normal", "nodes": "2", "comment": "xstest"},
+        **overrides,
+    )
+
+
+def test_a_judge_served_beside_the_policy_takes_the_served_judge_profile(tmp_path) -> None:
+    config = served_judge(tmp_path)
+    limit = {"max_time": "2:00:00", "max_time_s": 7200, "error": None}
+    profile = served_judge_profile(config, "cluster", limit)
+    assert profile.kind == SERVED_JUDGE_PROFILE
+    assert profile.services == ("wildguard",) and profile.pools == ("judge",)
+    assert profile.partition == "batch" and "'judge'" in profile.partition_source
+    # The saved judge pool in its saved shape; the policy pool is gone.
+    assert profile.compute.node_pools == {"judge": config.compute["cluster"].node_pools["judge"]}
+    # A GPU job like the run: the run's job-level QOS stays; the original allocation's size does not.
+    assert profile.qos == "gpu_normal" and profile.qos_source == "the run's job-level QOS"
+    assert profile.compute.extra_args == {"qos": "gpu_normal", "comment": "xstest"}
+    assert profile.walltime == "02:00:00" and profile.compute.walltime == "02:00:00"
+    assert profile.compute.account == "a"
+    report = profile.report()
+    assert report["kind"] == "served-judge" and report["pools"] == ["judge"] and report["services"] == ["wildguard"]
+    assert report["qos"] == "gpu_normal" and report["partition"] == "batch" and "unused" not in report
+
+
+def test_a_cpu_placement_is_not_used_by_a_served_judge_profile(tmp_path) -> None:
+    # A launcher that passes its CPU placement on every recovery must not move the GPU judge pool onto it.
+    config = served_judge(tmp_path)
+    profile = served_judge_profile(config, "cluster", {"max_time_s": None}, partition="cpu", qos="x")
+    assert profile.partition == "batch" and profile.compute.node_pools["judge"].partition == "batch"
+    assert profile.qos == "gpu_normal" and profile.compute.extra_args["qos"] == "gpu_normal"
+    assert profile.report()["unused"] == CPU_PLACEMENT_UNUSED
+    assert CPU_PLACEMENT_UNUSED == "--judge-partition/--judge-qos apply to the CPU judge profile only; not used"
+    job = judge_job_config(config, "cluster", "bench", profile, "gym eval reverify")
+    compute = job.compute["cluster"]
+    script = build_sbatch_script(job, "bench", job.driver.benchmarks["bench"], compute, Path("/jobs/bench"))
+    assert "#SBATCH --partition=batch" in script and "#SBATCH --qos=gpu_normal" in script
+    assert "--partition=cpu" not in script and "--qos=x" not in script
+
+
+def test_the_served_judge_job_starts_the_judge_service_and_never_the_policy(tmp_path) -> None:
+    config = served_judge(tmp_path)
+    profile = served_judge_profile(config, "cluster", {"max_time_s": None})
+    command = "gym eval reverify --judge-failed-only --settle-into-source --settle-receipt /r/receipt.json"
+    job = judge_job_config(config, "cluster", "bench", profile, command)
+    assert list(job.services) == ["wildguard"] and job.services["wildguard"] == config.services["wildguard"]
+    assert job.driver.policy_model is None and job.driver.env == config.driver.env
+    bench = job.driver.benchmarks["bench"]
+    compute = job.compute["cluster"]
+    script = build_sbatch_script(job, "bench", bench, compute, Path("/jobs/bench"))
+    assert "#SBATCH --partition=batch" in script and "#SBATCH --nodes=1" in script
+    assert "#SBATCH --gpus-per-node=8" in script and "#SBATCH --qos=gpu_normal" in script
+    assert "#SBATCH --exclusive=user" in script and "#SBATCH --nodes=2" not in script
+    # The judge pool's hosts are exported for the judge server, and the judge service starts before the command.
+    exported = script.index("export GYM_POOL_JUDGE_NODES=")
+    served = script.index("org/wildguard")
+    assert exported < served < script.index(command)
+    assert "GYM_POOL_POLICY_NODES" not in script and "vllm serve org/model" not in script
+    assert "gym eval run" not in script
+
+
+@pytest.mark.parametrize(
+    "wildguard",
+    [
+        {"node_pool": "policy"},  # the policy's own pool
+        {},  # no node_pool: the whole allocation, the policy's nodes included
+    ],
+)
+def test_a_judge_service_on_the_policys_nodes_is_refused_naming_it(tmp_path, wildguard) -> None:
     config = model_served(
         tmp_path,
+        pools={"policy": {"partition": "batch", "nodes": 2, "gpus_per_node": 8}},
         services={
-            "policy": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "node_pool": "gpu"},
-            "judge_vllm": {"type": "vllm", "container": "vllm:latest", "model": "org/judge", "port": 8001},
+            "policy": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "node_pool": "policy"},
+            "wildguard": {"type": "vllm", "container": "vllm:latest", "model": "org/wildguard", "port": 8001}
+            | wildguard,
         },
     )
-    with pytest.raises(JudgeProfileUnsupported, match="judge_vllm"):
-        choose_judge_partition(config, "cluster", partition="cpu")
+    with pytest.raises(JudgeProfileUnsupported) as refused:
+        served_judge_placement(config, "cluster")
+    text = str(refused.value)
+    assert "served-judge execution profile" in text and "wildguard" in text
+    assert "a separate node pool" in text
 
 
 # --- the bounded walltime ----------------------------------------------------------------------------------------
@@ -168,6 +271,7 @@ def test_the_walltime_is_the_segment_walltime_bounded_by_the_partition_max_time(
     assert profile.compute.walltime == expected
     report = profile.report()
     assert report["partition"] == "cpu" and report["walltime"] == expected and report["partition_source"]
+    assert report["kind"] == CPU_PROFILE and report["pools"] == [JUDGE_POOL_NAME] and report["services"] == []
 
 
 # --- the judge job's submission config and script ----------------------------------------------------------------

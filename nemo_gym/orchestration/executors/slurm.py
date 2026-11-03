@@ -52,6 +52,8 @@ from nemo_gym.orchestration.executors.judge_profile import (
     is_cpu_only_submission,
     judge_execution_profile,
     judge_job_config,
+    served_judge_placement,
+    served_judge_profile,
 )
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
@@ -1536,10 +1538,11 @@ class SlurmExecutor(BaseExecutor):
 
         A CPU-only submission (no service, no policy model, CPU node pools only) runs it on its own compute with the
         chain's remaining walltime allowance, as before. Any other submission, one that served its policy on GPUs,
-        runs it on a CPU-only judge execution profile derived from its saved config (``_queue_judge_job``): the run's
-        own judge and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the
-        launcher's reader placement, with ``judge_qos`` or a QOS derived for it), for the run's segment walltime bounded by the partition's MaxTime, at the run's
-        pinned Gym commit or ``repin``. Either way the job settles through ``gym eval reverify --judge-failed-only
+        runs it on a judge execution profile derived from its saved config (``_queue_judge_job``): the run's own judge
+        and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the launcher's
+        reader placement, with ``judge_qos`` or a QOS derived for it), or, for a run that serves its judge on a node
+        pool of its own, on that saved pool with those services started and the run's QOS, for the run's segment
+        walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``. Either way the job settles through ``gym eval reverify --judge-failed-only
         --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
@@ -1758,8 +1761,9 @@ class SlurmExecutor(BaseExecutor):
         repin: str | None,
         repin_reason: str | None,
     ) -> RecoveryOutcome:
-        """Queue the judge-only job of a run that is not CPU-only, on the CPU-only judge execution profile derived from
-        its saved config (``judge_profile``), and journal it.
+        """Queue the judge-only job of a run that is not CPU-only, on the judge execution profile derived from its
+        saved config (``judge_profile``), and journal it: the served-judge profile when the run serves services beside
+        its policy (its judge on a node pool of its own), else the CPU profile.
 
         The job's command is the same ``gym eval reverify --judge-failed-only --settle-into-source`` as a CPU-only
         run's, with the run's saved settings, the policy's ``--model-type`` so the run's config composes as it did
@@ -1796,9 +1800,12 @@ class SlurmExecutor(BaseExecutor):
                 f"answer; read their receipts and logs under {job_dir / 'reverification'} before another is queued"
             )
         try:
-            partition, source = choose_judge_partition(
-                config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
-            )
+            # A run that serves its judge on a node pool of its own takes that pool; any other, a CPU partition.
+            placement = served_judge_placement(config, record.cluster)
+            if placement is None:
+                partition, source = choose_judge_partition(
+                    config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
+                )
         except JudgeProfileUnsupported as error:
             return stopped(str(error))
         install = config.driver.gym_install
@@ -1815,16 +1822,22 @@ class SlurmExecutor(BaseExecutor):
         if repin is not None and not (repin_reason or "").strip():
             raise ValueError("--repin needs a nonempty --repin-reason")
         compute = config.compute[record.cluster]
-        probe = compute.model_copy(update={"node_pools": {JUDGE_POOL_NAME: NodePool(partition=partition)}})
-        profile = judge_execution_profile(
-            config,
-            record.cluster,
-            partition,
-            source,
-            _partition_time_limit(conn, probe),
-            qos=judge_qos,
-            reader_srun=os.environ.get(READER_SRUN_ENV),
-        )
+        if placement is not None:
+            probe = compute.model_copy(update={"node_pools": placement[1]})
+            profile = served_judge_profile(
+                config, record.cluster, _partition_time_limit(conn, probe), partition=judge_partition, qos=judge_qos
+            )
+        else:
+            probe = compute.model_copy(update={"node_pools": {JUDGE_POOL_NAME: NodePool(partition=partition)}})
+            profile = judge_execution_profile(
+                config,
+                record.cluster,
+                partition,
+                source,
+                _partition_time_limit(conn, probe),
+                qos=judge_qos,
+                reader_srun=os.environ.get(READER_SRUN_ENV),
+            )
         if evidence.source_digests is None or evidence.accounting_snapshot is None:
             return stopped("saved source or accounting snapshot is unavailable; collect the evidence again")
         queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
@@ -1889,10 +1902,8 @@ class SlurmExecutor(BaseExecutor):
             "at": utc_timestamp(utc_now()),
             "job_id": None,
             "nonce": nonce,
-            "partition": profile.partition,
-            "partition_source": profile.partition_source,
-            "walltime": profile.walltime,
-            "walltime_bounds": list(profile.walltime_bounds),
+            # Its kind, partition, pools, services, QOS and walltime, each with where it came from.
+            **profile.report(),
             "rows": decision.counts.get(IdentityState.JUDGE_RECOVERABLE.value, 0),
             "output": str(output),
             "receipt": str(receipt),

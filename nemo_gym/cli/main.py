@@ -1991,7 +1991,9 @@ COMMANDS = {
                     "launcher's reader placement (NEMO_GYM_REMOTE_READER_SRUN) names none. The job starts the run's "
                     "judge and verifier servers on one CPU node, never the policy. The run's GPU QOS does not "
                     "follow: the job takes --judge-qos, else the saved CPU pool's QOS, else the -q of "
-                    "NEMO_GYM_REMOTE_READER_SRUN, else the partition's default.",
+                    "NEMO_GYM_REMOTE_READER_SRUN, else the partition's default. A run that serves its judge as a "
+                    "service on a node pool of its own runs the job on that saved pool with the run's QOS instead; "
+                    "--judge-partition and --judge-qos are not used there.",
                 ),
             ),
             Flag(

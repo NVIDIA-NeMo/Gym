@@ -35,17 +35,27 @@ from tests.unit_tests.test_reverify_saved_results import verifier as verifier  #
 from tests.unit_tests.test_reverify_saved_results import verify_transport_masked
 
 
-def _model_served_run(tmp_path: Path, *, cpu_pool: bool = False) -> Path:
+def _model_served_run(tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str | None = None) -> Path:
     """A submitted run with a vLLM policy on a GPU pool, whose managed Store holds one scored row and one result
-    masked by a verify call lost in transport, with its chain accounting complete."""
+    masked by a verify call lost in transport, with its chain accounting complete. With ``judge_pool`` it also serves
+    its judge as a vLLM service ``wildguard`` on that pool: "judge", a GPU pool of its own, or "gpu", the policy's."""
     pools = {"gpu": {"partition": "gpu", "nodes": 1, "gpus_per_node": 8}}
     if cpu_pool:
         pools["scorer"] = {"partition": "cpu_long", "nodes": 1, "gpus_per_node": 0}
+    services = {"policy": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "node_pool": "gpu"}}
+    if judge_pool is not None:
+        if judge_pool != "gpu":
+            pools[judge_pool] = {"partition": "gpu", "nodes": 1, "gpus_per_node": 8}
+        services["wildguard"] = {
+            "type": "vllm",
+            "container": "vllm:latest",
+            "model": "org/wildguard",
+            "port": 8001,
+            "node_pool": judge_pool,
+        }
     config = SubmitConfig.model_validate(
         {
-            "services": {
-                "policy": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "node_pool": "gpu"}
-            },
+            "services": services,
             "compute": {
                 "cluster": {
                     "type": "slurm",
@@ -53,6 +63,7 @@ def _model_served_run(tmp_path: Path, *, cpu_pool: bool = False) -> Path:
                     "hostname": None,
                     "walltime": "04:00:00",
                     "node_pools": pools,
+                    **({"extra_args": {"qos": "gpu_normal"}} if judge_pool is not None else {}),
                 }
             },
             "driver": {
@@ -235,6 +246,46 @@ def test_without_a_cpu_partition_the_refusal_names_the_option_and_queues_nothing
     assert "CPU-only judge execution profile" in out.unsupported and "--judge-partition" in out.unsupported
     assert not (judge_slurm_bin / "sbatch_args").exists() and _journal(job_dir) == []
     assert out.gate_task["status"] == "FAILED"
+
+
+def test_recover_queues_a_served_judge_job_on_the_runs_judge_pool(tmp_path, judge_slurm_bin) -> None:
+    # The launcher's CPU placement comes with every recovery; a run that serves its judge does not use it.
+    job_dir = _model_served_run(tmp_path, judge_pool="judge")
+    before = _accounting(job_dir)
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="cpu_qos")
+
+    assert out.ok and out.dispatched == "reverify" and out.job_id == "4242", out.decision.reason
+    job = out.judge_job
+    assert job["kind"] == "served-judge" and job["services"] == ["wildguard"] and job["pools"] == ["judge"]
+    assert job["partition"] == "gpu" and job["qos"] == "gpu_normal" and job["rows"] == 1
+    assert job["unused"] == "--judge-partition/--judge-qos apply to the CPU judge profile only; not used"
+    script = _queued_script(job_dir)
+    assert "#SBATCH --partition=gpu" in script and "#SBATCH --nodes=1" in script
+    assert "#SBATCH --gpus-per-node=8" in script and "#SBATCH --qos=gpu_normal" in script
+    assert "--partition=cpu" not in script and "cpu_qos" not in script and "#SBATCH --no-requeue" in script
+    # The judge pool's hosts are exported and the judge service is up before the judge-only verifier command.
+    (reverify,) = [line for line in script.splitlines() if line.strip().startswith("gym eval reverify")]
+    assert script.index("export GYM_POOL_JUDGE_NODES=") < script.index("org/wildguard") < script.index(reverify)
+    assert "vllm serve org/model" not in script and "GYM_POOL_GPU_NODES" not in script and "gym eval run" not in script
+    assert _accounting(job_dir) == before
+    (entry,) = _journal(job_dir)
+    assert entry["kind"] == "served-judge" and entry["services"] == ["wildguard"]
+
+    (judge_slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
+    (judge_slurm_bin / "judge_accounting").write_text("4242|PENDING|0|0:0\n")
+    inspected = inspect_recovery(*_handle(job_dir))
+    (listed,) = inspected.gate_task["judge_jobs"]
+    assert listed["kind"] == "served-judge" and listed["services"] == ["wildguard"]
+    assert any("judge-only job 4242 on gpu serving wildguard" in w for w in inspected.gate_task["warnings"])
+
+
+def test_a_judge_service_on_the_policys_pool_is_refused_and_nothing_is_queued(tmp_path, judge_slurm_bin) -> None:
+    job_dir = _model_served_run(tmp_path, judge_pool="gpu")
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+    assert not out.ok and out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "wildguard" in out.unsupported and "a separate node pool" in out.unsupported
+    assert not (judge_slurm_bin / "sbatch_args").exists() and _journal(job_dir) == []
 
 
 def test_a_live_judge_only_job_is_reported_and_never_queued_beside(tmp_path, judge_slurm_bin) -> None:

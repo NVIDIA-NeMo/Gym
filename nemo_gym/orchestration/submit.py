@@ -110,7 +110,8 @@ def recover(
     judge-only job of the run runs at it too.
     ``judge_partition`` names the CPU partition of the judge-only job that grades a model-served run's saved answers
     again, when its saved config declares no CPU node pool and the launcher's reader placement names none, and
-    ``judge_qos`` that job's QOS (else the saved CPU pool's, the reader placement's or the partition's default).
+    ``judge_qos`` that job's QOS (else the saved CPU pool's, the reader placement's or the partition's default);
+    neither is used for a run that serves its judge on a node pool of its own, whose job runs on that saved pool.
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
     ``extend_attempts`` records that many more attempts for every rollout the Store would run again (not a model
     failure); explicit, journaled with the infra extension, and named in the decision.

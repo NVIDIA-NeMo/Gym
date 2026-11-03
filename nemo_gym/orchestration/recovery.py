@@ -369,8 +369,9 @@ class RecoveryOutcome(BaseModel):
     mlflow: dict[str, Any] | None = None
     # The re-verification part of a RESUBMIT that names ``reverify_first``: what runs it and when.
     reverify: str | None = None
-    # The judge-only job a REVERIFY of a model-served run queued: its id, partition and its source, walltime and its
-    # bounds, the rows it re-judges, the Gym commit it runs and its receipt path (the job dir's judge-job journal entry).
+    # The judge-only job a REVERIFY of a model-served run queued: its id, profile (kind, partition, pools, services
+    # and QOS, each with its source), walltime and its bounds, the rows it re-judges, the Gym commit it runs and its
+    # receipt path (the job dir's judge-job journal entry).
     judge_job: dict[str, Any] | None = None
     # The GYM_READER_TOKEN a login-host Store reader of this recovery carries; None for a caller that sets none.
     reader_token: str | None = None
@@ -2195,7 +2196,9 @@ def judge_jobs():
                "nonce": text(entry.get("nonce"), 120), "partition": text(entry.get("partition"), 120),
                "walltime": text(entry.get("walltime"), 40), "rows": count(entry.get("rows")),
                "gym_commit": text(entry.get("gym_commit"), 64), "receipt": text(entry.get("receipt"), 1000),
-               "error": text(entry.get("error"), 500), "state": "queued"}
+               "error": text(entry.get("error"), 500), "state": "queued", "kind": text(entry.get("kind"), 40),
+               "services": [text(s, 120) for s in entry["services"][:20] if isinstance(s, str)]
+               if isinstance(entry.get("services"), list) else []}
         path = entry.get("receipt")
         receipt = None
         inside = isinstance(path, str) and os.path.isabs(path) and os.path.realpath(path).startswith(os.path.realpath(d) + os.sep)
@@ -2294,8 +2297,9 @@ class CollectedEvidence(BaseModel):
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
     chain_continuation_note: str | None = None
     # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
-    # walltime, rows, receipt path and ``state`` ("queued" without a receipt, else the receipt's "completed" or
-    # "failed" with its counts); the executor adds the scheduler's state of a job without a receipt.
+    # profile kind and the services it starts, walltime, rows, receipt path and ``state`` ("queued" without a receipt,
+    # else the receipt's "completed" or "failed" with its counts); the executor adds the scheduler's state of a job
+    # without a receipt.
     judge_jobs: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -6197,6 +6201,9 @@ def judge_job_note(job: Mapping[str, Any]) -> str:
     receipt, or what its receipt says it settled."""
     name = f"judge-only job {job.get('job_id') or '(id unknown)'}"
     where = f" on {job['partition']}" if job.get("partition") else ""
+    if job.get("services"):
+        # A served-judge job starts the run's own judge services on their saved node pools.
+        where += f" serving {', '.join(job['services'])}"
     state = job.get("state")
     if state == "completed":
         note = (
