@@ -8,7 +8,9 @@ Episodes run exactly as on the ``harbor`` server. This server only reads the tas
 benchmark, the mean task reward over the base models, weighted with upstream's factors and summed
 (``scripts/aggregate.py``). An episode whose judging did not finish is masked as inconclusive, and the score
 is withheld while any task has no scored rollout: ``scripts/collect.py`` refuses to aggregate unjudged runs.
-A verifier that stopped before writing its reward is scored from the logs it left, by the same rules.
+A verifier that stopped before writing its reward is scored from the logs it left, by the same rules. An episode
+whose ``/logs/artifacts`` (the final_model hand-off) Gym could not collect is masked too: Harbor collects artifacts
+best effort, and the verifier would score the missing model as "not submitted", at the baseline.
 """
 
 import importlib.util
@@ -25,6 +27,7 @@ from environment_servers.harbor.app import (
     HarborEnvironmentServerConfig,
     HarborTasksetConfig,
 )
+from environment_servers.harbor.verifier import ARTIFACT_MANIFEST_NAME
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
@@ -37,6 +40,8 @@ MISSING_KEY = "ptb/tasks_without_score"
 # Per-task reward fields gym_score.py writes, counted over the scored rollouts.
 COUNTED_FIELDS = ("eval_failed", "no_model", "judge_flagged", "ptb_lookup_flagged")
 JUDGING_INCONCLUSIVE_KIND = "posttrainbench:judging_inconclusive"
+MODEL_NOT_COLLECTED_KIND = "posttrainbench:model_not_collected"
+HANDOFF_ARTIFACT = "/logs/artifacts"
 
 
 class PostTrainBenchEnvironmentServerConfig(HarborEnvironmentServerConfig):
@@ -69,6 +74,12 @@ class PostTrainBenchEnvironmentServer(HarborEnvironmentServer):
             # PostTrainBench's score. Score the verifier logs it left with the same rules, on the host.
             fields = _gym_score(task.path).score(str(logs_dir), self._baselines[task.task_id])
             scored = scored | {"reward": fields["reward"], "verifier_rewards": fields}
+        if _handoff_not_collected(logs_dir):
+            reason = (
+                f"Gym could not collect {HANDOFF_ARTIFACT} for {task.task_id}, so the verifier never saw the "
+                f"final_model (manifest in {logs_dir / 'artifacts'}; the environment server log names the cause)"
+            )
+            return scored | self._masked(MODEL_NOT_COLLECTED_KIND, reason)
         if fields.get("judgement_missing") or fields.get("judgement_unreadable"):
             reason = f"PostTrainBench judging did not finish for {task.task_id} (verifier logs in {logs_dir})"
             return scored | self._masked(JUDGING_INCONCLUSIVE_KIND, reason)
@@ -107,6 +118,20 @@ class PostTrainBenchEnvironmentServer(HarborEnvironmentServer):
 
 def _rewards(rollout: dict[str, Any]) -> dict[str, Any]:
     return rollout.get("verifier_rewards") or {}
+
+
+def _handoff_not_collected(logs_dir: Path) -> bool:
+    """Whether the separate verifier's artifact manifest records ``/logs/artifacts`` as failed to collect.
+
+    ``absent`` (the agent wrote nothing there) stays a measured "no model"; only Gym's failed transfer masks.
+    """
+    manifest = logs_dir / "artifacts" / ARTIFACT_MANIFEST_NAME
+    if not manifest.is_file():
+        return False
+    return any(
+        record.get("source", "").rstrip("/") == HANDOFF_ARTIFACT and record.get("status") == "failed"
+        for record in json.loads(manifest.read_text())
+    )
 
 
 def _load_module(name: str, path: Path) -> ModuleType:

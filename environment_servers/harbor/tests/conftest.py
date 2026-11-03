@@ -157,6 +157,8 @@ class FakeSandbox:
     image_user: str = "root"
     dirs: dict[str, str] = field(default_factory=lambda: {"/": "root", "/tmp": "root", "/home": "root"})
     passwd: dict[str, str] = field(default_factory=lambda: {"0": "root", "1000": "agent"})
+    # What `du -sk` reports for a path, 4 KiB when unnamed.
+    sizes_kib: dict[str, int] = field(default_factory=dict)
 
     default_user: str | int | None = None
 
@@ -212,6 +214,9 @@ class FakeSandbox:
                     EXIT_RECORD_NAME, f"{self.test_result.return_code} {start} {start + self.test_elapsed}\n"
                 )
             return self.test_result
+        if command.startswith("du -sk -- "):
+            path = shlex.split(command)[-1]
+            return SandboxExecResult(stdout=f"{self.sizes_kib.get(path, 4)}\t{path}\n", stderr="", return_code=0)
         if command == "pwd":
             # The image's own WORKDIR, asked for when a task declares none.
             return SandboxExecResult(stdout="/app\n", stderr="", return_code=0)
@@ -581,6 +586,7 @@ class AgentSandbox(FakeSandbox):
 
     ``archives`` maps a folder the server archives (``tar ... -C <folder>`` or ``cd <folder>``) to the
     archive bytes the fake hands back for it; ``probe_result`` replaces every probe answer when set.
+    ``archive_results`` replaces the outcome of archiving a folder (a kill at the deadline, say).
     """
 
     present: dict[str, str] = field(
@@ -594,6 +600,7 @@ class AgentSandbox(FakeSandbox):
     )
     probe_result: SandboxExecResult | None = None
     archived: list[str] = field(default_factory=list)
+    archive_results: dict[str, SandboxExecResult] = field(default_factory=dict)
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
@@ -605,6 +612,8 @@ class AgentSandbox(FakeSandbox):
         if "tar -czf" in command:
             marker = " -C " if " -C " in command else "cd "
             self.archived.append(command.split(marker)[1].split(" ")[0].strip("'"))
+            if self.archived[-1] in self.archive_results:
+                return self.archive_results[self.archived[-1]]
         self.execs.pop()  # recorded again by the base fake
         return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 

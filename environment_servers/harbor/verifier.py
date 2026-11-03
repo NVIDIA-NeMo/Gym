@@ -351,6 +351,9 @@ def _is_main_service(name: str | None) -> bool:
 
 # The record of one collection pass, written beside the staged artifacts as Harbor's artifact handler writes its own.
 ARTIFACT_MANIFEST_NAME = "manifest.json"
+# Added to an artifact's archive and restore deadlines per GiB it holds: a sandbox's `tar -czf` packs about
+# 35 MiB/s, so a multi-GB model checkpoint outlasts the fixed 600 s; this allows a quarter of that rate.
+ARTIFACT_SECONDS_PER_GIB = 120.0
 
 
 def _collected_artifacts(task: HarborTask, step: HarborTaskStep | None = None) -> list[tuple[HarborArtifact, str]]:
@@ -551,7 +554,14 @@ class HarborVerificationMixin:
                 "%s: artifact %r not restored: it would replace the grader's %s", task.task_id, source, protected
             )
             return
-        if not await upload_archive(verifier, archive, kind, source, keep_out=(TESTS_DIR, VERIFIER_LOGS_DIR)):
+        if not await upload_archive(
+            verifier,
+            archive,
+            kind,
+            source,
+            keep_out=(TESTS_DIR, VERIFIER_LOGS_DIR),
+            seconds_per_gib=ARTIFACT_SECONDS_PER_GIB,
+        ):
             LOGGER.warning(
                 "%s: artifact %r not restored: a link in the verifier sandbox diverts it onto the grader's files",
                 task.task_id,
@@ -985,6 +995,7 @@ class HarborVerificationMixin:
                     links="keep",
                     exclude=tuple(artifact.exclude),
                     archive_copy=archive,
+                    seconds_per_gib=ARTIFACT_SECONDS_PER_GIB,
                 )
             except (
                 SandboxTransferError,

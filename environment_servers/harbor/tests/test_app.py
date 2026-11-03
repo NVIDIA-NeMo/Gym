@@ -56,6 +56,7 @@ from environment_servers.harbor.tests.conftest import (
     write_task,
 )
 from environment_servers.harbor.verifier import (
+    ARTIFACT_SECONDS_PER_GIB,
     COLLECT_HOOK_GRACE_S,
     EXIT_RECORD_NAME,
     TIMEOUT_WRAPPER_GUARD,
@@ -2212,6 +2213,49 @@ class TestSeparateVerification:
         assert agent.archives["/app/output"] in verifier.uploaded_archives
         assert not list(artifacts.glob("*.tar.gz")) and not list((artifacts / "00").rglob("null"))
         assert created == ["hello"] and agent.stopped and verifier.stopped
+
+    async def test_a_large_artifact_gets_a_deadline_that_fits_it_and_a_kill_is_recorded_failed(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """PostTrainBench smoke (oci-aga 1553689): six 4B final_models outlasted the fixed 600 s tar -czf and
+        OpenSandbox reported the kill as a plain exit ("signal: killed"). The archive deadline now grows with what
+        du measures, and a kill still lands in the manifest as failed, which a benchmark can act on."""
+        agent = AgentSandbox(
+            sizes_kib={"/logs/artifacts": 20 * 1024 * 1024},
+            archive_results={"/logs/artifacts": SandboxExecResult(stdout="", stderr="signal: killed", return_code=-1)},
+        )
+        server, task, _, verifier, _ = self.prepared(tmp_path, monkeypatch, agent=agent)
+        with caplog.at_level("WARNING"):
+            result = (await run_episode(server, task)).result
+        archive = next(c for c in agent.execs if "tar -czf" in c["command"] and "/logs/artifacts" in c["command"])
+        assert archive["timeout_s"] == 600 + 20 * ARTIFACT_SECONDS_PER_GIB
+        assert "artifact '/logs/artifacts' not collected: Failed to archive /logs/artifacts: signal: killed" in (
+            caplog.text
+        )
+        manifest = json.loads((Path(result.verifier_logs_dir) / "artifacts" / "manifest.json").read_text())
+        assert [(e["source"], e["status"]) for e in manifest[:2]] == [
+            ("/logs/artifacts", "failed"),
+            ("/app/output/report.json", "ok"),
+        ]
+        assert agent.archives["/logs/artifacts"] not in verifier.uploaded_archives
+
+    async def test_a_restore_upload_that_fails_masks_the_sample(self, tmp_path, monkeypatch):
+        """The two smollm3-3b final_models of the same smoke: archived and downloaded, then the upload into the
+        verifier sandbox lost its connection. The sample is Gym's outage, masked, not a "no model" score."""
+
+        class DropsTheHandoff(FakeSandbox):
+            async def upload(self, local_path, remote_path):
+                if Path(local_path).read_bytes() == agent.archives["/logs/artifacts"]:
+                    raise ConnectionError("Can not write request body")
+                await super().upload(local_path, remote_path)
+
+        agent = AgentSandbox()
+        server, task, _, verifier, _ = self.prepared(tmp_path, monkeypatch, agent=agent, verifier=DropsTheHandoff())
+        result = (await run_episode(server, task)).result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "Can not write request body" in result.failure_reason
+        assert not any("test.sh" in c["command"] and "timeout" in c["command"] for c in verifier.execs)
+        assert agent.stopped and verifier.stopped
 
     async def test_each_artifact_stages_under_its_own_root(self, tmp_path, monkeypatch):
         """A link kept from one artifact is never a path component of another artifact's destination."""

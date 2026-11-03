@@ -14,6 +14,7 @@ from environment_servers.harbor.tests.conftest import make_client
 from environment_servers.posttrainbench.app import (
     JUDGING_INCONCLUSIVE_KIND,
     MISSING_KEY,
+    MODEL_NOT_COLLECTED_KIND,
     SCORE_KEY,
     PostTrainBenchEnvironmentServer,
     PostTrainBenchEnvironmentServerConfig,
@@ -174,6 +175,31 @@ def test_a_judged_episode_keeps_its_score(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(HarborEnvironmentServer, "_score", lambda *args, **kwargs: dict(measured))
 
     assert server._score(SimpleNamespace(task_id=TASKS[0]), None, None, tmp_path, 0.0, rewards=None) == measured
+
+
+@pytest.mark.parametrize("status, masked", [("failed", True), ("absent", False), ("ok", False)])
+def test_a_handoff_gym_could_not_collect_masks_the_episode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str, masked: bool
+) -> None:
+    """The oci-aga smoke scored six tasks whose final_model archive was killed as "no model", at the baseline. A
+    failed collection is Gym's, so it masks; an agent that left nothing in /logs/artifacts still scores no_model."""
+    server = make_server(tmp_path)
+    no_model = {"reward": 0.13, "verifier_rewards": {"reward": 0.13, "baseline_accuracy": 0.13, "no_model": 1.0}}
+    monkeypatch.setattr(HarborEnvironmentServer, "_score", lambda *args, **kwargs: dict(no_model))
+    logs_dir = tmp_path / "session"
+    entry = {"index": 0, "source": "/logs/artifacts", "service": None, "origin": "convention", "status": status}
+    HarborEnvironmentServer._write_artifact_manifest(logs_dir / "artifacts", [entry])
+
+    scored = server._score(SimpleNamespace(task_id=TASKS[0]), None, None, logs_dir, 0.0, rewards=None)
+
+    if masked:
+        assert scored["mask_sample"] is True and scored["failure_kind"] == MODEL_NOT_COLLECTED_KIND
+        assert (
+            "/logs/artifacts" in scored["failure_reason"] and str(logs_dir / "artifacts") in scored["failure_reason"]
+        )
+        assert scored["verifier_rewards"] == no_model["verifier_rewards"]
+    else:
+        assert scored == no_model
 
 
 # Upstream's verdict readers, reduced to the files gym_score.py consults (scripts/utils.py names and fields).
