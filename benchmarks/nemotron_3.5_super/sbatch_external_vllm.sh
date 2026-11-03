@@ -632,7 +632,7 @@ MOONCAKE_CONFIG
         echo "Using image-local Mooncake build:"
         cat "\$mooncake_manifest"
     else
-        uv pip install --system mooncake-transfer-engine-cuda13
+        uv pip install --system mooncake-transfer-engine-cuda13==0.3.13.post1
     fi
     python3 -c 'from mooncake.engine import TransferEngine; from mooncake.store import MooncakeDistributedStore'
 
