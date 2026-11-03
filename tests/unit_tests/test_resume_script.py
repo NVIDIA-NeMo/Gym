@@ -27,10 +27,12 @@ import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
+    ACCOUNTING_UNKNOWN_PREFIX,
     CHAIN_END_JOURNAL_NAME,
     DRIVER_FAILURE_NAME,
     EXPORT_RECEIPT_MISSING,
     EXPORT_RECEIPT_MISSING_REASON,
+    FOLLOW_UP_SUBMISSION_REFUSED,
     GUARDED_DRIVER_FAILURE_KINDS,
     INCOMPLETE_MARKER_NAME,
     NO_ELIGIBLE_RETRY,
@@ -140,6 +142,8 @@ _FAKE_SBATCH = """#!/bin/bash
 echo "$* sentinel=${GYM_FOLLOWUP_SENTINEL:-}" >> "$FAKE_LOG_DIR/sbatch_calls"
 echo "${GYM_RESUBMIT:-}|${GYM_RESUBMIT_KEEP_BUDGET:-}" >> "$FAKE_LOG_DIR/sbatch_env"
 if [[ -n "${FAKE_SBATCH_FAILS:-}" ]]; then echo "sbatch: error: Socket timed out"; exit 1; fi
+# The scheduler's refusal, as at a QOS submit limit: nothing is queued, and sbatch says why on stderr.
+if [[ -n "${FAKE_SBATCH_REFUSES:-}" ]]; then printf '%s\n' "$FAKE_SBATCH_REFUSES" >&2; exit 1; fi
 # Every queued job is 999 unless a test gives the sentinel its own id, to tell the two apart.
 _id=999
 [[ -z "${GYM_FOLLOWUP_SENTINEL:-}" || -z "${FAKE_SENTINEL_ID:-}" ]] || _id=$FAKE_SENTINEL_ID
@@ -451,6 +455,56 @@ def test_each_resumed_segment_still_queues_its_own_follow_up(tmp_path):
         "--dependency=afternotok:999",
         "--dependency=afterany:999",
     ]
+
+
+# sbatch's reply when a QOS caps the jobs a user may have submitted.
+_QOS_SUBMIT_LIMIT_REPLY = (
+    "sbatch: error: QOSMaxSubmitJobPerUserLimit\n"
+    "sbatch: error: Batch job submission failed: Job violates accounting/QOS policy "
+    "(job submit limit, user's size and/or time limits)"
+)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_follow_up_the_scheduler_refuses_is_a_typed_stop_not_unknown_accounting(tmp_path):
+    refused = _run_prologue(tmp_path, ResumeConfig(), None, extra_env={"FAKE_SBATCH_REFUSES": _QOS_SUBMIT_LIMIT_REPLY})
+
+    # This allocation still does its work; nothing was queued, so no sentinel either.
+    assert refused.returncode == 0 and "REACHED_WORK" in refused.stdout, refused.stdout + refused.stderr
+    assert len(_sbatch_calls(tmp_path)) == 1
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert marker == (
+        f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit "
+        "sbatch: error: Batch job submission failed: Job violates accounting/QOS policy "
+        "(job submit limit, user's size and/or time limits)\n"
+    )
+    assert "QOSMaxSubmitJobPerUserLimit" in refused.stdout and "gym eval resubmit --recover" in refused.stdout
+    # Its claim named no job: none is left behind for a later reader to take as an unobserved follow-up.
+    assert not list(tmp_path.glob(".gym_followup_queued.*"))
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_follow_up_submission_without_a_definite_reply_stays_unknown_and_logs_the_reply(tmp_path):
+    failed = _run_prologue(tmp_path, ResumeConfig(), None, sbatch_loses_reply=True)
+
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == (
+        f"{ACCOUNTING_UNKNOWN_PREFIX} Follow-up submission may have succeeded without an observed reply.\n"
+    )
+    assert "sbatch exited 1: sbatch: error: Socket timed out on send/recv operation" in failed.stdout
+
+
+def test_inspection_names_a_chain_stopped_on_a_refused_follow_up(tmp_path):
+    from nemo_gym.orchestration.recovery import decide_from_collected
+    from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir
+
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
+    line = f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit"
+    (job / INCOMPLETE_MARKER_NAME).write_text(line + "\n")
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.chain_continuation_note == line
+    assert f"the chain recorded: {line}" in decision.reason
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")

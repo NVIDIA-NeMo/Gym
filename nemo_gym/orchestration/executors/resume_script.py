@@ -99,6 +99,9 @@ PROVISIONAL_MARKER_PREFIX = "Continuation "
 # The words of the line a sentinel writes when its follow-up was cancelled before it started and the parent did
 # not finish the run: the chain stopped there, and the line says why.
 CANCELLED_FOLLOWUP_MARKER = "was cancelled before it started"
+# The scheduler answered the follow-up's sbatch with a refusal (a QOS submit limit, an invalid account): nothing was
+# queued, and the accounting is known. The chain stops; `gym eval resubmit --recover` continues it.
+FOLLOW_UP_SUBMISSION_REFUSED = "follow_up_submission_refused"
 # Why the chain ends after a segment that timed out before Gym wrote the task inventory.
 PRE_INVENTORY_REASON = "the segment ended before the task inventory was written; nothing can be resumed"
 # Where a resumed segment records how many progress rows the Store held when it started (one file per job id).
@@ -721,6 +724,12 @@ if ! _gym_claim_followup; then
         _gym_stop_accounting_unknown "The existing follow-up claim has no unique observed pending job; it may already have run."
     fi
 fi
+# Whether sbatch's reply is the scheduler's refusal: an error it reported, with no sign that the request or its reply
+# was lost on the way (a timeout or a connection failure leaves the submission's outcome unknown).
+_gym_submission_refused() {{
+    [[ "$1" == *"sbatch: error:"* ]] || return 1
+    ! grep -qiE 'timed out|time out|socket|unable to contact|connection|communication|zero bytes|try again|temporarily' <<< "$1"
+}}
 if [[ $_gym_queue_followup == 1 ]]; then
     # kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
     if _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
@@ -743,9 +752,19 @@ if [[ $_gym_queue_followup == 1 ]]; then
             echo "{accounting_unknown_prefix} Follow-up submission returned no unique job identity." > "$_incomplete_file"
         fi
     else
-        # The current allocation can finish, but a successor must not erase this uncertainty or reset budgets.
-        echo "{accounting_unknown_prefix} Follow-up submission may have succeeded without an observed reply." > "$_incomplete_file"
-        echo "WARNING: Failed to submit auto-resume follow-up. Inspect the complete queue and terminal accounting; automatic continuation is stopped."
+        _gym_submit_rc=$?
+        if _gym_submission_refused "$_next_output"; then
+            # An observed refusal queued nothing: the accounting is known, and the chain stops here without a requeue.
+            # Its claim names no job, so it goes, or a later reader would take it for an unobserved follow-up.
+            rm -f "$_guard_marker"
+            _gym_refusal=$(grep -m 3 'sbatch: error:' <<< "$_next_output" | paste -sd ' ' - | cut -c1-300)
+            echo "{follow_up_submission_refused}: sbatch exited $_gym_submit_rc: $_gym_refusal" > "$_incomplete_file"
+            echo "WARNING: The scheduler refused the auto-resume follow-up (sbatch exited $_gym_submit_rc: $_gym_refusal). Automatic continuation is stopped; this allocation still runs. Once the scheduler accepts the job, continue with gym eval resubmit --recover."
+        else
+            # The current allocation can finish, but a successor must not erase this uncertainty or reset budgets.
+            echo "{accounting_unknown_prefix} Follow-up submission may have succeeded without an observed reply." > "$_incomplete_file"
+            echo "WARNING: Failed to submit auto-resume follow-up (sbatch exited $_gym_submit_rc: $(paste -sd ' ' - <<< "$_next_output" | cut -c1-300)). Inspect the complete queue and terminal accounting; automatic continuation is stopped."
+        fi
     fi
 fi
 """
@@ -917,6 +936,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         accounting_unknown_prefix=ACCOUNTING_UNKNOWN_PREFIX,
         provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
         cancelled_followup_marker=CANCELLED_FOLLOWUP_MARKER,
+        follow_up_submission_refused=FOLLOW_UP_SUBMISSION_REFUSED,
         allocation_accounting_marker=ALLOCATION_ACCOUNTING_MARKER,
         runtime_admission_marker=(
             RUNTIME_ADMISSION_MARKER if admission_command != "false" else "# No installed-runtime continuation reader"
