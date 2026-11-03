@@ -110,12 +110,14 @@ class BaseExecutor(ABC):
         decision: RecoveryDecision,
         *,
         judge_partition: str | None = None,
+        judge_qos: str | None = None,
         repin: str | None = None,
         repin_reason: str | None = None,
     ) -> RecoveryOutcome:
         """Re-judge the run's saved judge-failed answers; executors without a saved-answer path report that.
 
-        ``judge_partition`` names the CPU partition of a judge-only job for a run that served its policy on GPUs, and
+        ``judge_partition`` (with ``judge_qos``, its QOS) names the CPU partition of a judge-only job for a run that
+        served its policy on GPUs, and
         ``repin`` (with ``repin_reason``) the Gym commit that job runs; an executor without such a job ignores them.
         """
         return RecoveryOutcome(
