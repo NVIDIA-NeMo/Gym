@@ -375,7 +375,9 @@ def test_vllm_installed_rust_launcher_compatibility(vllm_builder, tmp_path, supp
 
 
 @pytest.mark.parametrize("failed_stage", [None, "build-vllm", "build-flashinfer", "build-mooncake", "warmup"])
-async def test_container_stage_order_and_cleanup(container_config, tmp_path, monkeypatch, failed_stage):
+async def test_container_stage_order_and_cleanup(container_config, tmp_path, monkeypatch, capsys, failed_stage):
+    ticks = iter(range(0, 100, 5))
+    monkeypatch.setattr(build_containers, "perf_counter", lambda: next(ticks))
     container_config.input_container_fpath.write_text("base")
     container_config.vllm = VLLMConfig(repo="vllm", branch="dev", version="0.32.0", precompiled_wheel_commit="b" * 40)
     container_config.flashinfer = FlashInferConfig(repo="fi", branch="dev", invalidate_modules=[], cpus_per_task=64)
@@ -417,6 +419,16 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
         assert stages == expected_stages
         assert container_config.output_container_fpath.read_text() == "warmup"
     assert container_config.input_container_fpath.read_text() == "base"
+    output = capsys.readouterr().out
+    assert "[Copy container] completed in 5.0s" in output
+    labels = {"build-vllm": "VLLM", "build-flashinfer": "FlashInfer", "build-mooncake": "Mooncake", "warmup": "Warmup"}
+    for stage, label in labels.items():
+        if stage not in stages:
+            assert f"[{label}]" not in output
+            continue
+        status = "failed" if stage == failed_stage else "completed"
+        assert f"[{label}] starting" in output
+        assert f"[{label}] {status} in 5.0s" in output
 
 
 @pytest.mark.parametrize("selection", ["fused_moe_trtllm_sm100", "checkpointing_ssu_*,replayssm_materialize_*"])

@@ -6,12 +6,15 @@ import re
 import shutil
 from asyncio import create_subprocess_shell
 from asyncio.subprocess import PIPE, STDOUT
+from collections.abc import Iterator
+from contextlib import contextmanager
 from os import killpg
 from pathlib import Path
 from shlex import join, quote, split
 from signal import SIGKILL
 from tempfile import TemporaryDirectory
 from textwrap import dedent
+from time import perf_counter
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
@@ -600,6 +603,19 @@ class MooncakeBuilder(BaseBuilder):
         }
 
 
+@contextmanager
+def _timed_stage(name: str) -> Iterator[None]:
+    """Report wall time, including preflight checks and time waiting for Slurm."""
+    start = perf_counter()
+    print(f"[{name}] starting", flush=True)
+    status = "failed"
+    try:
+        yield
+        status = "completed"
+    finally:
+        print(f"[{name}] {status} in {perf_counter() - start:.1f}s", flush=True)
+
+
 class BuildContainerHelper(BaseModel):
     config: BuildContainerConfig
 
@@ -625,7 +641,8 @@ class BuildContainerHelper(BaseModel):
         self.config.log_file.unlink(missing_ok=True)
         self.config.output_container_fpath.parent.mkdir(parents=True, exist_ok=True)
 
-        shutil.copy(self.config.input_container_fpath, self.config.output_container_fpath)
+        with _timed_stage("Copy container"):
+            shutil.copy(self.config.input_container_fpath, self.config.output_container_fpath)
         print("Copied input container fpath to output (not finished, just starting)")
 
         builders: list[BaseBuilder] = []
@@ -639,20 +656,22 @@ class BuildContainerHelper(BaseModel):
             builders.append(MooncakeBuilder(config=self.config.mooncake, log_file=self.config.log_file))
 
         for builder in builders:
-            await builder.perform_preflight_checks()
-            command_output = await self._run_single_srun(
-                builder_command_str=builder.get_srun_command_str(),
-                builder_env_vars=builder.get_srun_env_vars(self.config),
-                builder_srun_slurm_vars=builder.get_srun_slurm_vars(self.config),
-            )
-            if command_output.returncode != 0:
-                raise RuntimeError(
-                    f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
+            with _timed_stage(type(builder).__name__.removesuffix("Builder")):
+                await builder.perform_preflight_checks()
+                command_output = await self._run_single_srun(
+                    builder_command_str=builder.get_srun_command_str(),
+                    builder_env_vars=builder.get_srun_env_vars(self.config),
+                    builder_srun_slurm_vars=builder.get_srun_slurm_vars(self.config),
                 )
+                if command_output.returncode != 0:
+                    raise RuntimeError(
+                        f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
+                    )
 
         if self.config.warmup is not None:
             print("Running warmup. Currently, the warmup logs aren't printed and need to be checked manually.")
-            await self._warmup_container()
+            with _timed_stage("Warmup"):
+                await self._warmup_container()
 
     async def _warmup_container(self) -> None:
         # TODO @bxyu-nvidia: Eventually this sbatch_external_vllm will migrate to Gym-native orchestration and we can just import the relevant thing
