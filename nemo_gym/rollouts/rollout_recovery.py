@@ -29,7 +29,7 @@ import re
 import socket
 import stat
 import warnings
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from itertools import combinations
 from pathlib import Path
@@ -353,6 +353,33 @@ def holds_response(row: Mapping[str, Any]) -> bool:
         isinstance(row.get(key), Mapping)
         for key in ("response", "_ng_failure_response", "_ng_failure_partial_response")
     )
+
+
+def agent_phase_oom(events: Any) -> bool:
+    """Whether a rollout's failure events hold a memory kill of the agent's own sandbox while the agent's command ran:
+    a ``sandbox`` failure of kind ``provider_oom_killed`` (the provider reported ``OOMKilled``) at stage ``agent``.
+
+    Such a rollout is the model's own result, as an upstream harness scores it: a final zero, kept in the denominator
+    and never retried, because a retry would resample a model that exhausted the benchmark's memory limit. A kill in
+    any other stage (setup, verification), any other provider reason, and an exit status without a provider report
+    stay infrastructure. Known limitation: the event does not say which container of the sandbox ended, so a helper
+    container killed for memory during the agent's command counts too; this tightens when the event names the
+    container.
+    """
+    if isinstance(events, Mapping):
+        events = events.values()
+    if not isinstance(events, Iterable) or isinstance(events, (str, bytes)):
+        return False
+    for event in events:
+        fields = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
+        if (
+            isinstance(fields, Mapping)
+            and fields.get("boundary") == "sandbox"
+            and fields.get("failure_kind") == "provider_oom_killed"
+            and fields.get("stage") == "agent"
+        ):
+            return True
+    return False
 
 
 def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
