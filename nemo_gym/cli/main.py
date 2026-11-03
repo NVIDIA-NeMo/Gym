@@ -799,7 +799,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
     from nemo_gym.config.config_types import ConfigError
-    from nemo_gym.health.types import RunHealthLimits
+    from nemo_gym.rollouts.health.types import RunHealthLimits
 
     # A limit flag that is not given is absent from args, so the limit stays unset and keeps the run's persisted
     # value; `none` sets it to None, which removes it.

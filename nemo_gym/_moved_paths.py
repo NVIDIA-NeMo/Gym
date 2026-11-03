@@ -67,6 +67,17 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.observability": MovedPath(new="nemo_gym.rollouts", since="0.8.0"),
+    "nemo_gym.rollout_collection": MovedPath(new="nemo_gym.rollouts.rollout_collection", since="0.8.0"),
+    "nemo_gym.batch_status": MovedPath(new="nemo_gym.rollouts.batch_status", since="0.8.0"),
+    "nemo_gym.rollout_health": MovedPath(new="nemo_gym.rollouts.rollout_health", since="0.8.0"),
+    "nemo_gym.health": MovedPath(new="nemo_gym.rollouts.health", since="0.8.0"),
+    "nemo_gym.rollout_outcomes": MovedPath(new="nemo_gym.rollouts.rollout_outcomes", since="0.8.0"),
+    "nemo_gym.omitted_rollouts": MovedPath(new="nemo_gym.rollouts.omitted_rollouts", since="0.8.0"),
+    "nemo_gym.rollout_records": MovedPath(new="nemo_gym.rollouts.rollout_records", since="0.8.0"),
+    "nemo_gym.rollout_recovery": MovedPath(new="nemo_gym.rollouts.rollout_recovery", since="0.8.0"),
+    "nemo_gym.rollout_store": MovedPath(new="nemo_gym.rollouts.rollout_store", since="0.8.0"),
+    "nemo_gym.harness_capabilities": MovedPath(new="nemo_gym.rollouts.harness_capabilities", since="0.8.0"),
     "nemo_gym.tasks.harbor.cli": MovedPath(new="nemo_gym.data.tasks.harbor.prepare", since="0.8.0"),
     "nemo_gym.prompt": MovedPath(new="nemo_gym.data.prompt", since="0.8.0"),
     "nemo_gym.vision_input": MovedPath(new="nemo_gym.data.vision_input", since="0.8.0"),
@@ -474,12 +485,34 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId TaskId"),
     },
     "nemo_gym.rollout_collection": {
-        **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS"),
+        **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS _strip_capture_payloads"),
         # Moved, and still imported by rollout_collection for its own use.
         **_names(
             "nemo_gym.artifacts.rollout_rows",
             "0.8.0",
-            "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export _strip_capture_payloads",
+            "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export",
+        ),
+        # Split out of rollout_collection.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "_build_ng_perf"),
+        **_names(
+            "nemo_gym.rollouts.trajectory_builder",
+            "0.8.0",
+            """
+            _build_trajectory_record _nonnegative_int _trajectory_identity _turn_content _turns_from_model_calls
+            """,
+        ),
+        # Moved, and still imported by rollout_collection for its own use.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "DispatchLatencyTracker NG_PERF_KEY _attach_ng_perf"),
+        **_names("nemo_gym.rollouts.trajectory_builder", "0.8.0", "_attach_trajectory_record _has_observation_gap"),
+        # rollout_collection imported these for code that moved out of it.
+        **_names(
+            "nemo_gym.trajectory.trajectory_record",
+            "0.8.0",
+            """
+            AgentInvocation AgentObservationBundle ModelCallRef ObservationGap ToolCallObservation
+            TrajectoryModelCall TrajectoryRecord TrajectoryTokenStats TrajectoryToolCall TrajectoryTurn
+            VerifierInvocation
+            """,
         ),
     },
     "nemo_gym.health.types": {
@@ -488,6 +521,22 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "0.8.0",
             "QUALITY_SUMMARY_FILENAME QUALITY_SUMMARY_SOURCES_KEY ROLLOUT_VERDICTS_FILENAME",
         ),
+    },
+    "nemo_gym.observability.model_calls": {
+        # Split out of observability.model_calls.
+        **_names(
+            "nemo_gym.trajectory.model_call_record",
+            "0.8.0",
+            "_as_arguments _cache_signal _prompt_size _token_count _tool_calls_and_reasoning _usage_detail_token extract_token_stats",
+        ),
+        # Moved, and still imported by observability.model_calls for its own use.
+        **_names(
+            "nemo_gym.trajectory.model_call_record",
+            "0.8.0",
+            "ModelCallRecord aggregate_model_call_records build_model_call_record",
+        ),
+        # observability.model_calls imported this for code that moved out of it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ModelServerRef"),
     },
     "nemo_gym.batch_status": {
         # Moved, and still imported by batch_status for its own use.

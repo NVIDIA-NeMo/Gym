@@ -421,12 +421,10 @@ async def test_protocol_failure_metadata_survives_collection(
 ) -> None:
     from unittest.mock import AsyncMock
 
-    import nemo_gym.rollout_collection as collection
-    from nemo_gym.rollout_outcomes import RolloutFailureRecord
-    from nemo_gym.rollout_records import logical_rollout_id
-    from nemo_gym.rollout_store import RolloutStore
+    import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.rollouts import RolloutFailureRecord, RolloutStore, logical_rollout_id
     from nemo_gym.server_runtime import EpisodeFailure, SingleAgentTurnFailure, SingleAgentTurnResponse
-    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     environment, client = _environment_server()
     if legacy:

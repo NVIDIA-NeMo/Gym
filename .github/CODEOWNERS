@@ -59,6 +59,7 @@ uv.lock @nvidia-nemo/automation
 # Running work
 /nemo_gym/data/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
 /nemo_gym/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
+/nemo_gym/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
 /nemo_gym/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
 
 # Tools
@@ -69,22 +70,12 @@ uv.lock @nvidia-nemo/automation
 /nemo_gym/testing/agent_session_conformance.py @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
 /nemo_gym/cli/ @NVIDIA-NeMo/gym_reviewers_cli_config @NVIDIA-NeMo/frontier-evals
 
-# Current paths awaiting the rollouts/, eval/, environment/, orchestration/,
-# and testing/ moves. Remove these entries when their source paths move.
-/nemo_gym/batch_status.py @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-/nemo_gym/health/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-/nemo_gym/observability/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-/nemo_gym/omitted_rollouts.py @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-/nemo_gym/rollout_collection.py @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-/nemo_gym/rollout_health.py @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
-/nemo_gym/rollout_outcomes.py @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
+# Current paths awaiting the eval/, environment/, and orchestration/ moves.
+# Remove these entries when their source paths move.
 /nemo_gym/comparison/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
 /nemo_gym/eval_plan.py @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
 /nemo_gym/rollout_compare/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-/nemo_gym/rollout_records.py @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-/nemo_gym/rollout_recovery.py @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
 /nemo_gym/rollout_reverification.py @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
-/nemo_gym/rollout_store.py @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
 /nemo_gym/agent_registry.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
 /nemo_gym/benchmarks.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
 /nemo_gym/deliverables.py @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
@@ -96,7 +87,6 @@ uv.lock @nvidia-nemo/automation
 /nemo_gym/h2_ping_sidecar/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
 /nemo_gym/tools/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
 /nemo_gym/cli/setup_command.py @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
-/nemo_gym/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
 /nemo_gym/cli_setup_command.py @NVIDIA-NeMo/gym_reviewers_cli_config @NVIDIA-NeMo/frontier-evals
 
 # Package tests: match both today's unit_tests/ and the proposed
@@ -117,6 +107,7 @@ uv.lock @nvidia-nemo/automation
 /tests/*/agents/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
 /tests/*/data/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals
 /tests/*/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts @NVIDIA-NeMo/frontier-evals
+/tests/*/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals
 /tests/*/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration @NVIDIA-NeMo/frontier-evals
 /tests/*/eval/ @NVIDIA-NeMo/gym_reviewers_eval @NVIDIA-NeMo/frontier-evals
 /tests/*/environment/ @NVIDIA-NeMo/gym_env_benchmarks @NVIDIA-NeMo/frontier-evals

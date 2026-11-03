@@ -37,7 +37,7 @@ def review(number: int, user_id: int, state: str, head: str = "head") -> dict:
 class PolicyTests(unittest.TestCase):
     """Verify path boundaries, precedence, and alternative approval semantics."""
 
-    def test_frontier_approval_satisfies_multiple_packages(self):
+    def test_frontier_approval_satisfies_multiple_packages(self) -> None:
         """One Frontier Eval reviewer can approve every changed package."""
         rules = approvals.parse_policy("/a/ @org/a @org/frontier\n/b/ @org/b @org/frontier")
         matches = approvals.match_policy(["a/file.py", "b/nested/file.py"], rules)
@@ -50,7 +50,7 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(approvals.evaluate(matches, teams, {1})["passed"])
         self.assertTrue(approvals.evaluate(matches, teams, {1, 2})["passed"])
 
-    def test_last_match_overrides_model_ownership(self):
+    def test_last_match_overrides_model_ownership(self) -> None:
         """Checkpoint hooks use runtime reviewers while token capture uses model reviewers."""
         rules = approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text())
         matches = approvals.match_policy(
@@ -58,6 +58,7 @@ class PolicyTests(unittest.TestCase):
                 "nemo_gym/models/_checkpoint.py",
                 "nemo_gym/models/token_capture/sink.py",
                 "nemo_gym/testing/harness_capabilities/checker.py",
+                "nemo_gym/rollouts/harness_capabilities/checker.py",
             ],
             rules,
         )
@@ -65,10 +66,13 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(owner_by_path["nemo_gym/models/_checkpoint.py"], "@NVIDIA-NeMo/gym_reviewers_server_runtime")
         self.assertEqual(owner_by_path["nemo_gym/models/token_capture/sink.py"], "@NVIDIA-NeMo/gym_reviewers_model")
         self.assertEqual(
+            owner_by_path["nemo_gym/rollouts/harness_capabilities/checker.py"], "@NVIDIA-NeMo/gym_reviewers_agents"
+        )
+        self.assertEqual(
             owner_by_path["nemo_gym/testing/harness_capabilities/checker.py"], "@NVIDIA-NeMo/gym_reviewers_agents"
         )
 
-    def test_github_glob_semantics(self):
+    def test_github_glob_semantics(self) -> None:
         """Directory patterns, root anchors, and double stars preserve boundaries."""
         cases = [
             ("docker/", "nested/docker/Dockerfile", True),
@@ -86,19 +90,19 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(pattern=pattern, path=path):
                 self.assertEqual(bool(approvals.compile_pattern(pattern).fullmatch(path)), expected)
 
-    def test_advisory_and_empty_overrides_do_not_require_approval(self):
+    def test_advisory_and_empty_overrides_do_not_require_approval(self) -> None:
         """Comments are advisory and a last empty rule clears a broader owner."""
         rules = approvals.parse_policy("* @org/a\n# suggest: /docs/ @org/docs\n/docs/\n")
         self.assertEqual(approvals.match_policy(["docs/readme.md"], rules), [])
         self.assertEqual(approvals.match_policy(["source.py"], rules)[0]["owners"], ["@org/a"])
 
-    def test_unsupported_rules_fail_closed(self):
+    def test_unsupported_rules_fail_closed(self) -> None:
         """Invalid patterns and individual owners cannot silently disable a rule."""
         for text in ("!file @org/a", "/[ab]/ @org/a", "/a\\ b @org/a", "/a/ @person"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 approvals.parse_policy(text)
 
-    def test_all_library_files_have_frontier_alternative(self):
+    def test_all_library_files_have_frontier_alternative(self) -> None:
         """Every tracked package file retains the requested shared alternative."""
         paths = [str(path.relative_to(ROOT)) for path in (ROOT / "nemo_gym").rglob("*.py")]
         matches = approvals.match_policy(paths, approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text()))
@@ -106,7 +110,7 @@ class PolicyTests(unittest.TestCase):
         for match in matches:
             self.assertIn("@NVIDIA-NeMo/frontier-evals", match["owners"])
 
-    def test_benchmark_fallback_and_bionemo_override(self):
+    def test_benchmark_fallback_and_bionemo_override(self) -> None:
         """Preserve coverage outside packages while retaining dedicated BioNeMo owners."""
         policy = approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text())
         matches = approvals.match_policy(
@@ -125,7 +129,7 @@ class PolicyTests(unittest.TestCase):
 class ReviewTests(unittest.TestCase):
     """Reject stale, revoked, author, and unverified cross-platform approvals."""
 
-    def test_latest_substantive_review_wins(self):
+    def test_latest_substantive_review_wins(self) -> None:
         """Comments preserve approval, while changes requested and dismissal revoke it."""
         reviews = [review(1, 10, "APPROVED"), review(2, 10, "COMMENTED")]
         self.assertEqual(approvals.github_approvers(reviews, "head", 99), {10})
@@ -133,19 +137,19 @@ class ReviewTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertEqual(approvals.github_approvers(reviews + [review(3, 10, state)], "head", 99), set())
 
-    def test_stale_and_author_reviews_do_not_count(self):
+    def test_stale_and_author_reviews_do_not_count(self) -> None:
         """Approval must reference this exact head and come from another person."""
         reviews = [review(1, 10, "APPROVED", "previous"), review(2, 99, "APPROVED")]
         self.assertEqual(approvals.github_approvers(reviews, "head", 99), set())
 
-    def test_gitlab_uses_account_ids_instead_of_display_names(self):
+    def test_gitlab_uses_account_ids_instead_of_display_names(self) -> None:
         """Only a verified numeric identity link grants GitHub team membership."""
         identities = [{"gitlab_user_id": 100, "github_user_id": 10}]
         approved = [{"user": {"id": 100}}, {"user": {"id": 101}}, {"user": {"id": 99}}]
         self.assertEqual(approvals.gitlab_approvers(approved, identities, 99), ({10}, [101]))
         self.assertEqual(approvals.gitlab_approvers([], identities, 99), (set(), []))
 
-    def test_duplicate_identity_links_fail_closed(self):
+    def test_duplicate_identity_links_fail_closed(self) -> None:
         """Ambiguous cross-provider account links cannot authorize a reviewer."""
         identities = [{"gitlab_user_id": 100, "github_user_id": 10}, {"gitlab_user_id": 100, "github_user_id": 11}]
         with self.assertRaises(ValueError):
@@ -155,12 +159,12 @@ class ReviewTests(unittest.TestCase):
 class ProviderTests(unittest.TestCase):
     """Verify complete API evidence and immutable target-policy selection."""
 
-    def test_pagination_reads_every_member(self):
+    def test_pagination_reads_every_member(self) -> None:
         """A reviewer beyond the first page must remain eligible."""
         responses = [[{"id": number} for number in range(100)], [{"id": 100}]]
         self.assertEqual(len(approvals.all_pages(lambda path: responses.pop(0), "members")), 101)
 
-    def test_github_uses_target_policy_and_both_rename_paths(self):
+    def test_github_uses_target_policy_and_both_rename_paths(self) -> None:
         """A PR cannot choose its own ownership policy or evade an old path's owner."""
         paths_read = []
 
@@ -181,7 +185,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(snapshot["approved"], {10})
         self.assertTrue(any("?ref=trusted" in path for path in paths_read))
 
-    def test_github_rejects_truncated_changed_files(self):
+    def test_github_rejects_truncated_changed_files(self) -> None:
         """A partial changed-file response must never produce a green decision."""
 
         def read(path):
@@ -193,12 +197,12 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             approvals.github_snapshot(read, "org/repo", 1)
 
-    def test_gitlab_requires_stale_approval_reset(self):
+    def test_gitlab_requires_stale_approval_reset(self) -> None:
         """GitLab approvals without head-reset protection cannot be trusted."""
         with self.assertRaisesRegex(ValueError, "reset approvals"):
             approvals.gitlab_snapshot(lambda path: {}, 1, 1)
 
-    def test_gitlab_reads_the_shared_policy(self):
+    def test_gitlab_reads_the_shared_policy(self) -> None:
         """GitLab evaluates GitHub-format policy and verified account links."""
 
         def read(path):
@@ -217,6 +221,8 @@ class ProviderTests(unittest.TestCase):
                     if "/merge_requests/" in path
                     else {"reset_approvals_on_push": True}
                 )
+            if "/versions?" in path:
+                return [{"head_commit_sha": "head", "patch_id_sha": "patch-id"}]
             if "/diffs?" in path:
                 return [{"old_path": "old/file.py", "new_path": "new/file.py"}]
             if "/branches/" in path:
@@ -230,12 +236,40 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(snapshot["approved"], {10})
         self.assertEqual(snapshot["policy"], "/old/ @org/a")
 
-    def test_api_redirects_do_not_forward_credentials(self):
+    def test_gitlab_rejects_approval_synchronization_in_progress(self) -> None:
+        """A push cannot reuse approvals while GitLab is still clearing them."""
+
+        def read(path):
+            """Return a request whose asynchronous approval reset is unfinished."""
+            return (
+                {"detailed_merge_status": "approvals_syncing"}
+                if "/merge_requests/" in path
+                else {"reset_approvals_on_push": True}
+            )
+
+        with self.assertRaisesRegex(ValueError, "synchronizing approvals"):
+            approvals.gitlab_snapshot(read, 1, 1)
+
+    def test_gitlab_rejects_unprepared_patch_identity(self) -> None:
+        """Diff references alone do not prove commit processing has finished."""
+
+        def read(path):
+            """Return current diff references but an unprepared patch identity."""
+            if "/versions?" in path:
+                return [{"head_commit_sha": "head", "patch_id_sha": None}]
+            if path.endswith("/approvals"):
+                return {"reset_approvals_on_push": True}
+            return {"sha": "head", "diff_refs": {"head_sha": "head"}}
+
+        with self.assertRaisesRegex(ValueError, "patch identity"):
+            approvals.gitlab_snapshot(read, 1, 1)
+
+    def test_api_redirects_do_not_forward_credentials(self) -> None:
         """An API response cannot redirect a team token to another origin."""
         with self.assertRaisesRegex(ValueError, "redirected"):
             approvals.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.example")
 
-    def test_error_is_not_reported_as_approval(self):
+    def test_error_is_not_reported_as_approval(self) -> None:
         """Transport failures exit distinctly and do not write a passing report."""
         with patch.object(approvals, "run_check", side_effect=ValueError("HTTP 403")):
             self.assertEqual(approvals.main(["github", "--number", "1"]), 2)
@@ -244,7 +278,9 @@ class ProviderTests(unittest.TestCase):
 class GitLabStatusTests(unittest.TestCase):
     """Verify that only validated results can turn the exact MR pipeline green."""
 
-    def run_publisher(self, *, report_head="head", returncode=0, malformed=False):
+    def run_publisher(
+        self, *, report_head: str = "head", returncode: int = 0, malformed: bool = False
+    ) -> tuple[int, list[tuple[str, dict]]]:
         """Execute the real publisher against isolated API and subprocess fixtures."""
         writes = []
         event = {
@@ -293,32 +329,32 @@ class GitLabStatusTests(unittest.TestCase):
                 result = 2
         return result, writes
 
-    def test_current_head_success_updates_exact_pipeline(self):
+    def test_current_head_success_updates_exact_pipeline(self) -> None:
         """Attach status to the MR pipeline rather than creating another pipeline."""
         result, writes = self.run_publisher()
         self.assertEqual(result, 0)
         self.assertEqual([item[1]["state"] for item in writes], ["pending", "success"])
         self.assertTrue(all(item[0] == "projects/1/statuses/head" and item[1]["pipeline_id"] == 42 for item in writes))
 
-    def test_missing_approval_updates_failure(self):
+    def test_missing_approval_updates_failure(self) -> None:
         """A failed checker invalidates an earlier successful pipeline verdict."""
         result, writes = self.run_publisher(returncode=1)
         self.assertEqual(result, 1)
         self.assertEqual(writes[-1][1]["state"], "failed")
 
-    def test_head_change_never_publishes_success(self):
+    def test_head_change_never_publishes_success(self) -> None:
         """A report for a different head cannot approve the captured head."""
         result, writes = self.run_publisher(report_head="new-head")
         self.assertEqual(result, 2)
         self.assertEqual(writes[-1][1]["state"], "failed")
 
-    def test_invalid_report_never_publishes_success(self):
+    def test_invalid_report_never_publishes_success(self) -> None:
         """An unreadable success report leaves the required pipeline failed."""
         result, writes = self.run_publisher(malformed=True)
         self.assertEqual(result, 2)
         self.assertEqual(writes[-1][1]["state"], "failed")
 
-    def test_pipeline_for_another_head_is_rejected(self):
+    def test_pipeline_for_another_head_is_rejected(self) -> None:
         """An approval status cannot be appended to a stale head's pipeline."""
         with patch.object(publisher.approvals, "api_json", return_value={"sha": "different-head"}):
             with self.assertRaisesRegex(ValueError, "head changed"):

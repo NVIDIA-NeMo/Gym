@@ -31,7 +31,9 @@ IDENTITIES_PATH = ".github/reviewer-identities.json"
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     """Prevent API redirects from forwarding credentials to another host."""
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(
+        self, req: urllib.request.Request, fp: object, code: int, msg: str, headers: object, newurl: str
+    ) -> urllib.request.Request | None:
         """Reject redirects; callers must configure the canonical API URL."""
         raise ValueError("API redirected; configure the canonical repository and API URL")
 
@@ -185,8 +187,13 @@ def gitlab_snapshot(read: ReadJSON, project: int, number: int) -> dict:
     merge = read(f"{prefix}/merge_requests/{number}")
     if not read(f"{prefix}/approvals").get("reset_approvals_on_push"):
         raise ValueError("GitLab must reset approvals on push to reject stale approvals")
+    if merge.get("detailed_merge_status") in {"checking", "approvals_syncing"}:
+        raise ValueError("GitLab has not finished synchronizing approvals for this head")
     if merge["diff_refs"]["head_sha"] != merge["sha"]:
         raise ValueError("GitLab is still preparing the current head's diff")
+    versions = read(f"{prefix}/merge_requests/{number}/versions?per_page=1")
+    if not versions or versions[0].get("head_commit_sha") != merge["sha"] or not versions[0].get("patch_id_sha"):
+        raise ValueError("GitLab has not finished preparing this head's patch identity")
     diffs = all_pages(read, f"{prefix}/merge_requests/{number}/diffs")
     if not str(merge["changes_count"]).isdigit() or len(diffs) != int(merge["changes_count"]):
         raise ValueError("GitLab changed-file response is incomplete")
