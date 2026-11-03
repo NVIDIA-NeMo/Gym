@@ -46,8 +46,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import call_judge
-from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 
 
 # ---------------------------------------------------------------------------

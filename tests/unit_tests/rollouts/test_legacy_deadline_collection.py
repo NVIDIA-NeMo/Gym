@@ -15,7 +15,7 @@ from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, L
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.test_agent_environment_collection_failures import _serve
+from tests.unit_tests.rollouts.test_agent_environment_collection_failures import _serve
 
 
 @pytest.mark.parametrize("expired", [False, True])

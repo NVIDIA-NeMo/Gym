@@ -37,13 +37,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.typed_exceptions import failure_report_for
 from nemo_gym.models._checkpoint import (
     CheckpointableLedger,
     PolicyAdmissionMiddleware,
@@ -79,12 +80,6 @@ from nemo_gym.models.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.models.token_capture import (
-    capture_tokens,
-    current_capture_context,
-    register_call_intent,
-    resolve_parent,
-)
 from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
@@ -93,12 +88,17 @@ from nemo_gym.models.token_capture.protocols import (
     LineageResolver,
 )
 from nemo_gym.models.token_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
+from nemo_gym.models.token_capture.sink import (
+    capture_tokens,
+    current_capture_context,
+    register_call_intent,
+    resolve_parent,
+)
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 

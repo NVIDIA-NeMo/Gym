@@ -41,10 +41,9 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedSessionRequest,
     check_agent_seed_rejected,
+    raises_agent_failure,
 )
-from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
-from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
+from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON, SESSION_ID_KEY, ServerClient
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -55,17 +54,24 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     EpisodeId,
+    FailureBoundary,
+    FailureEvent,
+    FailureHeader,
+    FailureReport,
+    ModelFailureDetails,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NgFailureEvent,
+    SdkErrorDetails,
     TaskId,
+    failure_report_for,
 )
-from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
@@ -80,20 +86,15 @@ from nemo_gym.server_runtime import (
     CommitRequest,
     DirectHTTPToolAccess,
     EnvironmentParticipant,
-    FailureBoundary,
-    FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
-    ModelFailureDetails,
     ParticipantControlPlane,
     RestoreRequest,
     RolloutIdRequiredError,
     SimpleResourcesServer,
     StaleAttemptError,
 )
-from nemo_gym.server_runtime.episode_types import FailureEvent, SdkErrorDetails
 from nemo_gym.trajectory import TrajectoryRecord
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from responses_api_agents.simple_agent.app import (
     POLICY_TIMEOUT_OPERATION,
     ModelServerRef,

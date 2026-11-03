@@ -139,7 +139,7 @@ MOVED_MODULES: dict[str, MovedPath] = {
     ),
     "nemo_gym.mcp_auto_exposure": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure", since="0.8.0"),
     "nemo_gym.server_status": MovedPath(new="nemo_gym.server_runtime.server_status", since="0.8.0"),
-    "nemo_gym.episode_types": MovedPath(new="nemo_gym.server_runtime.episode_types", since="0.8.0"),
+    "nemo_gym.episode_types": MovedPath(new="nemo_gym.core.episode_types", since="0.8.0"),
     "nemo_gym.single_agent_turn_types": MovedPath(
         new="nemo_gym.server_runtime.single_agent_turn_types", since="0.8.0"
     ),
@@ -730,6 +730,16 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names("nemo_gym.telemetry.startup", "0.8.0", "STARTUP_SETUP_DONE_NS_ENV SupervisorStartup"),
+    },
+    # The token_id_capture package imported this name without exporting it.
+    # Token capture's public API serves only the names it lists.
+    "nemo_gym.token_id_capture": {
+        **_names("nemo_gym.models.token_capture.fingerprint", "0.8.0", "canonicalize_tool_arguments"),
+    },
+    # The token_id_capture staging package re-exported the terminal resolver from token capture.
+    # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
+    "nemo_gym.token_id_capture.staging": {
+        **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
 }
 

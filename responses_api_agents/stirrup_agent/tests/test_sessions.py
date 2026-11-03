@@ -20,8 +20,8 @@ from nemo_gym.agents import (
     SandboxPythonRuntime,
     SandboxSession,
     agent_tools,
+    raises_agent_failure,
 )
-from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
 from nemo_gym.agents.utils import sandbox_python
 from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
 from nemo_gym.client import ServerClient

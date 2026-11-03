@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Read facts from any Python exception: its explicit causes, its type name and its HTTP status.
 
-These functions know nothing about Gym's failure types; ``nemo_gym.typed_exceptions`` builds on them.
+These functions know nothing about Gym's failure types; ``nemo_gym.core.typed_exceptions`` builds on them.
 """
 
 from collections.abc import Iterator
