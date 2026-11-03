@@ -19,7 +19,11 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.models.token_capture.fingerprint import FINGERPRINT_VERSION, tool_call_turn_fingerprint
+from nemo_gym.models.token_capture.fingerprint import (
+    FINGERPRINT_VERSION,
+    echoed_tool_call_turn_fingerprints,
+    tool_call_turn_fingerprint,
+)
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore, stamp_continuation
 from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.models.token_capture.staging.digest import EMPTY_EXTRAS_DIGEST, compute_chain_hash, hash_token_ids
@@ -260,8 +264,10 @@ def test_placeholder_keeps_the_served_turn_key_and_other_renames_do_not() -> Non
     placeholder[2] = {**placeholder[2], "name": "invalid", "arguments": '{"error":"unavailable","tool":"Read"}'}
     renamed = deepcopy(served)
     renamed[2] = {**renamed[2], "name": "invalid", "arguments": "{}"}
-    assert tool_call_turn_fingerprint(placeholder) == tool_call_turn_fingerprint(served)
-    assert tool_call_turn_fingerprint(renamed) != tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(placeholder, read_placeholders=True) == tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(renamed, read_placeholders=True) != tool_call_turn_fingerprint(served)
+    # Keys of served output never read placeholders.
+    assert tool_call_turn_fingerprint(placeholder) != tool_call_turn_fingerprint(served)
 
 
 @pytest.mark.parametrize(
@@ -280,7 +286,7 @@ def test_only_the_exact_placeholder_shape_keeps_the_served_turn_key(name: str, a
     served = _turn()
     echoed = deepcopy(served)
     echoed[2] = {**echoed[2], "name": name, "arguments": arguments}
-    assert tool_call_turn_fingerprint(echoed) != tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(served) not in echoed_tool_call_turn_fingerprints(echoed)
 
 
 def test_placeholder_in_a_chat_tool_call_keeps_the_served_turn_key() -> None:
@@ -295,8 +301,43 @@ def test_placeholder_in_a_chat_tool_call_keeps_the_served_turn_key() -> None:
     )
     renamed = chat_turn("Write", '{"filePath": "/app/notes.md"}')
     assert tool_call_turn_fingerprint(served)
-    assert tool_call_turn_fingerprint(echoed) == tool_call_turn_fingerprint(served)
-    assert tool_call_turn_fingerprint(renamed) != tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(served) in echoed_tool_call_turn_fingerprints(echoed)
+    assert tool_call_turn_fingerprint(served) not in echoed_tool_call_turn_fingerprints(renamed)
+
+
+def _placeholder_shaped(error: str) -> list[dict]:
+    """A model turn whose own call has the placeholder's shape: the model called `invalid` itself."""
+    turn = _turn()
+    turn[2] = {**turn[2], "name": "invalid", "arguments": json.dumps({"tool": "Read", "error": error})}
+    return turn
+
+
+@pytest.mark.asyncio
+async def test_a_served_placeholder_shaped_call_resolves_when_its_echo_rewrites_arguments(stores) -> None:
+    await _publish(stores, output=_placeholder_shaped("bad"))
+    request = _request()
+    request[3] = _placeholder_shaped("bad, as the harness re-serialized it")[2]
+    result = await stores[2].resolve("r", request)
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.match.model_call_id == "a"
+    assert result.reason == "tool_call_turn"
+
+
+@pytest.mark.asyncio
+async def test_a_served_placeholder_shaped_call_keeps_its_stored_key_across_replay(tmp_path) -> None:
+    # Stored keys never read placeholders, so a ledger written before this mapping existed holds the same key, and
+    # replaying its commit after a checkpoint import stays a no-op instead of a conflicting record.
+    output = _placeholder_shaped("bad")
+    commit = _commit("a", output, TOKENS, FINGERPRINT_VERSION)
+    writer = FileLineageStore(tmp_path)
+    await writer.record(commit)
+    [row] = writer.export_rows("r")
+    assert row["tool_call_turn_fingerprint"] == tool_call_turn_fingerprint(output)
+    assert row["tool_call_turn_fingerprint"] != tool_call_turn_fingerprint(output, read_placeholders=True)
+    restored = FileLineageStore(tmp_path / "restored")
+    restored.import_rows("r", [row])
+    await restored.record(commit)
+    assert restored.export_rows("r") == [row]
 
 
 @pytest.mark.asyncio

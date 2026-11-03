@@ -86,6 +86,7 @@ from nemo_gym.models.token_capture.fingerprint import (
     _tools_of,
     assistant_fingerprint,
     canonicalize_tool_arguments,
+    echoed_tool_call_turn_fingerprints,
     tool_call_turn_fingerprint,
 )
 from nemo_gym.models.token_capture.records import (
@@ -501,8 +502,8 @@ def _content_witness(
         # Fourth reading: the complete trailing model turn, ignoring only tool
         # arguments. Tool IDs alone cannot corroborate changed/missing output
         # or an uncaptured final assistant message (the #3972 witness contract).
-        target_turn = tool_call_turn_fingerprint(trailing)
-        if target_turn:
+        target_turns = echoed_tool_call_turn_fingerprints(trailing)
+        if target_turns:
             trailing_ids = {call_id for item in trailing for call_id, _, _ in _tools_of(item)}
             earlier_ids = {
                 call_id
@@ -521,7 +522,7 @@ def _content_witness(
                     own_turn = tool_call_turn_fingerprint(list(entry.output_items))
                 except (TypeError, ValueError):
                     continue
-                if own_turn == target_turn:
+                if own_turn in target_turns:
                     id_matches[entry.model_call_id] = entry
             winner = _collapse_identical(list(id_matches.values()))
             if winner is not None:

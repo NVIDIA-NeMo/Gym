@@ -318,11 +318,6 @@ def _served_tool_name(name: str, arguments: str) -> str:
     OpenCode echoes a call to a tool it does not offer as a call to its ``invalid`` tool with the
     same ID and ``{"tool": <the served name>, "error": <message>}`` as arguments. Any other call
     keeps its name, so a renamed call still cannot match.
-
-    This only moves the unversioned whole-turn key, never the strict fingerprint, so
-    ``FINGERPRINT_VERSION`` stays. In the rare case that a served output itself holds a model-emitted
-    call of exactly this shape, its turn key changes too, so a lineage store written before this
-    mapping disagrees with one replayed after it on such a call.
     """
     if name != _UNAVAILABLE_TOOL_PLACEHOLDER:
         return name
@@ -336,17 +331,21 @@ def _served_tool_name(name: str, arguments: str) -> str:
     return served if isinstance(served, str) and served and isinstance(payload["error"], str) else name
 
 
-def tool_call_turn_fingerprint(items: list[dict]) -> str:
+def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: bool = False) -> str:
     """Fingerprint a complete model turn while tolerating rewritten tool arguments.
 
     Every tool ID and name, their order, and all non-tool assistant content must
     agree. Missing/duplicate IDs abstain; they cannot identify a served call.
-    A call OpenCode rewrote into its unavailable-tool placeholder counts under the
-    name it was served with (``_served_tool_name``).
     Chat/Anthropic bundled turns and Responses items use the same canonical
     fields as the strict fingerprint. Empty assistant items remain accounted for.
     This fallback key supplements the versioned content fingerprint and the
     request-context digest in both in-memory and durable lineage indexes.
+
+    ``read_placeholders`` reads a call in OpenCode's unavailable-tool placeholder
+    as the call the model was served (``_served_tool_name``). Only a lookup of a
+    harness's echoed history sets it, next to the key without it
+    (``echoed_tool_call_turn_fingerprints``). Keys of served output never set it,
+    so stored keys keep their meaning across this change.
     """
     hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
     seen_ids: set[str] = set()
@@ -367,8 +366,22 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
                 return ""
             seen_ids.add(call_id)
             _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", _served_tool_name(name, arguments))
+            _update_field(hasher, b"\x03", _served_tool_name(name, arguments) if read_placeholders else name)
     return hasher.hexdigest() if seen_ids else ""
+
+
+def echoed_tool_call_turn_fingerprints(items: list[dict]) -> list[str]:
+    """The fallback keys an echoed model turn can match: as echoed, then with placeholders read.
+
+    A lookup pools the candidates of every key before it decides uniqueness, so a served call
+    that itself looks like the placeholder still matches its stored key.
+    """
+    keys: list[str] = []
+    for read_placeholders in (False, True):
+        key = tool_call_turn_fingerprint(items, read_placeholders=read_placeholders)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def trailing_assistant_turn(messages: list[dict]) -> list[dict]:
