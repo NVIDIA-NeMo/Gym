@@ -16,6 +16,7 @@ Flow for one request a Gym server serves:
 
 import json
 import logging
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -227,11 +228,16 @@ class StreamFailureReportReader:
         {"response.completed", "response.incomplete", "response.failed"}
     )
     _FIELD: ClassVar[bytes] = FailureHeader.STREAM_FIELD.encode()
+    # The report field as a JSON object key: after ``{``, ``,`` or whitespace and before ``:``. Answer text that only
+    # mentions the name sits inside a JSON string, where its quotes are escaped, so it never matches.
+    _KEY: ClassVar[re.Pattern[bytes]] = re.compile(rb'[{,\s]"' + re.escape(_FIELD) + rb'"\s{0,8}:')
+    # Bytes kept from a skipped line's end, enough to find the key across a chunk boundary.
+    _KEY_TAIL: ClassVar[int] = len(_FIELD) + 12
 
     def __init__(self) -> None:
         self._pending = b""
         # Inside a line over ``_MAX_LINE_BYTES``: its bytes are dropped up to its newline, keeping only enough at the
-        # end of ``_pending`` to find the report field across chunks. Whether that line carried the field so far.
+        # end of ``_pending`` to find the report key across chunks. Whether that line carried the key so far.
         self._skipping = False
         self._skipped_field = False
         self.report: FailureReport | None = None
@@ -253,21 +259,21 @@ class StreamFailureReportReader:
         for line in lines:
             if self._skipping:
                 # The newline that ends an oversized line: the line after it is framed as usual.
-                carried = self._skipped_field or self._FIELD in line
+                carried = self._skipped_field or self._KEY.search(line) is not None
                 self._skipping = self._skipped_field = False
                 if carried:
                     self._merge(FailureReport(omitted=True))
                 continue
             if len(line) > self._MAX_LINE_BYTES:
-                # An oversized event is not read; only one that carries a report loses failure evidence.
-                if self._FIELD in line:
+                # An oversized event is not read; only one that carries a report key loses failure evidence.
+                if self._KEY.search(line) is not None:
                     self._merge(FailureReport(omitted=True))
                 continue
             self._read_line(line)
         if self._skipping or len(self._pending) > self._MAX_LINE_BYTES:
             self._skipping = True
-            self._skipped_field = self._skipped_field or self._FIELD in self._pending
-            self._pending = self._pending[-(len(self._FIELD) - 1) :]
+            self._skipped_field = self._skipped_field or self._KEY.search(self._pending) is not None
+            self._pending = self._pending[-self._KEY_TAIL :]
 
     def _read_line(self, line: bytes) -> None:
         if not line.startswith(b"data: ") or self._FIELD not in line:
