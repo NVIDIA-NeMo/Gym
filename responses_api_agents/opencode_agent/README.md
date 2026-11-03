@@ -72,6 +72,14 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
+`network_access: model_only` limits an agent-owned sandbox's egress to the model
+server's host; `model_and_tools` also allows the host of each MCP grant. Each
+allowed host is open on every port. The OpenSandbox policy is set when the sandbox
+is created, so a session that borrows a task sandbox rejects any value other than
+`inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download
+the runtime: see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity).
+
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with
 apt-get or apk when running as root; otherwise preinstall it.
