@@ -1120,7 +1120,7 @@ def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox
     ids=["exit-code", "explicit-nonzero-with-error", "completed"],
 )
 def test_execution_outcome_maps_sdk_results(execution: Any, expected: tuple[int, str | None, str | None]) -> None:
-    assert opensandbox_provider._execution_outcome(execution) == expected
+    assert opensandbox_provider._execution_outcome(execution, operation="exec", sandbox_id="sb") == expected
 
 
 @pytest.mark.parametrize(
@@ -1132,8 +1132,12 @@ def test_execution_outcome_maps_sdk_results(execution: Any, expected: tuple[int,
     ],
 )
 def test_execution_outcome_rejects_unknown_or_contradictory_status(execution: Any, message: str) -> None:
-    with pytest.raises(opensandbox_provider._CommandOutcomeUnavailable, match=message):
-        opensandbox_provider._execution_outcome(execution)
+    with pytest.raises(NgFailureEvent, match=message) as exc_info:
+        opensandbox_provider._execution_outcome(execution, operation="exec", sandbox_id="sb")
+    assert exc_info.value.failure_kind == PROVIDER_COMMAND_OUTCOME_UNKNOWN
+    assert exc_info.value.boundary == "sandbox"
+    assert exc_info.value.operation == "exec"
+    assert exc_info.value.sandbox.sandbox_id == "sb"
 
 
 @pytest.mark.parametrize(

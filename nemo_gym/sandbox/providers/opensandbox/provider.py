@@ -92,14 +92,6 @@ class _MissingSandboxTerminateFilter(logging.Filter):
 logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSandboxTerminateFilter())
 
 
-class _CommandOutcomeUnavailable(ValueError):
-    """The SDK returned no trustworthy command outcome; translated at the provider boundary."""
-
-
-class SandboxBackendUnreachableError(RuntimeError):
-    """Legacy import; runtime failures now raise NgFailureEvent with a provider kind."""
-
-
 @dataclass(frozen=True)
 class _SandboxDeathNotice:
     message: str
@@ -312,6 +304,23 @@ def _is_retryable_create_error(
     return failure_outcome_policy(failure, config=config or OpenSandboxCreateOutcomePolicy()) == OutcomeAction.RETRY
 
 
+def _retry_delay(error: BaseException | None, *, fallback: float) -> float:
+    """Honor this request's Retry-After without searching other failure events' causes."""
+    if not isinstance(error, NgFailureEvent) or error.http_status != 429:
+        return fallback
+    import httpx
+    from opensandbox.exceptions import SandboxApiException
+
+    from nemo_gym.sandbox.providers._http_transport import _retry_after_seconds
+
+    cause = error.__cause__
+    if isinstance(cause, SandboxApiException):
+        cause = cause.__cause__
+    if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 429:
+        return _retry_after_seconds(cause.response.headers.get("Retry-After"), fallback=fallback)
+    return fallback
+
+
 def _is_deleted_output_error(exception: BaseException) -> bool:
     """Return whether a log read failed because execd's output file for the command is gone.
 
@@ -337,7 +346,9 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
-def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
+def _execution_outcome(
+    execution: Any, *, operation: str, sandbox_id: str, execution_id: str | None = None
+) -> tuple[int, str | None, str | None]:
     """Map a streamed SDK execution to ``(return_code, error_type, stderr_note)``.
 
     The SDK fills in ``exit_code=0`` itself once execd sends its completion
@@ -345,14 +356,22 @@ def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
     even if it contains partial logs or an error without an exit status.
     """
     if execution.exit_code is not None:
-        if execution.exit_code == 0 and execution.error is not None:
-            raise _CommandOutcomeUnavailable("OpenSandbox command reported both exit code 0 and an error")
-        return execution.exit_code, None, None
-    if execution.error is not None:
-        raise _CommandOutcomeUnavailable("OpenSandbox command reported an error without an exit code")
-    if execution.complete is not None:
+        if execution.exit_code != 0 or execution.error is None:
+            return execution.exit_code, None, None
+        reason = "OpenSandbox command reported both exit code 0 and an error"
+    elif execution.error is not None:
+        reason = "OpenSandbox command reported an error without an exit code"
+    elif execution.complete is not None:
         return 0, None, None
-    raise _CommandOutcomeUnavailable("OpenSandbox command ended without an exit code, error or completion event")
+    else:
+        reason = "OpenSandbox command ended without an exit code, error or completion event"
+    raise sandbox_failure(
+        operation=operation,
+        sandbox_id=sandbox_id,
+        execution_id=execution_id,
+        failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+        reason=reason,
+    )
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -1203,7 +1222,7 @@ class OpenSandboxProvider:
         if self._connection.transport_backend == "aiohttp":
             from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
-            return GymAiohttpTransport(verify=self._connection.tls_verify, rate_limit_retries=0)
+            return GymAiohttpTransport(verify=self._connection.tls_verify, raise_on_rate_limit=True)
 
         import httpx
 
@@ -1486,13 +1505,13 @@ class OpenSandboxProvider:
                 and failure_outcome_policy(error, config=self._operations.outcome_policy) == OutcomeAction.RETRY
             )
 
+        backoff = wait_random_exponential(
+            multiplier=self._operations.retry_delay_s, max=self._operations.retry_max_delay_s
+        )
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(retry_allowed),
             stop=stop_after_attempt(max_attempts),
-            wait=wait_random_exponential(
-                multiplier=self._operations.retry_delay_s,
-                max=self._operations.retry_max_delay_s,
-            ),
+            wait=lambda state: _retry_delay(state.outcome.exception(), fallback=backoff(state)),
             before_sleep=_before_sleep,
             reraise=True,
         )
@@ -1731,7 +1750,10 @@ class OpenSandboxProvider:
                     if last_exception is e:
                         raise
                     raise last_exception from e
-                sleep_s = min(self._create.connect_poll_s, max(deadline - loop.time(), 0.0))
+                sleep_s = min(
+                    _retry_delay(last_exception, fallback=self._create.connect_poll_s),
+                    max(deadline - loop.time(), 0.0),
+                )
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
 
@@ -2064,6 +2086,7 @@ class OpenSandboxProvider:
         spec: SandboxSpec,
     ) -> SandboxHandle:
         AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
+        backoff = wait_random_exponential(multiplier=self._create.retry_delay_s, max=self._create.retry_max_delay_s)
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(
                 lambda error: _is_retryable_create_error(
@@ -2071,10 +2094,7 @@ class OpenSandboxProvider:
                 )
             ),
             stop=stop_after_attempt(self._create.retries + 1),
-            wait=wait_random_exponential(
-                multiplier=self._create.retry_delay_s,
-                max=self._create.retry_max_delay_s,
-            ),
+            wait=lambda state: _retry_delay(state.outcome.exception(), fallback=backoff(state)),
             before_sleep=_log_create_retry,
             reraise=True,
         )
@@ -2201,7 +2221,9 @@ class OpenSandboxProvider:
             stderr_parts = [msg.text for msg in execution.logs.stderr]
             if execution.error is not None:
                 stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
-            return_code, error_type, note = _execution_outcome(execution)
+            return_code, error_type, note = _execution_outcome(
+                execution, operation="exec", sandbox_id=handle.sandbox_id, execution_id=getattr(execution, "id", None)
+            )
             if note is not None:
                 stderr_parts.append(note)
             stderr = "\n".join(stderr_parts) or None
@@ -2257,10 +2279,6 @@ class OpenSandboxProvider:
                 operation="exec",
                 sandbox_id=handle.sandbox_id,
                 cause=error,
-                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN
-                if isinstance(error, _CommandOutcomeUnavailable)
-                else None,
-                reason=str(error) if isinstance(error, _CommandOutcomeUnavailable) else None,
             ) from error
 
     async def _sandbox_death_evidence(
@@ -2395,7 +2413,12 @@ class OpenSandboxProvider:
         )
         execution_id = getattr(execution, "id", None)
         if not execution_id:
-            raise _CommandOutcomeUnavailable("OpenSandbox background command did not return an execution id")
+            raise sandbox_failure(
+                operation="exec",
+                sandbox_id=handle.sandbox_id,
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason="OpenSandbox background command did not return an execution id",
+            )
 
         # The server enforces the command timeout; leave the client headroom.
         deadline = (
@@ -2486,7 +2509,9 @@ class OpenSandboxProvider:
                 if status.running is False:
                     break
             limits = [value for value in (deadline, status_failure_deadline) if value is not None]
-            delay = min(poll_interval, max(0, min(limits) - loop.time())) if limits else poll_interval
+            delay = _retry_delay(status_failure_error, fallback=poll_interval)
+            if limits:
+                delay = min(delay, max(0, min(limits) - loop.time()))
             await asyncio.sleep(delay)
             poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
 
@@ -2531,15 +2556,21 @@ class OpenSandboxProvider:
         error_type = None
         if status.exit_code is not None:
             if status.exit_code == 0 and status_error is not None:
-                raise _CommandOutcomeUnavailable(
-                    f"OpenSandbox background command reported both exit code 0 and an error; "
-                    f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+                raise sandbox_failure(
+                    operation="exec",
+                    sandbox_id=handle.sandbox_id,
+                    execution_id=execution_id,
+                    failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                    reason="OpenSandbox background command reported both exit code 0 and an error",
                 )
             return_code = status.exit_code
         else:
-            raise _CommandOutcomeUnavailable(
-                f"OpenSandbox background command finished without an exit code; "
-                f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+            raise sandbox_failure(
+                operation="exec",
+                sandbox_id=handle.sandbox_id,
+                execution_id=execution_id,
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason="OpenSandbox background command finished without an exit code",
             )
 
         return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
@@ -2681,16 +2712,12 @@ class OpenSandboxProvider:
             return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
         if execution.error is not None:
             stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
-        try:
-            return_code, error_type, note = _execution_outcome(execution)
-        except _CommandOutcomeUnavailable as error:
-            raise sandbox_failure(
-                operation="run_in_session",
-                sandbox_id=handle.sandbox_id,
-                cause=error,
-                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
-                reason=str(error),
-            ) from error
+        return_code, error_type, note = _execution_outcome(
+            execution,
+            operation="run_in_session",
+            sandbox_id=handle.sandbox_id,
+            execution_id=getattr(execution, "id", None),
+        )
         if note is not None:
             stderr_parts.append(note)
         return SandboxExecResult(stdout, "\n".join(stderr_parts) or None, return_code, error_type)

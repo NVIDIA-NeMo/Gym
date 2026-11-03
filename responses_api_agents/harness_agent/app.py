@@ -46,7 +46,6 @@ from nemo_gym.core import (
 from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     ConnectableProvider,
-    SandboxBackendUnreachableError,
     SandboxCreateError,
     SandboxSpec,
     create_provider,
@@ -97,19 +96,12 @@ _WORKDIR_KEYS = {
 }
 
 
-# Markers in a provider failure's own message that name an OOM kill (OpenSandbox's 410 status and its typed backend loss).
-_OOM_MARKERS = ("exited with code 137", "OOMKilled", "Sandbox was OOM-killed")
-
-
 def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
 
-    Shared sandbox events retain their explicit kind; text never overrides them.
-    For legacy providers, only a failure the provider reports counts: the OpenSandbox SDK's exceptions (e.g. ``SANDBOX::ENDED`` when the
-    container was OOM-killed or evicted), Gym's ``SandboxCreateError`` and ``SandboxBackendUnreachableError``, and a
-    timeout or dropped connection while the episode runs (to the sandbox or to the resources server). Runner output
-    never decides it, and a runner that exits on a signal stays a runner failure: the agent's own commands can send it.
-    Messages naming an OOM kill are reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
+    Shared sandbox events retain their explicit kind. Other provider exceptions identify
+    infrastructure failure but do not establish OOM from message text or exit codes.
+    Runner output never decides it: the agent's own commands can exit on a signal.
     """
     if isinstance(exc, NgFailureEvent):
         return exc.failure_kind if exc.boundary == FailureBoundary.SANDBOX else None
@@ -117,12 +109,10 @@ def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     infra = (
         "SandboxApiException" in names
         or type(exc).__module__.startswith("opensandbox.")
-        or isinstance(exc, (SandboxCreateError, SandboxBackendUnreachableError, TimeoutError, ConnectionError))
+        or isinstance(exc, (SandboxCreateError, TimeoutError, ConnectionError))
     )
     if not infra:
         return None
-    if any(marker in str(exc) for marker in _OOM_MARKERS):
-        return failure_kinds.PROVIDER_OOM_KILLED
     return failure_kinds.PROVIDER_UNAVAILABLE
 
 
