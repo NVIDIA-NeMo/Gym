@@ -1503,6 +1503,7 @@ class SlurmExecutor(BaseExecutor):
         decision: RecoveryDecision,
         *,
         judge_partition: str | None = None,
+        judge_qos: str | None = None,
         repin: str | None = None,
         repin_reason: str | None = None,
     ) -> RecoveryOutcome:
@@ -1512,7 +1513,7 @@ class SlurmExecutor(BaseExecutor):
         chain's remaining walltime allowance, as before. Any other submission, one that served its policy on GPUs,
         runs it on a CPU-only judge execution profile derived from its saved config (``_queue_judge_job``): the run's
         own judge and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the
-        launcher's reader placement), for the run's segment walltime bounded by the partition's MaxTime, at the run's
+        launcher's reader placement, with ``judge_qos`` or a QOS derived for it), for the run's segment walltime bounded by the partition's MaxTime, at the run's
         pinned Gym commit or ``repin``. Either way the job settles through ``gym eval reverify --judge-failed-only
         --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
         """
@@ -1550,6 +1551,7 @@ class SlurmExecutor(BaseExecutor):
                     evidence,
                     config,
                     judge_partition=judge_partition,
+                    judge_qos=judge_qos,
                     repin=repin,
                     repin_reason=repin_reason,
                 )
@@ -1728,6 +1730,7 @@ class SlurmExecutor(BaseExecutor):
         config: SubmitConfig,
         *,
         judge_partition: str | None,
+        judge_qos: str | None = None,
         repin: str | None,
         repin_reason: str | None,
     ) -> RecoveryOutcome:
@@ -1790,7 +1793,13 @@ class SlurmExecutor(BaseExecutor):
         compute = config.compute[record.cluster]
         probe = compute.model_copy(update={"node_pools": {JUDGE_POOL_NAME: NodePool(partition=partition)}})
         profile = judge_execution_profile(
-            config, record.cluster, partition, source, _partition_time_limit(conn, probe)
+            config,
+            record.cluster,
+            partition,
+            source,
+            _partition_time_limit(conn, probe),
+            qos=judge_qos,
+            reader_srun=os.environ.get(READER_SRUN_ENV),
         )
         if evidence.source_digests is None or evidence.accounting_snapshot is None:
             return stopped("saved source or accounting snapshot is unavailable; collect the evidence again")
