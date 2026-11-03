@@ -4423,6 +4423,15 @@ def _observed_trial_operations(
                 incomplete[_identity(row)] = _trajectory_kinds(observed) or ["operation_join_incomplete"]
             # Every recorded model failure is accounted for: a failure is never hidden behind a graded answer.
             fresh = {key: value for key, value in recovered_events.items() if key not in prior_recovered_events}
+            # A graded row whose rollout ended on the model's own failed request (its context limit, say) is a model
+            # result at any reward: the verifier graded the state the model reached. That request's failure is
+            # accounted for; one of an evaluation-side kind is not.
+            ended = _ended_on_failed_request(row) if _reward(row) not in (None, 0) else None
+            if ended is not None and ended[0] in MODEL_FAULT_KINDS:
+                report = (ended[1].get("response_metadata") or {}).get("failure_report")
+                events = report.get("events") if isinstance(report, dict) else None
+                if isinstance(events, dict):
+                    fresh |= {key: event for key, event in events.items() if isinstance(event, dict)}
             if _unaccounted_failures(row, fresh):
                 return False
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -4593,67 +4602,78 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     found: dict[Identity, str] = {}
     infrastructure = infrastructure_timeouts(decision, collected)
     for row in (collected.results or []) if collected is not None else []:
-        observed = row.get("ng_trial_observations")
         reward = row.get("reward")
         if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
             continue
         if _identity(row) in infrastructure:
             continue  # Counted once, as its agent timeout's server-side fault.
-        invocations = observed.get("invocations") if isinstance(observed, dict) else None
-        # No invocation names a call: an agent that recorded no tool exchange has none at all.
-        unreferenced = isinstance(invocations, list) and all(
-            isinstance(item, dict) and item.get("model_calls") == [] for item in invocations
-        )
-        if unreferenced and isinstance(observed.get("model_calls"), list):
-            own = _last_captured_call([call for call in observed["model_calls"] if _policy_call(row, call)])
-            if own is not None and (refused := _length_refusal_kind(own.get("response_metadata"))):
-                found[_identity(row)] = refused
-                continue
-            last = _last_captured_call(observed["model_calls"])
-            failed = _failed_request(last)
-            if failed is not None:
-                found[_identity(row)] = status_fault_kind(failed[0], failed[1], policy=_policy_call(row, last))
-            continue
-        if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
-            continue
-        refs, calls = invocations[0].get("model_calls"), observed.get("model_calls")
-        if not isinstance(refs, list) or not refs or not isinstance(refs[-1], dict) or not isinstance(calls, list):
-            continue
-        ref = refs[-1]
-        last = [
-            call
-            for call in calls
-            if isinstance(call, dict)
-            and isinstance(call.get("response_metadata"), dict)
-            and (
-                call.get("model_call_id") == ref["model_call_id"]
-                if ref.get("model_call_id")
-                else ref.get("response_id") is not None
-                and call["response_metadata"].get("response_id") == ref["response_id"]
-                and call["response_metadata"].get("model_ref") == ref.get("model_ref")
-            )
-        ]
-        meta = last[0]["response_metadata"] if len(last) == 1 else None
-        if meta is not None and _policy_call(row, last[0]) and (refused := _length_refusal_kind(meta)):
-            found[_identity(row)] = refused
-            continue
-        operations = meta.get("model_operations") if isinstance(meta, dict) else None
-        report = meta.get("failure_report") if isinstance(meta, dict) else None
-        if not isinstance(operations, list) or not operations or not isinstance(operations[-1], dict):
-            continue
-        final = operations[-1]
-        events = report.get("events") if isinstance(report, dict) else None
-        event = events.get(final.get("failure_id")) if isinstance(events, dict) else None
-        if (
-            final.get("outcome") == "failed"
-            and isinstance(event, dict)
-            and event.get("boundary") == "model"
-            and event.get("operation") == "model_request"
-            and event.get("operation_id") == final.get("operation_id")
-            and isinstance(event.get("failure_kind"), str)
-        ):
-            found[_identity(row)] = status_fault_kind(event["failure_kind"], event.get("http_status"))
+        ended = _ended_on_failed_request(row)
+        if ended is not None:
+            found[_identity(row)] = ended[0]
     return found
+
+
+def _ended_on_failed_request(row: Mapping[str, Any]) -> tuple[Any, Mapping[str, Any]] | None:
+    """The failure kind of the request a row's rollout ended on, with that call, or None (``final_zero_trials``).
+
+    The last policy call of the row's one invocation ended in a failed model operation whose failure event the call
+    recorded, or, for an agent that recorded no call of its own, its last captured call failed that way; a policy whose
+    own last call was rejected on length ended there, whatever its event's kind.
+    """
+    observed = row.get("ng_trial_observations")
+    invocations = observed.get("invocations") if isinstance(observed, dict) else None
+    # No invocation names a call: an agent that recorded no tool exchange has none at all.
+    unreferenced = isinstance(invocations, list) and all(
+        isinstance(item, dict) and item.get("model_calls") == [] for item in invocations
+    )
+    if unreferenced and isinstance(observed.get("model_calls"), list):
+        own = _last_captured_call([call for call in observed["model_calls"] if _policy_call(row, call)])
+        if own is not None and (refused := _length_refusal_kind(own.get("response_metadata"))):
+            return refused, own
+        last = _last_captured_call(observed["model_calls"])
+        failed = _failed_request(last)
+        if failed is not None:
+            return status_fault_kind(failed[0], failed[1], policy=_policy_call(row, last)), last
+        return None
+    if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
+        return None
+    refs, calls = invocations[0].get("model_calls"), observed.get("model_calls")
+    if not isinstance(refs, list) or not refs or not isinstance(refs[-1], dict) or not isinstance(calls, list):
+        return None
+    ref = refs[-1]
+    last = [
+        call
+        for call in calls
+        if isinstance(call, dict)
+        and isinstance(call.get("response_metadata"), dict)
+        and (
+            call.get("model_call_id") == ref["model_call_id"]
+            if ref.get("model_call_id")
+            else ref.get("response_id") is not None
+            and call["response_metadata"].get("response_id") == ref["response_id"]
+            and call["response_metadata"].get("model_ref") == ref.get("model_ref")
+        )
+    ]
+    meta = last[0]["response_metadata"] if len(last) == 1 else None
+    if meta is not None and _policy_call(row, last[0]) and (refused := _length_refusal_kind(meta)):
+        return refused, last[0]
+    operations = meta.get("model_operations") if isinstance(meta, dict) else None
+    report = meta.get("failure_report") if isinstance(meta, dict) else None
+    if not isinstance(operations, list) or not operations or not isinstance(operations[-1], dict):
+        return None
+    final = operations[-1]
+    events = report.get("events") if isinstance(report, dict) else None
+    event = events.get(final.get("failure_id")) if isinstance(events, dict) else None
+    if (
+        final.get("outcome") == "failed"
+        and isinstance(event, dict)
+        and event.get("boundary") == "model"
+        and event.get("operation") == "model_request"
+        and event.get("operation_id") == final.get("operation_id")
+        and isinstance(event.get("failure_kind"), str)
+    ):
+        return status_fault_kind(event["failure_kind"], event.get("http_status")), last[0]
+    return None
 
 
 def _grading_facts(row: Mapping[str, Any]) -> Mapping[str, Any]:
