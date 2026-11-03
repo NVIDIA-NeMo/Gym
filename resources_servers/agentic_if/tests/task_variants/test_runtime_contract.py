@@ -309,7 +309,7 @@ def test_prefix_event_receipts_are_rejected_not_ignored():
 
 
 def test_gym_collation_of_a_sealed_flat_row_keeps_its_content_identity():
-    from nemo_gym.task_materialization import materialize_task
+    from nemo_gym.data import materialize_task
     from resources_servers.agentic_if.task_variants.builder import digest
     from resources_servers.agentic_if.task_variants.materialization import sealed_task_input
 

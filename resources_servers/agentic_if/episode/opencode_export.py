@@ -17,7 +17,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models import ResponsesConverter
 from resources_servers.agentic_if.episode.opencode_profile import model_visible_tool_input, model_visible_tool_output
 
 

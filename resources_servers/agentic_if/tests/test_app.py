@@ -23,13 +23,16 @@ from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId, rollout_context
+from nemo_gym.data import validate_jsonl_rows
 from nemo_gym.sandbox.providers import SandboxExecResult
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.task_data import validate_jsonl_rows
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from nemo_gym.verification import JudgeError
 from resources_servers.agentic_if import app as app_module
 from resources_servers.agentic_if import opencode_bundle

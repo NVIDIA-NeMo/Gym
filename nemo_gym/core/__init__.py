@@ -53,6 +53,7 @@ if TYPE_CHECKING:
         CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
         REQUIRED_TOKEN_METADATA_FIELDS,
         RESPONSES_TO_TRAIN,
+        SSE_KEEPALIVE,
         TOKEN_METADATA_FIELDS,
         NeMoGymChatCompletion,
         NeMoGymChatCompletionAssistantMessageForTrainingParam,
@@ -93,7 +94,6 @@ if TYPE_CHECKING:
         NeMoGymResponseReasoningItem,
         NeMoGymResponseUsage,
         NeMoGymSummary,
-        ReasoningEffort,
         accumulate_response_usage,
     )
 
@@ -155,9 +155,9 @@ _PUBLIC_API = {
     "PROVIDER_UNAVAILABLE": "failure_kinds",
     "REQUIRED_TOKEN_METADATA_FIELDS": "responses_api_types",
     "RESPONSES_TO_TRAIN": "responses_api_types",
-    "ReasoningEffort": "responses_api_types",
     "SESSION_EXPIRED": "failure_kinds",
     "SESSION_LOST": "failure_kinds",
+    "SSE_KEEPALIVE": "responses_api_types",
     "TOKEN_METADATA_FIELDS": "responses_api_types",
     "TaskId": "episode",
     "VERIFIER_ERROR": "failure_kinds",

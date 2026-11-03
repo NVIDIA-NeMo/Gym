@@ -6,8 +6,7 @@ from pathlib import Path
 import yaml
 
 from benchmarks.agentic_if import prepare
-from nemo_gym.benchmarks import BenchmarkConfig
-from nemo_gym.environment import load_manifest, resolve_manifest_config_path
+from nemo_gym.environment import BenchmarkConfig, load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 from resources_servers.agentic_if import opencode_bundle
 

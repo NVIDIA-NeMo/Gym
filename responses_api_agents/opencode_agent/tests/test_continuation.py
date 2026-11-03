@@ -14,8 +14,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.agent_activation_types import AgentContinuationRequirements
-from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
+from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest, AgentContinuationRequirements
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
@@ -209,7 +208,7 @@ def test_close_retains_recovered_activation_once(setup, tmp_path, monkeypatch, p
             earlier = roots(state.observations.model_dump(mode="json"))[0]
         index = 2 if prior_success else 1
         stop = AsyncMock(side_effect=[RuntimeError("temporary receipt unavailable"), dict(sandbox.result)])
-        monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+        monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
         capture = AsyncMock(wraps=state.collect_artifacts)
         state.collect_artifacts = capture
         assert activate(client, index).status_code == 500
@@ -266,7 +265,7 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
     body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
     await agent.seed_agent_session(request, body)
     stop = AsyncMock(side_effect=[asyncio.CancelledError(), dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     stop.assert_awaited_once()
@@ -299,7 +298,7 @@ async def test_close_without_recovered_root_preserves_activation(
     request = Request({**request.scope, "headers": [(AGENT_ACTIVATION_HEADER.encode(), str(index).encode())]})
     error = asyncio.CancelledError() if cancelled else RuntimeError("temporary receipt unavailable")
     stop = AsyncMock(side_effect=[error, dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="next task"))
     retained = state.observations.model_dump(mode="json")
@@ -387,9 +386,11 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     assert sandbox.disconnect.await_count == 1 and sandbox.stop.await_count == 0
 
 
-def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path, mode):
     agent, sandbox = setup
-    install_artifact_runner(sandbox, tmp_path)
+    agent.config.system_prompt_mode = mode
+    payloads = install_artifact_runner(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         request = start(client)
         assert activate(client, 1, "").status_code == 422
@@ -397,6 +398,18 @@ def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_pa
         assert activate(client, 2, instructions="Replace instructions").status_code == 422
         assert activate(client, 2, "A valid correction").status_code == 200
         assert sandbox.launch.call_count == 2
+        for index, payload in enumerate(payloads):
+            config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+            if mode == "replace":
+                assert config["agent"]["build"]["prompt"] == "Keep changes small"
+                assert "instructions" not in config
+            else:
+                assert "instructions" in config
+            assert payload["env"]["NEMO_GYM_OPENCODE_ACTIVATION_ID"] == (
+                f"{request.agent_session_id}:activation-{index + 1}"
+            )
+        continued = payloads[1]["command"]
+        assert continued[continued.index("--session") + 1] == "opencode-session"
         close(client, request)
 
 
@@ -628,11 +641,11 @@ def test_reported_error_retains_continuation_evidence(
 
 
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):
-    from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
-    from nemo_gym.observability.model_calls import ModelCallRecord
-    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
     from nemo_gym.trajectory import (
         AgentObservationBundle,
+        ModelCallRecord,
         TrajectoryRecord,
         join_agent_model_calls,
         join_assistant_message_calls,
@@ -752,12 +765,12 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
 
 @pytest.mark.parametrize("return_session_trajectory", [False, True])
 def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
-    from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
-    from nemo_gym.observability.model_calls import ModelCallRecord
-    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
     from nemo_gym.trajectory import (
         AgentObservationBundle,
         ContextCompactionObservation,
+        ModelCallRecord,
         TrajectoryRecord,
         join_agent_model_calls,
         join_assistant_message_calls,

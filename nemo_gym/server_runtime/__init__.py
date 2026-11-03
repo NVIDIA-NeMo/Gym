@@ -111,6 +111,7 @@ if TYPE_CHECKING:
         SingleAgentTurnResult,
         SingleAgentTurnTaskInput,
     )
+    from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
         DirectHTTPToolAccess,
         MCPStreamableHTTPConnection,
@@ -188,6 +189,7 @@ _PUBLIC_API = {
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
     "ToolAccess": "tool_access",
+    "check_resources_session_contract": "testing.session_conformance",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
     "harvest_tools": "mcp_auto_exposure",

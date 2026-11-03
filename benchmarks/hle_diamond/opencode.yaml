@@ -1,5 +1,5 @@
-# OpenCode sandboxed preset on the 728 text-only HLE-Diamond questions (the OpenCode adapter
-# accepts a single text user turn, so image questions are excluded). Mirrors benchmarks/hle/opencode.yaml.
+# OpenCode sandboxed preset on the 728 text-only HLE-Diamond questions, mirroring benchmarks/hle/opencode.yaml.
+# opencode_full.yaml runs the same agent on all 1000 questions, images attached through `opencode run -f`.
 config_paths:
 - benchmarks/hle_diamond/config.yaml
 - responses_api_agents/opencode_sandboxed_agent/configs/benchmark.yaml

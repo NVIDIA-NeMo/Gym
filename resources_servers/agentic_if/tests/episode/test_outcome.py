@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from resources_servers.agentic_if.episode.outcome import Verdict, classify, execution_status, setup_unverified
 from resources_servers.agentic_if.if_grading.contracts import SessionEvidence
 from resources_servers.agentic_if.tests.support import finished_session, response

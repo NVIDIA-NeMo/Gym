@@ -22,8 +22,11 @@ import resources_servers.swebench.patch_capture as patch_capture
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.scale_swe.app import (
     ScaleSWEResourcesServer,
     ScaleSWEResourcesServerConfig,

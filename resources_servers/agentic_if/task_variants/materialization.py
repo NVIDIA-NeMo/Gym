@@ -8,7 +8,7 @@ from collections.abc import Mapping
 def sealed_task_input(task: Mapping[str, object]) -> object:
     """Return a materialized task's sealed content.
 
-    Gym collation of a flat row (``nemo_gym.task_materialization.materialize_task``) takes the row's
+    Gym collation of a flat row (``nemo_gym.data.task_materialization.materialize_task``) takes the row's
     ``task_id`` as the task identity and keeps that field inside ``task_input``. The sealed content, and
     therefore the content digest, is everything else.
     """

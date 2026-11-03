@@ -14,8 +14,7 @@ from time import monotonic
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import AgentSeedRejectedError
+from nemo_gym.agents import AgentSeedRejectedError, SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.opencode_agent.app import _OPENCODE_ISOLATION, _private_directories
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment

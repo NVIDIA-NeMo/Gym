@@ -19,11 +19,9 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedRejectedError
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedRejectedError, SandboxSession, check_agent_seed_rejected
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.opencode_agent.app import (
     _CHECK_EXPORT_DIR,
     _CHECK_PLUGIN_FILES,
@@ -481,6 +479,16 @@ async def test_request_temperature_marks_the_native_model_entry(setup):
     assert set(config["provider"]["nemo_gym"]["models"]) == {"gpt-5.5"}
     assert config["provider"]["nemo_gym"]["models"]["gpt-5.5"]["temperature"] is True
     assert config["agent"] == {name: {"temperature": 0.6} for name in BUILTIN_AGENTS}
+
+
+async def test_prompt_replacement_keeps_request_sampling_on_the_build_agent(setup):
+    agent, sandbox = setup
+    agent.config.system_prompt_mode = "replace"
+    response, _ = await episode(agent, sandbox, instructions="outer", temperature=1.0, top_p=0.95)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    sampling = {"temperature": 1.0, "top_p": 0.95}
+    assert config["agent"] == {name: sampling for name in BUILTIN_AGENTS} | {"build": {**sampling, "prompt": "outer"}}
 
 
 @pytest.mark.parametrize("sampling", [{"temperature": 0.6}, {"top_p": 0.9}])

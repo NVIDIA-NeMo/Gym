@@ -29,34 +29,31 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Literal, Optional, Self
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from openai.types.responses.response import IncompleteDetails
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
-from nemo_gym.agent_activation_types import (
-    AgentContinuationCapabilities,
-)
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    SandboxSession,
-)
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
+    AgentContinuationCapabilities,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -283,6 +280,26 @@ class _ActivationDeadlineExpired(Exception):
     """The immutable activation window elapsed before process launch."""
 
 
+def _dump_with_serialized_member(value: dict[str, Any], member: str, serialized: str) -> str:
+    return (
+        "{"
+        + ",".join(
+            json.dumps(key) + ":" + (serialized if key == member else json.dumps(item)) for key, item in value.items()
+        )
+        + "}"
+    )
+
+
+def _serialize_replacement_config(config: dict[str, Any]) -> str:
+    """Keep only the replacement prompt literal through OpenCode's pre-JSON substitutions."""
+    agent = config["agent"]
+    build = agent["build"]
+    prompt = json.dumps(build["prompt"]).replace("{", "\\u007b")
+    build_json = _dump_with_serialized_member(build, "prompt", prompt)
+    agent_json = _dump_with_serialized_member(agent, "build", build_json)
+    return _dump_with_serialized_member(config, "agent", agent_json)
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -297,6 +314,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     repo_dir: Optional[str] = None
     thinking: bool = True
     system_prompt: Optional[str] = None
+    system_prompt_mode: Literal["append", "replace"] = "append"
     timeout: int = 900
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
@@ -316,7 +334,6 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
@@ -341,6 +358,17 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # compaction summaries left out), as continuation sessions always do. Without them, rollout collection builds one
     # turn per captured call, so the summary call of a compaction is counted as a step too.
     return_session_trajectory: bool = False
+
+    @model_validator(mode="after")
+    def _validate_prompt_agent(self) -> Self:
+        if self.system_prompt_mode == "replace" and any(
+            arg == "--agent" or arg.startswith("--agent=") for arg in self.extra_args
+        ):
+            raise ValueError(
+                "OpenCode replacement selects the build agent; remove --agent from extra_args "
+                "or use system_prompt_mode='append'."
+            )
+        return self
 
     @property
     def command_parts(self) -> list[str]:
@@ -528,6 +556,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout: float | None = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
+        try:
+            self.config._validate_prompt_agent()
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
         timeout = self.config.timeout if timeout is None else timeout
         await self._ensure_local_runtime()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
@@ -537,8 +569,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         data_home.mkdir(parents=True, exist_ok=True)
         self._write_opencode_config(project_dir, rollout_id)
         env = self._env(str(data_home), rollout_id)
+        if system_prompt and self.config.system_prompt_mode == "replace":
+            # Keep request-specific instructions out of a persistent repo's config file.
+            overrides = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
+            self._deep_merge(overrides, {"agent": {"build": {"prompt": system_prompt}}})
+            env["OPENCODE_CONFIG_CONTENT"] = _serialize_replacement_config(overrides)
+            prompt = instruction
 
         cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
+        if self.config.system_prompt_mode == "replace":
+            cmd.extend(["--agent", "build"])
         if self.config.thinking:
             cmd.append("--thinking")
         cmd.extend(self.config.extra_args)
@@ -612,7 +652,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         user_message, input_system = _extract_instruction(body.input)
-        system_parts = [p for p in [self.config.system_prompt, input_system] if p]
+        system_parts = [
+            p
+            for p in (
+                self.config.system_prompt,
+                body.instructions if self.config.system_prompt_mode == "replace" else None,
+                input_system,
+            )
+            if p
+        ]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         prompt = user_message if system_prompt is None else f"{system_prompt}\n\n{user_message}"
         trajectory = (
@@ -643,7 +691,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if root is not None and not any(
                 getattr(item, "role", None) in {"user", "system", "developer"} for item in root.conversation
             ):
-                root.conversation = [NeMoGymEasyInputMessage(role="user", content=prompt), *root.conversation]
+                conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+                if system_prompt and self.config.system_prompt_mode == "replace":
+                    conversation = [
+                        NeMoGymEasyInputMessage(role="system", content=system_prompt),
+                        NeMoGymEasyInputMessage(role="user", content=user_message),
+                    ]
+                root.conversation = [*conversation, *root.conversation]
 
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -1515,7 +1569,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 await upload_text(state.session.sandbox, path=f"{directory}/mcp-status.json", text=json.dumps(None))
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
-            config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
+            if self.config.system_prompt_mode == "replace":
+                # Added to the build agent, which keeps the request sampling set above.
+                config.setdefault("agent", {}).setdefault("build", {})["prompt"] = system
+            else:
+                config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
         if self._model_call_capture_enabled():
             apply_observability_patch(config, plugin_path=Path(state.persistent_directory) / OBSERVABILITY_PATCH.name)
         config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
@@ -1524,12 +1582,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Owner-staged plugins load after Gym's; a plugin that matters must fail closed through its own receipt.
         config["plugin"].extend(PurePosixPath(path).as_uri() for path in self.config.plugins)
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
+        if self.config.system_prompt_mode == "replace":
+            command.extend(["--agent", "build"])
         if self.config.thinking:
             command.append("--thinking")
         if state.harness_session_id:
             command.extend(["--session", state.harness_session_id])
         payload = {
-            "instructions": system,
+            "instructions": system if self.config.system_prompt_mode == "append" else "",
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
             "command": command,
@@ -1537,7 +1597,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "env": {
                 **_private_directories(state.persistent_directory),
                 **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
-                "OPENCODE_CONFIG_CONTENT": json.dumps(config),
+                "OPENCODE_CONFIG_CONTENT": (
+                    _serialize_replacement_config(config)
+                    if system and self.config.system_prompt_mode == "replace"
+                    else json.dumps(config)
+                ),
                 **_OPENCODE_ISOLATION,
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },

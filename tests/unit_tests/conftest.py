@@ -13,7 +13,7 @@ from tests.unit_tests.harbor_registry_fakes import FakeRegistryClient
 
 
 def _use_fake_registry(monkeypatch: pytest.MonkeyPatch) -> type[FakeRegistryClient]:
-    from nemo_gym.tasks.harbor import image_configs as image_configs_module
+    from nemo_gym.data.tasks.harbor import image_configs as image_configs_module
 
     monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
     monkeypatch.setattr(FakeRegistryClient, "missing", set())
@@ -34,7 +34,7 @@ def no_real_registry(request):
     base images, so a test that did not ask for ``fake_registry`` went to Docker Hub and failed on its rate limit
     (HTTP 429) whatever the code under test did. It is autouse here, and not imported into each module, so a new
     Harbor test module cannot forget it. A test that needs another client patches ``RegistryClient`` itself, which
-    wins over this one, and the ones that exercise the real client build it from ``nemo_gym.tasks.harbor.registry``.
+    wins over this one, and the ones that exercise the real client build it from ``nemo_gym.data.tasks.harbor.registry``.
 
     ``monkeypatch`` is requested only for Harbor modules: requesting it for every test sets it up before the other
     autouse fixtures, so it is torn down after them, and a fixture such as the telemetry state reset would then run
