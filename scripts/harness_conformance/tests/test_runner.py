@@ -18,12 +18,12 @@ from scripts.harness_conformance.provider import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ConfigError
-from nemo_gym.harness_capabilities.cli import json_rows
-from nemo_gym.observability.model_calls import build_model_call_record
-from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
+from nemo_gym.rollouts.harness_capabilities import json_rows
+from nemo_gym.trajectory import build_model_call_record
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
 SCENARIO = {s.name: s for s in SCENARIOS}
@@ -67,7 +67,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
     )
     from omegaconf import OmegaConf
 
-    from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
+    from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 
     assert (
         _environment_server_for_agent("probe_agent", _environment_servers_by_agent(OmegaConf.create(config)))
@@ -107,7 +107,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 
 
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     class LegacyAgent(SimpleResponsesAPIAgent):
         pass
@@ -156,8 +156,8 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     from scripts.harness_conformance import episode
 
     import nemo_gym.config.global_config
-    import nemo_gym.server_utils
-    from nemo_gym.base_responses_api_agent import (
+    import nemo_gym.server_runtime.base_server
+    from nemo_gym.agents import (
         AgentCloseSessionResponse,
         AgentSessionState,
         BaseResponsesAPIAgentConfig,
@@ -923,8 +923,7 @@ def test_chat_fingerprint_ignores_creation_clock():
 
 
 def test_manifest_backed_episode_reaches_conformance_report(retained_episode):
-    from nemo_gym.rollout_recovery import RunManifest
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts import RolloutStore, RunManifest
 
     directory, _ = retained_episode
     output = directory / "rollouts.jsonl"

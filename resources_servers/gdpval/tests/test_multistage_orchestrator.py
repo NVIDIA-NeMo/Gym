@@ -27,10 +27,9 @@ from aiohttp import ClientResponseError, ClientSession, web
 from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 
-import nemo_gym.rollout_collection as rollout_collection_module
+import nemo_gym.rollouts.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -39,7 +38,8 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_collection import (
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_RESULT_TYPE_KEY,
@@ -3768,7 +3768,7 @@ class TestCompletionContract:
     async def test_accepted_omissions_do_not_hide_another_stages_missing_rollout(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from nemo_gym.rollout_recovery import IncompleteEvaluationError
+        from nemo_gym.rollouts import IncompleteEvaluationError
 
         # Stage 0 accepts 9/10. Stage 1 requires 20/20 and loses one worker: its gap must still count.
         def first_run(row, position):
@@ -4919,10 +4919,14 @@ def test_single_pass_history_is_quarantined_before_switching_to_multistage(tmp_p
 
     import orjson
 
-    from nemo_gym.rollout_records import coverage_path_for, materialized_path_for
-    from nemo_gym.rollout_records import journal_path_for as attempts_path_for
-    from nemo_gym.rollout_recovery import RunManifest, manifest_path_for
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts import (
+        RolloutStore,
+        RunManifest,
+        coverage_path_for,
+        manifest_path_for,
+        materialized_path_for,
+    )
+    from nemo_gym.rollouts import journal_path_for as attempts_path_for
 
     output = tmp_path / "rollouts.jsonl"
     source = tmp_path / "source.jsonl"
@@ -4955,7 +4959,7 @@ def test_single_pass_history_is_quarantined_before_switching_to_multistage(tmp_p
 
 @pytest.mark.parametrize("kind", ["terminal", "exhausted", "retryable", "drained", "omitted", "agent_crash"])
 async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, monkeypatch, capsys, kind):
-    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.rollouts import IncompleteEvaluationError
 
     dispatches = []
 
@@ -5046,7 +5050,7 @@ async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, mon
 
 @pytest.mark.parametrize("recovers", [False, True])
 async def test_multistage_http_outage_resumes_until_recovery_or_budget(tmp_path, monkeypatch, recovers):
-    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.rollouts import IncompleteEvaluationError
 
     dispatches = []
 
