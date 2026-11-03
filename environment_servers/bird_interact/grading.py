@@ -4,8 +4,8 @@
 """Create the episode database, run queries on it and grade a submission, inside the episode's sandbox.
 
 The database is SQLite or PostgreSQL. A SQLite database is a file that ``setup`` creates from the task's database. A
-PostgreSQL database is ``<db>_template`` in the server of the sandbox's image (``postgres/Dockerfile``), which
-``setup`` starts; the sandbox is the episode's own, so the database is too.
+PostgreSQL database is ``<db>_template`` in the server of the sandbox's image (``benchmarks/bird_interact`` builds it),
+which ``setup`` starts; the sandbox is the episode's own, so the database is too.
 
 Grading is an independent implementation of BIRD-Interact's default test case for tasks without custom test cases:
 remove comments, ``DISTINCT`` and ``ROUND(...)`` from both queries, run them, normalize the values (floats and decimals

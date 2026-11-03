@@ -147,7 +147,7 @@ class BirdInteractSandboxConfig(BaseModel):
     """The episode's sandbox. The runner is uploaded at the start.
 
     For SQLite the image needs only ``python3`` (default ``python:3.12-slim``), and the database is uploaded too. For
-    PostgreSQL the image is one built from ``postgres/Dockerfile``, which holds the databases.
+    PostgreSQL the image holds the release's databases as ``<db>_template``; ``benchmarks/bird_interact`` builds it.
     """
 
     image: str | None = None
@@ -212,8 +212,8 @@ class BirdInteractEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
     def postgresql_names_its_image(self) -> Self:
         if self.database_engine == "postgresql" and self.sandbox_config.image is None:
             raise ValueError(
-                "database_engine postgresql needs sandbox_config.image: an image built from "
-                "environment_servers/bird_interact/postgres/Dockerfile"
+                "database_engine postgresql needs sandbox_config.image: an image that holds the release's "
+                "databases, such as one built from benchmarks/bird_interact/Dockerfile"
             )
         return self
 
@@ -605,7 +605,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 f"Task {task.instance_id} has no sol_sql. The public BIRD-Interact releases withhold the ground truth; "
                 "merge it into the rows before running."
             )
-        if task.test_cases:
+        if task.test_cases or (task.follow_up is not None and task.follow_up.test_cases):
             raise _refused(f"Task {task.instance_id} has custom test cases, which this server does not run yet.")
         files = self._database_files(task.selected_database)
         source = self._sandbox_source(task)
