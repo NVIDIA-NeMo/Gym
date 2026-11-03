@@ -6,8 +6,8 @@
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.config_types import AmbiguousResourcesRenameError, ConfigMissingValuesError
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.config_types import AmbiguousResourcesRenameError, ConfigMissingValuesError
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 def _parse(config: DictConfig) -> DictConfig:
