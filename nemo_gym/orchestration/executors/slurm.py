@@ -33,7 +33,11 @@ from typing import Any
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.config.global_config import DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS, SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
+from nemo_gym.config.global_config import (
+    DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
+)
 from nemo_gym.orchestration.api import (
     HOST_ENV_REFS,
     SAVED_CONFIG,
@@ -111,7 +115,7 @@ from nemo_gym.orchestration.recovery import (
     FOLLOWUP_ACCOUNTING_FORMAT,
     INFRA_RETRIES_FILE,
     INFRA_RETRY_EXTENSION_FILE,
-    JUDGE_JOB_FAILURE_BOUND,
+    JUDGE_JOB_ACK_JOURNAL_NAME,
     JUDGE_JOB_JOURNAL_NAME,
     LIVE_JOB_STATES,
     MAX_EXTEND_ATTEMPTS,
@@ -119,6 +123,7 @@ from nemo_gym.orchestration.recovery import (
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
     READER_PLACEMENT_FIELDS,
+    RERUN_MASKED_JOURNAL_NAME,
     CollectedEvidence,
     IdentityState,
     OperatorBudget,
@@ -132,6 +137,8 @@ from nemo_gym.orchestration.recovery import (
     chain_accounting,
     decide_from_collected,
     effective_outcome_policy,
+    failed_judge_jobs_blocking,
+    failed_judge_jobs_stop,
     live_chain_job,
     reconcile_requeued_chain,
     requeue_note,
@@ -491,6 +498,21 @@ def _remote_reader_bound_s() -> int | None:
 # The heavy remote readers (the collector and the managed Store reader) can run in a Slurm step instead of on the
 # login host, which may allow each user one core. Unset, they run on the login host exactly as before.
 READER_SRUN_ENV = "NEMO_GYM_REMOTE_READER_SRUN"
+# How long a remote reader's cold install of the pinned Gym waits for uv's lock: the caller's UV_LOCK_TIMEOUT, else the
+# default a Gym run uses (global_config's uv_lock_timeout_seconds).
+_READER_UV_LOCK_TIMEOUT_DEFAULT_S = 1800
+
+
+def _reader_env_lines() -> list[str]:
+    """The settings a remote reader takes from its caller: the reader's command starts from a cleared environment on
+    another host, so without this a cold install there waits uv's own default for the lock and gives up early."""
+    raw = os.environ.get("UV_LOCK_TIMEOUT", "").strip()
+    lock_timeout = (
+        raw if raw.isascii() and raw.isdecimal() and int(raw) > 0 else str(_READER_UV_LOCK_TIMEOUT_DEFAULT_S)
+    )
+    return [f"export UV_LOCK_TIMEOUT={lock_timeout}"]
+
+
 READER_SRUN_WAIT_ENV = "NEMO_GYM_REMOTE_READER_SRUN_WAIT_S"
 READER_MAX_ENV = "NEMO_GYM_REMOTE_READER_MAX"
 # How long a reader waits for a slot when the user's reader steps are at the cap (0: it does not wait).
@@ -498,6 +520,16 @@ READER_QUEUE_WAIT_ENV = "NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S"
 _READER_QUEUE_WAIT_DEFAULT_S = 600
 # How often a queued reader counts the reader steps again.
 _READER_QUEUE_POLL_S = 10
+# A reader step srun refused outright (nothing was queued) is submitted again after this many seconds, doubling up
+# to _READER_SRUN_RETRY_MAX_S, for as long as the queue wait allows.
+_READER_SRUN_RETRY_S = 15
+_READER_SRUN_RETRY_MAX_S = 60
+# srun's words for a submission the scheduler refused without queueing it: a per-user submit or size limit, or no
+# node free for an immediate start.
+_SRUN_REFUSAL = (
+    "Job violates accounting/QOS policy|Requested nodes are busy|"
+    "Immediate execution impossible|Resources temporarily unavailable"
+)
 # With a reader step, whether a reader that cannot run in its step may read on the login host instead: "forbid" (the
 # default) or "allow". Forbidden, such a read is unavailable: nothing is read on the login host or decided from it.
 READER_LOGIN_FALLBACK_ENV = "NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK"
@@ -582,6 +614,11 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
     When the user's reader steps are at ``step.max_readers``, the reader queues: it counts them again every
     ``_READER_QUEUE_POLL_S`` seconds for up to ``step.queue_wait_s``, saying on stderr how many it is queued behind
     (a progress line), and runs in its step once one ends. Only a cap still reached after that wait keeps it out.
+
+    A step srun refused outright (``_SRUN_REFUSAL``: a submit or QOS limit, or no node free to start it) was never
+    queued, so the reader submits it again after ``_READER_SRUN_RETRY_S`` seconds, doubling up to
+    ``_READER_SRUN_RETRY_MAX_S``, with a progress line each time, for as long as ``step.queue_wait_s`` allows. Any
+    other srun failure, or a refusal past that wait, falls through to the cancellation below as before.
     """
     name = shlex.quote(f"gym-reader-{token}")
     inside = shlex.quote(f'echo "{_READER_HOST_PREFIX}cpu:$SLURM_JOB_ID"; exec 3<&0 </dev/null; {script}')
@@ -623,8 +660,25 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         "    done",
         "fi",
         "if [[ -z $_gym_fallback ]]; then",
-        *(f"    {line}" for line in run_step),
-        f'    _gym_host=$(grep -m 1 "^{_READER_HOST_PREFIX}cpu:" "$_gym_step_out")',
+        "    _gym_retry_s=0",
+        f"    _gym_backoff={_READER_SRUN_RETRY_S}",
+        "    while :; do",
+        *(f"        {line}" for line in run_step),
+        f'        _gym_host=$(grep -m 1 "^{_READER_HOST_PREFIX}cpu:" "$_gym_step_out")',
+        "        [[ -z $_gym_host ]] || break",
+        '        _gym_srun_said=$(tail -n 1 "$_gym_err" | cut -c 1-300)',
+        f'        printf "%s\\n" "$_gym_srun_said" | grep -qE {shlex.quote(_SRUN_REFUSAL)} || break',
+        f"        (( _gym_retry_s + _gym_backoff <= {step.queue_wait_s} )) || break",
+        # Refused at submission, so nothing was queued; the cancel only covers a race with a late start.
+        f'        scancel --name {name} --user "$USER" 2>/dev/null',
+        f'        echo "{READER_PROGRESS_PREFIX} the reader step was refused ($_gym_srun_said); retrying in '
+        f'$_gym_backoff s, waited $_gym_retry_s s of {step.queue_wait_s} s" >&2',
+        '        sleep "$_gym_backoff"',
+        "        _gym_retry_s=$(( _gym_retry_s + _gym_backoff ))",
+        f"        _gym_backoff=$(( _gym_backoff * 2 > {_READER_SRUN_RETRY_MAX_S} ? {_READER_SRUN_RETRY_MAX_S} : "
+        "_gym_backoff * 2 ))",
+        '        : >"$_gym_step_out"',
+        "    done",
         "    if [[ -n $_gym_host ]]; then",
         f"        _gym_host=${{_gym_host#{_READER_HOST_PREFIX}}}",
         "    else",
@@ -641,6 +695,7 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         "            _gym_waited=$(( _gym_waited + 2 ))",
         "        done",
         f'        _gym_fallback="the reader step did not start within {step.wait_s} s and was cancelled"',
+        '        (( _gym_retry_s == 0 )) || _gym_fallback="$_gym_fallback after $_gym_retry_s s of resubmissions"',
         '        [[ -z $_gym_srun_said ]] || _gym_fallback="$_gym_fallback ($_gym_srun_said)"',
         # A step that may still start must not race a second reader on the login host: stop instead.
         "        if (( ! _gym_gone )); then",
@@ -905,6 +960,7 @@ def _reader_command(
         ]
     steps = [
         "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+        *_reader_env_lines(),
         *([f"export {READER_TOKEN_ENV}={shlex.quote(token)}"] if token is not None else []),
         f"_gym_bytes=$(stat -c %s -- {sources} 2>/dev/null | awk '{{s += $1}} END {{print s + 0}}')",
         f"_gym_bound={size_bound}",
@@ -944,6 +1000,8 @@ def _reader_command_in_step(
         run_login = [login, "_gym_rc=$?"]
     steps = [
         "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+        # Exported before srun, so the reader in its step gets them too.
+        *_reader_env_lines(),
         f"export {READER_TOKEN_ENV}={shlex.quote(token)}",
         *_bound_lines(job_dir, bound_s=bound_s, factor=factor),
         'echo "__GYM_READER_BOUND:$_gym_bound $_gym_bytes"',
@@ -1029,7 +1087,15 @@ def _remote_managed_evidence(
     try:
         command = f"python -c {shlex.quote(_remote_managed_reader_script())} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
         entrypoint = render_driver_entrypoint(
-            repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True, private_uv=True
+            repo=install.repo,
+            ref=install.ref,
+            prepare_cmd=None,
+            command=command,
+            cleanup=True,
+            private_uv=True,
+            # The reader asks the tracking server for the exported run's status (`query_mlflow_status`), as the
+            # login-host export does; without the client that read fails and delivery stays unverified.
+            extras=("mlflow",),
         )
         # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
         # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
@@ -1095,6 +1161,8 @@ def _remote_managed_evidence(
             "checkpoint_enabled",
             # The attempt extension the Store applied (--extend-attempts); an older reader leaves it unset.
             "attempt_extension_applied",
+            # True from a reader whose Store applies the rerun-masked approvals; an older one leaves it unset.
+            "rerun_masked_applied",
         }
         # A pinned reader older than a host-collected field drops it on its own model (the reader's projection then
         # lacks the key); the host collection owns such fields, and these named ones, either way.
@@ -1377,6 +1445,7 @@ class SlurmExecutor(BaseExecutor):
         operator_budget: OperatorBudget | None = None,
         server_spinup_timeout_seconds: int | None = None,
         spinup_timeout_reason: str | None = None,
+        rerun_masked_without_artifact: bool = False,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH.
 
@@ -1384,6 +1453,8 @@ class SlurmExecutor(BaseExecutor):
         ``max_walltime`` is a walltime raise the resubmit will render: the plan checks the chain cap it renders.
         ``server_spinup_timeout_seconds`` (with ``spinup_timeout_reason``) is a spin-up limit raise the resubmit
         will render: the decision names it.
+        ``rerun_masked_without_artifact`` plans the masked results that kept a saved answer but have no gradeable
+        artifact and no grade as retries; the resubmit journals them (see ``resubmit``).
         ``operator_budget`` lets a run whose chain accounting is unknown continue (see ``decide_from_collected``); with
         it, a failed scheduler query is a stop that names it instead of an error.
         """
@@ -1471,6 +1542,7 @@ class SlurmExecutor(BaseExecutor):
                             outcome_policy_source=policy_source,
                             extend_retries=extend_retries,
                             extend_attempts=extend_attempts,
+                            rerun_masked_without_artifact=rerun_masked_without_artifact,
                         ), collected
             try:
                 workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
@@ -1548,6 +1620,7 @@ class SlurmExecutor(BaseExecutor):
             allocation_cut=allocation_cut,
             extend_retries=extend_retries,
             extend_attempts=extend_attempts,
+            rerun_masked_without_artifact=rerun_masked_without_artifact,
             live_job_name=live_job_name,
             operator_budget=operator_budget,
         )
@@ -1586,6 +1659,8 @@ class SlurmExecutor(BaseExecutor):
         judge_qos: str | None = None,
         repin: str | None = None,
         repin_reason: str | None = None,
+        acknowledge_failed_judge_jobs: bool = False,
+        acknowledge_reason: str | None = None,
     ) -> RecoveryOutcome:
         """Queue a judge-only job that grades the run's selected saved answers again, never the policy.
 
@@ -1595,8 +1670,11 @@ class SlurmExecutor(BaseExecutor):
         and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the launcher's
         reader placement, with ``judge_qos`` or a QOS derived for it), or, for a run that serves its judge on a node
         pool of its own, on that saved pool with those services started and the run's QOS, for the run's segment
-        walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``. Either way the job settles through ``gym eval reverify --judge-failed-only
-        --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
+        walltime bounded by the partition's MaxTime, at the run's pinned Gym commit or ``repin``.
+        ``acknowledge_failed_judge_jobs`` (with ``acknowledge_reason``) lets one more judge-only job queue when the last
+        ones ended without settling a saved answer (see ``_queue_judge_job``). Either way the job settles through
+        ``gym eval reverify --judge-failed-only --settle-into-source``. This never starts a policy service or turns an
+        unavailable judge into a model run.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -1635,6 +1713,8 @@ class SlurmExecutor(BaseExecutor):
                     judge_qos=judge_qos,
                     repin=repin,
                     repin_reason=repin_reason,
+                    acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
+                    acknowledge_reason=acknowledge_reason,
                 )
             install = config.driver.gym_install
             if (
@@ -1713,8 +1793,6 @@ class SlurmExecutor(BaseExecutor):
             script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
             script_path = job_dir / f"reverify-{nonce}.sh"
             expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
-            if evidence.source_digests is None:
-                return stopped("saved source snapshot is unavailable")
             config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
             config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
             if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
@@ -1816,6 +1894,8 @@ class SlurmExecutor(BaseExecutor):
         judge_qos: str | None = None,
         repin: str | None,
         repin_reason: str | None,
+        acknowledge_failed_judge_jobs: bool = False,
+        acknowledge_reason: str | None = None,
     ) -> RecoveryOutcome:
         """Queue the judge-only job of a run that is not CPU-only, on the judge execution profile derived from its
         saved config (``judge_profile``), and journal it: the served-judge profile when the run serves services beside
@@ -1830,7 +1910,9 @@ class SlurmExecutor(BaseExecutor):
         appended to the job dir's judge-job journal. The job is not a segment of the policy chain: nothing is added
         to ``.gym_job_chain`` and no retry or walltime budget is spent or needed. When the last
         ``JUDGE_JOB_FAILURE_BOUND`` judge-only jobs ended without settling a saved answer, nothing is queued and the
-        stop names them.
+        stop names them and the way on: ``acknowledge_failed_judge_jobs`` with a nonempty ``acknowledge_reason`` appends
+        one line (time, user, reason, those jobs' ids) to the acknowledgement journal once the new job is accepted by the
+        scheduler, so exactly one more job queues; the acknowledgement covers only the jobs it names.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -1845,16 +1927,21 @@ class SlurmExecutor(BaseExecutor):
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
         original = config.driver.benchmarks[benchmark]
-        recent = evidence.judge_jobs[-JUDGE_JOB_FAILURE_BOUND:]
-        if len(recent) == JUDGE_JOB_FAILURE_BOUND and all(
-            entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
-            for entry in recent
-        ):
-            named = ", ".join(str(entry.get("job_id") or "(id unknown)") for entry in recent)
-            return stopped(
-                f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job(s) ({named}) ended without settling a saved "
-                f"answer; read their receipts and logs under {job_dir / 'reverification'} before another is queued"
-            )
+        blocked = failed_judge_jobs_blocking(evidence.judge_jobs, evidence.judge_job_acknowledgements)
+        acknowledgement = None
+        if blocked is not None:
+            if not acknowledge_failed_judge_jobs or None in blocked:
+                return stopped(failed_judge_jobs_stop(blocked, str(job_dir / "reverification")))
+            if not (acknowledge_reason or "").strip():
+                raise ValueError("--acknowledge-failed-judge-jobs needs a nonempty --acknowledge-reason")
+            acknowledgement = {
+                "at": utc_timestamp(utc_now()),
+                "user": getpass.getuser(),
+                "reason": (acknowledge_reason or "").strip(),
+                "job_ids": blocked,
+                "gym_job_id": record.gym_job_id,
+                "benchmark": benchmark,
+            }
         try:
             # A run that serves its judge on a node pool of its own takes that pool; any other, a CPU partition.
             placement = served_judge_placement(config, record.cluster)
@@ -1904,6 +1991,9 @@ class SlurmExecutor(BaseExecutor):
         # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
         # evaluation captures into its benchmark directory.
         run = _with_default_capture_dir(run, folder)
+        # The job only judges saved answers: it never calls the policy model, whose served endpoint is gone with the
+        # run's allocation, so waiting for that endpoint's readiness would only time the job out.
+        run = {key: value for key, value in run.items() if key != MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}
         policy_type = config.driver.policy_model_type
         command = " ".join(
             [
@@ -1927,6 +2017,7 @@ class SlurmExecutor(BaseExecutor):
                 # A judge failure whose saved attempts are spent keeps its masked row; the rest are judged.
                 "+skip_spent_judge_failures=True",
                 *flatten_run_args(run),
+                f"++{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}=0",
             ]
         )
         bound = judge_job_config(config, record.cluster, benchmark, profile, command, gym_ref=repin)
@@ -1970,6 +2061,13 @@ class SlurmExecutor(BaseExecutor):
             "actor": getpass.getuser(),
             **({"repin_reason": repin_reason} if repin is not None else {}),
         }
+        # Only once the scheduler has accepted the job: an acknowledgement of a job that was not queued is never written.
+        acknowledge = (
+            f"printf '%s\\n' {shlex.quote(json.dumps(acknowledgement, sort_keys=True))} "
+            f">> {shlex.quote(JUDGE_JOB_ACK_JOURNAL_NAME)} || fail 'cannot journal the acknowledgement'; "
+            if acknowledgement is not None
+            else ""
+        )
         journal = (
             f"python3 -c {shlex.quote(_JOURNAL_JUDGE_JOB)} {shlex.quote(JUDGE_JOB_JOURNAL_NAME)} "
             f"{shlex.quote(json.dumps(entry, sort_keys=True))}"
@@ -1997,7 +2095,7 @@ class SlurmExecutor(BaseExecutor):
             "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
             # The queued job is journaled by id; an acknowledgement without one is journaled as such, so inspect
             # reports it and the next recovery's scheduler check finds the job by its working directory.
-            f'if [[ $jid =~ ^[0-9]+$ ]]; then {journal} "$jid" || fail "cannot journal the judge-only job"; '
+            f'if [[ $jid =~ ^[0-9]+$ ]]; then {acknowledge}{journal} "$jid" || fail "cannot journal the judge-only job"; '
             f'else {journal} "" "acknowledgement unknown: $out"; fail "unknown job identity"; fi',
         ]
         try:
@@ -2109,6 +2207,7 @@ class SlurmExecutor(BaseExecutor):
         spinup_timeout_reason: str | None = None,
         fresh_restart: bool = False,
         segment_walltime: str | None = None,
+        rerun_masked: Mapping[str, Any] | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -2131,6 +2230,10 @@ class SlurmExecutor(BaseExecutor):
         it, and a value below the recorded walltime is refused. The run dir's walltime journal records the raise.
         ``segment_walltime`` (from ``walltime_plan``) is what each Slurm segment requests instead, when the partition's
         MaxTime is below the raise: the raise stays the chain cap.
+        ``rerun_masked`` (with ``keep_budget``) is the operator's approval to run again the masked results that kept a
+        saved answer but have no gradeable artifact and no grade: its ``reason`` and ``identities`` (identity, attempt
+        id and attempts counted) are appended as one line to the run's rerun-masked journal in artifacts/, which the
+        Store reads. The line is written just before sbatch and taken back if the job is not queued.
         A job the scheduler refuses raises ``SchedulerRefusedError`` with sbatch's text and the restored job dir.
         ``unsafe_resume_reason`` (with ``keep_budget``) renders the job with ``allow_unsafe_resume`` the same way, so
         its resume proceeds past a refused run identity check; the run dir's unsafe-resume journal records the reason
@@ -2253,7 +2356,8 @@ class SlurmExecutor(BaseExecutor):
                 else []
             )
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
-            # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
+            # The job itself resets the run's retry and attempt state when it starts, unless the resubmit keeps its
+            # budget (see RESUBMIT_ENV and KEEP_BUDGET_ENV).
             results = _parse_sbatch_results(
                 output := conn.run(
                     exports
@@ -2273,8 +2377,9 @@ class SlurmExecutor(BaseExecutor):
                         "> .gym_chain_incomplete || return; fi; "
                         f"rm -f {_RESUBMIT_LOCK}; }}",
                         "_gym_restore_repin() { :; }; _gym_restore_extension() { :; }; _gym_restore_operator() { :; }; "
-                        "_gym_restore_attempts() { :; }",
-                        "trap '_gym_restore_operator; _gym_restore_extension; _gym_restore_attempts; _gym_restore_repin; "
+                        "_gym_restore_attempts() { :; }; _gym_restore_rerun_masked() { :; }",
+                        "trap '_gym_restore_operator; _gym_restore_extension; _gym_restore_attempts; "
+                        "_gym_restore_rerun_masked; _gym_restore_repin; "
                         "_gym_release_resubmit_lock' EXIT",
                         # --all: without it squeue does not list jobs, ours included, in a hidden partition.
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
@@ -2364,6 +2469,11 @@ class SlurmExecutor(BaseExecutor):
                             if extend_attempts
                             else []
                         ),
+                        *(
+                            self._rerun_masked_commands(rerun_masked, record, benchmark, keep_budget=keep_budget)
+                            if rerun_masked is not None
+                            else []
+                        ),
                         *restart_note,
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
@@ -2421,6 +2531,7 @@ class SlurmExecutor(BaseExecutor):
                             *(["job.sh", RESOLVED_CONFIG_NAME] if repin_commands else []),
                             *(["infra-retry extension"] if extend_retries else []),
                             *(["attempt extension"] if extend_attempts else []),
+                            *(["rerun-masked approval"] if rerun_masked is not None else []),
                             *(["operator continuation counters"] if operator_continuation is not None else []),
                             "resubmit lock released",
                         ],
@@ -2536,6 +2647,42 @@ class SlurmExecutor(BaseExecutor):
             f"else rm -f {name}; fi; }}",
             f"printf '%s\\n' $((10#$_gym_old_attempts + {extend_attempts})) > {name}.tmp && mv -f {name}.tmp {name} "
             "|| fail 'cannot record the attempt extension'",
+        ]
+
+    @staticmethod
+    def _rerun_masked_commands(
+        approval: Mapping[str, Any], record: SubmissionRecord, benchmark: str, *, keep_budget: bool
+    ) -> list[str]:
+        """The locked steps that journal the approval to run masked results again, taken back unless the job is queued.
+
+        The line goes to the rerun-masked journal beside the rollouts file, where the Store reads it when the job starts:
+        its time, user, reason and each approved identity with the attempt it covers and the attempts counted for it.
+        """
+        if not keep_budget:
+            raise RuntimeError(
+                "--rerun-masked-without-artifact needs --recover: the run continues with its spent budgets"
+            )
+        reason = approval.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("--rerun-masked-without-artifact needs a nonempty --rerun-reason")
+        identities = approval.get("identities")
+        if not isinstance(identities, list) or not identities:
+            raise ValueError("--rerun-masked-without-artifact approves at least one identity")
+        entry = {
+            "at": utc_timestamp(utc_now()),
+            "user": getpass.getuser(),
+            "reason": reason.strip(),
+            "gym_job_id": record.gym_job_id,
+            "benchmark": benchmark,
+            "identities": identities,
+        }
+        name = "artifacts/" + RERUN_MASKED_JOURNAL_NAME
+        return [
+            f"_gym_rerun_size=$(stat -c %s {name} 2>/dev/null || echo -1)",
+            '_gym_restore_rerun_masked() { [[ "$_gym_submit_confirmed" == 1 ]] && return; '
+            f'if [[ "$_gym_rerun_size" == -1 ]]; then rm -f {name}; else truncate -s "$_gym_rerun_size" {name}; fi; }}',
+            f"printf '%s\\n' {shlex.quote(json.dumps(entry, sort_keys=True))} >> {name} "
+            "|| fail 'cannot journal the rerun-masked approval'",
         ]
 
     def _rerender_commands(

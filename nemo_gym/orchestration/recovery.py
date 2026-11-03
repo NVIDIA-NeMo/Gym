@@ -105,6 +105,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     REQUEUE_UNKNOWN_REASON,
 )
 from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
 
 
 TASK_INDEX = "_ng_task_index"
@@ -203,6 +204,9 @@ class ManagedRecoveryFact(BaseModel):
     # Whether the Store would run it again under some attempt cap (its replay rule without the cap). None from a
     # Store reader that predates attempt extensions (`--extend-attempts`), which then cannot be applied to the run.
     replayable: bool | None = None
+    # The selected result is a masked one the operator approved to run again (`--rerun-masked-without-artifact`):
+    # the Store counts it as a failed attempt and runs it again within its cap.
+    rerun_approved: bool = False
 
 
 # What an exhausted-attempts stop says an operator can do; the extension is explicit and journaled.
@@ -284,6 +288,18 @@ def _extend_attempts_refusal(collected: "CollectedEvidence") -> str | None:
     return None
 
 
+def _rerun_masked_refusal(collected: "CollectedEvidence") -> str | None:
+    """Why this run cannot run masked results without an artifact again, or None when it can."""
+    if not collected.managed_store or not collected.managed_selection:
+        return "only a run written by a rollout store, whose saved selection was read, can run a masked result again"
+    if collected.rerun_masked_applied is not True:
+        return (
+            "the run's pinned Gym predates the rerun of masked results, so its Store would not run them; repin the "
+            "run to a Gym that has it (--repin COMMIT --repin-reason TEXT) in the same resubmit"
+        )
+    return None
+
+
 # The chain's accounting counters in the job dir (see resume_script); an operator continuation fills unknown ones.
 INFRA_RETRIES_FILE = ".gym_infra_retries"
 ACCUMULATED_WALLTIME_FILE = ".gym_accumulated_walltime"
@@ -308,8 +324,59 @@ OPERATOR_CONTINUATION_NOTE = f"Operator continuation: an explicit budget filled 
 # ``SlurmExecutor.reverify_judge_failures``): its id, partition, walltime, the rows it re-judges and its receipt path.
 # Such a job is not a segment of the policy chain: it is not recorded in the chain and spends none of its budget.
 JUDGE_JOB_JOURNAL_NAME = "judge-job-journal.jsonl"
+# A masked result that kept a saved answer has neither a gradeable artifact nor a recorded grade, so no re-verification
+# can measure it and a resume keeps it: it runs again only with the explicit, journaled approval of the operator
+# (``RERUN_MASKED_JOURNAL_NAME``, in the run artifacts directory), which the Store reads.
+RERUN_MASKED_FLAGS = "--rerun-masked-without-artifact --rerun-reason"
+RERUN_MASKED_REASON = (
+    f"retained, never run again, not measured: it reruns only with {RERUN_MASKED_FLAGS} TEXT "
+    f"(journaled in {RERUN_MASKED_JOURNAL_NAME})"
+)
 # How many judge-only jobs in a row may end without settling a saved answer before recovery stops and names them.
 JUDGE_JOB_FAILURE_BOUND = 2
+# Appended in the job dir when an operator acknowledges that bound (``--acknowledge-failed-judge-jobs``): the time, user and
+# reason, and the ids of the failed judge-only jobs it covers. It is a sibling of the judge-job journal, whose readers take
+# every line for a job. It lets one more judge-only job queue, and covers only the failed jobs it names.
+JUDGE_JOB_ACK_JOURNAL_NAME = "judge-job-acknowledgement-journal.jsonl"
+ACKNOWLEDGE_JUDGE_JOBS_FLAGS = "--acknowledge-failed-judge-jobs --acknowledge-reason"
+
+
+def _judge_job_unsettled(entry: Mapping[str, Any]) -> bool:
+    return entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
+
+
+def failed_judge_jobs_blocking(
+    judge_jobs: Sequence[Mapping[str, Any]], acknowledgements: Sequence[Mapping[str, Any]] = ()
+) -> list[str | None] | None:
+    """The ids of the last ``JUDGE_JOB_FAILURE_BOUND`` judge-only jobs when all ended without settling a saved answer and no
+    acknowledgement names exactly them; else None. An acknowledgement covers the failed jobs it names, so a later pair of
+    failures (the one more job it let queue, and the one before it) needs an acknowledgement of its own."""
+    recent = list(judge_jobs)[-JUDGE_JOB_FAILURE_BOUND:]
+    if len(recent) < JUDGE_JOB_FAILURE_BOUND or not all(_judge_job_unsettled(entry) for entry in recent):
+        return None
+    ids = [
+        entry.get("job_id") if isinstance(entry.get("job_id"), str) and entry.get("job_id") else None
+        for entry in recent
+    ]
+    if None not in ids and any(
+        isinstance(ack.get("job_ids"), list) and set(ack["job_ids"]) == set(ids) for ack in acknowledgements
+    ):
+        return None
+    return ids
+
+
+def failed_judge_jobs_stop(ids: Sequence[str | None], where: str) -> str:
+    """The stop text of ``failed_judge_jobs_blocking``: the jobs, where to read them, and the explicit way on."""
+    named = ", ".join(str(job_id or "(id unknown)") for job_id in ids)
+    text = (
+        f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job(s) ({named}) ended without settling a saved "
+        f"answer; read their receipts and logs under {where} before another is queued"
+    )
+    if None in ids:
+        return text + "; a job without an id cannot be acknowledged"
+    return (
+        f'{text}; once read, `gym eval resubmit ... --recover {ACKNOWLEDGE_JUDGE_JOBS_FLAGS} "<why>"` allows one more'
+    )
 
 
 class OperatorBudget(BaseModel):
@@ -409,6 +476,15 @@ class IdentityEvidence(BaseModel):
     unscored: bool = False
 
 
+class RerunMaskedApproval(BaseModel):
+    """One masked result the operator approves to run again: its identity, the attempts counted for it before the
+    approval, and the attempt id of the masked row the approval covers (a later attempt is never covered)."""
+
+    identity: Identity
+    attempts: int = Field(ge=0)
+    attempt: int = Field(ge=0)
+
+
 class RecoveryDecision(BaseModel):
     action: RecoveryAction
     reason: str
@@ -426,6 +502,13 @@ class RecoveryDecision(BaseModel):
     reverify_first: list[Identity] = Field(default_factory=list)
     # The outcome policy this decision applied: its ``source`` (default, config or python) and its entries.
     outcome_policy: dict[str, Any] | None = None
+    # Masked results that kept a saved answer, with no gradeable artifact and no recorded grade
+    # (``masked_without_artifact_kind``), that a resume keeps: they rerun only with ``RERUN_MASKED_FLAGS``. Their
+    # state stays MASKED.
+    masked_without_artifact: list[Identity] = Field(default_factory=list)
+    # The results of that kind this recovery asks to run again (``rerun_masked_without_artifact``) and plans as
+    # retries: what the resubmit journals as the approval.
+    rerun_masked: list[RerunMaskedApproval] = Field(default_factory=list)
 
     @property
     def complete(self) -> bool:
@@ -787,6 +870,7 @@ def decide_recovery(
     managed_selection: list[ManagedRecoveryFact] | None = None,
     planned_missing_continuation: bool = False,
     allocation_cut: bool = False,
+    rerun_masked_without_artifact: bool = False,
 ) -> RecoveryDecision:
     """Classify every materialized identity and choose the run-level action.
 
@@ -798,6 +882,12 @@ def decide_recovery(
     ``allocation_cut`` says that the allocation that last wrote the Store has ended, by any path (one of
     ``ALLOCATION_ENDED_STATES``), and no allocation of the run is live: a reservation with no saved row was in flight
     when it ended and saved nothing, so it is not started for recovery purposes and the Store runs it again.
+
+    A masked result with a saved answer, no gradeable artifact and no recorded grade (``masked_without_artifact_kind``)
+    stays MASKED, named in ``masked_without_artifact``, unless the Store reports an approval for it
+    (``ManagedRecoveryFact.rerun_approved``) or ``rerun_masked_without_artifact`` asks for it now: it is then planned
+    like an infrastructure-masked result, one failed attempt within its cap, and ``rerun_masked`` lists the retries
+    this call would have journaled.
     """
     from nemo_gym.rollouts.rollout_collection import (
         NG_UNROUTED_RUN_ERROR_KEY,
@@ -847,6 +937,10 @@ def decide_recovery(
 
     evidence: list[IdentityEvidence] = []
     policy_stopped = False
+    masked_without_artifact: list[Identity] = []
+    rerun_masked: list[RerunMaskedApproval] = []
+    # Reopened by this call and not yet counted by the Store: the Store facts do not describe them.
+    asked: set[Identity] = set()
     # Results re-verified from their saved answers (``reverification_cause``): masked ones, and scored ones whose judge
     # gave no verdict or whose grading did not resolve (``judge_unparseable``). No failure attempt is spent. A scored
     # result whose grading was never recorded stays SCORED here (the trial gate reports it unobserved); the run's
@@ -900,6 +994,25 @@ def decide_recovery(
                     continue
                 infrastructure = masked_infrastructure_kind(row)
                 fact = managed.get(identity)
+                spent = fact.attempts if fact is not None else 0
+                kept = masked_without_artifact_kind(row) if infrastructure is None and fact is not None else None
+                if kept is not None:
+                    if fact.rerun_approved:
+                        infrastructure = kept  # the Store counts the approved row as a failed attempt
+                    elif rerun_masked_without_artifact:
+                        infrastructure, spent = kept, fact.attempts + 1
+                        asked.add(identity)
+                    else:
+                        masked_without_artifact.append(identity)
+                        evidence.append(
+                            IdentityEvidence(
+                                identity=identity,
+                                state=IdentityState.MASKED,
+                                failure_kind=row.get("failure_kind"),
+                                reason=RERUN_MASKED_REASON,
+                            )
+                        )
+                        continue
                 if infrastructure is not None and fact is not None:
                     # Infrastructure masked it: the Store counts it as a failed attempt and runs it again, and the new
                     # attempt supersedes it. The policy decides it as it decides a failure of that kind.
@@ -909,17 +1022,23 @@ def decide_recovery(
                         policy_stopped = True
                         state = IdentityState.TERMINAL
                     elif action == OutcomeAction.RETRY:
-                        state = (
-                            IdentityState.RETRYABLE if fact.attempts < fact.max_attempts else IdentityState.EXHAUSTED
-                        )
+                        state = IdentityState.RETRYABLE if spent < fact.max_attempts else IdentityState.EXHAUSTED
                     else:
                         state = IdentityState.UNKNOWN
+                    if identity in asked and state == IdentityState.RETRYABLE:
+                        rerun_masked.append(
+                            RerunMaskedApproval(
+                                identity=identity,
+                                attempts=fact.attempts,
+                                attempt=int(row.get("_ng_attempt_index") or 0),
+                            )
+                        )
                     evidence.append(
                         IdentityEvidence(
                             identity=identity,
                             state=state,
                             failure_kind=infrastructure,
-                            attempts=fact.attempts,
+                            attempts=spent,
                             max_attempts=fact.max_attempts,
                             reason=(
                                 "the policy verifies a masked result that has no saved judge answer"
@@ -1136,6 +1255,10 @@ def decide_recovery(
         fact = managed.get(item.identity)
         if fact is None:
             continue
+        if item.identity in asked:
+            # Not run by the Store until the approval is journaled: its facts say nothing of the row yet.
+            item.max_attempts = fact.max_attempts
+            continue
         item.attempts, item.max_attempts = fact.attempts, fact.max_attempts
         if (
             item.state == IdentityState.JUDGE_RECOVERABLE
@@ -1163,9 +1286,16 @@ def decide_recovery(
     duplicates = sorted(i for i, n in seen.items() if n > 1)
 
     def decision(action: RecoveryAction, reason: str, **fields: Any) -> RecoveryDecision:
+        if masked_without_artifact:
+            reason = (
+                f"{reason}; {len(masked_without_artifact)} masked result(s) without a gradeable artifact rerun only "
+                f"with {RERUN_MASKED_FLAGS} TEXT"
+            )
         return RecoveryDecision(
             action=action,
             reason=reason,
+            masked_without_artifact=sorted(masked_without_artifact),
+            rerun_masked=sorted(rerun_masked, key=lambda approval: approval.identity),
             expected=len(expected_set),
             counts=counts,
             identities=by_state,
@@ -1329,7 +1459,7 @@ _EXTEND_RETRIES_SCOPE = (
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
-    """The omitted identities by stage and policy, e.g. "1 omitted by an accepted partial stage (1, tolerate_unresolved)"."""
+    """The omitted identities by stage and policy, e.g. "1 omitted by an accepted partial stage (stage_index 1, tolerate_unresolved)"."""
     stages = Counter(item.reason for item in evidence if item.state == IdentityState.OMITTED)
     return ", ".join(f"{n} omitted by an accepted partial stage {stage}" for stage, n in sorted(stages.items()))
 
@@ -1384,6 +1514,7 @@ COLLECT_SCRIPT = (
     + f"UNREADABLE_CLAIM_REASON = {UNREADABLE_CLAIM_REASON!r}\n"
     + f"OPERATOR_CONTINUATION_JOURNAL_NAME = {OPERATOR_CONTINUATION_JOURNAL_NAME!r}\n"
     + f"JUDGE_JOB_JOURNAL_NAME = {JUDGE_JOB_JOURNAL_NAME!r}\n"
+    + f"JUDGE_JOB_ACK_JOURNAL_NAME = {JUDGE_JOB_ACK_JOURNAL_NAME!r}\n"
     + r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
@@ -2259,6 +2390,23 @@ def judge_jobs():
         jobs.append(job)
     return jobs
 collected["judge_jobs"] = judge_jobs()
+def judge_job_acknowledgements():
+    # The operator's acknowledgements of failed judge-only jobs (JUDGE_JOB_ACK_JOURNAL_NAME): the ids each covers, bounded.
+    acknowledgements = []
+    try:
+        lines = open(os.path.join(d, JUDGE_JOB_ACK_JOURNAL_NAME)).read().splitlines()
+    except OSError:
+        return acknowledgements
+    for line in lines[-50:]:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        ids = entry.get("job_ids") if isinstance(entry, dict) else None
+        if isinstance(ids, list) and all(isinstance(i, str) and 0 < len(i) <= 64 for i in ids):
+            acknowledgements.append({"job_ids": ids[:20], "at": str(entry.get("at"))[:40]})
+    return acknowledgements
+collected["judge_job_acknowledgements"] = judge_job_acknowledgements()
 print(json.dumps(collected))
 """
 )
@@ -2331,6 +2479,9 @@ class CollectedEvidence(BaseModel):
     attempt_extension: int | None = None
     attempt_extension_state: str = "absent"
     attempt_extension_applied: int | None = None
+    # True when the run's Store reader applies the approvals of ``RERUN_MASKED_JOURNAL_NAME``; None from a reader
+    # that predates them, which would not run an approved result again.
+    rerun_masked_applied: bool | None = None
     # The run's configured infra-retry cap (its saved resume_config), set by the executor that read it.
     infra_retries_configured: int | None = None
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
@@ -2340,6 +2491,8 @@ class CollectedEvidence(BaseModel):
     # else the receipt's "completed" or "failed" with its counts); the executor adds the scheduler's state of a job
     # without a receipt.
     judge_jobs: list[dict[str, Any]] = Field(default_factory=list)
+    # The acknowledgements of failed judge-only jobs (JUDGE_JOB_ACK_JOURNAL_NAME): the job ids each covers.
+    judge_job_acknowledgements: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # The host sets the reader placement; a reader neither receives it nor replaces it.
@@ -2479,6 +2632,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
         with redirect_stdout(StringIO()):
             pending = {logical_rollout_id(row) for row in store.pending()}
         replayable = store.replayable_identities()
+        approved = store.rerun_approved_identities()
         facts = []
         for row in collected.materialized:
             identity = _identity(row)
@@ -2496,6 +2650,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                     pending=logical in pending,
                     reserved=logical in store.manifest.next_attempt,
                     replayable=logical in replayable,
+                    rerun_approved=logical in approved,
                 )
             )
         selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
@@ -2528,6 +2683,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 "checkpoint_enabled": checkpoint_enabled,
                 "unresolved_rejudgments": unresolved_rejudgments,
                 "attempt_extension_applied": store.attempt_extension,
+                "rerun_masked_applied": True,
             }
         )
     except ImportError as error:
@@ -2690,6 +2846,9 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
         update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
     )
     notes = [resume_drift_note(collected.resume_drift_keys)]
+    blocked = failed_judge_jobs_blocking(collected.judge_jobs, collected.judge_job_acknowledgements)
+    if blocked is not None and decision.action == RecoveryAction.REVERIFY:
+        notes.append(failed_judge_jobs_stop(blocked, "the run's reverification directory"))
     if collected.chain_continuation_note:
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
     notes = [note for note in notes if note]
@@ -2713,11 +2872,15 @@ def _decide_from_collected(
     live_job_name: str | None = None,
     operator_budget: OperatorBudget | None = None,
     extend_attempts: int = 0,
+    rerun_masked_without_artifact: bool = False,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing result file stops the decision.
 
     ``extend_attempts`` is the attempts this recovery asks to add to every rollout's cap (``--extend-attempts``):
     the Store's facts are read as they would be once it is recorded (see ``_with_attempt_extension``).
+
+    ``rerun_masked_without_artifact`` asks to run again the masked results that kept a saved answer but have no gradeable
+    artifact and no grade (see ``decide_recovery``); the run's Store reader must apply the approval, or the ask is refused.
 
     When the chain accounting is unknown, ``operator_budget`` may continue the run instead (see
     ``_operator_continuation``); without it, the stop names the options that allow that.
@@ -2826,6 +2989,7 @@ def _decide_from_collected(
             scheduler_live=live,
         )
     attempts_refused = _extend_attempts_refusal(collected) if extend_attempts else None
+    rerun_refused = _rerun_masked_refusal(collected) if rerun_masked_without_artifact else None
     inputs = dict(
         materialized=collected.materialized,
         results=collected.results or [],
@@ -2837,8 +3001,23 @@ def _decide_from_collected(
         else _with_attempt_extension(collected.managed_selection, extend_attempts),
         planned_missing_continuation=planned_missing_continuation,
         allocation_cut=allocation_cut and live_job is False,
+        rerun_masked_without_artifact=rerun_masked_without_artifact and rerun_refused is None,
     )
     decision = decide_recovery(**inputs, budget=budget)
+    if rerun_refused:
+        return decision.model_copy(
+            update={
+                "action": RecoveryAction.STOP,
+                "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}",
+            }
+        )
+    if decision.rerun_masked and decision.action == RecoveryAction.RESUBMIT:
+        decision = decision.model_copy(
+            update={
+                "reason": f"{decision.reason}; {len(decision.rerun_masked)} masked result(s) without a gradeable "
+                f"artifact run again on the operator approval ({RERUN_MASKED_JOURNAL_NAME})"
+            }
+        )
     if attempts_refused:
         return decision.model_copy(
             update={
@@ -2990,7 +3169,7 @@ def continuation_admission(
             return "stop"
         collected.accounted_walltime_s = collected.walltime_used_s
         # A completed outcome plus untouched pending inputs establishes planned segment work. Actual failed
-        # attempts still consume infra retries, even if the driver happened to exit75. A missing output,
+        # attempts still consume infra retries, even if the driver happened to exit 75. A missing output,
         # reservation, judge answer or unowned selected cause is rejected by the ordinary decision below.
         # A scheduler allocation timeout continues untouched work, but never a failed agent attempt.
         segment = previous_state == "TIMEOUT"
@@ -3346,7 +3525,10 @@ def gate_task_summary(
         if states.get(state):
             errors.append(f"{states[state]} {label}: {decision.identities[state.value][:5]}")
     if score is None or not math.isfinite(score):
-        errors.append("score unavailable: no requested metric was read")
+        errors.append(
+            "score unavailable: no requested metric was read (pass --score-key, and --score-agent or "
+            "--score-environment for a Gym aggregate)"
+        )
     if decision.duplicate_results:
         errors.append(f"duplicate result rows: {decision.duplicate_results[:5]}")
     if decision.action == RecoveryAction.STOP:
@@ -6478,6 +6660,22 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
     if _judge_unparseable(row):
         return REVERIFY_JUDGE
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
+
+
+def masked_without_artifact_kind(row: Mapping[str, Any]) -> str | None:
+    """The kind of a masked result that is never measured nor run again, though infrastructure left it unmeasured; else None.
+
+    A masked result ``masked_infrastructure_kind`` rejects only because it kept a saved answer (so every other rule of
+    that predicate applies: the kind must be registered, evaluation-side and not graded again), that has no recorded
+    grade (``has_recorded_grade``) and no re-verification cause (``reverification_cause``): its saved answer has no
+    gradeable artifact, a resume keeps it and re-verification cannot grade it. It runs again only with the explicit
+    ``--rerun-masked-without-artifact``. ``row`` is a collector projection, or a saved row passed through
+    ``saved_row_evidence``.
+    """
+    from nemo_gym.rollouts.rollout_recovery import masked_kept_answer_kind
+
+    kind = masked_kept_answer_kind(row)
+    return kind if kind is not None and reverification_cause(row) is None else None
 
 
 _COLLECTOR_FUNCTIONS: dict[str, Any] = {}

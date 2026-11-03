@@ -138,10 +138,12 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `expected` | Number of logical rollouts in the materialized inputs. |
 | `successful` | Rollouts with a completed result, including wrong answers and completed masked results. |
 | `measured` | Completed results with a numeric reward whose producer did not set `mask_sample`, including valid reward-zero results. |
-| `masked` | Completed results with a numeric reward whose producer set `mask_sample`. These remain saved and reusable on resume. |
+| `masked` | Completed results with a numeric reward whose producer set `mask_sample`. These remain saved and reusable on resume, except a result masked by an evaluation-side failure kind (see `masked_retryable`). |
+| `masked_retryable` | Completed results whose producer reported an evaluation-side failure kind (for example a lost session or a failed provider) and that resume runs again within the attempt cap. They count as one failed attempt and are not settled. |
 | `unscored` | Completed results without a numeric reward, including those also marked `mask_sample`. |
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
 | `failed_final` / `failed_not_final` | Selected failures with no retry available (terminal or budget exhausted), versus selected failures still eligible for retry. |
+| `final_zeros` | Failed rollouts settled as final zeros: a terminal failure counted as zero. They count as complete and are still failures for health. |
 | `failed_by_class` | Selected failure counts by failure class; excludes omissions. |
 | `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
 | `not_started` | Rollouts with no reserved execution. |
@@ -149,6 +151,9 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `retryable` | Rollouts eligible for another attempt under the active retry policy. Aggregate reports expose this per shard. |
 | `outcomes_recorded` | All outcomes saved during this collector invocation, including interruptions. |
 | `progress_outcomes_recorded` | Saved successes, omissions, terminal failures or counted failures; distinguishes productive continuation from infrastructure-only retries. |
+| `stopped_not_retried` | Failed rollouts that are neither final nor at their attempt cap and that resume still does not run again (a kept answer or a judge failure left to recovery, or an unclassified execution). |
+| `attempt_extension` | The recorded extension of the per-rollout attempt cap; 0 when none. |
+| `completion_fraction` | Settled rollouts (completed results, less `masked_retryable`, plus final zeros) divided by `expected`; 1.0 for an empty inventory. |
 
 The existing `successful` field remains the completed-result total. The measurement split is additive:
 
@@ -160,8 +165,8 @@ expected = measured + masked + unscored + failed + intentionally_omitted + not_s
 Counts describe the selected attempt for each logical rollout. Older attempts cannot count again or change whether
 the selected result is masked. Failure metadata on a completed result does not by itself make it a no-result failure.
 
-`complete` requires a completed result for every expected rollout; `reconciled` means no reserved execution is missing an outcome. Tasks not yet started do not prevent reconciliation.
-A fully masked run can be complete while containing no unmasked measurements. Masking alone does not trigger recovery.
+`complete` means every expected rollout is settled: a completed result that resume does not run again (not a `masked_retryable` one), or a settled final zero (`final_zeros`); `reconciled` means no reserved execution is missing an outcome. Tasks not yet started do not prevent reconciliation.
+A fully masked run can be complete while containing no unmasked measurements. Masking alone does not trigger recovery, with one exception: a result masked by an evaluation-side failure kind within its attempt cap is a failed attempt, and a resume runs it again (`masked_retryable`). A masked result that keeps a saved answer, or whose answer is judged again, stays the result.
 Completed-result quality scoring follows the verifier/aggregation contract; these counts describe collection coverage.
 
 `scored` counts completed results with a numeric reward, plus failures explicitly counted as zero when

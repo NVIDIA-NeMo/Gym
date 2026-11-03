@@ -201,3 +201,17 @@ def test_large_projection_streams_outside_installer_argv(tmp_path, monkeypatch):
     assert result.managed_reader_error is None
     assert result.results == raw.results
     assert result.source_job_identity == raw.source_job_identity
+
+
+def test_the_remote_reader_installs_the_mlflow_client_with_the_pinned_gym(tmp_path):
+    # The reader reads the exported run's status from the tracking server: without the client that read fails and
+    # MLflow delivery stays unverified, while the worker that exported the run had it.
+    prepare_managed(tmp_path, "healthy")
+    raw = collect(tmp_path)
+    selected = select_managed_evidence(raw, tmp_path)
+    conn = ProjectionConnection("__GYM_MANAGED:" + selected.model_dump_json())
+
+    _remote_managed_evidence(conn, raw, tmp_path, config())
+
+    script = "\n".join(conn.commands)
+    assert 'uv pip install -e ".[mlflow,ray]"' in script

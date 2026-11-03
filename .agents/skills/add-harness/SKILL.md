@@ -156,13 +156,13 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Real pairing | Each claimed pairing produces rewards on a real model and tasks; the agent closes before verification; cleanup runs. | `rollouts.jsonl`, failures sidecar, server logs |
 | TB 2.1 full evaluation | A new harness or upgrade claiming TB 2.1 support completes the [full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation), at every capability level. | Full run artifacts, per-task results, aggregate score, coverage and failure counts; before/after results for upgrades. |
 | Health | Every `unhealthy` rollout has a stated cause in the PR: a harness limit, an infrastructure failure, or a bug that was fixed and rerun. Every `unobserved` count is explained by the capability level or a named missing input. | `quality_summary.json`, `gym eval health-check` |
-
-To run an evaluation with the harness as a submitted job on a cluster (submit, resume, recover, acceptance gates),
-follow the [gym-eval](../gym-eval/SKILL.md) skill.
 | Evidence | From the Observability level up, the saved rollouts pass the evidence check. At the Evaluation level they fail it by design: record the result and the gaps the close bundle declares. | `scripts/inspect_harness_conformance.py` |
 | Composition | A second pairing works through configuration alone. | Its run folder |
 | Pairing declared | Where a paired benchmark's Resources Server declares `allowed_agents`, the harness is in it, reviewed by the benchmark's owner. | Resources Server config diff |
 | Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) table lists the harness; so do the [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) table for a sandboxed harness and each paired benchmark's README harness table, where one exists. Each entry matches the adapter: its limits, the request fields it rejects, and whether it captures token IDs. | Docs diff |
+
+To run an evaluation with the harness as a submitted job on a cluster (submit, resume, recover, acceptance gates),
+follow the [gym-eval](../gym-eval/SKILL.md) skill.
 
 The [conformance results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#results) are published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
 
