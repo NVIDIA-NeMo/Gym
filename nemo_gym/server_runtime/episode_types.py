@@ -74,8 +74,8 @@ class SdkErrorDetails(BaseModel):
 class SandboxFailureDetails(BaseModel):
     """Observed sandbox facts; missing evidence stays absent, with no inferred cause or policy.
 
-    A last execution ID identifies an observation, not the cause of a sandbox loss. Memory values describe
-    the named resource/process; peaks must be measured. Provider text is diagnostic, not proof of OOM.
+    A last execution ID does not establish causation. Preserve provider reason codes as reported;
+    use only reported command exit codes, not synthesized fallback codes.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -84,18 +84,7 @@ class SandboxFailureDetails(BaseModel):
     execution_id: str | None = Field(default=None, max_length=256)
     provider: str | None = Field(default=None, max_length=256)
     provider_status_reason: str | None = Field(default=None, max_length=2000)
-    evidence_source: str | None = Field(default=None, max_length=256)
     exit_code: int | None = None
-    signal: int | None = Field(default=None, ge=1)
-    memory_resource_id: str | None = Field(default=None, min_length=1, max_length=256)
-    memory_limit_bytes: int | None = Field(default=None, ge=0)
-    memory_peak_bytes: int | None = Field(default=None, ge=0)
-
-    @model_validator(mode="after")
-    def _memory_has_a_resource(self) -> Self:
-        if (self.memory_limit_bytes is not None or self.memory_peak_bytes is not None) and not self.memory_resource_id:
-            raise ValueError("memory measurements require memory_resource_id")
-        return self
 
 
 class ModelFailureDetails(BaseModel):

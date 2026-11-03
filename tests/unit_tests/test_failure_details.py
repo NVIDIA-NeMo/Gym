@@ -33,12 +33,7 @@ from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
                 execution_id="exec-1",
                 provider="opensandbox",
                 provider_status_reason="OOMKilled",
-                evidence_source="lifecycle_status",
                 exit_code=137,
-                signal=9,
-                memory_resource_id="container-1",
-                memory_limit_bytes=1024,
-                memory_peak_bytes=1024,
             ),
         ),
         ("model", ModelFailureDetails(provider_request_id="request-1", request_upload_complete=True)),
@@ -114,7 +109,6 @@ async def test_details_survive_exception_chain_http_and_collection(boundary, det
         ("model", {"attribution": "model"}),
         ("sandbox", {"retryable": True}),
         ("sandbox", {"cause": "oom"}),
-        ("sandbox", {"memory_peak_bytes": 1024}),
         ("sandbox", {"provider_status_reason": "x" * 2001}),
         ("model", {"request_upload_complete": "true"}),
     ],
@@ -148,4 +142,4 @@ def test_model_upload_evidence_has_one_location_and_provider_text_is_only_eviden
     )
     rebuilt = NgFailureEvent.from_record(failure.to_record())
     assert rebuilt.failure_kind == "provider_unavailable"
-    assert rebuilt.details.memory_peak_bytes is None
+    assert rebuilt.details == failure.details
