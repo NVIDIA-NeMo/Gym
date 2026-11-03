@@ -302,3 +302,9 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's
+own agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must
+reach the model server by address, so the profile sets `use_absolute_ip: true`. Supply the image and limits in
+`sandbox_config`.

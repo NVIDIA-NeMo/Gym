@@ -72,6 +72,12 @@ still depend on legacy Agent-to-Resources bindings; they are not equivalent to t
 Existing [Hermes SWE-Pro recipes](../../benchmarks/swebench/pro/hermes.yaml) remain supported
 for compatibility; a new pairing does not need another combined preset.
 
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's
+own agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must
+reach the model server by address, so the profile sets `use_absolute_ip: true`. Supply the image and limits in
+`sandbox_config`.
+
 ## Configuration example
 
 ```yaml

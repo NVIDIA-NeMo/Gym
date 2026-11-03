@@ -307,3 +307,10 @@ harness execution; setup and close use the limits above. The close response's
 `cleanup_confirmed` reports whether harness termination was witnessed or an owned
 sandbox was stopped. A false value can accompany successful borrowed-connection
 release; the owner must destroy that sandbox and leave the activation ungraded.
+
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's
+own agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must
+reach the model server by address, so the profile sets `use_absolute_ip: true`. It also points the CLI at the
+`policy_model` Gym model server, which serves the Anthropic Messages API, with an empty `anthropic_api_key`.
+Supply the image and limits in `sandbox_config`.
