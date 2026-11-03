@@ -369,3 +369,135 @@ def test_typed_seed_grants_mcp_tools_until_close() -> None:
         verify_response = client.post("/verify", json=verify_body)
         assert verify_response.json()["mask_sample"] is True
         assert verify_response.json()["failure_kind"] == "session_lost"
+
+
+@pytest.mark.parametrize("stage", ["active", "verified", "closed"])
+def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        if stage == "verified":
+            assert (
+                client.post(
+                    "/verify",
+                    json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+                ).status_code
+                == 200
+            )
+        elif stage == "closed":
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+        before = dict(server.session_id_to_state)
+        assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 409
+        assert server.session_id_to_state == before
+
+
+def test_malformed_typed_seed_does_not_fall_back_to_legacy() -> None:
+    server = _server()
+    malformed = dict({"verifier_metadata": {"expected_city": "Paris"}}) | {"resources_session_id": "incomplete-typed"}
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=malformed).status_code == 422
+    assert server.session_id_to_state == {}
+    assert server._session_episodes == {}
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed: bool, monkeypatch) -> None:
+    from omegaconf import DictConfig
+
+    clock = [100.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+    server = _server()
+    server.server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+    )
+    prefix = "/ng-rollout/rollout"
+    with TestClient(server.setup_webserver()) as client:
+        assert (
+            client.post(
+                prefix + "/seed_session",
+                json=_typed_seed() if typed else {"verifier_metadata": {"expected_city": "Paris"}},
+            ).status_code
+            == 200
+        )
+        sid = next(iter(server.session_id_to_state))
+        assert server._checkpoint.is_open(sid)
+        assert client.post(prefix + "/get_weather", json={"city": "Paris"}).status_code == 200
+        first = client.post(
+            prefix + "/verify",
+            json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+        ).json()
+        assert not first["mask_sample"]
+        assert not server._checkpoint.is_open(sid)
+        assert server.session_id_to_state == {}
+        assert server._session_episodes == {}
+        retry = client.post(
+            prefix + "/verify",
+            json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+        ).json()
+        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+        if typed:
+            wrong_owner = _typed_close()
+            wrong_owner["episode_id"]["rollout_id"] = "other"
+            assert client.post(prefix + "/close_session", json=wrong_owner).status_code == 409
+        clock[0] += server.config.session_close_retry_window_seconds + 1
+        assert (
+            client.post(
+                prefix + "/verify",
+                json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+            ).json()["mask_sample"]
+            is True
+        )
+        assert len(server._verified_sessions) == 0
+
+
+def test_next_legacy_run_gets_new_cookie_and_old_verify_remains_retryable() -> None:
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
+        old_cookies = dict(client.cookies)
+        old_id = next(iter(server.session_id_to_state))
+        first = client.post(
+            "/verify", json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
+        ).json()
+        assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
+        new_id = next(iter(server.session_id_to_state))
+        assert new_id != old_id
+        assert (
+            client.post(
+                "/verify",
+                json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
+            ).json()["mask_sample"]
+            is False
+        )
+        client.cookies.clear()
+        client.cookies.update(old_cookies)
+        retry = client.post(
+            "/verify", json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
+        ).json()
+        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
+    from omegaconf import DictConfig
+
+    server = _server()
+    server.server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+    )
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/ng-rollout/rollout/seed_session", json=_typed_seed() if typed else {}).status_code == 200
+        client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
+        assert server.session_id_to_state == {}
+        assert server._session_episodes == {}
+
+
+def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json={}).status_code == 200
+        sid = next(iter(server.session_id_to_state))
+        original = server.session_id_to_state[sid]
+        assert client.post("/seed_session", json=_typed_seed(sid)).status_code == 409
+        assert server.session_id_to_state[sid] is original
+        assert server._session_episodes == {}

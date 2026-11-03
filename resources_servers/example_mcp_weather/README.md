@@ -30,7 +30,11 @@ An Environment Server such as `single_agent_turn` seeds the server with a typed 
 the session (`resources_session_id`), and `task_data` carries the row's own fields, here `verifier_metadata`. The reply
 is a `ResourcesSeedSessionResponse` whose `resources_tools` holds the same MCP metadata (the `/mcp` path and the
 per-rollout session token) that a legacy seed returns under `mcp`; the Environment Server grants it to the agent.
-After `/verify`, the Environment Server calls `/close_session`, which drops the session's weather calls. From then on:
+`/verify` releases the live weather-call history and typed binding before checkpoint tracking ends. It keeps only
+the unique called cities and optional typed identity for `session_close_retry_window_seconds`, so a repeated verify
+can still score the response. Checkpoint retirement also releases a live history. Legacy seeds cannot replace typed
+sessions; a new legacy `/run` reusing a completed legacy cookie receives a fresh cookie. The Environment Server then
+calls `/close_session`, which fences verification retries. From then on:
 
 - a `/get_weather` call for the session, over HTTP or with its MCP token, fails with 404 (`failure_kind: session_lost`);
 - `/verify` returns a masked sample (`mask_sample: true`, `failure_kind: session_lost`) instead of a reward of 0;
