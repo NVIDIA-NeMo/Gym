@@ -281,7 +281,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Close the session's environment instance, if verify has not already closed it.
+        """Close the session's environment instance; verify keeps a typed session's instance until this close.
 
         Keyed by resources_session_id, so a close without the cookie (the seed's reply was lost) still releases it.
         Closing an unknown or already-closed session succeeds, and the fence refuses a later seed of it.
@@ -334,6 +334,9 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             if hasattr(session.env, "close"):
                 session.env.close()
             del self._sessions[session_id]
+        else:
+            # End the episode, so a step that lands after verify cannot change what a retried verify reports.
+            session.done = True
 
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
 

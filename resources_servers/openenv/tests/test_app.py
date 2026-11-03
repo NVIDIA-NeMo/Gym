@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.openenv.app import (
     OpenEnvResourcesServer,
     OpenEnvResourcesServerConfig,
@@ -902,6 +902,22 @@ class TestResourcesSessions:
         envs[0].close.assert_called_once()
         assert server._sessions == {}
 
+    def test_step_after_typed_verify_cannot_change_a_retried_verify(self) -> None:
+        step_obs = MagicMock(reward=1.0, done=False)
+        step_obs.model_dump.return_value = {"reward": 1.0, "done": False}
+        server, envs = _session_server(reset_obs=MagicMock(reward=0.5, done=False), step_obs=step_obs)
+
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == pytest.approx(0.5)
+            # A tool call still in flight when the Environment Server verified.
+            late = client.post("/step", json={})
+            retried = client.post("/verify", json=VERIFY_BODY)
+
+        assert late.json() == {"error": "Episode has ended.", "result": None}
+        envs[0].step.assert_not_called()
+        assert retried.json()["reward"] == pytest.approx(0.5)
+
     def test_failed_env_close_raises_and_a_retried_close_releases(self) -> None:
         server, envs = _session_server()
 
@@ -912,6 +928,8 @@ class TestResourcesSessions:
             assert response.status_code == 500
             # Not recorded as closed: the env is still held and a later seed is not fenced.
             assert "resources-session" in server._sessions
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert len(envs) == 1
 
             envs[0].close.side_effect = None
             assert client.post("/close_session", json=_typed_close()).status_code == 200
@@ -948,6 +966,8 @@ class TestResourcesSessions:
         assert response.status_code == 500
         envs[0].close.assert_called_once()
         assert server._sessions == {}
+        assert server._pending_envs == {}
+        assert server._session_episodes == {}
 
     def test_failed_reset_and_cleanup_remains_owned_until_close(self) -> None:
         server, envs = _session_server()
