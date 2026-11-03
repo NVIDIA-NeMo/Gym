@@ -14,11 +14,11 @@ import psutil
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
-from scripts.harness_conformance.provider import Probe
+from scripts.harness_conformance.provider import OpenClawProbe, Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ConfigError
 from nemo_gym.harness_capabilities.cli import json_rows
@@ -107,7 +107,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 
 
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     class LegacyAgent(SimpleResponsesAPIAgent):
         pass
@@ -156,8 +156,8 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     from scripts.harness_conformance import episode
 
     import nemo_gym.config.global_config
-    import nemo_gym.server_utils
-    from nemo_gym.base_responses_api_agent import (
+    import nemo_gym.server_runtime.base_server
+    from nemo_gym.agents import (
         AgentCloseSessionResponse,
         AgentSessionState,
         BaseResponsesAPIAgentConfig,
@@ -293,12 +293,15 @@ def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_
     assert call.client_assistant_message_id == "assistant-message"
 
 
+@pytest.mark.parametrize("tool_name", ["bash", "exec"])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
-def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
+def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name, tool_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
     messages = [{"role": "user", "content": "Run checks"}]
-    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    tool = copy.deepcopy(TOOL)
+    tool["function"]["name"] = tool_name
+    body = {"model": "conformance-model", "messages": messages, "tools": [tool]}
     with TestClient(probe.model_app()) as client:
         for status in scenario.http_errors:
             response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
@@ -308,6 +311,8 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
             assert response.status_code == 200
             message = response.json()["choices"][0]["message"]
             call = message["tool_calls"][0]
+            assert call["id"].startswith("call_")
+            assert call["function"]["name"] == tool_name
             execution = subprocess.run(
                 json.loads(call["function"]["arguments"])["command"],
                 shell=True,
@@ -363,6 +368,47 @@ def test_a_harness_that_finishes_on_a_tool_gets_a_finish_call(tmp_path):
     assert json.loads(call["function"]["arguments"]) == {"reason": "CONFORMANCE_DONE", "paths": []}
     assert probe.finished and not probe.violations
     assert probe.finish_call["id"] == call["id"]
+
+
+@pytest.mark.parametrize("probe_cls", [Probe, OpenClawProbe])
+@pytest.mark.parametrize("replay", ["matched", "missing_call", "wrong_name", "wrong_arguments", "wrong_result"])
+def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, probe_cls, replay):
+    probe = probe_cls(SCENARIO["tool_success"], tmp_path)
+    body = {"model": "probe", "messages": [], "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        message = client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+        call = message["tool_calls"][0]
+        original_id = call["id"]
+        assert original_id.startswith("call_")
+        execution = subprocess.run(
+            json.loads(call["function"]["arguments"])["command"],
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        call["id"] = original_id.replace("_", "")
+        # Replay may serialize equivalent arguments differently.
+        call["function"]["arguments"] = json.dumps(json.loads(call["function"]["arguments"]), separators=(",", ":"))
+        if replay == "wrong_name":
+            call["function"]["name"] = "other_tool"
+        if replay == "wrong_arguments":
+            call["function"]["arguments"] = '{"command":"false"}'
+        body["messages"] = [] if replay == "missing_call" else [message]
+        body["messages"].append(
+            {
+                "role": "tool",
+                "tool_call_id": "other" if replay == "wrong_result" else call["id"],
+                "content": execution.stdout,
+            }
+        )
+        response = client.post("/v1/chat/completions", json=body)
+    accepted = probe_cls is OpenClawProbe and replay == "matched"
+    assert response.status_code == (200 if accepted else 409)
+    assert probe.tool_calls[0]["result_seen"] == accepted
+    assert probe.tool_calls[0]["id"] == original_id
+    assert probe.attempts[0]["response"]["choices"][0]["message"]["tool_calls"][0]["id"] == original_id
+    assert probe.attempts[1]["request"] == body
 
 
 def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):
