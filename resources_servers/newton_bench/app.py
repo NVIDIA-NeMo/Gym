@@ -24,9 +24,10 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -34,7 +35,17 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from resources_servers.newton_bench.newton_bench_utils.sandbox import (
     SessionHandle,
@@ -143,8 +154,19 @@ class NewtonBenchEndSessionResponse(BaseModel):
 
 class NewtonBenchResourcesServer(SimpleResourcesServer):
     config: NewtonBenchResourcesServerConfig
+    # Keyed by the session cookie's SESSION_ID_KEY, which a typed seed binds to its resources_session_id.
     session_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     _sessions: Dict[str, SessionHandle] = PrivateAttr(default_factory=dict)
+    # The episode and task each Environment Server session was seeded for, keyed by resources_session_id.
+    _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    # Sessions the idle sweep closed after session_ttl, so a late call reports them expired rather than lost.
+    _expired_sessions: ClosedResourcesSessionRecords[None] = PrivateAttr()
+    _fence: ResourcesSessionFence = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._expired_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -198,29 +220,88 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
 
         return app
 
-    async def seed_session(self, request: Request, body: NewtonBenchSeedSessionRequest) -> BaseSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        module_name = body.module_name
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | NewtonBenchSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Store the task's metadata for the session; the Python worker starts on the first execute_python call.
 
-        if module_name not in MODULE_REQUEST_CLASSES_MAPPING:
-            raise HTTPException(status_code=400, detail=f"Invalid module_name '{module_name}'.")
+        An Agent's /run seeds with the row's fields under the session its cookie names. An Environment Server seeds
+        with a ResourcesSeedSessionRequest whose task_data holds those fields: the session is keyed by
+        resources_session_id and the cookie is bound to that ID, so the agent's tool calls reach it.
+        """
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            if body.module_name not in MODULE_REQUEST_CLASSES_MAPPING:
+                raise HTTPException(status_code=400, detail=f"Invalid module_name '{body.module_name}'.")
+            self.session_metadata[request.session[SESSION_ID_KEY]] = self._session_metadata(body)
+            return BaseSeedSessionResponse()
 
-        self.session_metadata[session_id] = {
-            "module_name": module_name,
-            "difficulty": body.difficulty,
-            "system": body.system,
-            "noise_level": body.noise_level,
-            "law_version": body.law_version,
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
+            identity = self._session_episodes.get(session_id)
+            if identity is None:
+                # Input no retry can fix gets a final 422 rather than a 500 that would dispatch the episode again.
+                try:
+                    task = NewtonBenchSeedSessionRequest.model_validate(body.task_data)
+                except ValidationError as error:
+                    raise ResourcesSeedRejectedError(f"task_data is not a NewtonBench task: {error}") from error
+                if task.module_name not in MODULE_REQUEST_CLASSES_MAPPING:
+                    raise ResourcesSeedRejectedError(f"Invalid module_name '{task.module_name}'.")
+                self.session_metadata[session_id] = self._session_metadata(task)
+                self._session_episodes[session_id] = (body.episode_id, body.task_id)
+            elif identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            # A repeated seed for the same episode keeps the session, including its Python worker's state.
+            request.session[SESSION_ID_KEY] = session_id
+        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Release the session's Python worker and metadata, if verify or the idle sweep has not already done so.
+
+        Keyed by resources_session_id, so a close without the cookie (the seed's reply was lost) still releases it.
+        Closing an unknown or already-closed session succeeds, and the fence refuses a later seed of it.
+        """
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            closed_episode = self._fence.closed_episode(session_id)
+            if closed_episode is not None and closed_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+            identity = self._session_episodes.get(session_id)
+            if identity is not None and identity[0] != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            self._close_session(session_id)
+            self._session_episodes.pop(session_id, None)
+            self._fence.mark_closed(session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=session_id)
+
+    @staticmethod
+    def _session_metadata(task: NewtonBenchSeedSessionRequest) -> Dict[str, Any]:
+        return {
+            "module_name": task.module_name,
+            "difficulty": task.difficulty,
+            "system": task.system,
+            "noise_level": task.noise_level,
+            "law_version": task.law_version,
             "last_used": time.time(),
         }
-        return BaseSeedSessionResponse()
+
+    def _lost_failure_kind(self, session_id: Optional[str]) -> str:
+        return SESSION_EXPIRED if session_id in self._expired_sessions else SESSION_LOST
+
+    def _require_metadata(self, session_id: Optional[str]) -> Dict[str, Any]:
+        """The metadata of the session a tool call names, or a 404 if it was never seeded or has already ended."""
+        metadata = self.session_metadata.get(session_id)
+        if not metadata:
+            raise ResourcesSessionLostError(
+                "Session not initialized or already ended. Please call seed_session first.",
+                failure_kind=self._lost_failure_kind(session_id),
+            )
+        return metadata
 
     async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
         """Execute Python code in a session-based environment."""
         sid = request.session[SESSION_ID_KEY]
-        metadata = self.session_metadata.get(sid)
-        if not metadata:
-            raise HTTPException(status_code=400, detail="Session not initialized. Please call seed_session first.")
+        metadata = self._require_metadata(sid)
 
         metadata["last_used"] = time.time()
         loop = asyncio.get_running_loop()
@@ -270,7 +351,17 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         metadata = self.session_metadata.get(session_id)
         if not metadata:
-            raise HTTPException(status_code=400, detail="Session not initialized. Please call seed_session first.")
+            # Never seeded, already verified or closed, or reaped by the idle sweep: the task's metadata is gone, so
+            # there is nothing to score against. Mask the sample rather than score the policy 0.
+            failure_kind = self._lost_failure_kind(session_id)
+            reason = (
+                "The NewtonBench session outlived session_ttl"
+                if failure_kind == SESSION_EXPIRED
+                else "No active NewtonBench session to verify"
+            )
+            return NewtonBenchVerifyResponse(
+                **(body.model_dump() | lost_session_verification(reason, failure_kind=failure_kind))
+            )
 
         metadata["last_used"] = time.time()
         difficulty = metadata.get("difficulty")
@@ -396,7 +487,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         return NewtonBenchEndSessionResponse()
 
     def _close_session(self, sid: str):
-        """Internal helper to clean up session handle and metadata."""
+        """Internal helper to clean up session handle and metadata.
+
+        SessionHandle.close() escalates to kill and logs rather than raises, so releasing a session cannot fail.
+        """
         handle = self._sessions.pop(sid, None)
         if handle:
             handle.close()
@@ -409,9 +503,7 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
 
         async def handler(request: Request, body: Any):
             session_id = request.session.get(SESSION_ID_KEY)
-            metadata = self.session_metadata.get(session_id)
-            if not metadata:
-                raise HTTPException(status_code=400, detail="Session not initialized. Please call seed_session first.")
+            metadata = self._require_metadata(session_id)
 
             session_module_name = metadata.get("module_name")
             if session_module_name != module_name:
@@ -483,6 +575,7 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
 
             if now - last_activity > self.config.session_ttl:
                 self._close_session(sid)
+                self._expired_sessions.remember(sid, None)
 
     def _extract_law_from_response(self, response: Any) -> Optional[str]:
         for output in reversed(response.output):

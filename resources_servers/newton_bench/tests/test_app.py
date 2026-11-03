@@ -18,10 +18,17 @@ import time
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException, Request
+from fastapi.testclient import TestClient
 from pytest import fixture, mark, raises
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    ResourcesSessionLostError,
+)
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.newton_bench.app import (
     BaseSeedSessionResponse,
     ExecutePythonRequest,
@@ -389,11 +396,12 @@ class TestApp:
     ) -> None:
         """Test that calling run_experiment without seeding session first."""
         handler = server._create_module_handler("m0_gravity")
-        with raises(HTTPException) as exc_info:
+        with raises(ResourcesSessionLostError) as exc_info:
             await handler(mock_request, {})
 
-        assert exc_info.value.status_code == 400
-        assert "Session not initialized" in exc_info.value.detail
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail["failure_kind"] == "session_lost"
+        assert "Session not initialized" in exc_info.value.detail["message"]
 
     @mark.asyncio
     async def test_run_experiment_missing_parameters(
@@ -852,14 +860,14 @@ class TestApp:
     async def test_execute_python_without_seed_session(
         self, server: NewtonBenchResourcesServer, mock_request: Request
     ) -> None:
-        """Test execute_python without seed_session raises 400."""
+        """Test execute_python without seed_session raises 404 for a lost session."""
         request_body = ExecutePythonRequest(code="import math\nmath.pi * 2")
 
-        with raises(HTTPException) as exc_info:
+        with raises(ResourcesSessionLostError) as exc_info:
             await server.execute_python(mock_request, request_body)
 
-        assert exc_info.value.status_code == 400
-        assert "Session not initialized" in exc_info.value.detail
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail["failure_kind"] == "session_lost"
 
     @mark.asyncio
     async def test_execute_python_multiple_sessions(self, server: NewtonBenchResourcesServer) -> None:
@@ -1076,16 +1084,16 @@ result
     async def test_verify_failure_uninitialized_session(
         self, server: NewtonBenchResourcesServer, mock_request: Request
     ) -> None:
-        """Test verify() without seed_session."""
+        """Test verify() without seed_session masks the sample: there is no task metadata to score against."""
         mock_response = self._make_response_with_law("<final_law>def f(): pass</final_law>")
         verify_request = NewtonBenchVerifyRequest(
             responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
             response=mock_response,
         )
-        with raises(HTTPException) as exc_info:
-            await server.verify(mock_request, verify_request)
-        assert exc_info.value.status_code == 400
-        assert "Session not initialized" in exc_info.value.detail
+        result = await server.verify(mock_request, verify_request)
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == "session_lost"
 
     @mark.asyncio
     async def test_verify_failure_missing_module_name(
@@ -1240,3 +1248,151 @@ result
         mock_response = self._make_response_with_law("<final_law></final_law>")
         extracted = server._extract_law_from_response(mock_response)
         assert extracted == ""
+
+
+TASK_DATA = {
+    "id": 0,
+    "module_name": "m0_gravity",
+    "difficulty": "easy",
+    "system": "vanilla_equation",
+    "noise_level": 0.0,
+    "law_version": "v0",
+}
+VERIFY_BODY = {
+    "responses_create_params": {"input": [{"role": "user", "content": "test"}]},
+    "response": {
+        "id": "resp_test",
+        "object": "response",
+        "created_at": 0,
+        "model": "test",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [],
+    },
+}
+
+
+def _session_server() -> NewtonBenchResourcesServer:
+    config = NewtonBenchResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+    return NewtonBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _typed_seed(resources_session_id: str = "resources-session", task_data: dict | None = None) -> dict:
+    # The body single_agent_turn sends: task_data holds the row's own fields.
+    return ResourcesSeedSessionRequest(
+        resources_session_id=resources_session_id,
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="newton_bench", task_id="0"),
+        task_data=TASK_DATA if task_data is None else task_data,
+    ).model_dump(mode="json")
+
+
+def _typed_close(resources_session_id: str = "resources-session") -> dict:
+    return ResourcesCloseSessionRequest(
+        resources_session_id=resources_session_id, episode_id=EpisodeId(rollout_id="rollout", attempt=0)
+    ).model_dump(mode="json")
+
+
+class TestResourcesSessions:
+    def test_resources_session_contract(self) -> None:
+        server = _session_server()
+
+        check_resources_session_contract(
+            server.setup_webserver(),
+            ResourcesSeedSessionRequest.model_validate(_typed_seed("contract-session")),
+            keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server.session_metadata,
+            verify_body=VERIFY_BODY,
+        )
+
+    @mark.parametrize(
+        "task_data, message",
+        [
+            ({**TASK_DATA, "difficulty": None}, "task_data is not a NewtonBench task"),
+            ({k: v for k, v in TASK_DATA.items() if k != "law_version"}, "task_data is not a NewtonBench task"),
+            ({**TASK_DATA, "module_name": "m99_unknown"}, "Invalid module_name 'm99_unknown'"),
+        ],
+    )
+    def test_typed_seed_rejects_task_data_no_retry_can_fix(self, task_data: dict, message: str) -> None:
+        server = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/seed_session", json=_typed_seed(task_data=task_data))
+
+        assert response.status_code == 422
+        assert message in response.text
+        assert server.session_metadata == {}
+
+    def test_typed_session_runs_tools_and_close_releases_the_worker(self) -> None:
+        server = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert server.session_metadata["resources-session"]["module_name"] == "m0_gravity"
+
+            experiment = client.post("/run_experiment_m0_gravity", json={"mass1": 1.0, "mass2": 1.0, "distance": 1.0})
+            assert experiment.status_code == 200
+            assert isinstance(experiment.json()["result"], float)
+            python = client.post("/execute_python", json={"code": "x = 41\nx + 1"})
+            assert python.json()["result"] == "42"
+            handle = server._sessions["resources-session"]
+
+            # A seed retried after its reply was lost arrives without the cookie, and keeps the worker's state.
+            client.cookies.clear()
+            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/execute_python", json={"code": "x"}).json()["result"] == "41"
+
+            client.cookies.clear()
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        assert handle.is_closed
+        assert server._sessions == {}
+        assert server.session_metadata == {}
+        assert server._session_episodes == {}
+
+    def test_close_after_verify_succeeds(self) -> None:
+        server = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            client.post("/seed_session", json=_typed_seed())
+            verify = client.post("/verify", json=VERIFY_BODY)
+            # Verify releases the session for an Agent's /run, which never closes it.
+            assert verify.json()["mask_sample"] is False
+            assert server.session_metadata == {}
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        assert server._session_episodes == {}
+
+    def test_tool_calls_after_close_are_lost(self) -> None:
+        server = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            client.post("/seed_session", json=_typed_seed())
+            client.post("/close_session", json=_typed_close())
+            experiment = client.post("/run_experiment_m0_gravity", json={"mass1": 1.0, "mass2": 1.0, "distance": 1.0})
+            python = client.post("/execute_python", json={"code": "1"})
+
+        for response in (experiment, python):
+            assert response.status_code == 404
+            assert response.json()["detail"]["failure_kind"] == "session_lost"
+        assert server._sessions == {}
+
+    def test_session_reaped_by_idle_sweep_reports_expired(self) -> None:
+        server = _session_server()
+
+        with TestClient(server.setup_webserver()) as client:
+            client.post("/seed_session", json=_typed_seed())
+            server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
+            server._cleanup_sessions()
+
+            python = client.post("/execute_python", json={"code": "1"})
+            verify = client.post("/verify", json=VERIFY_BODY)
+            # The Environment Server still closes the session it seeded.
+            close = client.post("/close_session", json=_typed_close())
+
+        assert python.status_code == 404
+        assert python.json()["detail"]["failure_kind"] == "session_expired"
+        assert verify.json()["mask_sample"] is True
+        assert verify.json()["failure_kind"] == "session_expired"
+        assert close.status_code == 200

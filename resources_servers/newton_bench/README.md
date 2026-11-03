@@ -105,6 +105,30 @@ gym eval run --no-serve \
     --limit 5
 ```
 
+### Run under the single-agent-turn Environment Server
+`configs/newton_bench_single_agent_turn.yaml` runs the same rows through the `single_agent_turn_legacy` Environment
+Server. Rollout collection still sends flat rows, but the Environment Server seeds the Resources Server and the
+Simple Agent with typed sessions, grants the agent direct HTTP access to the tools, verifies, and then closes both
+sessions:
+```bash
+gym env start \
+    --config resources_servers/newton_bench/configs/newton_bench_single_agent_turn.yaml \
+    --model-type vllm_model
+
+gym eval run --no-serve \
+    --agent newton_bench_single_agent_turn \
+    --input resources_servers/newton_bench/data/example.jsonl \
+    --output resources_servers/newton_bench/data/example_single_agent_turn_rollouts.jsonl \
+    --limit 5
+```
+
+The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
+`task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
+ID for another episode, or arrives after the session closed, is refused with 409. `/verify` and the idle sweep
+(`session_ttl`) still release a session as before; `/close_session` releases whatever is left and succeeds for a
+session that is already gone. A tool call for a session the server no longer holds fails with 404, and `/verify` for
+it returns a masked sample (`failure_kind` `session_lost`, or `session_expired` after the idle sweep).
+
 ## Running Tests
 ```bash
 gym env test --resources-server newton_bench
