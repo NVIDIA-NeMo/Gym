@@ -74,13 +74,15 @@ current results at build time.
 ## Run diagnostic probes
 
 Run predetermined model replies and failures through real Gym harnesses, collect
-their rollouts, and apply the existing P0 evidence checks:
+their rollouts, and apply the scenario and evidence checks:
 
 ```bash
 python scripts/run_harness_conformance.py \
     --harness codex --harness pi --harness opencode --harness hermes \
     --output results/conformance
 ```
+
+Use `--gate-tier P1` to include P1 requirements in the exit status; the default is P0.
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
 installed. Simple Agent (`--harness simple`) uses Gym's Python implementation and
@@ -140,37 +142,6 @@ python scripts/run_harness_conformance.py --harness codex \
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 | `context_compaction` | Automatic compaction between shell actions; summary reused, helper retained without becoming a turn | Existing P0 checks plus P1 compaction checks (TE-13) |
 
-The compaction scenario runs for every selected harness. Its five behavioral
-checks require a completed event, reuse of the witnessed summary in the next
-policy request, resolvable helper references with invocation ownership, exclusion
-of the helper from saved turns, and aggregate usage that includes the helper.
-The existing `ContextCompactionObservation` schema validates the event. Checks
-read the collector's saved artifacts; they do not repair or synthesize them.
-
-The shared script executes fourteen shell actions so Hermes has enough history
-outside its protected recent messages. The provider keeps reported input usage
-above 27,000 tokens until it receives an explicit summary request, then lowers
-it. Small context/threshold settings trigger each harness's own compaction path.
-With the pinned runtimes, OpenCode, Kilo, Codex, Stirrup, and Hermes pass; Simple
-and Pi report missing compaction events. Missing events remain failures. The
-no-compaction control is a regression test, not another catalog scenario.
-
-Require the compaction checks explicitly when running the diagnostic scenario:
-
-```bash
-python scripts/run_harness_conformance.py --harness opencode \
-    --scenario context_compaction --gate-tier P1 \
-    --output results/opencode-compaction
-```
-
-The default full run reports all nine scenarios and gates the eight P0
-scenarios. `--gate-tier P1` also requires the compaction scenario, including its
-existing P0 checks. The new checks are P1; existing checks retain their original
-priorities. P1 failures remain visible in the report even when the P0 gate passes.
-Reported usage is synthetic fixture input, not a measurement of compression
-quality. Before/after context token counts and boundary references are outside
-these five checks.
-
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat
 replies also include reasoning text. Requests adapt only the shell-tool name and
@@ -226,10 +197,7 @@ tree, including harnesses that start new process groups.
 
 Exit codes: **0** when all selected gates pass, **1** for evidence or scenario
 failures, and **2** for execution, dependency, input, or checker errors. Existing
-harness evidence gaps are expected to remain visible as failures. This suite
-covers P0 checks, including ownership and call-to-step checks, and P1 compaction
-checks. Multimodal content, parallelism and transport disconnects remain outside
-its qualification scope.
+harness evidence gaps remain visible as failures.
 
 Run regression checks with:
 
