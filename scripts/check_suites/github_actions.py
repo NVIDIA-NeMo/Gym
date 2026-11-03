@@ -17,6 +17,18 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 
 
+def _merge_base(base: str, *, root: Path) -> str:
+    """The merge base with `base`; a CI checkout has other branches only as `origin/<name>`."""
+    command = ["git", "merge-base", "--"]
+    try:
+        output = subprocess.check_output([*command, base, "HEAD"], cwd=root, text=True, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError:
+        output = subprocess.check_output(
+            [*command, f"origin/{base}", "HEAD"], cwd=root, text=True, stderr=subprocess.PIPE
+        )
+    return output.strip()
+
+
 def changed_paths(base: str, *, root: Path, subject: str) -> list[str] | None:
     """Compare the entire branch since its merge base, including deleted/renamed paths.
 
@@ -25,9 +37,7 @@ def changed_paths(base: str, *, root: Path, subject: str) -> list[str] | None:
     if not base:
         return None
     try:
-        ancestor = subprocess.check_output(
-            ["git", "merge-base", "--", base, "HEAD"], cwd=root, text=True, stderr=subprocess.PIPE
-        ).strip()
+        ancestor = _merge_base(base, root=root)
         paths = subprocess.check_output(
             ["git", "diff", "--name-only", "--no-renames", "-z", ancestor, "HEAD", "--"], cwd=root
         ).decode("utf-8", errors="replace")

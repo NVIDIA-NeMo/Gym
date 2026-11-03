@@ -127,6 +127,26 @@ def test_full_branch_diff_includes_earlier_commits_and_deleted_paths(tmp_path):
     assert changed_harnesses(before_move, root=tmp_path) == ["pi"]
 
 
+def test_a_base_branch_that_only_exists_as_a_remote_tracking_ref_is_resolved(tmp_path):
+    # GitHub's checkout holds the other branches only as origin/<name>.
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "CI test")
+    git("config", "user.email", "ci@example.invalid")
+    (tmp_path / "README.md").write_text("docs\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "base")
+    git("update-ref", "refs/remotes/origin/release", "HEAD")
+    adapter = tmp_path / "responses_api_agents/pi_agent/app.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("new\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "adapter")
+    assert changed_harnesses("release", root=tmp_path) == ["pi"]
+
+
 def test_missing_base_runs_all(tmp_path, capsys):
     assert changed_harnesses("", root=tmp_path) == list(HARNESSES)
     assert changed_harnesses("missing-base", root=tmp_path) == list(HARNESSES)
