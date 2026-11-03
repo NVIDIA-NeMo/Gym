@@ -20,9 +20,8 @@ from typing import ClassVar
 
 from pydantic import Field
 
-from nemo_gym.artifacts.exporters.base import Exporter, ExportResult, unexportable_reason
-from nemo_gym.artifacts.run_artifacts import RunArtifacts
-from nemo_gym.config.config_types import RunExportConfig
+from nemo_gym.artifacts import Exporter, ExportResult, RunArtifacts, unexportable_reason
+from nemo_gym.config import RunExportConfig
 
 
 class SummaryExportConfig(RunExportConfig):

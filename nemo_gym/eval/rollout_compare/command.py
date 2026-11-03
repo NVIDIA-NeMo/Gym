@@ -31,10 +31,10 @@ from typing import Optional
 from pydantic import Field
 
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.rollout_compare.compare import compare_rollouts
-from nemo_gym.rollout_compare.report import render_report, summary_dict
-from nemo_gym.rollout_compare.rows import load_rollouts
-from nemo_gym.rollout_compare.schema import TASK_KEY_CANDIDATES, CompareInputError, Roots
+from nemo_gym.eval.rollout_compare.compare import compare_rollouts
+from nemo_gym.eval.rollout_compare.report import render_report, summary_dict
+from nemo_gym.eval.rollout_compare.rows import load_rollouts
+from nemo_gym.eval.rollout_compare.schema import TASK_KEY_CANDIDATES, CompareInputError, Roots
 
 
 class RolloutCompareConfig(BaseNeMoGymCLIConfig):

@@ -407,7 +407,7 @@ def test_failed_atomic_publication_keeps_prior_metadata(tmp_path, monkeypatch):
 
 
 def test_reverification_overwrite_preserves_existing_run(prepared_run):
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.eval.rollout_reverification import _prepare_output_fpaths
 
     output, prepare = prepared_run
     RolloutStore.start_or_resume(output, prepare, resume=False)
@@ -508,7 +508,7 @@ def test_exhaustion_counts_failures_but_not_interruptions_terminal_or_completed(
 
 @pytest.mark.parametrize("alias", [False, True])
 async def test_journal_reverification_waits_for_followup_without_changing_files(prepared_run, monkeypatch, alias):
-    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
 
     output, prepare = prepared_run
     RolloutStore.start_or_resume(output, prepare, resume=False)
@@ -528,7 +528,7 @@ async def test_journal_reverification_waits_for_followup_without_changing_files(
         await RolloutReverificationHelper().run_from_config(config)
     assert snapshot(output) == before
     # The final prefixed path must be checked too, including resume/append.
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.eval.rollout_reverification import _prepare_output_fpaths
 
     for append, resume in [(True, False), (False, True)]:
         with pytest.raises(ConfigError, match="Manifest-backed reverification is a follow-up"):
@@ -798,7 +798,7 @@ def test_health_reads_success_file_after_failed_attempt_is_retried(prepared_run)
 async def test_judge_only_reads_selected_source_into_separate_output(
     prepared_run, monkeypatch, superseded, answer_key
 ):
-    import nemo_gym.rollout_reverification as reverify
+    import nemo_gym.eval.rollout_reverification as reverify
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -849,7 +849,7 @@ async def test_judge_only_reads_selected_source_into_separate_output(
     ],
 )
 def test_judge_recovery_does_not_promote_diagnostics_to_saved_answers(saved):
-    from nemo_gym.rollout_reverification import _rollout_response
+    from nemo_gym.eval.rollout_reverification import _rollout_response
 
     with pytest.raises(ConfigError, match="has no `response`"):
         _rollout_response(saved)

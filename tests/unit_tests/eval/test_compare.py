@@ -25,20 +25,20 @@ import pytest
 from scipy.stats import t
 
 import nemo_gym.rollouts.rollout_collection as collection
-from nemo_gym.comparison.diff import (
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.eval.comparison.diff import (
     build_flip_summary,
     build_metric_rows,
     compare_runs,
 )
-from nemo_gym.comparison.loading import (
+from nemo_gym.eval.comparison.loading import (
     build_loaded_run,
     load_agg_metrics_file,
     resolve_agent_selections,
 )
-from nemo_gym.comparison.report import render_key_metrics_tables, render_markdown, summary_lines, write_reports
-from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
-from nemo_gym.comparison.schema import ComparisonConfig
-from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.eval.comparison.report import render_key_metrics_tables, render_markdown, summary_lines, write_reports
+from nemo_gym.eval.comparison.runner import build_comparison_result, resolve_output_dir
+from nemo_gym.eval.comparison.schema import ComparisonConfig
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
 
@@ -912,7 +912,7 @@ class TestFlips:
         assert "mean/reward" in summary.reason
 
     def test_continuous_mode_only_keeps_reward_lists_for_shown_flips(self, tmp_path):
-        from nemo_gym.comparison.schema import MAX_FLIPS_SHOWN
+        from nemo_gym.eval.comparison.schema import MAX_FLIPS_SHOWN
 
         num_tasks = MAX_FLIPS_SHOWN + 1
         baseline = _load(
@@ -983,7 +983,7 @@ class TestRunLabel:
         assert run_file.label == "run_a"
 
     def test_label_falls_back_to_the_stem_when_there_is_no_directory(self):
-        from nemo_gym.comparison.schema import RunFile
+        from nemo_gym.eval.comparison.schema import RunFile
 
         run_file = RunFile(
             role="baseline",
@@ -1323,7 +1323,7 @@ class TestEndToEnd:
             readonly.chmod(0o755)
 
     def test_run_comparison_returns_the_result_and_the_paths_it_wrote(self, tmp_path):
-        from nemo_gym.comparison.runner import run_comparison
+        from nemo_gym.eval.comparison.runner import run_comparison
 
         config, _ = self._result(tmp_path, output_dirpath=str(tmp_path / "out"))
         result, written = run_comparison(config, "gym eval compare ...")
@@ -1332,14 +1332,14 @@ class TestEndToEnd:
         assert all(path.exists() for path in written)
 
     def test_invoked_command_records_the_resolved_invocation(self, monkeypatch):
-        from nemo_gym.comparison.runner import invoked_command
+        from nemo_gym.eval.comparison.runner import invoked_command
 
         # `dispatch` rewrites argv to the resolved Hydra overrides before the entry point runs.
         monkeypatch.setattr("sys.argv", ["gym", "+baseline_rollouts_jsonl_fpath=a b.jsonl"])
         assert invoked_command() == "gym eval compare '+baseline_rollouts_jsonl_fpath=a b.jsonl'"
 
     def test_invoked_command_redacts_secret_shaped_overrides(self, monkeypatch):
-        from nemo_gym.comparison.runner import invoked_command
+        from nemo_gym.eval.comparison.runner import invoked_command
 
         monkeypatch.setattr(
             "sys.argv",
@@ -1575,7 +1575,7 @@ class TestReportEdgeCases:
 
     def test_flip_table_is_capped_per_direction(self, tmp_path):
         """The cap applies to each direction, so improvements are never crowded out by regressions."""
-        from nemo_gym.comparison.report import MAX_FLIPS_SHOWN
+        from nemo_gym.eval.comparison.report import MAX_FLIPS_SHOWN
 
         over_cap = MAX_FLIPS_SHOWN + 3
         # Regressions first in task order, then the same number of improvements. A single global cap
@@ -1670,7 +1670,7 @@ class TestReportEdgeCases:
 
 @pytest.mark.parametrize("legacy_alias_sidecars", [False, True])
 def test_comparison_uses_reverification_metrics_through_alias(tmp_path, legacy_alias_sidecars):
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.eval.rollout_reverification import _prepare_output_fpaths
     from nemo_gym.utils.path_utils import failures_path_for
 
     target = tmp_path / "original.jsonl"
@@ -1686,7 +1686,7 @@ def test_comparison_uses_reverification_metrics_through_alias(tmp_path, legacy_a
 
 
 def test_explicit_comparison_metrics_override_keeps_its_path(tmp_path):
-    from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
+    from nemo_gym.eval.comparison.loading import resolve_aggregate_metrics_fpath
 
     override = tmp_path / "custom_metrics.json"
     assert resolve_aggregate_metrics_fpath(str(tmp_path / "absent.jsonl"), str(override)) == override
@@ -1786,7 +1786,7 @@ async def test_aggregation_and_compare_retain_legacy_alias_sidecars(tmp_path, mo
 async def test_aggregate_destination_with_competing_alias_companions_is_unchanged(tmp_path, monkeypatch, merge):
     from unittest.mock import AsyncMock
 
-    from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
+    from nemo_gym.eval.comparison.loading import resolve_aggregate_metrics_fpath
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
     from nemo_gym.utils.path_utils import failures_path_for
     from tests.unit_tests.rollouts.test_rollout_collection import (
