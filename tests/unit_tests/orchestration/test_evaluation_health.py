@@ -298,3 +298,59 @@ def test_a_scored_harbor_agent_timeout_counts_its_own_failure_kind_once():
     assert passed is True and report["exact"] is True, reason
     assert task["failures"]["trial_failures"]["by_cause"]["timeout"]["count"] == 30
     assert task["trial_counts"] == {"observed_healthy": 70, "unhealthy": 30, "unobserved": 0, "verifier_recorded": 0}
+
+
+def _memory_kill(row: dict, *, stage: str = "agent") -> None:
+    """Make a counted terminal failure row of a provider-reported memory kill of the agent's sandbox at ``stage``,
+    as collection saves it when its policy makes an agent-stage kill a final zero (the /run reply was a 500)."""
+    event_id = row["_ng_failure_id"]
+    row["failure_kind"] = "provider_oom_killed"
+    row["_ng_failure_http_status"] = 500
+    row["_ng_failure_events"] = {
+        event_id: {
+            "boundary": "sandbox",
+            "operation": "agent.sandbox_exec",
+            "failure_kind": "provider_oom_killed",
+            "stage": stage,
+            "cause_id": None,
+            "operation_id": None,
+            "attempt_id": None,
+        }
+    }
+
+
+def test_agent_stage_memory_kills_the_policy_counted_are_model_faults_and_do_not_fail_health():
+    collected = _run(97, settled={"model_transport_error": 3})
+    for row in collected.failures:
+        _memory_kill(row)
+    decision, (passed, reason, report), task = _gate(collected)
+    assert decision.counts == {"scored": 97, "model_final": 3}
+    assert passed is True, reason
+    assert report["evaluation"] == {"count": 0, "fraction": 0.0, "kinds": {}, "server": 0}
+    assert report["model"] == {"count": 3, "fraction": 0.03, "kinds": {"agent_sandbox_oom_killed": 3}}
+    assert "model faults: 3 of 100 (3.00%) (agent_sandbox_oom_killed 3)" in reason
+    assert not _health_errors(task)
+    # Still a sandbox failure by cause, in the trial failure rate.
+    assert task["failures"]["trial_failures"]["by_cause"]["sandbox"] == {"count": 3, "rate": 0.03}
+
+
+def test_the_same_kind_without_the_policys_final_zero_markers_stays_evaluation_side():
+    # A scored row that records the kind as its own outcome carries no final-zero markers: the gate counts it as a
+    # server-class fault, as for any provider failure.
+    collected = _run(100)
+    for row in collected.results[:3]:
+        row["failure_kind"] = "provider_oom_killed"
+    _, (passed, reason, report), _ = _gate(collected)
+    assert passed is False
+    assert report["evaluation"]["kinds"] == {"provider_oom_killed": 3} and report["evaluation"]["server"] == 3
+    assert report["model"]["count"] == 0
+
+
+def test_a_memory_kill_in_another_stage_is_no_final_zero_and_leaves_the_run_incomplete():
+    # The policy does not count a setup or verification kill; it stays infrastructure, which nobody owns here.
+    collected = _run(97, settled={"model_transport_error": 3})
+    for row in collected.failures:
+        _memory_kill(row, stage="verification")
+    decision, (passed, reason, report), _ = _gate(collected)
+    assert decision.counts == {"scored": 97, "unknown": 3}
+    assert passed is None and report is None and "not complete" in reason

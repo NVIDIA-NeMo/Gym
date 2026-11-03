@@ -63,6 +63,7 @@ from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_s
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
+    AGENT_SANDBOX_OOM_KILLED,
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
@@ -888,6 +889,7 @@ def decide_recovery(
         is_terminal_failure,
     )
     from nemo_gym.rollouts.rollout_recovery import (
+        agent_phase_oom,
         is_answered_agent_deadline,
         is_infrastructure_agent_timeout,
         masked_infrastructure_kind,
@@ -1172,6 +1174,16 @@ def decide_recovery(
             # Collection's metrics score it only when its producer marked it a counted zero.
             state = IdentityState.MODEL_FINAL
             unscored = last.get(COUNTS_AS_ZERO) is not True
+        elif (
+            last.get(COUNTS_AS_ZERO) is True
+            and is_terminal_failure(last)
+            and agent_phase_oom(last.get(FAILURE_EVENTS))
+        ):
+            # The policy made a memory kill of the agent's own sandbox during its command a final zero: the model
+            # exhausted the benchmark's limit. The gate counts it as the model's fault (``AGENT_SANDBOX_OOM_KILLED``);
+            # the same kind without these markers, or from another stage, stays infrastructure.
+            state = IdentityState.MODEL_FINAL
+            kind = AGENT_SANDBOX_OOM_KILLED
         elif last.get(COUNTS_AS_ZERO) is True:
             # Explicit scoring is required, but cannot make an unowned or infrastructure failure a model zero.
             model_cause, _ = _policy_evidence(last)
@@ -4931,7 +4943,10 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     final_zero = final_zero_trials(decision, collected)
     infrastructure = infrastructure_timeouts(decision, collected)
     kinds = Counter(
-        status_fault_kind(e.failure_kind, e.http_status)
+        # The sandbox's own memory kill keeps its class: the /run reply's status is the agent's failure, not a server's.
+        e.failure_kind
+        if e.failure_kind == AGENT_SANDBOX_OOM_KILLED
+        else status_fault_kind(e.failure_kind, e.http_status)
         for e in decision.evidence
         if e.state == IdentityState.MODEL_FINAL
     )
@@ -5197,6 +5212,8 @@ def trial_failure_cause(kind: Any) -> str:
         return "other"
     if kind == ROLLOUT_ALLOCATION_ENDED:
         return "allocation"
+    if kind == AGENT_SANDBOX_OOM_KILLED:
+        return "sandbox"
     if "timeout" in kind:
         return "timeout"
     if kind in (JUDGE_FAILED, JUDGE_UNPARSEABLE, VERIFIER_ERROR, GRADING_WITHOUT_VERDICT):
