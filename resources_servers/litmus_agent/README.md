@@ -183,8 +183,10 @@ tool-using rows works even without provider credentials.
 Under an Environment Server, such as `litmus_agent_environment_server`
 (`single_agent_turn_legacy`), `/seed_session` binds the session cookie to the
 `resources_session_id`, and `/close_session` stops the session's sandbox even
-when `/verify` never ran. A stop that fails makes the close fail, and the sandbox
-stays registered, so the caller's retry stops it. A failed stop at `/verify` is
+when `/verify` never ran. Close and verify wait for a sandbox that is still
+starting or running a cell before they stop it. A stop that fails makes the close
+fail, and the sandbox stays registered, so the caller's retry stops it; a provider
+that only queues the delete, such as OpenShell, logs its failures instead. A failed stop at `/verify` is
 logged and keeps the score. Closing an unknown or already closed session
 succeeds, and a seed that arrives after its session closed is refused with 409
 for `session_close_retry_window_seconds`. A tool call for a closed session gets

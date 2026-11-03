@@ -34,8 +34,12 @@ from nemo_gym.sandbox import (
     list_providers,
     register_provider,
 )
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    ResourcesSessionLostError,
+)
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.litmus_agent.app import (
     _ANSWER_FORMAT_REGEXES,
     _CODE_EXEC_DRIVER_PATH,
@@ -889,23 +893,66 @@ class TestResourcesSessions:
         assert len(_LocalFakeProvider.instances) == providers_before
         assert server._sessions == {}
 
-    def test_tool_call_racing_close_stops_its_sandbox(self, monkeypatch):
-        server, client = _session_client()
-        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+    async def test_close_racing_a_cell_waits_for_it_then_refuses_the_next(self, monkeypatch):
+        server = _make_sandbox_server()
+        running = asyncio.Event()
+        finish_exec = asyncio.Event()
         real_exec = _LocalFakeProvider.exec
 
-        async def exec_then_close(provider, handle, command, **kwargs):
-            result = await real_exec(provider, handle, command, **kwargs)
-            # A close that ran before this call registered its sandbox found nothing to stop.
-            server._fence.mark_closed("rs-1", EPISODE_ID)
-            return result
+        async def blocking_exec(provider, handle, command, **kwargs):
+            running.set()
+            await finish_exec.wait()
+            return await real_exec(provider, handle, command, **kwargs)
 
-        monkeypatch.setattr(_LocalFakeProvider, "exec", exec_then_close)
-        response = client.post("/stateful_python_code_exec", json={"code": "print(1)"})
+        monkeypatch.setattr(_LocalFakeProvider, "exec", blocking_exec)
+        await server.seed_session(_FakeRequest("rs-1"), ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        tool_call = asyncio.create_task(_run_code(server, "rs-1", "print(1)"))
+        await running.wait()
+        close = asyncio.create_task(
+            server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+        )
+        await asyncio.sleep(0.05)
+        provider = _LocalFakeProvider.instances[-1]
+        # The close does not stop the sandbox under the running cell.
+        assert provider.closed == 0 and not close.done()
 
-        assert response.status_code == 404
-        assert _LocalFakeProvider.instances[-1].closed == 1
-        assert server._sessions == {}
+        finish_exec.set()
+        assert (await tool_call).strip() == "1"
+        await close
+        assert provider.closed == 1
+        assert server._sessions == {} and server._session_locks == {}
+        with pytest.raises(ResourcesSessionLostError):
+            await _run_code(server, "rs-1", "print(2)")
+
+    async def test_verify_during_startup_stops_the_sandbox_startup_creates(self, monkeypatch):
+        server = _make_sandbox_server()
+        creating = asyncio.Event()
+        finish_create = asyncio.Event()
+        real_create = _LocalFakeProvider.create
+
+        async def delayed_create(provider, spec):
+            creating.set()
+            await finish_create.wait()
+            return await real_create(provider, spec)
+
+        monkeypatch.setattr(_LocalFakeProvider, "create", delayed_create)
+        # An Agent's /run session: its verify, not a close, stops the sandbox.
+        tool_call = asyncio.create_task(_run_code(server, "s1", "print(1)"))
+        await creating.wait()
+        verify = asyncio.create_task(
+            server._verify_and_cleanup(
+                _FakeRequest("s1"), _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT)
+            )
+        )
+        await asyncio.sleep(0.05)
+        finish_create.set()
+
+        assert (await verify).reward == 1.0
+        with pytest.raises(ResourcesSessionLostError):
+            await tool_call
+        provider = _LocalFakeProvider.instances[-1]
+        assert provider.created == 1 and provider.closed == 1
+        assert server._sessions == {} and server._session_locks == {}
 
     async def test_close_waits_for_startup_and_retries_a_failed_stop(self, monkeypatch):
         server = _make_sandbox_server()

@@ -729,6 +729,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
                 raise ResourcesSessionLostError(f"litmus_agent session {session_id} is closed")
             session, lock = await self._acquire_session(session_id)
         async with lock:
+            if self._sessions.get(session_id) is not session:
+                # Verify or close stopped the sandbox while this call waited for it.
+                raise ResourcesSessionLostError(f"litmus_agent session {session_id} ended before the tool call ran")
             result = await session.sandbox.exec(
                 f"python3 {_CODE_EXEC_DRIVER_PATH}",
                 env={_CELLS_ENV_VAR: _encode_cells([*session.cells, code])},
@@ -740,29 +743,30 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             elif result.return_code == _EXIT_REPLAY_RESET:
                 session.cells.clear()
 
-        if self._fence.closed_episode(session_id) is not None:
-            # The session closed while this call ran, so stop the sandbox the call may have started.
-            await self._cleanup_session(session_id)
-            raise ResourcesSessionLostError(f"litmus_agent session {session_id} closed during the tool call")
-
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         return PlainTextResponse(_truncate_output(output, self.config.code_exec_max_output_chars))
 
     async def _cleanup_session(self, session_id: str) -> None:
-        """Stop the session's sandbox; one whose stop fails stays registered, so a later cleanup retries it."""
+        """Stop the session's sandbox; one whose stop fails stays registered, so a later cleanup retries it.
+
+        Waits for the session's lock, so it never stops a sandbox that is still starting or running a cell. A stop
+        during startup would only release the client, and the container that startup then creates would leak.
+        """
         if self._registry_lock is None:
             self._registry_lock = asyncio.Lock()
         async with self._registry_lock:
+            # A registered session always has its lock, so no lock means nothing to stop.
+            lock = self._session_locks.get(session_id)
+        if lock is None:
+            return
+        async with lock:
             session = self._sessions.get(session_id)
-            if session is None:
-                self._session_locks.pop(session_id, None)
-                return
-        await session.sandbox.stop()
-        async with self._registry_lock:
-            # A concurrent cleanup may already have dropped it, and a later call may have started another.
-            if self._sessions.get(session_id) is session:
-                del self._sessions[session_id]
-                self._session_locks.pop(session_id, None)
+            if session is not None:
+                await session.sandbox.stop()
+            async with self._registry_lock:
+                self._sessions.pop(session_id, None)
+                if self._session_locks.get(session_id) is lock:
+                    del self._session_locks[session_id]
 
     async def _shutdown_all_sessions(self) -> None:
         for session_id in list(self._sessions):
