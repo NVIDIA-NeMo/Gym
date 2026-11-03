@@ -29,9 +29,7 @@ from PIL import Image
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import AGENT_ROUTE_FAILED, NeMoGymResponse
-from nemo_gym.failure_transport import RequestFailureLog
-from nemo_gym.server_runtime import FailureBoundary
+from nemo_gym.core import AGENT_ROUTE_FAILED, FailureBoundary, NeMoGymResponse, RequestFailureLog
 from responses_api_agents.gdp_pdf_agent import app as gdp_pdf_agent_app
 from responses_api_agents.gdp_pdf_agent.app import (
     DocumentDelivery,

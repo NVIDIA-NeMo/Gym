@@ -21,7 +21,7 @@ def test_runtime_and_cost_observations_reject_coercion_and_nonfinite_values():
     import pytest
     from pydantic import ValidationError
 
-    from nemo_gym.failure_transport import ModelOperationObservation
+    from nemo_gym.core.failure_transport import ModelOperationObservation
     from nemo_gym.trajectory.trajectory_record import AgentInvocation
 
     with pytest.raises(ValidationError):

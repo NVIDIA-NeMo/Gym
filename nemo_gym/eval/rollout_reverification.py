@@ -55,7 +55,7 @@ from nemo_gym.config.global_config import (
     rollout_run_labels,
 )
 from nemo_gym.core import VERIFIER_ERROR
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
