@@ -250,7 +250,7 @@ async def test_restored_typed_session_keeps_its_binding_and_verify_lifetime(tmp_
         for _ in range(2):
             verified = (await client.post("/ng-rollout/r-a1/verify", json=verify_body())).json()
             assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
-        assert seed.resources_session_id in restored.session_id_to_tool_env
+        assert restored.session_id_to_tool_env == {} and restored._session_episodes == {}
         client.cookies.clear()
         closed = await client.post(
             "/ng-rollout/r-a1/close_session",
@@ -261,7 +261,7 @@ async def test_restored_typed_session_keeps_its_binding_and_verify_lifetime(tmp_
         )
         assert closed.status_code == 200, closed.text
     assert restored.session_id_to_tool_env == {}
-    assert restored._typed_sessions == {}
+    assert restored._session_episodes == {}
 
 
 async def test_a_retired_session_is_gone(tmp_path: Path) -> None:
@@ -314,3 +314,107 @@ async def test_a_session_dropped_by_a_failed_verify_is_left_out_of_the_export(
     assert len(restored.session_id_to_tool_env) == 1
     assert continued == ["00000301"]
     assert gone.status_code == 404
+
+
+def typed_seed(session_id: str = "typed-session", rollout_id: str = "r") -> ResourcesSeedSessionRequest:
+    return ResourcesSeedSessionRequest(
+        resources_session_id=session_id,
+        episode_id=EpisodeId(rollout_id=rollout_id),
+        task_id=TaskId(taskset="workplace_assistant", task_id="0"),
+        task_data={
+            key: value for key, value in verify_body().items() if key not in ("response", "responses_create_params")
+        },
+    )
+
+
+async def test_retire_releases_typed_binding() -> None:
+    server, webserver = make_server()
+    async with client_for(webserver) as client:
+        assert (
+            await client.post("/ng-rollout/r/seed_session", json=typed_seed().model_dump(mode="json"))
+        ).status_code == 200
+        await call_tools(client, BEFORE, "r")
+        retired = await client.post(
+            "/ng-control/v1/checkpoint/retire", json=control(episode_ids=[{"rollout_id": "r"}]), headers=AUTH
+        )
+        assert retired.status_code == 200, retired.text
+    assert server.session_id_to_tool_env == {} and server._session_episodes == {}
+
+
+async def test_typed_verify_failure_releases_tables_and_can_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    server, webserver = make_server()
+    async with client_for(webserver) as client:
+        await client.post("/ng-rollout/r/seed_session", json=typed_seed().model_dump(mode="json"))
+        await call_tools(client, BEFORE + AFTER[:1], "r")
+        with monkeypatch.context() as patch:
+            patch.setattr(workplace_app, "is_correct", MagicMock(side_effect=RuntimeError("verifier failed")))
+            with pytest.raises(RuntimeError, match="verifier failed"):
+                await client.post("/ng-rollout/r/verify", json=verify_body())
+        assert server.session_id_to_tool_env == {} and server._session_episodes == {}
+        retried = await client.post("/ng-rollout/r/verify", json=verify_body())
+        assert retried.json()["reward"] == 1.0
+
+
+async def test_verify_releases_typed_state_before_checkpoint_ownership_ends() -> None:
+    server, webserver = make_server()
+    async with client_for(webserver) as client:
+        await client.post("/ng-rollout/r/seed_session", json=typed_seed().model_dump(mode="json"))
+        await call_tools(client, BEFORE + AFTER[:1], "r")
+        verified = await client.post(
+            "/ng-rollout/r/verify", json=verify_body(), headers={"x-ng-checkpoint-close-follows": "1"}
+        )
+        assert verified.json()["reward"] == 1.0
+        status = (await client.get("/ng-control/v1/checkpoint/status", headers=AUTH)).json()
+        assert status["report"]["counts"]["sessions"] == 0
+        # There is no later retire callback once wait-verify unbinds the session.
+        assert server.session_id_to_tool_env == {} and server._session_episodes == {}
+
+
+async def test_mixed_checkpoint_restores_both_seed_protocols(tmp_path: Path) -> None:
+    source, source_app = make_server()
+    seed = typed_seed(rollout_id="q")
+    async with client_for(source_app) as legacy, client_for(source_app) as typed:
+        await legacy.post("/ng-rollout/r/seed_session", json=SEED)
+        await typed.post("/ng-rollout/q/seed_session", json=seed.model_dump(mode="json"))
+        await call_tools(legacy, BEFORE, "r")
+        await call_tools(typed, BEFORE, "q")
+        states = await source.export_session_states(list(source.session_id_to_tool_env))
+        assert all(set(state) == {"tool_env", "episode_id", "task_id"} for state in states.values())
+        assert sum(state["episode_id"] is None for state in states.values()) == 1
+        assert (await checkpoint(legacy, tmp_path))["manifest"]["record_count"] == 2
+        legacy_cookies, typed_cookies = dict(legacy.cookies), dict(typed.cookies)
+    restored, restored_app = make_server()
+    async with client_for(restored_app, legacy_cookies) as legacy, client_for(restored_app, typed_cookies) as typed:
+        assert (await restore(legacy, tmp_path)).json()["phase"] == "restored"
+        await legacy.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        assert restored._session_episodes == {
+            seed.resources_session_id: (EpisodeId(rollout_id="q", attempt=1), seed.task_id)
+        }
+        for client, attempt in ((legacy, "r-a1"), (typed, "q-a1")):
+            assert await call_tools(client, AFTER[:1], attempt) == ["00000301"]
+            assert (await client.post(f"/ng-rollout/{attempt}/verify", json=verify_body())).json()["reward"] == 1.0
+        assert restored.session_id_to_tool_env == {} and restored._session_episodes == {}
+        closed = await typed.post(
+            "/ng-rollout/q-a1/close_session",
+            json={
+                "resources_session_id": seed.resources_session_id,
+                "episode_id": {"rollout_id": "q", "attempt": 1},
+            },
+        )
+        assert closed.status_code == 200
+
+
+async def test_old_flat_checkpoint_can_be_adopted_without_resetting_tables() -> None:
+    source, source_app = make_server()
+    async with client_for(source_app) as client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await call_tools(client, BEFORE, "r")
+    [tool_env] = source.session_id_to_tool_env.values()
+    restored, _ = make_server()
+    await restored.restore_session_states({"typed-session": _export_tool_env(tool_env)})
+    from fastapi import Request
+
+    request = Request({"type": "http", "session": {}})
+    await restored.seed_session(request, typed_seed())
+    assert _export_tool_env(restored.session_id_to_tool_env["typed-session"]) == _export_tool_env(tool_env)
+    assert restored._session_episodes["typed-session"] == (typed_seed().episode_id, typed_seed().task_id)

@@ -99,7 +99,7 @@ def test_follows_the_session_contract() -> None:
     )
 
 
-def test_a_typed_session_keeps_its_tables_until_close() -> None:
+def test_a_typed_verify_releases_tables_and_keeps_only_its_retry_identity() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
 
@@ -119,8 +119,8 @@ def test_a_typed_session_keeps_its_tables_until_close() -> None:
 
     verified = client.post("/verify", json=verify_json(SEND)).json()
     assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
-    # The Environment Server closes after verifying, so verify leaves the session for that close.
-    assert "resources-session" in server.session_id_to_tool_env
+    # Verify ends checkpoint ownership, so the databases and active binding are already released.
+    assert server.session_id_to_tool_env == {} and server._session_episodes == {}
     assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
 
     # The close names the session, so it releases it without the seed's cookie.
@@ -151,7 +151,7 @@ def test_a_seed_whose_task_data_is_not_a_task_is_refused_and_records_nothing() -
 
     assert response.status_code == 422
     assert "task_data is not a workplace_assistant task" in response.json()["detail"]
-    assert server.session_id_to_tool_env == {} and server._typed_sessions == {}
+    assert server.session_id_to_tool_env == {} and server._session_episodes == {}
     # The refusal records nothing, so a corrected seed for the same ID succeeds.
     assert client.post("/seed_session", json=seed_json()).status_code == 200
     assert "resources-session" in server.session_id_to_tool_env
@@ -172,7 +172,7 @@ def test_a_seed_whose_tables_fail_to_build_leaves_no_binding(monkeypatch: pytest
     monkeypatch.setattr(app, "get_tools", get_tools_failing_once)
 
     assert client.post("/seed_session", json=seed_json()).status_code == 500
-    assert server._typed_sessions == {}
+    assert server._session_episodes == {}
     # The caller's retry builds the tables, so the session's tool calls reach them.
     assert client.post("/seed_session", json=seed_json()).status_code == 200
     assert client.post("/email_send_email", json=SEND).status_code == 200
@@ -244,3 +244,139 @@ def test_mcp_tool_calls_reach_the_tables_seeded_under_the_callers_id() -> None:
     assert called["result"].get("isError") is not True, called
     emails = server.session_id_to_tool_env["resources-session"]["containers"]["email"]._emails
     assert (emails["subject"] == "Session check").sum() == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        seed_json() | {"extra": True},
+        {key: value for key, value in seed_json().items() if key != "episode_id"},
+        seed_json(task_data=[]),
+    ],
+)
+def test_malformed_typed_seed_cannot_fall_back_to_legacy(payload: dict[str, Any]) -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=payload).status_code == 422
+    assert server.session_id_to_tool_env == {} and server._session_episodes == {}
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+
+
+@pytest.mark.parametrize("completed", ["active", "verified", "closed"])
+def test_legacy_seed_cannot_replace_a_typed_session(completed: str) -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert client.post("/email_send_email", json=SEND).status_code == 200
+    if completed == "verified":
+        assert client.post("/verify", json=verify_json(SEND)).status_code == 200
+    elif completed == "closed":
+        assert client.post("/close_session", json=close_json()).status_code == 200
+    assert client.post("/seed_session", json={"responses_create_params": {"input": "hi"}}).status_code == 409
+    if completed == "active":
+        found = client.post("/email_search_emails", json={"query": SEND["body"]}).json()
+        assert found["output"]["pagination"]["total_emails"] == 1
+    else:
+        assert server.session_id_to_tool_env == {} and server._session_episodes == {}
+
+
+def test_refused_seed_preserves_the_callers_existing_cookie() -> None:
+    server = make_server()
+    webserver = server.setup_webserver()
+    owner, other = TestClient(webserver), TestClient(webserver)
+    assert owner.post("/seed_session", json=seed_json()).status_code == 200
+    other_episode = EpisodeId(rollout_id="other").model_dump(mode="json")
+    assert other.post("/seed_session", json=seed_json("own-session", episode_id=other_episode)).status_code == 200
+    assert other.post("/seed_session", json=seed_json(episode_id=other_episode)).status_code == 409
+    assert other.post("/email_send_email", json=SEND).status_code == 200
+    own = server.session_id_to_tool_env["own-session"]["containers"]["email"]._emails
+    bound = server.session_id_to_tool_env["resources-session"]["containers"]["email"]._emails
+    assert (own["subject"] == SEND["subject"]).sum() == 1
+    assert (bound["subject"] == SEND["subject"]).sum() == 0
+
+
+def test_verified_session_keeps_close_ownership_but_not_tools() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    assert client.post("/email_send_email", json=SEND).status_code == 404
+    assert client.post("/seed_session", json=seed_json()).status_code == 409
+    wrong_close = close_json() | {"episode_id": EpisodeId(rollout_id="other").model_dump(mode="json")}
+    assert client.post("/close_session", json=wrong_close).status_code == 409
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    assert client.post("/close_session", json=close_json()).status_code == 200
+    assert client.post("/verify", json=verify_json(SEND)).json()["mask_sample"] is True
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_verify_retry_record_expires_without_extending_on_retry(monkeypatch: pytest.MonkeyPatch, typed: bool) -> None:
+    now = 0.0
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: now)
+    server = make_server(session_close_retry_window_seconds=10)
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=seed_json() if typed else {}).status_code == 200
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    now = 9.0
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    now = 11.0
+    verified = client.post("/verify", json=verify_json(SEND)).json()
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
+    assert len(server._verified_sessions) == 0
+    assert server.session_id_to_tool_env == {} and server._session_episodes == {}
+
+
+def test_task_data_and_verify_required_fields_agree() -> None:
+    from pydantic import TypeAdapter
+
+    from nemo_gym.server_runtime import BaseVerifyRequest
+    from resources_servers.workplace_assistant.app import WorkbenchVerifyRequest
+    from resources_servers.workplace_assistant.task_data import TaskData
+
+    task_fields = TaskData.model_fields
+    verify_fields = {
+        name: field
+        for name, field in WorkbenchVerifyRequest.model_fields.items()
+        if name not in BaseVerifyRequest.model_fields
+    }
+    assert task_fields.keys() == verify_fields.keys()
+    for name, field in task_fields.items():
+        assert field.is_required() == verify_fields[name].is_required()
+        assert TypeAdapter(field.annotation).json_schema() == TypeAdapter(verify_fields[name].annotation).json_schema()
+
+
+def test_reverify_without_a_session_is_explicitly_unsupported() -> None:
+    client = TestClient(make_server().setup_webserver())
+    assert client.get("/reverify_mode").json() == "unsupported"
+    assert client.post("/verify", json=verify_json(SEND)).json()["mask_sample"] is True
+
+
+def test_new_legacy_run_rotates_cookie_without_invalidating_previous_verify() -> None:
+    server = make_server()
+    webserver = server.setup_webserver()
+    client = TestClient(webserver)
+    assert client.post("/seed_session", json={}).status_code == 200
+    old_cookies = dict(client.cookies)
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    assert client.post("/seed_session", json={}).status_code == 200
+    assert dict(client.cookies) != old_cookies
+    assert client.post("/email_send_email", json=SEND).status_code == 200
+    retry = TestClient(webserver)
+    retry.cookies.update(old_cookies)
+    assert retry.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    assert len(server.session_id_to_tool_env) == 1
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    assert server.session_id_to_tool_env == {}
+
+
+def test_typed_seed_cannot_adopt_a_live_legacy_session() -> None:
+    server = make_server()
+    webserver = server.setup_webserver()
+    legacy, typed = TestClient(webserver), TestClient(webserver)
+    assert legacy.post("/seed_session", json={}).status_code == 200
+    [session_id] = server.session_id_to_tool_env
+    assert legacy.post("/email_send_email", json=SEND).status_code == 200
+    assert typed.post("/seed_session", json=seed_json(session_id)).status_code == 409
+    assert server._session_episodes == {}
+    found = legacy.post("/email_search_emails", json={"query": SEND["body"]}).json()
+    assert found["output"]["pagination"]["total_emails"] == 1

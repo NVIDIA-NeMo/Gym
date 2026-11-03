@@ -159,6 +159,8 @@ The environment is implemented as a FastAPI-based resources server that executes
 
 <Tab title="Verification Process">
 
+The simplified scoring example below omits the session presence check and lifecycle cleanup performed by the HTTP handler.
+
 ```python
 async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
     ground_truth = body.ground_truth
@@ -183,7 +185,7 @@ async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
     return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
 ```
 
-The replay needs only the trajectory, but the server first checks that it still holds the rollout's databases. If the session was never seeded, already closed, or lost with a restart, the agent's tool calls had no databases to act on, so `verify` returns a masked sample (`reward: 0`, `mask_sample: true`) instead of a score.
+The replay needs only the trajectory. The HTTP handler first requires either a live seeded session or an unexpired record of a previous verify, and refuses a session that has been explicitly closed. It releases the rollout's databases and active binding after verification, including on scoring errors, while keeping a compact identity record for HTTP retries for `session_close_retry_window_seconds` (default 300 seconds). Never-seeded, closed, restarted, or expired sessions return a masked sample (`reward: 0`, `mask_sample: true`). Offline `gym eval reverify` is unsupported because saved trajectories do not restore this session provenance; forcing it still produces masked samples.
 
 The `is_correct` function implements the state-matching logic:
 

@@ -29,15 +29,19 @@ gym eval run --no-serve \
 
 Each rollout gets its own copy of the five databases, created at `/seed_session`.
 
-An Environment Server, such as `single_agent_turn`, seeds the session with a typed `ResourcesSeedSessionRequest` and closes it with `/close_session`. New configs should use this path. The databases are keyed by the caller's `resources_session_id`: a repeated seed returns the same databases, `/verify` leaves them for the close, and the close releases them even without the seed's cookie. A seed after its session closed gets 409, and a seed whose `task_data` is not a workplace_assistant task gets 422.
+An Environment Server, such as `single_agent_turn`, seeds with a typed `ResourcesSeedSessionRequest` and closes with `/close_session`. New configs should use this path. The databases are keyed by the caller's `resources_session_id`; repeating an active seed returns the existing databases. `/verify` releases the databases and active binding, even if scoring raises, before checkpoint ownership ends. A compact identity record lets an HTTP verify retry replay the trajectory without retaining the databases. `/close_session` releases an unverified session even without the seed's cookie, and checks the episode for an already verified session.
 
-A tool call for a session the server no longer holds (never seeded, closed, or lost with a restart) gets 404 with `failure_kind: session_lost`, and its `/verify` returns a masked sample (`reward: 0`, `mask_sample: true`).
+Closed and verified IDs cannot be seeded again for `session_close_retry_window_seconds` (default 300 seconds). The records expire after that fixed window; callers must use unique typed IDs and finish retries within it. A malformed typed seed or invalid workplace `task_data` gets 422. A legacy-shaped seed cannot overwrite a typed session or reopen a closed one.
 
-The `/run` seed is kept for compatibility. The configs in `configs/` still front `simple_agent` with the `legacy_agent` relay, so the agent's `/run` seeds with its run body under the session cookie. The server keeps accepting that body so these configs run unchanged until they switch. That caller never closes the session, so `/verify` releases its databases; a verify the HTTP client sends again after a dropped connection is still scored for `session_close_retry_window_seconds`. To run the configs through `single_agent_turn_legacy` instead, switch them:
+A tool call after verify, close, or session loss gets 404 with `failure_kind: session_lost`. Verify retries are scored only while the server remembers the completed session and it has not been explicitly closed. Never-seeded, closed, restarted, or expired sessions return a masked sample (`reward: 0`, `mask_sample: true`).
+
+The `/run` seed remains compatible. Both `configs/` and `environments/workplace_assistant/config.yaml` still front `simple_agent` with the `legacy_agent` relay. That caller never closes the session, so verify releases its databases and retains only the bounded retry record. A new `/run` reusing a verified legacy cookie receives a fresh session ID; retries with the previous cookie remain valid within their window. To switch the configs to `single_agent_turn_legacy`:
 
 ```bash
-python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent resources_servers/workplace_assistant/configs/
+python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent resources_servers/workplace_assistant/configs/ environments/workplace_assistant/config.yaml
 ```
+
+Offline `gym eval reverify` is unsupported (`REVERIFY_MODE = UNSUPPORTED`): saved trajectories do not carry a live seeded session. `++force=true` bypasses the CLI guard but does not restore session provenance, so those requests are masked rather than rescored. This differs from an HTTP retry of a verify for a session the worker still remembers.
 
 ## Generating Additional Training Data
 
