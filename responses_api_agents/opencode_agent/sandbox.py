@@ -20,6 +20,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
@@ -275,10 +276,13 @@ class OpenCodeSandboxSession(AgentSessionState):
             )
         directory = self.session.session_dir
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        command = await stage_cli_transport(
+            self.session.sandbox, {**payload, "directory": directory}, harness="opencode"
+        )
         env = payload["env"]
         params = {
             "cwd": payload["cwd"],
-            "command": payload["command"],
+            "command": command,
             "env": env,
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.jsonl",

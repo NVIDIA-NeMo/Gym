@@ -49,6 +49,7 @@ from nemo_gym.agents import (
     resolve_agent_timeout,
     stage_skills,
 )
+from nemo_gym.agents.utils import model_history_transport
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     SKILLS_REF_KEY_NAME,
@@ -590,6 +591,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
+    history_delta_enabled: bool = False
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
     # server's URL (every Gym model server speaks the streaming Responses dialect on /v1/responses).
@@ -885,6 +887,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                 )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            if self.config.history_delta_enabled:
+                await sandbox.upload(Path(model_history_transport.__file__), f"{directory}/model_history_transport.py")
             # The runner loads the transport from beside itself under this name.
             await sandbox.upload(Path(__file__).with_name("sandbox_transport.py"), f"{directory}/sandbox_transport.py")
         except BaseException as error:
@@ -1003,6 +1007,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
         payload = {
+            **(
+                {"history_transport": {"base_url": base_url, "timeout": timeout}}
+                if self.config.history_delta_enabled
+                else {}
+            ),
             "directory": state.session.session_dir,
             "command": command,
             "model_base_url": base_url,

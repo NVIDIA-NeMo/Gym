@@ -60,10 +60,12 @@ from nemo_gym.models._checkpoint_workers import (
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 from nemo_gym.models.chat_completions_converter import CustomToolStrategy
 from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.models.history_delta import HistoryTransportProtocol
 from nemo_gym.models.model_call_capture import (
     _SSE_KEEPALIVE,
     ModelCallCaptureConfig,
     install_model_call_capture,
+    install_model_rollout_routing,
 )
 from nemo_gym.models.responses_streaming import (
     NamespaceMap,
@@ -309,6 +311,8 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    routes_rollouts_to_owner = True
+
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
@@ -350,6 +354,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         return False
 
+    def history_transport_protocol(self) -> HistoryTransportProtocol | None:
+        """Override to select a native continuation protocol; None uses the shim header."""
+        return None
+
+    def setup_rollout_routing(self, app: FastAPI, *, socket_dir: str, backlog: int) -> None:
+        install_model_rollout_routing(
+            app,
+            socket_dir=socket_dir,
+            backlog=backlog,
+            non_generating_requests=self.non_generating_model_routes
+            | frozenset(
+                (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
+            ),
+        )
+
     def setup_webserver(self) -> FastAPI:
         if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
             raise ValueError(
@@ -379,6 +398,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            history_transport_protocol=self.history_transport_protocol(),
             # Embedding vectors never contain policy-generated text, so an embeddings call under a
             # rollout's token-capture prefix must not mark that rollout incomplete.
             non_generating_requests=self.non_generating_model_routes

@@ -50,6 +50,17 @@ def run(params: dict) -> int:
 
     signal.signal(signal.SIGTERM, interrupt)
     with ExitStack() as stack:
+        transport = params.get("history_transport")
+        if transport is not None:
+            import runpy
+
+            helper = runpy.run_path(str(Path(__file__).with_name("model_history_transport.py")))
+            params["model_base_url"] = stack.enter_context(
+                helper["HistoryTransport"](
+                    transport["base_url"],
+                    timeout=transport["timeout"],
+                )
+            )
         command = list(params["command"])
         if params.get("model_base_url"):
             # -I intentionally excludes the session directory from sys.path.
