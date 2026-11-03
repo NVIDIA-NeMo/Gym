@@ -1357,9 +1357,9 @@ class TestResourcesSessions:
         with TestClient(server.setup_webserver()) as client:
             client.post("/seed_session", json=_typed_seed())
             verify = client.post("/verify", json=VERIFY_BODY)
-            # Typed verification retains state for retries until the Environment Server closes the session.
+            # Verification releases live state while a compact record serves retries.
             assert verify.json()["mask_sample"] is False
-            assert "resources-session" in server.session_metadata
+            assert server.session_metadata == {}
             assert client.post("/close_session", json=_typed_close()).status_code == 200
 
         assert server.session_metadata == {}
@@ -1391,7 +1391,7 @@ class TestResourcesSessions:
                 assert response.json()["evaluation_error"] == (
                     "No law found in response. Expected <final_law>...</final_law> tags."
                 )
-            assert "resources-session" in server.session_metadata
+            assert server.session_metadata == {}
             assert client.post("/close_session", json=_typed_close()).status_code == 200
 
         assert server.session_metadata == {}
@@ -1451,3 +1451,149 @@ class TestResourcesSessions:
 
         assert verify.json()["mask_sample"] is True
         assert verify.json()["failure_kind"] == "session_expired"
+
+
+@mark.parametrize("stage", ["active", "verified", "closed"])
+def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+    server = _session_server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        if stage == "verified":
+            assert client.post("/verify", json=VERIFY_BODY).status_code == 200
+        elif stage == "closed":
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+        before = dict(server.session_metadata)
+        assert client.post("/seed_session", json=TASK_DATA).status_code == 409
+        assert server.session_metadata == before
+
+
+def test_malformed_typed_seed_does_not_fall_back_to_legacy() -> None:
+    server = _session_server()
+    malformed = dict(TASK_DATA) | {"resources_session_id": "incomplete-typed"}
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=malformed).status_code == 422
+    assert server.session_metadata == {}
+    assert server._session_episodes == {}
+
+
+@mark.parametrize("typed", [False, True])
+def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed: bool, monkeypatch) -> None:
+    from omegaconf import DictConfig
+
+    clock = [100.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+    server = _session_server()
+    server.server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+    )
+    prefix = "/ng-rollout/rollout"
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post(prefix + "/seed_session", json=_typed_seed() if typed else TASK_DATA).status_code == 200
+        sid = next(iter(server.session_metadata))
+        assert server._checkpoint.is_open(sid)
+        handle = MagicMock()
+        server._sessions[sid] = handle
+        first = client.post(prefix + "/verify", json=VERIFY_BODY).json()
+        assert not first["mask_sample"]
+        assert not server._checkpoint.is_open(sid)
+        assert server.session_metadata == {}
+        assert server._session_episodes == {}
+        assert server._sessions == {}
+        handle.close.assert_called_once()
+        retry = client.post(prefix + "/verify", json=VERIFY_BODY).json()
+        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+        if typed:
+            wrong_owner = _typed_close()
+            wrong_owner["episode_id"]["rollout_id"] = "other"
+            assert client.post(prefix + "/close_session", json=wrong_owner).status_code == 409
+        clock[0] += server.config.session_close_retry_window_seconds + 1
+        assert client.post(prefix + "/verify", json=VERIFY_BODY).json()["mask_sample"] is True
+        assert len(server._verified_sessions) == 0
+
+
+def test_next_legacy_run_gets_new_cookie_and_old_verify_remains_retryable() -> None:
+    server = _session_server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=TASK_DATA).status_code == 200
+        old_cookies = dict(client.cookies)
+        old_id = next(iter(server.session_metadata))
+        first = client.post("/verify", json=VERIFY_BODY).json()
+        assert client.post("/seed_session", json=TASK_DATA).status_code == 200
+        new_id = next(iter(server.session_metadata))
+        assert new_id != old_id
+        assert client.post("/verify", json=VERIFY_BODY).json()["mask_sample"] is False
+        client.cookies.clear()
+        client.cookies.update(old_cookies)
+        retry = client.post("/verify", json=VERIFY_BODY).json()
+        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+
+
+def test_verify_retry_reuses_evaluation_and_refuses_a_changed_answer() -> None:
+    from copy import deepcopy
+
+    server = _session_server()
+    body = deepcopy(VERIFY_BODY)
+    body["response"]["output"] = [
+        {
+            "id": "answer",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {"type": "output_text", "text": "<final_law>def law(): return 1</final_law>", "annotations": []}
+            ],
+        }
+    ]
+    evaluator = MagicMock()
+    evaluator.evaluate_law.side_effect = [
+        {"symbolic_equivalent": True, "rmsle": 0.0},
+        {"symbolic_equivalent": False, "rmsle": 10.0},
+    ]
+    with (
+        TestClient(server.setup_webserver()) as client,
+        patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
+    ):
+        client.post("/seed_session", json=_typed_seed())
+        first = client.post("/verify", json=body).json()
+        retry = client.post("/verify", json=body).json()
+        assert first["reward"] == retry["reward"] == 1.0
+        evaluator.evaluate_law.assert_called_once()
+        changed = deepcopy(body)
+        changed["response"]["output"][0]["content"][0]["text"] = "<final_law>def law(): return 2</final_law>"
+        assert client.post("/verify", json=changed).json()["mask_sample"] is True
+        assert client.post("/close_session", json=_typed_close()).status_code == 200
+        assert client.post("/verify", json=body).json()["mask_sample"] is True
+
+
+@mark.parametrize("typed", [False, True])
+def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
+    from omegaconf import DictConfig
+
+    server = _session_server()
+    server.server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+    )
+    with TestClient(server.setup_webserver()) as client:
+        assert (
+            client.post("/ng-rollout/rollout/seed_session", json=_typed_seed() if typed else TASK_DATA).status_code
+            == 200
+        )
+        sid = next(iter(server.session_metadata))
+        handle = MagicMock()
+        server._sessions[sid] = handle
+        client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
+        assert server.session_metadata == {}
+        assert server._session_episodes == {}
+        handle.close.assert_called_once()
+        assert server._sessions == {}
+
+
+def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+    server = _session_server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=TASK_DATA).status_code == 200
+        sid = next(iter(server.session_metadata))
+        original = server.session_metadata[sid]
+        assert client.post("/seed_session", json=_typed_seed(sid)).status_code == 409
+        assert server.session_metadata[sid] is original
+        assert server._session_episodes == {}
