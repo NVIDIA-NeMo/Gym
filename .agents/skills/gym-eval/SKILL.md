@@ -105,6 +105,12 @@ The driver's own exit code tells the chain what happened: 75, unfinished work, t
 `PREEMPTED`, `NODE_FAIL` and `BOOT_FAIL` spend an infra retry. A segment the scheduler requeued
 leaves its elapsed time unknown, and the chain stops with unknown accounting (step 5).
 
+While the chain runs, `gym eval status "$GYM_JOB_ID"` prints each benchmark's saved progress as the
+Store recorded it, without taking the run lock: `updated_at` and `tracking`, the `export receipt`
+per exporter (present or missing, with the live run id), and per agent `completed`, `remaining`,
+`expected`, `aggregation`, `failures by class`, `by kind` and `model-final by kind` (`--json` gives the
+same as data).
+
 Do not resubmit while a job of the run is live; recovery answers NOOP then anyway.
 
 ## 3. Where the evidence lives
