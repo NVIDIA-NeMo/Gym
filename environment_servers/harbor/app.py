@@ -115,7 +115,6 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NgFailureEvent,
     TaskId,
-    encode_model_sampling,
     failure_kinds,
     model_sampling_path_segment,
     sdk_error_details,
@@ -537,6 +536,7 @@ class HarborEnvironmentServer(
     config: HarborEnvironmentServerConfig
     request_model = HarborEpisodeRequest
     response_model = HarborEpisodeResponse
+    applies_model_sampling = True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -2082,11 +2082,7 @@ class HarborEnvironmentServer(
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         # The agent is the one the training framework trains, so its model calls carry the episode's values.
-        sampling_segment = (
-            model_sampling_path_segment(encode_model_sampling(request.model_sampling))
-            if request.model_sampling is not None
-            else ""
-        )
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
         return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
