@@ -124,10 +124,22 @@ Each entry is a plain top-level file name: no path separators, no `*`, `?` or `[
 every turn. Harbor has no such field. See [Multi-Container Tasks](/main/data/task-folders/compose-tasks).
 
 ## Shared and separate verification
+Verification can be shared or separate, meaning the verifier runs in the agent's sandbox or in a separate sandbox.
 
-In **shared** mode, `test.sh` runs in the agent's sandbox. Processes the agent started keep running beside it.
+In **shared** mode (`environment_mode = "shared"`, the default), `test.sh` runs in the agent's sandbox. Processes
+the agent started keep running beside it. Use shared verification when the verifier needs to inspect the actual 
+environment the agent changed. For example, Terminal-Bench's nginx-request-logging tests whether Nginx is responding
+at localhost:8080. Copying its configuration files into a fresh container sandbox would not prove that the agent
+successfully started the Nginx server and restarting it during verificatio nwould change what is actaully being tested.
 
-In **separate** mode, set by `environment_mode = "separate"` or a `[verifier.environment]` table, the server runs
+In **separate** mode, set by `environment_mode = "separate"` or a `[verifier.environment]` table, a fresh
+sandbox is created for the verifier. Use separate verification when success can be determined from exported
+artifacts and there are concerns about the agent's environment affecting verification. 
+Imagine an agent is asked in a SWE task to fix a bug in a Python project. While working, the agent
+changes a Python file and upgrades a Python package. The package upgrade is not something we want to impact verification, 
+but this change may affect verification.
+
+When using separate verification, the server runs
 the collect hooks, copies `/logs/artifacts` and the task's `artifacts` out of the agent's sandbox, stops it, and
 runs `test.sh` in a fresh sandbox that takes its `env` and `workdir` from `[verifier.environment]`, or from
 `[environment]` without one. That sandbox receives the artifacts at their own paths, the task's `tests/` (unless
