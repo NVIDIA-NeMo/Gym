@@ -183,7 +183,8 @@ class TestServerSpanParent:
     """With Gym's real stack order, the server span is parented to the span named in the URL."""
 
     @pytest.fixture
-    def app(self):
+    def app(self, traces) -> FastAPI:  # noqa: F811
+        """Install the test trace provider before FastAPI binds its instrumentation."""
         from nemo.lens.contrib.fastapi import instrument_fastapi
         from opentelemetry import trace
 

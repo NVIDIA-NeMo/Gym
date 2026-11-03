@@ -5,7 +5,7 @@ NeMo CI adapter. `contract-version` contains the interface version expected by t
 
 - `lint.sh` installs the pinned pre-commit release and runs every hook against the repository.
 - `core_unit_tests.sh` installs the `dev` extra and runs core tests with the `sandbox` marker
-  excluded.
+  excluded. Optional `SHARD_INDEX NUM_SHARDS` arguments select a zero-based `pytest-shard` shard.
 - `server_tests.sh SHARD_INDEX NUM_SHARDS` installs the `dev` extra and runs one zero-based shard
   of the full server suite.
 
@@ -92,3 +92,9 @@ Lint clears `SKIP`; core and server tests clear external Gym roots, root configu
 `PYTHONSAFEPATH` overrides. Clearing `PYTHONSAFEPATH` keeps nested module imports consistent with
 GitHub when a CI image enables Python safe-path mode globally. Resolver/index settings are
 intentionally preserved so internal package access remains available.
+
+GitHub's unit-test workflow runs four core + sandbox shards on separate runners. Each shard
+appends sandbox coverage to its core coverage without enforcing a partial-suite threshold.
+The existing `Test` job requires every shard to succeed, downloads their separate coverage
+artifacts, combines them, and enforces the configured coverage threshold before testing changed
+servers. The standalone full-test workflow and the internal adapter retain their unsharded core run.

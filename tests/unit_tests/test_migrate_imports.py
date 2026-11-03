@@ -240,6 +240,7 @@ class TestRewritePython:
     def test_qualified_access_to_a_split_name_is_kept_unless_the_new_module_is_imported(
         self, tmp_path, monkeypatch
     ) -> None:
+        """Execute rewritten imports without attributing synthetic code to a source file."""
         # The new module may never be loaded where the old one is, so `old.Thing` cannot just become `new.Thing`.
         package = tmp_path / "fakepkg"
         package.mkdir()
@@ -262,7 +263,7 @@ class TestRewritePython:
         for name in ("fakepkg", "fakepkg.legacy", "fakepkg.destination"):
             monkeypatch.delitem(__import__("sys").modules, name, raising=False)
         namespace: dict = {}
-        exec(compile(rewritten, "x.py", "exec"), namespace)
+        exec(compile(rewritten, "<rewritten>", "exec"), namespace)
         assert namespace["value"] is __import__("sys").modules["fakepkg.destination"].Thing
 
         imported = "import fakepkg.legacy\nimport fakepkg.destination\nvalue = fakepkg.legacy.Thing\n"
