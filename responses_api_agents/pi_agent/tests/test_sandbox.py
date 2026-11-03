@@ -2366,6 +2366,95 @@ def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
         )
 
 
+def owned_seed_with_search_grant() -> AgentSeedSessionRequest:
+    body = seed_with_tools(mcp_grant("search", required=False))
+    body.sandbox_access = None
+    return body
+
+
+@pytest.mark.parametrize(
+    ("network_access", "allowed"),
+    [
+        ("inherit", None),
+        ("model_only", ["model.example"]),
+        ("model_and_tools", ["model.example", "resources.example"]),
+    ],
+)
+async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, network_access, allowed):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = network_access
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), owned_seed_with_search_grant())
+    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+
+
+async def test_network_access_with_borrowed_sandbox_is_rejected(setup):
+    agent, sandbox = setup
+    agent.config.network_access = "model_only"
+    with pytest.raises(HTTPException) as rejected:
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    assert rejected.value.status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+async def test_network_access_and_explicit_policy_conflict_before_creation(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "provider_options": {"network_policy": {}}}
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        pytest.raises(ValueError, match="not both"),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), owned_seed_with_search_grant())
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("reported", ["0.80.2", "0.79.0"])
+async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported):
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_dir = "/opt"
+    execute = sandbox.exec.side_effect
+
+    async def report_version(command, **kwargs):
+        if command.endswith("/dist/cli.js --version"):
+            return SimpleNamespace(return_code=0, error_type=None, stdout=f"{reported}\n", stderr="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = report_version
+    request = Request({"type": "http", "session": {}})
+    if reported != agent.config.pi_version:
+        with pytest.raises(RuntimeError, match="does not run pi_version 0.80.2"):
+            await agent.seed_agent_session(request, seed())
+        return
+    await agent.seed_agent_session(request, seed())
+    state = agent._session_records["pi-session"].state
+    assert state.runtime == "/opt"
+    assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    assert "/opt/node/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version" in commands
+
+
+def test_runtime_dir_must_be_absolute():
+    with pytest.raises(ValidationError):
+        PiAgentConfig(name="pi", host="localhost", port=8001, entrypoint="app.py", sandbox_runtime_dir="opt")
+
+
 def test_owned_stop_failure_blocks_close_until_retry(setup):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"

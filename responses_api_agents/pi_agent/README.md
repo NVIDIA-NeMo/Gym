@@ -91,7 +91,9 @@ also need patchelf so Pi's Node can use a private, checksum-verified C++ library
 replacing the task's system library. The pinned Node version has no arm64 musl build.
 The provider must support sandbox exec and file upload/download.
 Installation needs network access to nodejs.org and npm; musl also uses unofficial-builds.nodejs.org
-and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org.
+and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org. An image without that access can carry the
+runtime instead: set `sandbox_runtime_dir` to a directory with the installer's `node/` and `pi/` layout, and setup
+checks that it runs `pi_version` rather than installing one.
 
 The Node runtime, Pi package, and private `PI_CODING_AGENT_DIR` are outside the task repository.
 Task HOME and XDG directories are preserved for tools and verification. Pi's
@@ -224,6 +226,10 @@ detail, not a separate endpoint or a setup step users must run.
 - `pi_version`: npm version to pin on install (null means latest on the local path; sandbox sessions require an exact version)
 - `resources_server`: required only for the agent's existing `/run` endpoint, not for sandbox sessions or direct `/v1/responses`
 - `sandbox_install_timeout_seconds`: sandbox runtime installation timeout (default 600)
+- `sandbox_runtime_dir`: absolute sandbox path of a preinstalled runtime to use instead of installing one
+  (default none)
+- `network_access`: egress of a sandbox the agent creates: `inherit` (default, the provider's network),
+  `model_only`, or `model_and_tools`; OpenSandbox only
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
@@ -323,3 +329,9 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits a created sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The policy is
+set when the sandbox is created, so a session that borrows a task sandbox rejects any value other than `inherit`,
+and a `sandbox_config.provider_options.network_policy` cannot be combined with it. A created sandbox must reach
+the model server by address (`use_absolute_ip: true`).

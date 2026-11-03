@@ -42,9 +42,11 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restrict_sandbox_network,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -648,6 +650,23 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     mcp_servers: dict[str, PiMCPServerConfig] = Field(default_factory=dict)
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Pi creates: `model_only` allows only the model server's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
+            "borrows one rejects any other value than `inherit`."
+        ),
+    )
+    sandbox_runtime_dir: Optional[str] = Field(
+        default=None,
+        pattern=r"^/",
+        description=(
+            "Directory inside the sandbox that already holds `node/` and `pi/` as `install_pi_runtime.sh` lays them "
+            "out, for sandboxes that cannot download the runtime. Setup checks that it runs `pi_version` instead of "
+            "installing one."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
     sandbox_mcp_timeout_seconds: float = Field(
@@ -723,6 +742,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "Pi requires direct SandboxAccess")
+            if self.config.network_access != "inherit":
+                raise HTTPException(422, "Pi network_access applies only to a sandbox it creates, not a borrowed one")
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/"):
@@ -752,6 +773,19 @@ class PiAgent(SimpleResponsesAPIAgent):
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider_name=provider.name,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[
+                        str(access.connection.url) for access in tool_accesses if isinstance(access, MCPToolAccess)
+                    ],
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -760,7 +794,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         directory = f"/tmp/nemo-gym-pi-sessions/{uuid4().hex}"
-        runtime = f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
+        runtime = self.config.sandbox_runtime_dir or f"/tmp/nemo-gym-pi-node-22.19.0-{self.config.pi_version}"
         state = PiSandboxSession(
             request=body,
             session=SandboxSession(
@@ -786,24 +820,39 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"Cannot prepare Pi session (exit {prepared.return_code}, "
                     f"error_type={prepared.error_type}): {details[-16000:]}"
                 )
-            # Install only the agent runtime in the existing task sandbox.
-            # Resources has already prepared the task repository and its dependencies.
-            installer = "install_pi_runtime.sh"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            installed = await sandbox.exec(
-                f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
-                f"{shlex.quote(self.config.pi_version)}",
-                cwd=workdir,
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if installed.return_code != 0 or installed.error_type:
-                # Background execution puts the installer log in stdout and may
-                # leave only a generic "exit status 1" in stderr. Preserve both.
-                details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
-                raise RuntimeError(
-                    f"Pi sandbox installation failed (exit {installed.return_code}, "
-                    f"error_type={installed.error_type}): {details[-16000:]}"
+            if self.config.sandbox_runtime_dir:
+                checked = await sandbox.exec(
+                    f"{shlex.quote(runtime + '/node/bin/node')} "
+                    f"{shlex.quote(runtime + '/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js')} --version",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
+                reported = (checked.stdout or "").strip()
+                if checked.return_code != 0 or checked.error_type or reported != self.config.pi_version:
+                    details = "\n".join(part for part in (checked.stderr, checked.stdout) if part)
+                    raise RuntimeError(
+                        f"Pi runtime in {runtime} does not run pi_version {self.config.pi_version} "
+                        f"(exit {checked.return_code}, error_type={checked.error_type}): {details[-16000:]}"
+                    )
+            else:
+                # Install only the agent runtime in the existing task sandbox.
+                # Resources has already prepared the task repository and its dependencies.
+                installer = "install_pi_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+                installed = await sandbox.exec(
+                    f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
+                    f"{shlex.quote(self.config.pi_version)}",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
+                )
+                if installed.return_code != 0 or installed.error_type:
+                    # Background execution puts the installer log in stdout and may
+                    # leave only a generic "exit status 1" in stderr. Preserve both.
+                    details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
+                    raise RuntimeError(
+                        f"Pi sandbox installation failed (exit {installed.return_code}, "
+                        f"error_type={installed.error_type}): {details[-16000:]}"
+                    )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
