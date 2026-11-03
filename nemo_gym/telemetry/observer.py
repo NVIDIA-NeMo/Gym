@@ -617,7 +617,7 @@ def observer_settings() -> Optional[tuple[float, bool]]:
 async def observe_event_loop(loop_name: str) -> AsyncIterator[None]:
     """Sample the running event loop, and observe this process, for as long as the context is open.
 
-    ``loop_name`` is a bounded label for the loop, such as ``server``, ``head_server``, or ``driver``.
+    ``loop_name`` is a bounded label for the loop, such as ``server``, ``registry_server``, or ``driver``.
     Does nothing unless telemetry metrics are exporting.
     """
     sampler: Optional[asyncio.Task] = None

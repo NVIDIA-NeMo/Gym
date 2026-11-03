@@ -168,7 +168,7 @@ The rollout driver, which is `gym eval run`, reports how much work it holds and 
 
 Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
 
-`gym.event_loop.lag_ms` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the registry server's loop inside the supervisor (the value keeps the registry server's former name, so existing dashboards keep matching), and `driver` for the rollout driver's loop.
+`gym.event_loop.lag_ms` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `registry_server` for the registry server's loop inside the supervisor (`head_server` before nemo_gym 0.8.0), and `driver` for the rollout driver's loop.
 
 The `process.*` metrics keep the OpenTelemetry process semantic-convention names, units, and `cpu.mode` attribute, so standard dashboards recognize them. The Gym metrics follow Gym's own conventions: durations in milliseconds with a `_ms` suffix, counters with a `_total` suffix, and attributes under `nemo.gym.`.
 

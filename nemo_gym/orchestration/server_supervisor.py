@@ -726,7 +726,7 @@ class RunHelper:  # pragma: no cover
         self._registry_server, self._registry_server_thread, self._registry_server_instance = (
             RegistryServer.run_webserver()
         )
-        self._startup.mark("start_head_server")
+        self._startup.mark("start_registry_server")
 
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
@@ -811,7 +811,7 @@ class RunHelper:  # pragma: no cover
         )
 
         self._wait_for_registry_server()
-        self._startup.mark("wait_for_head_server")
+        self._startup.mark("wait_for_registry_server")
 
         print("Waiting for servers to spin up")
         if global_config_dict[DRY_RUN_KEY_NAME]:

@@ -91,7 +91,7 @@ class RegistryServer(BaseServer):
 
         app = server.setup_webserver()
         # The registry server runs on its own thread and event loop inside the supervisor process.
-        observe_app_event_loop(app, "head_server")
+        observe_app_event_loop(app, "registry_server")
 
         config = uvicorn.Config(
             app,
