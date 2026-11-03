@@ -690,7 +690,9 @@ class BuildContainerHelper(BaseModel):
         output = self.config.output_container_fpath
         # The launcher publishes via a hard link and requires a nonexistent target.
         # Keep the input image intact until the completed job has exported its caches.
-        with TemporaryDirectory(prefix=f".{output.stem}-warmup-", dir=output.parent) as directory:
+        # The launcher mounts a directory beneath this path. Image names can
+        # contain colons, which Pyxis interprets as mount-field separators.
+        with TemporaryDirectory(prefix=".vllm-warmup-", dir=output.parent) as directory:
             warmed = Path(directory) / "warmed.sqsh"
             job_file = Path(directory) / "job-id"
             env = {

@@ -921,7 +921,7 @@ sys.exit(7 if outcome == "failure" else 0)
         monkeypatch.setenv(key, "wrong")
     config = BuildContainerConfig(
         input_container_fpath=tmp_path / "base.sqsh",
-        output_container_fpath=tmp_path / "output.sqsh",
+        output_container_fpath=tmp_path / "vllm-openai:v0.32.0___prims.sqsh",
         slurm={
             "account": "warmup-account",
             "partition": "batch",
@@ -959,6 +959,9 @@ sys.exit(7 if outcome == "failure" else 0)
             saved_path = Path(env["SAVE_WARMED_CONTAINER"])
             assert env["CONTAINER"] == str(config.output_container_fpath)
             assert saved_path.parent.parent == tmp_path
+            # The cache-export directory is passed to Pyxis as source:target.
+            assert ":" not in str(saved_path.parent)
+            assert "," not in str(saved_path.parent)
             assert not saved_path.exists()
             assert not task.done()
             assert config.output_container_fpath.read_bytes() == b"base"
