@@ -41,6 +41,7 @@ NO_FACTS = {
     "substep_tests": None,
     "unit_tests": None,
     "node_f1": None,
+    "guarded_objectives": None,
 }
 
 

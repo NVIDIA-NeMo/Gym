@@ -1542,6 +1542,15 @@ def node_f1(r):
         precision, recall = len(chosen & expected) / len(chosen), len(chosen & expected) / len(expected)
         f1 = 2 * precision * recall / (precision + recall)
     return {"f1": saved, "regraded": f1, "parse_matches": predicted == nodes and parse_failed is failed}
+def guarded_objectives(r):
+    # A guardrail-gated objective score an agent's own rubric saved beside the answer (response.metrics): the headline
+    # (aa_headline) and the counts it follows from. Counts only; the world state and assertions stay local.
+    response = r.get("response")
+    metrics = response.get("metrics") if isinstance(response, dict) else None
+    if not isinstance(metrics, dict) or "aa_headline" not in metrics:
+        return None
+    return {k: finite(metrics.get(k)) for k in
+            ("aa_headline", "objectives_passed", "objectives_total", "guardrails_violated", "guardrails_total")}
 def judge_verdicts(value):
     # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
     # not parse; the label text stays local.
@@ -1598,6 +1607,7 @@ def grading_facts(r):
         "substep_tests": substep_tests(r),
         "unit_tests": unit_tests(r),
         "node_f1": node_f1(r),
+        "guarded_objectives": guarded_objectives(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -4814,6 +4824,29 @@ def _session_reward_file(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _guarded_objective_score(row: Mapping[str, Any]) -> bool:
+    """A guardrail-gated objective score the agent's own rubric saved (``response.metrics``): the row's reward equals
+    the saved ``aa_headline``, and that headline follows from the saved counts: 0.0 when a guardrail was violated,
+    else the objectives passed over the objectives (0.0 without objectives). A row without any counted assertion (no
+    world or no assertions also scores 0.0) is no evidence and stays unobserved. The counts are the rubric's own, not
+    a re-run of its assertions. The saved answer and score are bound."""
+    score = _grading_facts(row).get("guarded_objectives")
+    if not isinstance(score, dict) or any(
+        type(score.get(key)) not in (int, float) or score[key] < 0
+        for key in ("aa_headline", "objectives_passed", "objectives_total", "guardrails_violated", "guardrails_total")
+    ):
+        return False
+    passed, total = score["objectives_passed"], score["objectives_total"]
+    if (
+        passed > total
+        or score["guardrails_violated"] > score["guardrails_total"]
+        or total + score["guardrails_total"] == 0
+    ):
+        return False
+    expected = 0.0 if score["guardrails_violated"] > 0 else (passed / total if total else 0.0)
+    return _reward(row) == score["aa_headline"] == expected and _bound_answer(row)
+
+
 def _environment_reward(row: Mapping[str, Any]) -> bool:
     """The environment's own reward record: ``result.reward_info.reward`` equal to the row's reward."""
     recorded = _grading_facts(row).get("environment_reward")
@@ -4835,6 +4868,7 @@ GRADING_ARTIFACTS = (
     ("unit_test_results", _unit_test_results),
     ("node_set_f1", _node_set_f1),
     ("session_reward_file", _session_reward_file),
+    ("guarded_objective_score", _guarded_objective_score),
 )
 
 
