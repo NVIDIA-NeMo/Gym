@@ -24,11 +24,12 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 from nemo_gym.telemetry import connection_pool
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
@@ -121,6 +122,15 @@ def make_row(tools=None, **extras) -> dict:
         row["responses_create_params"]["tools"] = tools
     row.update(extras)
     return row
+
+
+def test_failure_placeholder_is_marked_as_no_generation() -> None:
+    """The empty assistant message the failure path returns is a placeholder, never a saved answer."""
+    agent = RemoteAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+    result = agent._failure_response(make_row(), "remote service unreachable").model_dump(mode="json")
+    assert result["response"]["metadata"] == NG_NO_GENERATION_METADATA
+    assert not has_saved_generation(result)
+    assert not has_saved_generation({"_ng_failure_response": result["response"]})
 
 
 def make_request(cookies=None) -> MagicMock:

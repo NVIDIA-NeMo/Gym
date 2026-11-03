@@ -866,11 +866,11 @@ name = "nemo_gym packages depend only on packages below them"
 type = "layers"
 layers = [
     # cli/
-    "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils : nemo_gym.cli_setup_command",
+    "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils",
     # environment/
-    "nemo_gym.agent_registry : nemo_gym.benchmarks : nemo_gym.deliverables : nemo_gym.discovery : nemo_gym.environment : nemo_gym.model_registry : nemo_gym.registry : nemo_gym.resources_server_registry",
+    "nemo_gym.environment",
     # eval/
-    "nemo_gym.comparison : nemo_gym.eval_plan : nemo_gym.rollout_compare : nemo_gym.rollout_reverification",
+    "nemo_gym.eval",
     # orchestration/
     "nemo_gym.orchestration",
     # rollouts/
@@ -882,7 +882,7 @@ layers = [
     # models/
     "nemo_gym.models",
     # server_runtime/
-    "nemo_gym.server_runtime",
+    "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.testing : nemo_gym.server_runtime.verifier_observability",
     # artifacts/
     "nemo_gym.artifacts",
     # metrics/
@@ -898,9 +898,9 @@ layers = [
     # telemetry/
     "nemo_gym.telemetry",
     # core/
-    "nemo_gym.core",
+    "nemo_gym.core : nemo_gym.failure_transport : nemo_gym.server_runtime.episode_types : nemo_gym.typed_exceptions",
     # utils/
-    "nemo_gym.utils",
+    "nemo_gym.utils : nemo_gym.exception_inspection",
     # config/
     "nemo_gym.config",
 ]

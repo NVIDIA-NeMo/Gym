@@ -67,6 +67,20 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
+    "nemo_gym.benchmarks": MovedPath(new="nemo_gym.environment.benchmarks", since="0.8.0"),
+    "nemo_gym.deliverables": MovedPath(new="nemo_gym.environment.deliverables", since="0.8.0"),
+    "nemo_gym.registry": MovedPath(new="nemo_gym.environment.registry", since="0.8.0"),
+    "nemo_gym.discovery": MovedPath(new="nemo_gym.environment.discovery", since="0.8.0"),
+    "nemo_gym.resources_server_registry": MovedPath(
+        new="nemo_gym.environment.resources_server_registry", since="0.8.0"
+    ),
+    "nemo_gym.agent_registry": MovedPath(new="nemo_gym.environment.agent_registry", since="0.8.0"),
+    "nemo_gym.model_registry": MovedPath(new="nemo_gym.environment.model_registry", since="0.8.0"),
+    "nemo_gym.rollout_reverification": MovedPath(new="nemo_gym.eval.rollout_reverification", since="0.8.0"),
+    "nemo_gym.eval_plan": MovedPath(new="nemo_gym.eval.eval_plan", since="0.8.0"),
+    "nemo_gym.comparison": MovedPath(new="nemo_gym.eval.comparison", since="0.8.0"),
+    "nemo_gym.rollout_compare": MovedPath(new="nemo_gym.eval.rollout_compare", since="0.8.0"),
     "nemo_gym.h2_ping_sidecar": MovedPath(new="nemo_gym.orchestration.h2_ping_sidecar", since="0.8.0"),
     "nemo_gym.cli.setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
     "nemo_gym.testing": MovedPath(new="nemo_gym.server_runtime.testing", since="0.8.0"),
@@ -716,6 +730,16 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names("nemo_gym.telemetry.startup", "0.8.0", "STARTUP_SETUP_DONE_NS_ENV SupervisorStartup"),
+    },
+    # The token_id_capture package imported this name without exporting it.
+    # Token capture's public API serves only the names it lists.
+    "nemo_gym.token_id_capture": {
+        **_names("nemo_gym.models.token_capture.fingerprint", "0.8.0", "canonicalize_tool_arguments"),
+    },
+    # The token_id_capture staging package re-exported the terminal resolver from token capture.
+    # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
+    "nemo_gym.token_id_capture.staging": {
+        **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
 }
 
