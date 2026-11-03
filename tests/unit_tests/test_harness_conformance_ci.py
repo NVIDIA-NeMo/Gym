@@ -21,7 +21,7 @@ def test_adapter_changes_select_only_that_harness(harness):
 @pytest.mark.parametrize(
     "path",
     [
-        "nemo_gym/rollout_collection.py",
+        "nemo_gym/rollouts/rollout_collection.py",
         "nemo_gym/telemetry/gym_metrics.py",
         "nemo_gym/agents/utils/sandbox_session.py",
         "nemo_gym/sandbox/local.py",
@@ -41,7 +41,7 @@ def test_adapter_changes_select_only_that_harness(harness):
         "tests/conftest.py",
         "tests/unit_tests/__init__.py",
         "tests/unit_tests/conftest.py",
-        "tests/unit_tests/harness_capabilities/test_checker.py",
+        "tests/unit_tests/rollouts/harness_capabilities/test_checker.py",
         "tests/unit_tests/test_harness_conformance_checks.py",
         "pyproject.toml",
         "uv.lock",
