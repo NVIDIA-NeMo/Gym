@@ -233,6 +233,11 @@ def judge_execution_profile(
     partition or none, else the partition's default.
     """
     compute = config.compute[cluster]
+    if served_judge_placement(config, cluster) is not None:
+        raise JudgeProfileUnsupported(
+            f"{_NO_PROFILE}: it serves {', '.join(n for n in config.services if n != config.driver.policy_model)} "
+            "beside its policy, which only the served-judge profile starts"
+        )
     walltime, bounds = bound_judge_walltime(compute.walltime, limit)
     saved_pool = next(
         (pool for pool in compute.node_pools.values() if pool.partition == partition and pool.gpus_per_node == 0),
@@ -291,8 +296,8 @@ def served_judge_placement(config: SubmitConfig, cluster: str) -> tuple[tuple[st
     shared = sorted(name for name in services if None in pools[name] or pools[name] & policy_pools)
     if shared:
         raise JudgeProfileUnsupported(
-            f"{_NO_SERVED_PROFILE}: service(s) {', '.join(shared)} run on the policy's nodes (its node pool, or the "
-            "whole allocation without a node_pool of their own), and a judge-only job does not start the policy's "
+            f"{_NO_SERVED_PROFILE}: service(s) {', '.join(shared)} run on the policy's nodes (its node pool, or no node_pool "
+            "of their own, which is the whole allocation), and a judge-only job does not start the policy's "
             "allocation; a separate node pool for each of them, beside the policy's, would allow it; policy services "
             "are not restarted"
         )

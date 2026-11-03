@@ -372,3 +372,9 @@ def test_an_explicit_judge_qos_wins_over_the_saved_pool_and_the_reader_placement
     compute = job.compute["cluster"]
     script = build_sbatch_script(job, "bench", job.driver.benchmarks["bench"], compute, Path("/jobs/bench"))
     assert script.count("--qos=") == 1 and "#SBATCH --qos=cpu_ops" in script
+
+
+def test_the_cpu_profile_never_drops_the_services_a_run_serves_beside_its_policy(tmp_path) -> None:
+    # Only the served-judge profile starts those services; the CPU one refuses rather than grading without them.
+    with pytest.raises(JudgeProfileUnsupported, match="only the served-judge profile starts"):
+        judge_execution_profile(served_judge(tmp_path), "cluster", "cpu", "--judge-partition", {"max_time_s": None})
