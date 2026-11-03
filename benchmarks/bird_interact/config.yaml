@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD-Interact Lite in c-Interact, on the bird_interact Environment Server with PostgreSQL. Each episode starts its
+# own database sandbox from the image that this folder's Dockerfile builds. See README.md.
+#
+#   gym eval prepare --benchmark bird_interact +prepare_script_args.ground_truth_jsonl=<ground truth file>
+#   gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark \
+#     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --output results/bird_interact_lite_c.jsonl
+#
+# The other releases and modes chain this file: a_interact.yaml, full.yaml and full_a_interact.yaml, each run with
+# --config benchmarks/bird_interact/<file> in place of --benchmark bird_interact.
+
+config_paths:
+  - environment_servers/bird_interact/configs/bird_interact.yaml
+
+# A variant sets these with its dataset below: lite or full, and c_interact or a_interact.
+bird_interact_release: lite
+bird_interact_mode: c_interact
+# The image that Dockerfile builds for the release. A remote sandbox provider needs a registry's copy.
+bird_interact_image: benchmarks/bird_interact:${bird_interact_release}
+
+# Forwarded to prepare.py's prepare(). The ground truth path comes from the command line.
+prepare_script_args:
+  release: ${bird_interact_release}
+  mode: ${bird_interact_mode}
+
+environment_server_routes:
+  "bird_interact:c_interact": bird_interact_c_interact
+  "bird_interact:a_interact": bird_interact_a_interact
+
+# One dataset for each release and mode, so each has its own file and metrics. Written out, not interpolated: the
+# manifest mirrors it.
+bird_interact_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: bird_interact_lite_c_interact
+          type: benchmark
+          jsonl_fpath: benchmarks/bird_interact/data/lite/c_interact.jsonl
+          taskset: bird_interact:c_interact
+          prepare_script: benchmarks/bird_interact/prepare.py
+          num_repeats: 1
+          license: CC BY-SA 4.0
+
+bird_interact_c_interact:
+  environment_servers:
+    bird_interact:
+      database_engine: postgresql
+      database_dir: benchmarks/bird_interact/data/${bird_interact_release}/databases
+      sandbox_config:
+        image: ${bird_interact_image}
+
+bird_interact_a_interact:
+  environment_servers:
+    bird_interact:
+      database_engine: postgresql
+      database_dir: benchmarks/bird_interact/data/${bird_interact_release}/databases
+      sandbox_config:
+        image: ${bird_interact_image}
