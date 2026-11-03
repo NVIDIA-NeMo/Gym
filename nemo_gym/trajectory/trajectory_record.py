@@ -341,6 +341,15 @@ class ObservationGap(ObservationModel):
     span_id: Optional[str] = None
     detail: Optional[str] = None
 
+    def matches_tool(self, tool: ToolCallObservation) -> bool:
+        """A supplied owner constrains the span; missing ownership never selects between matches."""
+        return (
+            self.span_id is not None
+            and self.span_id == tool.span_id
+            and (self.invocation_id is None or self.invocation_id == tool.invocation_id)
+            and (self.agent_instance is None or self.agent_instance == tool.agent_instance)
+        )
+
 
 AgentObservationRecord = Annotated[
     AgentInvocation | ToolCallObservation | ContextCompactionObservation | SandboxObservation,
@@ -466,6 +475,9 @@ class TrajectoryRecord(ObservationModel):
             identities = [(tool.agent_instance, tool.span_id) for tool in self.tool_calls]
             if any(tool.span_id is None for tool in self.tool_calls) or len(identities) != len(set(identities)):
                 raise ValueError("v2 tool attempts require unique span identities")
+            for gap in self.gaps:
+                if gap.span_id is not None and sum(gap.matches_tool(tool) for tool in self.tool_calls) != 1:
+                    raise ValueError("attempt-scoped gap must resolve to one retained tool with consistent ownership")
             validate_failure_events(self.failure_events)
             calls = {call.model_call_id: call for call in self.model_calls if call.model_call_id}
             owners: dict[str, set[str | None]] = defaultdict(set)

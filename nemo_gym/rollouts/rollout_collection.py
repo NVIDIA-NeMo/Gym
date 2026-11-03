@@ -905,11 +905,12 @@ def _build_trajectory_record(
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
     observations_read = False
+    observation_gaps: list[ObservationGap] = []
     raw_observations = result.get(NG_AGENT_OBSERVATIONS_KEY)
     if raw_observations is not None:
         try:
             observations = AgentObservationBundle.model_validate(raw_observations)
-            gaps.extend(observations.gaps)
+            observation_gaps = observations.gaps
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
             producer_invocation_ids = {(record.agent_instance, record.invocation_id) for record in invocations}
             invocations.extend(
@@ -1101,6 +1102,7 @@ def _build_trajectory_record(
         model_calls=model_calls,
         invocations=invocations,
         failure_events=failure_events,
+        observation_gaps=observation_gaps,
     )
     gaps.extend(tool_gaps)
     version = (

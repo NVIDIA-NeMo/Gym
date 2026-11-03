@@ -82,6 +82,93 @@ def _matches_reference(call: TrajectoryModelCall, reference: ModelCallRef) -> bo
     )
 
 
+def _unresolved_gap(gap: ObservationGap, reason: str) -> ObservationGap:
+    """Retain an unattributable diagnostic without asserting a canonical span reference."""
+    return gap.model_copy(
+        update={
+            "span_id": None,
+            "detail": json.dumps(
+                {
+                    "unresolved_span_reference": {"span_id": gap.span_id, "reason": reason},
+                    "detail": gap.detail,
+                }
+            ),
+        }
+    )
+
+
+def _import_tool_observations(
+    observations: Iterable[ToolCallObservation],
+    observation_gaps: Iterable[ObservationGap],
+    *,
+    capture_key: str,
+    producer_id: str,
+    invocations: Sequence[AgentInvocation],
+) -> tuple[list[TrajectoryToolCall], list[ObservationGap], set[str]]:
+    """Import the complete raw span namespace once, before generating any diagnostics.
+
+    Canonical tools already own qualified IDs. Only raw observations participate in
+    raw-gap lookup; model/failure IDs and conversation call references are untouched.
+    Gaps carry no producer ID, so an ambiguous local reference stays explicitly unresolved.
+    """
+    imported: list[TrajectoryToolCall] = []
+    raw_targets: list[tuple[ToolCallObservation, TrajectoryToolCall]] = []
+    legacy_spans: set[str] = set()
+    for observed in observations:
+        tool = TrajectoryToolCall.model_validate(observed.model_dump())
+        if tool.span_id is None:
+            tool.span_id = tool_attempt_id(
+                producer_id=tool.producer_id or producer_id,
+                invocation_id=tool.invocation_id,
+                operation_key=f"legacy:{tool.tool_call_id}",
+            )
+            legacy_spans.add(tool.span_id)
+        elif not isinstance(observed, TrajectoryToolCall):
+
+            def qualified(span_id: str) -> str:
+                return tool_attempt_id(
+                    producer_id=tool.producer_id or producer_id,
+                    invocation_id=capture_key,
+                    operation_key=span_id,
+                )
+
+            tool.span_id = qualified(tool.span_id)
+            if tool.parent_span_id is not None:
+                tool.parent_span_id = qualified(tool.parent_span_id)
+        owners = [
+            inv
+            for inv in invocations
+            if inv.invocation_id == tool.invocation_id
+            and (tool.agent_instance is None or inv.agent_instance in {None, tool.agent_instance})
+        ]
+        if len(owners) == 1 and owners[0].agent_instance is not None:
+            tool.agent_instance = owners[0].agent_instance
+        if not isinstance(observed, TrajectoryToolCall):
+            raw_targets.append((observed.model_copy(update={"agent_instance": tool.agent_instance}), tool))
+        imported.append(tool)
+
+    gaps = []
+    for gap in observation_gaps:
+        if gap.span_id is None:
+            gaps.append(gap.model_copy())
+            continue
+        matches = {(tool.agent_instance, tool.span_id): tool for raw, tool in raw_targets if gap.matches_tool(raw)}
+        if len(matches) != 1:
+            gaps.append(_unresolved_gap(gap, "ambiguous" if matches else "unmatched"))
+            continue
+        target = next(iter(matches.values()))
+        gaps.append(
+            gap.model_copy(
+                update={
+                    "span_id": target.span_id,
+                    "agent_instance": target.agent_instance,
+                    "invocation_id": target.invocation_id,
+                }
+            )
+        )
+    return imported, gaps, legacy_spans
+
+
 def normalize_tool_calls(
     tools: Iterable[ToolCallObservation],
     *,
@@ -90,14 +177,25 @@ def normalize_tool_calls(
     model_calls: Sequence[TrajectoryModelCall],
     invocations: Sequence[AgentInvocation],
     failure_events: Mapping[str, object] | None = None,
+    observation_gaps: Iterable[ObservationGap] = (),
 ) -> tuple[list[TrajectoryToolCall], list[ObservationGap]]:
     """Resolve one record per attempt after capture merge, retaining uncertainty as scoped gaps.
 
     Input-only producer identity/message/model references stay in bundles for replay. Native
     call IDs verify an exact model reference; by themselves they never select a model attempt.
+    Pass raw bundle diagnostics via observation_gaps so they cross the same import boundary.
+    Returned span-scoped gaps resolve to retained tools; unresolved references keep their raw
+    span and reason in detail without claiming a canonical span. Canonical input gaps stay
+    with their trajectory and do not cross this raw import boundary again.
     """
     failures = failure_events or {}
-    gaps: list[ObservationGap] = []
+    imported, gaps, legacy_spans = _import_tool_observations(
+        tools,
+        observation_gaps,
+        capture_key=capture_key,
+        producer_id=producer_id,
+        invocations=invocations,
+    )
     merged: dict[tuple[str | None, str], TrajectoryToolCall] = {}
 
     def gap(tool: ToolCallObservation, code: str, detail: str | None = None) -> None:
@@ -111,10 +209,9 @@ def normalize_tool_calls(
             )
         )
 
-    tools = list(tools)
-    legacy_spans: set[str] = set()
-    for observed in tools:
-        tool = TrajectoryToolCall.model_validate(observed.model_dump())
+    for tool in imported:
+        if tool.span_id in legacy_spans:
+            gap(tool, "tool_attempt_identity_unavailable")
         if not tool.timings and any(
             value is not None for value in (tool.started_at, tool.completed_at, tool.duration_ms)
         ):
@@ -145,35 +242,6 @@ def normalize_tool_calls(
                 tool.timings = [timing] if timing else []
                 for code in timing_gaps:
                     gap(tool, code)
-        if tool.span_id is None:
-            tool.span_id = tool_attempt_id(
-                producer_id=tool.producer_id or producer_id,
-                invocation_id=tool.invocation_id,
-                operation_key=f"legacy:{tool.tool_call_id}",
-            )
-            legacy_spans.add(tool.span_id)
-            gap(tool, "tool_attempt_identity_unavailable")
-        elif not isinstance(observed, TrajectoryToolCall):
-            # Observation spans are producer-local. Qualify them on first import even
-            # before a collision arrives; canonical trajectory spans are already scoped.
-            def qualified(span_id: str) -> str:
-                return tool_attempt_id(
-                    producer_id=tool.producer_id or producer_id,
-                    invocation_id=capture_key,
-                    operation_key=span_id,
-                )
-
-            tool.span_id = qualified(tool.span_id)
-            if tool.parent_span_id is not None:
-                tool.parent_span_id = qualified(tool.parent_span_id)
-        owners = [
-            inv
-            for inv in invocations
-            if inv.invocation_id == tool.invocation_id
-            and (tool.agent_instance is None or inv.agent_instance in {None, tool.agent_instance})
-        ]
-        if len(owners) == 1 and owners[0].agent_instance is not None:
-            tool.agent_instance = owners[0].agent_instance
         key = (tool.agent_instance, tool.span_id)
         existing = merged.get(key)
         if existing is None:
@@ -362,6 +430,28 @@ def normalize_tool_calls(
                 for tool in matches:
                     if tool.output is None:
                         gap(tool, "tool_output_ambiguous")
+    # Exact model ownership may resolve after import/merge. Bind imported and generated
+    # diagnostics to the retained attempt only when that target is unique; never fan out.
+    scoped_gaps = []
+    for item in gaps:
+        if item.span_id is None:
+            scoped_gaps.append(item)
+            continue
+        matches = [tool for tool in attempts if item.matches_tool(tool)]
+        if len(matches) == 1:
+            target = matches[0]
+            scoped_gaps.append(
+                item.model_copy(
+                    update={
+                        "agent_instance": target.agent_instance,
+                        "invocation_id": target.invocation_id,
+                    }
+                )
+            )
+        else:
+            scoped_gaps.append(_unresolved_gap(item, "ambiguous" if matches else "unmatched"))
     return attempts, list(
-        {(gap.code, gap.agent_instance, gap.invocation_id, gap.span_id, gap.detail): gap for gap in gaps}.values()
+        {
+            (gap.code, gap.agent_instance, gap.invocation_id, gap.span_id, gap.detail): gap for gap in scoped_gaps
+        }.values()
     )

@@ -441,3 +441,63 @@ async def test_v2_tool_artifacts_keep_partial_intervals_and_exact_request_joins(
     assert saved["turns"][0]["answer"][0]["call_id"] == saved["tool_calls"][0]["tool_call_id"]
     again = _parse_opencode_session(db, "0-0")
     assert [r.span_id for r in again.records if isinstance(r, ToolCallObservation)] == [r.span_id for r in tools]
+
+
+@pytest.mark.parametrize(
+    "times,required",
+    [
+        ({"start": 1000}, {"tool_completion_unavailable", "tool_clock_domain_unavailable"}),
+        ({"start": 2000, "end": 1000}, {"tool_clock_discontinuity"}),
+        ({"start": "invalid", "end": 3000}, {"tool_start_unavailable"}),
+    ],
+)
+async def test_native_timing_gaps_follow_imported_attempt_through_replay(tmp_path, times, required):
+    from nemo_gym.rollouts import enrich_run_result
+    from nemo_gym.trajectory import ToolCallObservation
+
+    db = _session_db(
+        tmp_path,
+        [
+            _policy(
+                {
+                    "type": "tool",
+                    "tool": "bash",
+                    "callID": "native",
+                    "state": {"status": "running", "input": {}, "time": times},
+                }
+            )
+        ],
+    )
+    native = TrajectoryRecord(task_id="0", rollout_id="0-0")
+    bundle = _parse_opencode_session(db, "0-0", native, agent_instance="agent")
+    # The invocation supplies the same explicit attribution as the tool parser input.
+    for record in bundle.records:
+        if isinstance(record, AgentInvocation):
+            record.agent_instance = "agent"
+    (raw_tool,) = [record for record in bundle.records if isinstance(record, ToolCallObservation)]
+    source_gaps = [gap for gap in bundle.gaps if gap.span_id == raw_tool.span_id]
+    assert required <= {gap.code for gap in source_gaps}
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    result = {"ng_agent_observations": bundle.model_dump(mode="json")}
+    first = None
+    for _ in range(3):
+        await enrich_run_result(
+            row, result, capture_dirs=[], observability_enabled=True, trajectory_schema_version="2.0"
+        )
+        saved = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        (tool,) = saved.tool_calls
+        for source in source_gaps:
+            matched = [
+                gap
+                for gap in saved.gaps
+                if gap.code == source.code and gap.span_id == tool.span_id and gap.detail == source.detail
+            ]
+            assert len(matched) == 1
+            assert matched[0].agent_instance == tool.agent_instance == "agent"
+            assert matched[0].invocation_id == tool.invocation_id
+        assert all(gap.span_id != raw_tool.span_id for gap in saved.gaps)
+        assert all(gap.span_id is None or gap.matches_tool(tool) for gap in saved.gaps)
+        if first is not None:
+            assert saved.tool_calls == first.tool_calls
+            assert saved.gaps == first.gaps
+        first = saved

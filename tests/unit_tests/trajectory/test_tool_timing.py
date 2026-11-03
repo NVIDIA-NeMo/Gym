@@ -17,6 +17,7 @@ from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
+    ObservationGap,
     ToolCallObservation,
     TrajectoryModelCall,
     TrajectoryRecord,
@@ -59,13 +60,14 @@ def tool(span="attempt", *, instance="assistant", **updates):
     )
 
 
-def normalize(tools, *, calls=None, invocations=None):
+def normalize(tools, *, calls=None, invocations=None, gaps=()):
     return normalize_tool_calls(
         tools,
         capture_key="0-0-a1",
         producer_id="test",
         model_calls=calls or [call()],
         invocations=invocations or [AgentInvocation(invocation_id="root", agent_instance="assistant")],
+        observation_gaps=gaps,
     )
 
 
@@ -422,3 +424,157 @@ async def test_unusable_capture_cannot_remove_tool_evidence_or_obscure_success(r
     assert observed.model_call_id == ("good" if include_success else None)
     assert not any(g.code == "trajectory_projection_failed" for g in decoded.gaps)
     assert any(g.code in {"tool_request_payload_malformed", "tool_request_payload_unsuccessful"} for g in decoded.gaps)
+
+
+def assert_gap_targets(tools, gaps):
+    for gap in gaps:
+        if gap.span_id is not None:
+            targets = [item for item in tools if gap.matches_tool(item)]
+            assert len(targets) == 1
+            assert (gap.agent_instance, gap.invocation_id) == (targets[0].agent_instance, targets[0].invocation_id)
+
+
+@pytest.mark.parametrize("instances", [("a", "b"), (None, None)])
+def test_gap_import_resolves_unique_owner_and_never_fans_out_ambiguous_spans(instances):
+    observations = [
+        tool("shared", instance=instance).model_copy(update={"producer_id": producer})
+        for producer, instance in zip(("one", "two"), instances)
+    ]
+    raw_gaps = [ObservationGap(code="adapter_only", invocation_id="root", span_id="shared", detail="kept")]
+    if instances[0] is not None:
+        raw_gaps.append(
+            ObservationGap(code="owned_adapter", invocation_id="root", agent_instance="a", span_id="shared")
+        )
+    invocations = [AgentInvocation(invocation_id="root", agent_instance=instance) for instance in set(instances)]
+    tools, gaps = normalize(observations, invocations=invocations, calls=[call(instance=None)], gaps=raw_gaps)
+    assert len(tools) == 2
+    (unresolved,) = [gap for gap in gaps if gap.code == "adapter_only"]
+    assert unresolved.span_id is None
+    assert json.loads(unresolved.detail) == {
+        "unresolved_span_reference": {"span_id": "shared", "reason": "ambiguous"},
+        "detail": "kept",
+    }
+    if instances[0] is not None:
+        (owned,) = [gap for gap in gaps if gap.code == "owned_adapter"]
+        assert owned.span_id == next(tool.span_id for tool in tools if tool.agent_instance == "a")
+        assert owned.agent_instance == "a"
+    assert_gap_targets(tools, gaps)
+
+
+@pytest.mark.parametrize("resolve_through_model", [False, True])
+def test_imported_and_generated_gap_owners_follow_exact_resolution(resolve_through_model):
+    observed = tool(instance=None, model_call_id="model")
+    raw = ObservationGap(code="adapter_clock_invalid", invocation_id="root", span_id="attempt")
+    owner = None if resolve_through_model else "assistant"
+    tools, gaps = normalize(
+        [observed], invocations=[AgentInvocation(invocation_id="root", agent_instance=owner)], gaps=[raw]
+    )
+    (imported,) = [gap for gap in gaps if gap.code == raw.code]
+    assert imported.span_id == tools[0].span_id
+    assert imported.agent_instance == "assistant"
+    assert_gap_targets(tools, gaps)
+
+
+def test_legacy_diagnostics_have_final_attempt_scope():
+    raw = ToolCallObservation(
+        invocation_id="root", tool_call_id="request", started_at=1, completed_at=2, timing_source="artifact"
+    )
+    tools, gaps = normalize([raw])
+    (diagnostic,) = [gap for gap in gaps if gap.code == "tool_legacy_boundary_unavailable"]
+    assert diagnostic.span_id == tools[0].span_id
+    assert diagnostic.agent_instance == tools[0].agent_instance == "assistant"
+    assert_gap_targets(tools, gaps)
+
+
+async def test_delayed_producer_does_not_rewrite_canonical_gaps_and_canonical_only_replay_is_stable():
+    observed = tool("shared", instance=None).model_copy(update={"source_message_id": None})
+    bundle = AgentObservationBundle(
+        schema_version="2.0",
+        source="test",
+        records=[
+            AgentInvocation(invocation_id="root"),
+            observed,
+        ],
+        gaps=[ObservationGap(code="adapter_only", invocation_id="root", span_id="shared", detail="original")],
+    )
+    row = {"task_id": "task", "_ng_rollout_id": "capture"}
+    result = {"ng_agent_observations": bundle.model_dump(mode="json")}
+
+    async def enrich():
+        await enrich_run_result(
+            row, result, capture_dirs=[], observability_enabled=True, trajectory_schema_version="2.0"
+        )
+        return TrajectoryRecord.model_validate(result["ng_trajectory"])
+
+    first = await enrich()
+    (canonical_gap,) = [gap for gap in first.gaps if gap.code == "adapter_only"]
+    assert canonical_gap.span_id == first.tool_calls[0].span_id
+    bundle.records.append(observed.model_copy(update={"producer_id": "another"}))
+    result["ng_agent_observations"] = bundle.model_dump(mode="json")
+    second = await enrich()
+    assert canonical_gap in second.gaps
+    diagnostic = [gap for gap in second.gaps if gap.code == "adapter_only"]
+    assert len(diagnostic) == 2
+    assert sum(gap.span_id is not None for gap in diagnostic) == 1
+    assert "ambiguous" in next(gap.detail for gap in diagnostic if gap.span_id is None)
+    assert_gap_targets(second.tool_calls, second.gaps)
+    serialized = json.loads(json.dumps(result["ng_trajectory"]))
+    result.clear()
+    result["ng_trajectory"] = serialized
+    for _ in range(3):
+        replay = await enrich()
+        assert replay.tool_calls == second.tool_calls
+        assert replay.gaps == second.gaps
+        assert canonical_gap in replay.gaps
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        ObservationGap(code="bad", span_id="missing"),
+        ObservationGap(code="bad", span_id="attempt", invocation_id="wrong"),
+        ObservationGap(code="bad", span_id="attempt", agent_instance="wrong"),
+    ],
+)
+def test_canonical_decoder_rejects_dangling_or_misowned_gap(gap):
+    with pytest.raises(ValidationError, match="attempt-scoped gap"):
+        TrajectoryRecord(
+            schema_version="2.0", task_id="task", rollout_id="capture", tool_calls=[tool().model_dump()], gaps=[gap]
+        )
+
+
+def test_unmatched_raw_gap_stays_explicitly_unresolved_without_touching_other_namespaces():
+    observed = tool(model_call_id="model", failure_id="failure").model_copy(update={"status": "failed"})
+    tools, gaps = normalize_tool_calls(
+        [observed],
+        capture_key="capture",
+        producer_id="producer",
+        model_calls=[call()],
+        invocations=[AgentInvocation(invocation_id="root", agent_instance="assistant")],
+        failure_events={
+            "failure": {"boundary": "harness", "failure_kind": "example:failure", "failure_reason": "failed"}
+        },
+        observation_gaps=[ObservationGap(code="native", span_id="missing", detail="native evidence")],
+    )
+    assert tools[0].model_call_id == "model"
+    assert tools[0].failure_id == "failure"
+    assert tools[0].tool_call_id == "normalized"
+    assert tools[0].native_tool_call_id == "native"
+    (unresolved,) = [gap for gap in gaps if gap.code == "native"]
+    assert unresolved.span_id is None
+    assert json.loads(unresolved.detail)["unresolved_span_reference"] == {"span_id": "missing", "reason": "unmatched"}
+    assert_gap_targets(tools, gaps)
+
+
+def test_one_import_maps_parent_child_and_their_diagnostics_together():
+    parent = tool("parent", instance=None)
+    child = tool("child", instance=None, parent_span_id="parent")
+    raw_gaps = [
+        ObservationGap(code="adapter_only", span_id=span, invocation_id="root") for span in ("parent", "child")
+    ]
+    tools, gaps = normalize([parent, child], gaps=raw_gaps)
+    assert tools[1].parent_span_id == tools[0].span_id
+    imported = [gap for gap in gaps if gap.code == "adapter_only"]
+    assert [gap.span_id for gap in imported] == [item.span_id for item in tools]
+    assert all(gap.agent_instance == "assistant" for gap in imported)
+    assert_gap_targets(tools, gaps)

@@ -62,7 +62,10 @@ boundary into legacy flat fields; multiple boundaries require an explicit consum
 produce no flat interval. Legacy measurements with unknown boundaries remain diagnostic evidence
 when upgraded. In particular, the coarse `artifact` source does not identify a timing boundary.
 Raw observation spans and parent references are qualified by producer and capture namespace on
-import; canonical trajectory spans retain those identities on replay.
+import together with their diagnostics; canonical trajectory spans and gaps retain those
+identities on replay. An adapter gap that cannot identify one imported attempt keeps its code
+and original detail, with `unresolved_span_reference` in its diagnostic detail and no canonical
+`span_id`. It is never copied onto multiple attempts.
 
 Missing agent identity, clock provenance, completion, failure details or exact requesting-call
 links produce scoped gaps. Tool IDs alone never select a model call. Payload omission happens
