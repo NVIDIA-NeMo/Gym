@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from nemo_gym import in_process
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
 from nemo_gym.config.global_config import maybe_get_global_config_dict
-from nemo_gym.in_process import TaskRunner, plan_benchmark
+from nemo_gym.in_process import TaskRunner, plan_benchmark, serve_benchmark
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
 
@@ -112,3 +114,112 @@ class TestPlanBenchmark:
         assert planned.plan == "the plan"
         assert [row["task_id"] for row in planned.rows] == ["a", "a"]
         assert maybe_get_global_config_dict() is None
+
+
+DOTTED_OVERRIDES = [
+    {"judge.model": "x"},
+    {"judge": {"a.b": 1}},
+    {"items": [{"a.b": 1}]},
+]
+
+
+class TestDottedOverrides:
+    @pytest.mark.parametrize("overrides", DOTTED_OVERRIDES)
+    def test_planning_refuses_a_dotted_key(self, monkeypatch: pytest.MonkeyPatch, overrides: dict) -> None:
+        monkeypatch.setattr("nemo_gym.cli.main._asset_config_path", lambda flag, name: f"{flag}/{name}.yaml")
+
+        with pytest.raises(ConfigError, match="dotted"):
+            plan_benchmark("bench", overrides=overrides)
+
+    def test_nested_keys_are_accepted(self) -> None:
+        assert in_process._checked_overrides({"judge": {"model": "x"}, "items": [{"a": 1}]}) == {
+            "judge": {"model": "x"},
+            "items": [{"a": 1}],
+        }
+
+    def test_no_overrides_are_an_empty_dict(self) -> None:
+        assert in_process._checked_overrides(None) == {}
+
+
+class _FakeRunHelper:
+    """Stands in for `RunHelper`: records the config it is started with and whether it was shut down."""
+
+    started_with = None
+    shut_down = 0
+    start_error = None
+
+    def start(self, parser_config) -> None:
+        type(self).started_with = parser_config
+        if type(self).start_error is not None:
+            raise type(self).start_error
+
+    def shutdown(self) -> None:
+        type(self).shut_down += 1
+
+
+class TestServeBenchmark:
+    @pytest.fixture(autouse=True)
+    def fakes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _FakeRunHelper.started_with, _FakeRunHelper.shut_down, _FakeRunHelper.start_error = None, 0, None
+        monkeypatch.setattr("nemo_gym.orchestration.server_supervisor.RunHelper", _FakeRunHelper)
+        monkeypatch.setattr(
+            "nemo_gym.cli.main._asset_config_path",
+            lambda flag, name: f"{'benchmarks' if flag == 'benchmark' else 'responses_api_models'}/{name}.yaml",
+        )
+        monkeypatch.setattr(ServerClient, "load_head_server_config", classmethod(lambda cls: HEAD))
+
+    def test_serves_from_a_config_dict_and_stops_on_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "unrelated=1"])
+        overrides = {"judge": {"model": "x"}, "policy_base_url": "http://model/v1"}
+
+        with serve_benchmark("bench", overrides=overrides) as head_server:
+            assert head_server == HEAD
+            assert _FakeRunHelper.shut_down == 0
+
+        parser_config = _FakeRunHelper.started_with
+        assert parser_config.skip_load_from_cli
+        assert parser_config.initial_global_config_dict == {
+            "config_paths": ["benchmarks/bench.yaml", "responses_api_models/openai_model.yaml"],
+            "judge": {"model": "x"},
+            "policy_base_url": "http://model/v1",
+        }
+        assert _FakeRunHelper.shut_down == 1
+        assert sys.argv == ["gym", "unrelated=1"]
+
+    def test_the_model_type_is_a_parameter(self) -> None:
+        with serve_benchmark("bench", model_type="vllm_model"):
+            pass
+
+        assert _FakeRunHelper.started_with.initial_global_config_dict["config_paths"][1] == (
+            "responses_api_models/vllm_model.yaml"
+        )
+
+    def test_overrides_may_replace_the_config_paths(self) -> None:
+        with serve_benchmark("bench", overrides={"config_paths": ["mine.yaml"]}):
+            pass
+
+        assert _FakeRunHelper.started_with.initial_global_config_dict["config_paths"] == ["mine.yaml"]
+
+    @pytest.mark.parametrize("overrides", DOTTED_OVERRIDES)
+    def test_serving_refuses_a_dotted_key_before_starting_anything(self, overrides: dict) -> None:
+        with pytest.raises(ConfigError, match="dotted"):
+            with serve_benchmark("bench", overrides=overrides):
+                pytest.fail("the body must not run")
+
+        assert _FakeRunHelper.started_with is None
+
+    def test_stops_the_servers_when_the_caller_fails(self) -> None:
+        with pytest.raises(RuntimeError, match="boom"):
+            with serve_benchmark("bench"):
+                raise RuntimeError("boom")
+
+        assert _FakeRunHelper.shut_down == 1
+
+    def test_a_failed_start_raises_and_leaves_the_clean_up_to_start(self) -> None:
+        _FakeRunHelper.start_error = ConfigError("model endpoint never answered")
+
+        with pytest.raises(ConfigError, match="never answered"):
+            with serve_benchmark("bench"):
+                pytest.fail("the body must not run")
+
+        assert _FakeRunHelper.shut_down == 0

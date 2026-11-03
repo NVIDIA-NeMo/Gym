@@ -10,21 +10,32 @@ result = await runner.run_task(planned.plan.tasks[0].task_id.task_id)
 result.rewards                                            # one reward per repeat
 ```
 
+To start the servers from Python too, serve the benchmark and give the yielded head server to the runner:
+
+```python
+overrides = {"policy_base_url": url, "policy_api_key": key, "policy_model_name": model}
+with serve_benchmark("ifeval", overrides=overrides) as head_server:
+    runner = TaskRunner(planned.rows, head_server=head_server)
+    ...
+```
+
 `plan_benchmark` builds the plan `gym eval plan --benchmark NAME` writes and collates the benchmark's
 rows. It reads no command-line arguments and leaves Gym's process-wide configuration untouched,
-so a long-lived process can call it. The servers come from `gym env start --benchmark NAME`; each server
-runs in its own process and environment either way.
+so a long-lived process can call it. `serve_benchmark` starts the servers `gym env start --benchmark NAME`
+starts, from the same kind of config dict; each server runs in its own process and environment either way.
 """
 
 import json
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from omegaconf import DictConfig, OmegaConf
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.data.task_selection import row_task_id, select_tasks
@@ -61,7 +72,8 @@ def plan_benchmark(
 ) -> PlannedBenchmark:
     """Resolve the benchmark `NAME[/FLAVOR]`, prepare its data, build its plan and collate its rows.
 
-    `overrides` are config keys merged on top, as `++key=value` would be on the command line.
+    `overrides` are config keys merged on top, as a nested dict like the config file's; a dotted key is refused
+    (`ConfigError`), because it would be one literal key here but a path on the command line.
     `work_dir` receives the collated files; a temporary directory is used when it is None.
     """
     from nemo_gym.cli.eval import PrepareBenchmarkConfig, plan_for_config
@@ -79,12 +91,65 @@ def plan_benchmark(
     return PlannedBenchmark(plan=plan, rows=rows)
 
 
+@contextmanager
+def serve_benchmark(
+    benchmark: str,
+    *,
+    model_type: str = "openai_model",
+    overrides: Optional[Mapping[str, Any]] = None,
+) -> Iterator[BaseServerConfig]:
+    """Start the benchmark's servers, and stop them on exit. Yields the head server a `TaskRunner` talks to.
+
+    The benchmark `NAME[/FLAVOR]` and the model type are named as in
+    `gym env start --benchmark NAME --model-type TYPE`. `overrides` are config keys merged on top, as in
+    `plan_benchmark`, so planning and serving read the same dict: nested dicts, and a dotted key is refused
+    (`ConfigError`). The model's
+    `policy_base_url`, `policy_api_key` and `policy_model_name` are among them.
+
+    Returns once every server is ready; raises `ConfigError` if a server or a model endpoint is not. Like
+    `gym env start`, it sets this process's Gym configuration, so serve one benchmark per process.
+    """
+    from nemo_gym.cli.main import _asset_config_path
+    from nemo_gym.orchestration.server_supervisor import RunHelper
+
+    config_paths = [_asset_config_path("benchmark", benchmark), _asset_config_path("model-type", model_type)]
+    initial = OmegaConf.merge({"config_paths": config_paths}, _checked_overrides(overrides))
+    helper = RunHelper()
+    helper.start(GlobalConfigDictParserConfig(initial_global_config_dict=initial, skip_load_from_cli=True))
+    try:
+        yield ServerClient.load_head_server_config()
+    finally:
+        helper.shutdown()
+
+
+def _checked_overrides(overrides: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    """The overrides as a dict, refusing a dotted key at any depth.
+
+    Merged as a dict, `"judge.model"` would be one key with a dot in its name, while `++judge.model=x` on the
+    command line sets `model` inside `judge`. Refusing it keeps the dict and the command line from disagreeing.
+    """
+    checked = dict(overrides or {})
+    _refuse_dotted_keys(checked)
+    return checked
+
+
+def _refuse_dotted_keys(node: Any) -> None:
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            if "." in str(key):
+                raise ConfigError(f"Override key {key!r} is dotted: nest the keys as dicts instead.")
+            _refuse_dotted_keys(value)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            _refuse_dotted_keys(item)
+
+
 def _benchmark_config(config_path: str, overrides: Optional[Mapping[str, Any]]) -> DictConfig:
     """The resolved config for one benchmark, built without reading sys.argv or caching it process-wide."""
     initial = OmegaConf.merge(
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         {"config_paths": [config_path]},
-        dict(overrides or {}),
+        _checked_overrides(overrides),
     )
     return GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(initial_global_config_dict=initial, skip_load_from_cli=True)
