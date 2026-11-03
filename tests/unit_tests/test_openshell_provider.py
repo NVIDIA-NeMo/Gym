@@ -41,7 +41,7 @@ pytest.importorskip("openshell", reason="openshell optional dependency is not in
 
 import grpc  # noqa: E402  (grpcio ships with the openshell SDK)
 from openshell import SandboxError, SandboxRef, SandboxStatusRef, TlsConfig
-from openshell._proto import openshell_pb2, sandbox_pb2  # noqa: E402
+from openshell._proto import openshell_pb2  # noqa: E402
 from openshell.mutations import DeletionOutcome, DeletionResult  # noqa: E402
 from openshell.sandbox import SandboxConditionRef  # noqa: E402
 
