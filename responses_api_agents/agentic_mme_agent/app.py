@@ -120,21 +120,32 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         rounds = itertools.count() if max_rounds is None else range(max_rounds + 1)
         for turn in rounds:
             new_params = params.model_copy(update={"input": [*params.input, *outputs], "tool_choice": "auto"})
-            response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                # Under token capture this is /ng-rollout/<id>/training-token-capture/v1/responses, so the
-                # policy model server records every call of this rollout; otherwise plain /v1/responses.
-                url_path=model_url_path,
-                json=new_params,
-                cookies=cookies,
-            )
+            try:
+                response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    # Under token capture this is /ng-rollout/<id>/training-token-capture/v1/responses, so the
+                    # policy model server records every call of this rollout; otherwise plain /v1/responses.
+                    url_path=model_url_path,
+                    json=new_params,
+                    cookies=cookies,
+                )
+                if response.ok:
+                    reply = NeMoGymResponse.model_validate(await get_response_json(response))
+                else:
+                    error_body = (await response.read()).decode(errors="replace")
+            except (TimeoutError, ClientError, ValueError) as exc:
+                # The call failed without an HTTP status (connection lost, timeout after the client's
+                # retries, a body that is not JSON or not a Response): it ends the episode like a refusal,
+                # so the rollout scores 0 instead of escaping run() into the failures sidecar.
+                policy_error = f"{type(exc).__name__}: {str(exc)[:1000]}"
+                break
             if not response.ok:
                 # A refused model call (e.g. an endpoint's request-size limit once many tool images
                 # accumulate) ends this episode unanswered instead of failing the whole collection.
-                policy_error = f"HTTP {response.status}: {(await response.read()).decode(errors='replace')[:1000]}"
+                policy_error = f"HTTP {response.status}: {error_body[:1000]}"
                 break
             cookies = response.cookies
-            generated = NeMoGymResponse.model_validate(await get_response_json(response))
+            generated = reply
             usage = accumulate_response_usage(usage, generated.usage)
             # Preserve typed output items, including token IDs/log-probs for training.
             outputs.extend(generated.output)

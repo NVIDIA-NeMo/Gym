@@ -5,6 +5,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientConnectionError, ClientPayloadError
 from fastapi import Request, Response
 from PIL import Image
 
@@ -329,6 +330,55 @@ async def test_refused_model_call_ends_episode_unanswered() -> None:
     result = await agent.run(request(), body())
     assert result.reward == 0 and result.failure_reason == "policy_error"
     assert "request_too_large" in result.policy_error and result.tool_call_count == 1
+
+
+class UnreadableResponse(FakeResponse):
+    """HTTP 200 whose body read fails or does not parse."""
+
+    def __init__(self, body=None, error=None):
+        super().__init__(None)
+        self.body, self.error = body, error
+
+    async def read(self) -> bytes:
+        if self.error is not None:
+            raise self.error
+        return self.body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_call", [0, 1], ids=["first_call", "mid_episode"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(),
+        ClientConnectionError("connection reset"),
+        UnreadableResponse(error=ClientPayloadError("response payload is not completed")),
+        UnreadableResponse(body=b"<html>bad gateway</html>"),
+        UnreadableResponse(body=b'{"not": "a response"}'),
+    ],
+    ids=["timeout", "connection", "payload", "not_json", "not_a_response"],
+)
+async def test_failed_model_call_without_status_scores_zero(failing_call, failure) -> None:
+    # A policy call that fails before giving an HTTP status still ends the episode as a
+    # policy_error scored 0, instead of raising out of run() into the failures sidecar.
+    agent, seen = make_agent([response(output=[call()]), response("red")])
+    post = agent.server_client.post.side_effect
+    model_calls = 0
+
+    async def post_or_fail(**kwargs):
+        nonlocal model_calls
+        if kwargs["url_path"] == "/v1/responses":
+            model_calls += 1
+            if model_calls == failing_call + 1:
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+        return await post(**kwargs)
+
+    agent.server_client.post.side_effect = post_or_fail
+    result = await agent.run(request(), body())
+    assert result.reward == 0 and result.failure_reason == "policy_error"
+    assert result.policy_error and result.tool_call_count == failing_call
 
 
 @pytest.mark.asyncio
