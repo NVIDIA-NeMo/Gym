@@ -1,128 +1,135 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The two-stage user simulator: classify the agent's question, then answer it.
+"""The user simulator: the BIRD-Interact ADK's two-stage pipeline, with its default (``v2``) prompts.
 
-BIRD-Interact's simulator first maps a clarifying question to one action: an annotated ambiguity (``labeled``), a
-detail the ground truth settles that is not annotated (``unlabeled``), or a question to refuse (``unanswerable``).
-It then writes the reply from that action alone, so the reply cannot reveal more than the action allows.
-The prompts here are written for Gym. Parity runs against the published scores need the reference prompts.
+The action parser reads the agent's question, the annotated ambiguities and the solution SQL split into clauses, and
+picks one action: ``labeled("<term>")``, ``unlabeled("<segment>")`` or ``unanswerable()``. The response generator
+then writes the user's reply from that action, the clear question, the solution SQL and the schema. The prompts are
+the ADK's (``adk_prompts.py``); this module fills them, and reads the model's output, as the ADK's user simulator
+does. In phase 2 the prompts show no ambiguities and the follow-up's solution, and keep phase 1's clear question.
+
+One difference: the ADK fills the placeholders one after another, so a question that contains ``[[GT_SQL]]`` would
+get the solution SQL written into it. Here the placeholders are filled in one pass over the template.
 """
 
 import json
 import re
-from dataclasses import dataclass
-from typing import Literal
 
-from environment_servers.bird_interact.task_data import AmbiguityPoint, BirdInteractTask
+from sqlglot import tokenize
+from sqlglot.errors import TokenError
+from sqlglot.tokens import TokenType
 
-
-UNANSWERABLE_REPLY = "Sorry, I can't help with that question. Please work with what you have."
-_ACTION = re.compile(r'\b(labeled|unlabeled)\(\s*"(.+?)"\s*\)|\bunanswerable\(\s*\)', re.DOTALL)
-
-
-@dataclass(frozen=True)
-class SimulatorAction:
-    kind: Literal["labeled", "unlabeled", "unanswerable"]
-    argument: str | None = None
+from environment_servers.bird_interact.adk_prompts import (
+    ACTION_PARSER_PROMPT,
+    RESPONSE_GENERATOR_PROMPT,
+    UNCLEAR_QUESTION_REPLY,
+)
+from environment_servers.bird_interact.task_data import BirdInteractTask
 
 
-def _sql(task: BirdInteractTask, phase: int) -> str:
-    sql = task.sol_sql if phase == 1 else task.follow_up.sol_sql
-    return "\n".join(sql)
+# The ADK's output limits for the two stages, which it samples at temperature 0.
+ACTION_PARSER_MAX_TOKENS = 500
+RESPONSE_GENERATOR_MAX_TOKENS = 1024
+_PLACEHOLDER = re.compile(r"\[\[(\w+)\]\]")
+# The tokens that start a clause of the solution SQL, and the clause's name.
+_CLAUSES = {
+    TokenType.SELECT: "SELECT",
+    TokenType.FROM: "FROM",
+    TokenType.WHERE: "WHERE",
+    TokenType.HAVING: "HAVING",
+    TokenType.GROUP_BY: "GROUP BY",
+    TokenType.ORDER_BY: "ORDER BY",
+    TokenType.LIMIT: "LIMIT",
+    TokenType.OFFSET: "OFFSET",
+    TokenType.JOIN: "JOIN",
+}
 
 
-def classifier_prompt(task: BirdInteractTask, question: str, *, phase: int) -> str:
-    ambiguities = [{"term": point.term, "sql_snippet": point.sql_snippet} for point in task.ambiguities()]
-    request = task.amb_user_query if phase == 1 else task.follow_up.query
-    return f"""You play the user in a text-to-SQL conversation. An AI assistant writes SQL for your request.
-It asked you a clarifying question. Decide what kind of question it is.
-The assistant sees only its own question, never this prompt.
+def segment_sql(sql: str) -> list[tuple[str, str]]:
+    """Split ``sql`` at each clause keyword into (clause, text up to the next clause), as PostgreSQL tokenizes it.
 
-Your request:
-{request}
-
-Annotated ambiguities in your request. Each has a term and the SQL fragment that resolves it:
-{json.dumps(ambiguities, indent=1)}
-
-Ground-truth SQL:
-```sql
-{_sql(task, phase)}
-```
-
-The assistant's question:
-{question}
-
-Choose exactly one action:
-- labeled("<term>"): the question is about an annotated ambiguity. Write its exact term.
-- unlabeled("<SQL fragment>"): the question is about a detail that is not annotated, that the ground-truth SQL
-  settles, and that a careful analyst needs. Quote the SQL fragment.
-- unanswerable(): any other question, such as a request for the SQL, the result, or a detail the SQL does not settle.
-
-Write only the action, on one line."""
+    SQL with no clause is one ``STATEMENT``; SQL that does not tokenize is one ``STATEMENT`` for each semicolon.
+    """
+    try:
+        starts = [
+            (token.start, _CLAUSES[token.token_type])
+            for token in tokenize(sql, read="postgres")
+            if token.token_type in _CLAUSES
+        ]
+    except TokenError:
+        return [("STATEMENT", f"{part.strip()};") for part in sql.split(";") if part.strip()]
+    if not starts:
+        return [("STATEMENT", sql.strip())]
+    ends = [start for start, _ in starts[1:]] + [len(sql)]
+    return [(clause, sql[start:end].strip()) for (start, clause), end in zip(starts, ends)]
 
 
-def parse_action(text: str, task: BirdInteractTask) -> SimulatorAction:
-    """Read the classifier's action. Anything unreadable, or a term that is not annotated, is ``unanswerable``."""
-    match = _ACTION.search(text)
-    if match is None or match.group(1) is None:
-        return SimulatorAction("unanswerable")
-    kind, argument = match.group(1), match.group(2).strip()
-    if kind == "labeled" and _ambiguity(task, argument) is None:
-        return SimulatorAction("unanswerable")
-    return SimulatorAction(kind, argument)
+def _solution(task: BirdInteractTask, phase: int) -> list[str]:
+    return task.sol_sql if phase == 1 else task.follow_up.sol_sql
 
 
-def _ambiguity(task: BirdInteractTask, term: str) -> AmbiguityPoint | None:
-    return next((point for point in task.ambiguities() if point.term.casefold() == term.casefold()), None)
+def _segments(task: BirdInteractTask, phase: int) -> str:
+    return "\n===\n".join(
+        "\n\n".join(f"{clause}:\n{text}" for clause, text in segment_sql(sql)) for sql in _solution(task, phase)
+    )
 
 
-def responder_prompt(
-    task: BirdInteractTask,
-    question: str,
-    action: SimulatorAction,
-    *,
-    phase: int,
-    schema_text: str,
-    knowledge: dict[int, dict],
+def _ambiguities(task: BirdInteractTask, phase: int) -> str:
+    """The annotated ambiguities as the row writes them; phase 2's question has none."""
+    if phase != 1:
+        return json.dumps({}, indent=4)
+    query_ambiguity = task.user_query_ambiguity.model_dump(mode="json", exclude_unset=True)
+    knowledge_ambiguity = [point.model_dump(mode="json", exclude_unset=True) for point in task.knowledge_ambiguity]
+    return (
+        f"user_query_ambiguity: \n{json.dumps(query_ambiguity, indent=4)}\n\n"
+        f"knowledge_ambiguity: \n{json.dumps(knowledge_ambiguity, indent=4)}"
+    )
+
+
+def _fill(template: str, values: dict[str, str]) -> str:
+    return _PLACEHOLDER.sub(lambda match: values.get(match.group(1), match.group(0)), template)
+
+
+def action_parser_prompt(task: BirdInteractTask, question: str, *, phase: int) -> str:
+    return _fill(
+        ACTION_PARSER_PROMPT,
+        {"clarification_Q": question, "amb_json": _ambiguities(task, phase), "SQL_Glot": _segments(task, phase)},
+    )
+
+
+def response_generator_prompt(
+    task: BirdInteractTask, question: str, action: str, *, phase: int, schema_text: str
 ) -> str:
-    """The prompt that writes the reply for a ``labeled`` or ``unlabeled`` action."""
-    if action.kind == "labeled":
-        point = _ambiguity(task, action.argument)
-        fact = f"The term {point.term!r} means this SQL: {point.sql_snippet}"
-        # A term in the question links to a hidden knowledge entry through the same SQL fragment.
-        for linked in task.knowledge_ambiguity:
-            if (linked is point or linked.sql_snippet == point.sql_snippet) and linked.deleted_knowledge in knowledge:
-                fact += f"\nIt comes from this knowledge entry: {json.dumps(knowledge[linked.deleted_knowledge])}"
-    else:
-        fact = f"This part of the ground-truth SQL answers the question: {action.argument}"
-    request = task.amb_user_query if phase == 1 else task.follow_up.query
-    clear = f"\nThe same request without ambiguity (hidden from the assistant):\n{task.query}\n" if task.query else ""
-    return f"""You play the user in a text-to-SQL conversation. Answer the assistant's clarifying question as the
-person who wrote the request: briefly, in plain language, in one or two sentences.
+    return _fill(
+        RESPONSE_GENERATOR_PROMPT,
+        {
+            "clarification_Q": question,
+            "Action": action,
+            "clear_query": task.query if task.query is not None else task.amb_user_query,
+            "amb_json": _ambiguities(task, phase),
+            "GT_SQL": "\n".join(_solution(task, phase)),
+            "SQL_Glot": _segments(task, phase),
+            "DB_schema": schema_text,
+        },
+    )
 
-Rules:
-- Answer only what the question asks, with the fact below.
-- State every detail the way the ground-truth SQL computes it, such as a fraction or a percentage, a unit or a
-  sort order. Never add a requirement the SQL does not have; if it does not settle a point, say it does not matter.
-- Never write SQL, never quote the ground truth, and never give the full solution.
-- Do not ask a question back.
 
-Database schema:
-{schema_text}
+def read_action(output: str) -> str:
+    """The action in the action parser's output: what precedes ``</s>``, else its first line, after any ``<s>``."""
+    output = output.strip()
+    action = output.split("</s>")[0].strip() if "</s>" in output else output.split("\n")[0].strip()
+    if "<s>" in action:
+        action = action[action.find("<s>") :].replace("<s>", "").strip()
+    return action
 
-Your request:
-{request}
-{clear}
-The fact that answers the question (hidden from the assistant):
-{fact}
 
-Ground-truth SQL (hidden from the assistant):
-```sql
-{_sql(task, phase)}
-```
-
-The assistant's question:
-{question}
-
-Write only your reply."""
+def read_reply(output: str) -> str:
+    """The reply in the response generator's output, between ``<s>`` and ``</s>``, either of which may be missing."""
+    output = output.strip()
+    if "</s>" in output:
+        reply = output.split("</s>")[0].strip()
+        return reply[reply.find("<s>") :].replace("<s>", "").strip() if "<s>" in reply else reply
+    if "<s>" in output:
+        return output.split("<s>")[1].strip()
+    return UNCLEAR_QUESTION_REPLY

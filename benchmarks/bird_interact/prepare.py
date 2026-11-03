@@ -9,8 +9,9 @@ not downloaded; they are in the sandbox image that ``Dockerfile`` builds.
 
 The public rows withhold the ground truth: ``sol_sql``, ``external_knowledge`` and ``test_cases``, for the task and
 for its follow-up. The authors send it on request, and ``prepare`` merges it in by ``instance_id``. It keeps the rows
-that the server can grade: those with their ground truth, and without custom test cases for the task or its follow-up
-(BIRD-Interact's management tasks).
+that the server can grade: those with their ground truth, and not graded by custom test cases. As in BIRD-Interact, a
+query (``category`` Query) is graded by comparing its result with the solution's even when it has test cases; a
+management task runs its own, which the server does not run yet. Every query task's follow-up is a query too.
 """
 
 import json
@@ -70,10 +71,9 @@ def select_tasks(
         follow_up = merged.get("follow_up")
         if not merged["sol_sql"] or (follow_up is not None and not follow_up.get("sol_sql")):
             left_out["no ground truth"] += 1
-        elif merged["test_cases"] or (follow_up is not None and follow_up.get("test_cases")):
+        elif BirdInteractTask.model_validate(merged).needs_custom_test_cases():
             left_out["custom test cases"] += 1
         else:
-            BirdInteractTask.model_validate(merged)
             kept.append(merged)
     return kept, left_out
 

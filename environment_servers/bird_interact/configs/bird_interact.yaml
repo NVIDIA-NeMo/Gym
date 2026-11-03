@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # BIRD-Interact: interactive text-to-SQL with a simulated user, in both of its modes, with no Resources Server.
-# Each mode has an Environment Server that owns each episode's database sandbox, the simulator and the grader.
-# c-Interact: the Environment Server runs the conversation (environment-driven).
-# a-Interact: the agent reaches the user, the database and the grader through tools that the Environment Server
-# serves for the episode (agent-driven).
+# Each mode has an Environment Server that owns each episode's database sandbox, the simulator and the grader, and
+# serves the agent its tools for the episode.
+# c-Interact: the BIRD-Interact ADK's protocol. The agent has ask_user and submit_sql, and the Environment Server opens
+# each turn: phase 1, a debug turn after a failed phase, and the follow-up question as phase 2.
+# a-Interact: the agent reaches the user, the database and the grader through nine tools, in one turn.
 
 environment_server_routes:
   "bird_interact:c_interact_example": bird_interact_c_interact
@@ -35,7 +36,8 @@ bird_interact_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      # a-Interact tool calls; the BIRD-COIN budget ends the episode first.
+      # Model calls in one turn. The BIRD-COIN budget ends an a-Interact episode first; a c-Interact turn ends at its
+      # submission (the ADK's own agent stops at 60 model calls in an episode).
       max_steps: 40
       # One file, one taskset for each mode. The two entries share a name, so they share the file's metrics.
       # The Environment Server's task_data.py validates the rows.
@@ -78,8 +80,9 @@ bird_interact_c_interact:
           benchmark: bird-interact
       default_episode_timeout_seconds: 3600
       cleanup_timeout_seconds: 120
-      # Questions (ambiguities + patience), two SQL attempts for each of two phases, with room to spare.
-      max_turns: 20
+      # simple_agent calls the tools over direct HTTP; [mcp] serves them to an agent that takes only MCP grants.
+      tool_transports: [direct_http]
+      # Up to four turns: each phase, and a debug turn after each failed one.
       turn_timeout_seconds: 600
 
 bird_interact_a_interact:
@@ -108,5 +111,4 @@ bird_interact_a_interact:
       # simple_agent calls the tools over direct HTTP. Set [mcp] for an agent that takes only MCP grants (Codex, Pi,
       # Hermes); the first request then declares no tools, which Codex would refuse.
       tool_transports: [direct_http]
-      max_turns: 1
       turn_timeout_seconds: 1800

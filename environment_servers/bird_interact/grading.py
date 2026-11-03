@@ -7,11 +7,17 @@ The database is SQLite or PostgreSQL. A SQLite database is a file that ``setup``
 PostgreSQL database is ``<db>_template`` in the server of the sandbox's image (``benchmarks/bird_interact`` builds it),
 which ``setup`` starts; the sandbox is the episode's own, so the database is too.
 
-Grading is an independent implementation of BIRD-Interact's default test case for tasks without custom test cases:
-remove comments, ``DISTINCT`` and ``ROUND(...)`` from both queries, run them, normalize the values (floats and decimals
-to two places, dates to ``YYYY-MM-DD``, JSON values to sorted JSON), and compare the rows in order when
-``conditions.order`` is set, or as sets otherwise. An empty result on either side fails. No query changes the
-database: SQLite runs each on a scratch copy, PostgreSQL in a transaction that it rolls back.
+Grading is an independent implementation of the BIRD-Interact ADK's default test case, which grades every query task.
+A submission runs as the ADK runs it, in order on one database state: the submitted SQL as written, which shows
+whether it runs; then the submitted SQL and the solution's, each with its comments, ``DISTINCT`` words and
+``ROUND(...)`` calls removed. Their results are compared: values normalized (floats and decimals to two places,
+decimals half-up, dates and timestamps to ``YYYY-MM-DD``, JSON values and arrays to sorted JSON), rows in order when
+``conditions.order`` is set and as sets otherwise. An empty result on either side fails, and so does a value that
+cannot be normalized, such as an array of decimals or dates, as in the ADK.
+
+Nothing that grading or an exploratory query runs stays in the database: SQLite runs it on a scratch copy, PostgreSQL
+in a transaction that it rolls back. Only ``setup`` and a passing phase 1 write the database: as in the ADK, phase 1's
+SQL is applied once it passes, so phase 2 sees what it changed.
 
 The Environment Server uploads this file to the episode's sandbox and runs ``python3 grading.py <command> <request>``
 (see ``main``), so it imports only the standard library, and ``psycopg2`` for PostgreSQL, which the image provides.
@@ -26,18 +32,22 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
 
-_LINE_COMMENT = re.compile(r"--[^\n]*")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-_DISTINCT = re.compile(r"\bdistinct\b", re.IGNORECASE)
-_ROUND_CALL = re.compile(r"\bround\s*\(", re.IGNORECASE)
+# A line comment that a line break ends; the break stays.
+_LINE_COMMENT = re.compile(r"--.*?(\r\n|\r|\n)")
+_BLANK_LINES = re.compile(r"\n\s*\n+")
+_ROUND_CALL = re.compile(r"ROUND\s*\(", re.IGNORECASE)
 _FLOAT_PLACES = 2
 _DECIMAL_STEP = Decimal(1).scaleb(-_FLOAT_PLACES)
+# The rows the ADK keeps of a query that starts with SELECT or WITH.
+MAX_RESULT_ROWS = 10_000
 # Rows returned to the agent by an exploratory query.
 MAX_PREVIEW_ROWS = 20
 
@@ -46,6 +56,7 @@ MAX_PREVIEW_ROWS = 20
 class QueryResult:
     rows: list[tuple] | None
     error: str | None = None
+    timed_out: bool = False
 
     @property
     def ok(self) -> bool:
@@ -57,6 +68,7 @@ class Grade:
     passed: bool
     # Set when the submitted SQL did not run; the agent sees it in the debug message.
     execution_error: str | None = None
+    timed_out: bool = False
 
 
 class SolutionFailedError(RuntimeError):
@@ -64,10 +76,7 @@ class SolutionFailedError(RuntimeError):
 
 
 def split_statements(sql: str) -> list[str]:
-    """Split a script into complete statements; a semicolon inside a string literal does not split.
-
-    PostgreSQL's dollar-quoted bodies (``$$ ... $$``) are not recognized, so a semicolon inside one splits.
-    """
+    """Split a SQLite script into complete statements; a semicolon inside a string literal does not split."""
     statements, pending = [], ""
     for piece in sql.split(";"):
         pending += piece + ";"
@@ -80,8 +89,19 @@ def split_statements(sql: str) -> list[str]:
     return statements
 
 
-def strip_round_calls(sql: str) -> str:
-    """Replace each ``ROUND(x, n)`` with ``x``, nested calls included."""
+def remove_comments(sql: str) -> str:
+    """Drop block comments and the line comments that a line break ends, then blank lines."""
+    sql = _LINE_COMMENT.sub(r"\1", _BLOCK_COMMENT.sub("", sql))
+    return _BLANK_LINES.sub("\n", sql).strip()
+
+
+def remove_distinct(sql: str) -> str:
+    """Drop each space-separated word that is ``DISTINCT``, in any case; ``COUNT(DISTINCT x)`` keeps its own."""
+    return " ".join(word for word in sql.split(" ") if word.lower() != "distinct")
+
+
+def remove_round(sql: str) -> str:
+    """Replace each ``ROUND(x, n)`` with ``x``, nested calls included. Unbalanced parentheses stop the rewrite."""
     while match := _ROUND_CALL.search(sql):
         depth, position, first_argument_end = 1, match.end(), None
         while position < len(sql) and depth:
@@ -94,71 +114,41 @@ def strip_round_calls(sql: str) -> str:
                 first_argument_end = position
             position += 1
         if depth:
-            return sql  # Unbalanced parentheses: leave the query for SQLite to reject.
+            return sql
         argument = sql[match.end() : first_argument_end if first_argument_end is not None else position - 1]
         sql = sql[: match.start()] + argument.strip() + sql[position:]
     return sql
 
 
 def normalize_sql(sql: str) -> str:
-    sql = _BLOCK_COMMENT.sub(" ", _LINE_COMMENT.sub(" ", sql))
-    return strip_round_calls(_DISTINCT.sub(" ", sql))
+    return remove_round(remove_distinct(remove_comments(sql)))
 
 
-def run_query(database: Path, sql: str, *, timeout_seconds: float) -> QueryResult:
-    """Run ``sql`` on ``database`` and return the rows of its last statement that returns rows."""
-    deadline = time.monotonic() + timeout_seconds
-    connection = sqlite3.connect(database)
-    # The handler interrupts a running statement once the deadline passes.
-    connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 10_000)
-    try:
-        rows: list[tuple] | None = None
-        for statement in split_statements(sql):
-            cursor = connection.execute(statement)
-            if cursor.description is not None:
-                rows = cursor.fetchall()
-        connection.commit()
-        return QueryResult(rows=rows)
-    except sqlite3.OperationalError as error:
-        if time.monotonic() > deadline:
-            return QueryResult(rows=None, error=f"Query timed out after {timeout_seconds} seconds")
-        return QueryResult(rows=None, error=str(error))
-    except sqlite3.Error as error:
-        return QueryResult(rows=None, error=str(error))
-    finally:
-        connection.close()
-
-
-def run_on_copy(database: Path, sql: str, *, timeout_seconds: float) -> QueryResult:
-    """Run ``sql`` on a scratch copy, so a statement that writes leaves ``database`` unchanged."""
-    with tempfile.TemporaryDirectory(prefix="bird-interact-query-") as scratch:
-        copy = Path(scratch) / database.name
-        shutil.copyfile(database, copy)
-        return run_query(copy, sql, timeout_seconds=timeout_seconds)
+def _returns_rows(sql: str) -> bool:
+    return sql.strip().lower().startswith(("select", "with"))
 
 
 def _round_nested(value: object) -> object:
-    if isinstance(value, float):
-        return round(value, _FLOAT_PLACES)
     if isinstance(value, Decimal):
         return value.quantize(_DECIMAL_STEP, rounding=ROUND_HALF_UP)
+    if isinstance(value, float):
+        return round(value, _FLOAT_PLACES)
     if isinstance(value, (list, tuple)):
-        return [_round_nested(item) for item in value]
+        return type(value)(_round_nested(item) for item in value)
     if isinstance(value, dict):
         return {key: _round_nested(item) for key, item in value.items()}
     return value
 
 
 def _normalize_value(value: object) -> object:
-    """A value as grading compares it. SQLite returns only the first two kinds; PostgreSQL returns them all."""
-    if isinstance(value, (float, Decimal)):
-        return _round_nested(value)
+    """A value as grading compares it. SQLite returns only numbers, strings and bytes; PostgreSQL returns them all."""
     # datetime is a date too: the time of day does not count.
     if isinstance(value, datetime.date):
         return value.strftime("%Y-%m-%d")
-    # JSON values and arrays compare as JSON with sorted keys, which a set can hold.
+    value = _round_nested(value)
+    # JSON values and arrays compare as JSON with sorted keys. A decimal or a date inside raises TypeError.
     if isinstance(value, (dict, list)):
-        return json.dumps(_round_nested(value), sort_keys=True, default=str)
+        return json.dumps(value, sort_keys=True)
     return value
 
 
@@ -177,10 +167,11 @@ def _display_value(value: object) -> object:
 
 class Database(Protocol):
     def create(self, request: dict[str, Any]) -> None:
-        """Make the episode database ready, with the task's ``preprocess_sql`` applied."""
+        """Make the episode database ready: ``preprocess_sql`` applied, then ``applied_sql``."""
 
-    def run(self, sql: str, *, timeout_seconds: float) -> QueryResult:
-        """Run ``sql`` and return the rows of its last statement that returns rows, leaving the database unchanged."""
+    def run(self, scripts: Sequence[str], *, timeout_seconds: float, commit: bool = False) -> list[QueryResult]:
+        """Run the scripts in order, each as one query, and stop after the first that fails. Each result has the rows
+        of its script's last statement. With ``commit`` the changes stay in the database; otherwise none does."""
 
 
 @dataclass(frozen=True)
@@ -190,57 +181,108 @@ class SQLiteDatabase:
     path: Path
 
     def create(self, request: dict[str, Any]) -> None:
-        create_database(Path(request["source"]), self.path, request["preprocess_sql"])
+        source = Path(request["source"])
+        if source.suffix == ".sql":
+            with sqlite3.connect(self.path) as connection:
+                connection.executescript(source.read_text())
+        else:
+            shutil.copyfile(source, self.path)
+        _apply_setup(self, request)
 
-    def run(self, sql: str, *, timeout_seconds: float) -> QueryResult:
-        return run_on_copy(self.path, sql, timeout_seconds=timeout_seconds)
+    def run(self, scripts: Sequence[str], *, timeout_seconds: float, commit: bool = False) -> list[QueryResult]:
+        if commit:
+            return _run_sqlite(self.path, scripts, timeout_seconds=timeout_seconds)
+        with tempfile.TemporaryDirectory(prefix="bird-interact-query-") as scratch:
+            copy = Path(scratch) / self.path.name
+            shutil.copyfile(self.path, copy)
+            return _run_sqlite(copy, scripts, timeout_seconds=timeout_seconds)
+
+
+def _run_sqlite(database: Path, scripts: Sequence[str], *, timeout_seconds: float) -> list[QueryResult]:
+    # Each script has its own deadline, which the handler enforces by interrupting the running statement.
+    deadline = [0.0]
+    connection = sqlite3.connect(database)
+    connection.set_progress_handler(lambda: int(time.monotonic() > deadline[0]), 10_000)
+    results: list[QueryResult] = []
+    try:
+        for script in scripts:
+            deadline[0] = time.monotonic() + timeout_seconds
+            try:
+                rows: list[tuple] | None = None
+                for statement in split_statements(script):
+                    cursor = connection.execute(statement)
+                    rows = cursor.fetchall() if cursor.description is not None else None
+                if rows is not None and _returns_rows(script):
+                    rows = rows[:MAX_RESULT_ROWS]
+                results.append(QueryResult(rows=rows))
+            except sqlite3.Error as error:
+                timed_out = isinstance(error, sqlite3.OperationalError) and time.monotonic() > deadline[0]
+                message = f"Query timed out after {timeout_seconds} seconds" if timed_out else str(error)
+                results.append(QueryResult(rows=None, error=message, timed_out=timed_out))
+                break
+        connection.commit()
+        return results
+    finally:
+        connection.close()
 
 
 @dataclass(frozen=True)
 class PostgresDatabase:
     """A database in the PostgreSQL server of the sandbox's image.
 
-    The image sets ``PGDATA`` and the libpq variables (``PGHOST``, ``PGUSER``) that connections use.
+    The image sets ``PGDATA`` and the libpq variables (``PGHOST``, ``PGUSER``) that connections use. Each script is
+    sent as one query, as the ADK sends it, so it may hold several statements and dollar-quoted bodies.
     """
 
     name: str
 
     def create(self, request: dict[str, Any]) -> None:
         start_postgres()
-        if request["preprocess_sql"]:
-            applied = self._execute(";\n".join(request["preprocess_sql"]), commit=True, timeout_seconds=None)
-            if not applied.ok:
-                # As for SQLite: the task's own setup failed, and the command fails with it.
-                raise RuntimeError(f"preprocess_sql failed: {applied.error}")
+        _apply_setup(self, request)
 
-    def run(self, sql: str, *, timeout_seconds: float) -> QueryResult:
-        return self._execute(sql, commit=False, timeout_seconds=timeout_seconds)
-
-    def _execute(self, sql: str, *, commit: bool, timeout_seconds: float | None) -> QueryResult:
+    def run(self, scripts: Sequence[str], *, timeout_seconds: float, commit: bool = False) -> list[QueryResult]:
         import psycopg2
 
         connection = psycopg2.connect(dbname=self.name)
+        results: list[QueryResult] = []
         try:
             with connection.cursor() as cursor:
-                if timeout_seconds is not None:
-                    # Bounds each statement of the transaction.
-                    cursor.execute("SET LOCAL statement_timeout = %s", (max(1, int(timeout_seconds * 1000)),))
-                rows: list[tuple] | None = None
-                for statement in split_statements(sql):
-                    cursor.execute(statement)
-                    if cursor.description is not None:
-                        rows = cursor.fetchall()
-            return QueryResult(rows=rows)
-        except psycopg2.errors.QueryCanceled:
-            return QueryResult(rows=None, error=f"Query timed out after {timeout_seconds} seconds")
-        except psycopg2.Error as error:
-            return QueryResult(rows=None, error=str(error).strip())
+                # Bounds each statement of the transaction.
+                cursor.execute("SET LOCAL statement_timeout = %s", (max(1, int(timeout_seconds * 1000)),))
+                for script in scripts:
+                    try:
+                        cursor.execute(script)
+                        if _returns_rows(script):
+                            rows = cursor.fetchmany(MAX_RESULT_ROWS + 1)[:MAX_RESULT_ROWS]
+                        else:
+                            rows = cursor.fetchall() if cursor.description is not None else None
+                        results.append(QueryResult(rows=rows))
+                    except psycopg2.errors.QueryCanceled:
+                        message = f"Query timed out after {timeout_seconds} seconds"
+                        results.append(QueryResult(rows=None, error=message, timed_out=True))
+                        break
+                    except psycopg2.Error as error:
+                        results.append(QueryResult(rows=None, error=str(error)))
+                        break
         finally:
-            if commit:
+            if commit and all(result.ok for result in results):
                 connection.commit()
             else:
                 connection.rollback()
             connection.close()
+        return results
+
+
+def _apply_setup(database: Database, request: dict[str, Any]) -> None:
+    """Apply the task's ``preprocess_sql``, then ``applied_sql``: phase 1's passing SQL when a fresh sandbox replaces
+    one that failed."""
+    scripts = [script for script in (*request["preprocess_sql"], *request.get("applied_sql", [])) if script.strip()]
+    if not scripts:
+        return
+    results = database.run(scripts, timeout_seconds=request["timeout_seconds"], commit=True)
+    if not results[-1].ok:
+        # The task's own setup failed, and the command fails with it.
+        raise RuntimeError(f"Setup SQL failed: {results[-1].error}")
 
 
 def start_postgres() -> None:
@@ -265,34 +307,40 @@ def start_postgres() -> None:
 
 
 def grade(
-    database: Database, predicted_sql: str, solution_sql: str, *, ordered: bool, timeout_seconds: float
+    database: Database,
+    predicted_sql: str,
+    solution_sql: Sequence[str],
+    *,
+    ordered: bool,
+    timeout_seconds: float,
+    apply_if_passed: bool = False,
 ) -> Grade:
-    """Compare the predicted query's result with the solution's; neither changes ``database``."""
-    predicted = database.run(normalize_sql(predicted_sql), timeout_seconds=timeout_seconds)
-    if not predicted.ok:
-        return Grade(passed=False, execution_error=predicted.error)
-    solution = database.run(normalize_sql(solution_sql), timeout_seconds=timeout_seconds)
-    if not solution.ok:
-        raise SolutionFailedError(f"The ground-truth SQL failed: {solution.error}")
-    if not predicted.rows or not solution.rows:
+    """Grade ``predicted_sql`` against the solution's scripts by BIRD-Interact's default test case.
+
+    With ``apply_if_passed``, a passing submission is then applied to ``database``.
+    """
+    solution = [script for script in map(normalize_sql, solution_sql) if script.strip()]
+    results = database.run([predicted_sql, normalize_sql(predicted_sql), *solution], timeout_seconds=timeout_seconds)
+    submitted = results[0]
+    if not submitted.ok:
+        return Grade(passed=False, execution_error=submitted.error, timed_out=submitted.timed_out)
+    if len(results) < 2 or not results[1].ok:
         return Grade(passed=False)
-    predicted_rows, solution_rows = _normalize_rows(predicted.rows), _normalize_rows(solution.rows)
-    if ordered:
-        return Grade(passed=predicted_rows == solution_rows)
-    return Grade(passed=set(predicted_rows) == set(solution_rows))
-
-
-def create_database(source: Path, database: Path, preprocess_sql: list[str]) -> None:
-    """Create ``database`` from ``source``, a SQLite file or a SQL script, and apply ``preprocess_sql``."""
-    if source.suffix == ".sql":
-        with sqlite3.connect(database) as connection:
-            connection.executescript(source.read_text())
-    else:
-        shutil.copyfile(source, database)
-    if preprocess_sql:
-        with sqlite3.connect(database) as connection:
-            for statement in split_statements(";\n".join(preprocess_sql)):
-                connection.execute(statement)
+    if not results[-1].ok:
+        raise SolutionFailedError(f"The ground-truth SQL failed: {results[-1].error}")
+    predicted_rows = results[1].rows
+    solution_rows = results[-1].rows if solution else None
+    if not predicted_rows or not solution_rows:
+        return Grade(passed=False)
+    try:
+        predicted_rows, solution_rows = _normalize_rows(predicted_rows), _normalize_rows(solution_rows)
+        passed = predicted_rows == solution_rows if ordered else set(predicted_rows) == set(solution_rows)
+    except TypeError:
+        # A value that JSON or a set cannot hold; the ADK's comparison fails on it too.
+        passed = False
+    if passed and apply_if_passed:
+        database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
+    return Grade(passed=passed)
 
 
 def main(argv: list[str]) -> None:
@@ -315,7 +363,7 @@ def main(argv: list[str]) -> None:
         database.create(request)
         result: dict[str, object] = {}
     elif command == "execute":
-        query = database.run(request["sql"], timeout_seconds=request["timeout_seconds"])
+        (query,) = database.run([request["sql"]], timeout_seconds=request["timeout_seconds"])
         rows = query.rows or []
         result = {
             "error": query.error,
@@ -330,8 +378,13 @@ def main(argv: list[str]) -> None:
                 request["solution_sql"],
                 ordered=request["ordered"],
                 timeout_seconds=request["timeout_seconds"],
+                apply_if_passed=request.get("apply_if_passed", False),
             )
-            result = {"passed": outcome.passed, "execution_error": outcome.execution_error}
+            result = {
+                "passed": outcome.passed,
+                "execution_error": outcome.execution_error,
+                "timed_out": outcome.timed_out,
+            }
         except SolutionFailedError as error:
             result = {"solution_error": str(error)}
     else:
