@@ -44,7 +44,7 @@ from typing import Dict, Optional, Tuple
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.discovery import discover_components
+from nemo_gym.environment.discovery import discover_components
 
 
 AGENTS_SUBDIR = "responses_api_agents"
@@ -165,7 +165,7 @@ def _discover_agents_in_dir(agents_dir: Path) -> Dict[str, AgentEntry]:
 def discover_agents() -> Dict[str, AgentEntry]:
     """Map agent name -> :class:`AgentEntry` for every discoverable agent dir.
 
-    Scans the ``responses_api_agents/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
+    Scans the ``responses_api_agents/`` subdir of every :func:`~nemo_gym.environment.discovery.component_search_roots`
     root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user agents shadow same-named built-ins.
     """
     return discover_components(AGENTS_SUBDIR, _discover_agents_in_dir)

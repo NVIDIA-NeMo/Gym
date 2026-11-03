@@ -63,6 +63,13 @@ from nemo_gym.environment.onboarding import (
     prepare_verifier_run,
 )
 from nemo_gym.environment.publication import finalize_publication
+from nemo_gym.environment.registry import (
+    EnvironmentCatalogEntry,
+    RegistryError,
+    discover_environment_catalog,
+    read_environment_details,
+    resolve_catalog_entry,
+)
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
 from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
 from nemo_gym.orchestration.server_supervisor import (
@@ -71,13 +78,6 @@ from nemo_gym.orchestration.server_supervisor import (
     _resolve_server_dir,
 )
 from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
-from nemo_gym.registry import (
-    EnvironmentCatalogEntry,
-    RegistryError,
-    discover_environment_catalog,
-    read_environment_details,
-    resolve_catalog_entry,
-)
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
 from nemo_gym.server_runtime.server_status import StatusCommand
 

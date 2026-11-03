@@ -53,7 +53,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /environments/ @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/cli/ @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/cli_setup_command.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/benchmarks.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/environment/benchmarks.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/data/dataset_orchestrator.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/data/gitlab_utils.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/data/hf_utils.py @nvidia-nemo/gym_env_benchmarks
@@ -73,8 +73,8 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/server_runtime/base_resources_server.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/agents/base_responses_api_agent.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/base_responses_api_model.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/registry.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/environment/registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/environment/agent_registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/rollouts/rollout_collection.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/telemetry/profiling.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_core
@@ -83,9 +83,9 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/chat_streaming.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/responses_streaming.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/discovery.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/model_registry.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/resources_server_registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/environment/discovery.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/environment/model_registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/environment/resources_server_registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/mcp_auto_exposure.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/orchestration/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/request_handling/rollout_context.py @nvidia-nemo/gym_core
