@@ -491,6 +491,22 @@ class TestResourcesSessions:
         assert not worker.is_alive()
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
 
+    def test_typed_seed_cannot_take_over_existing_cookie_worker(self) -> None:
+        server, app = _session_server()
+        client = TestClient(app)
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert client.post("/execute_python", json={"code": "value = 42"}).json()["success"]
+        [session_id] = server._sessions
+        worker = server._sessions[session_id]
+        try:
+            assert client.post("/seed_session", json=_seed(session_id)).status_code == 409
+            assert server._session_episodes == {}
+            assert server._sessions[session_id] is worker and worker._proc.is_alive()
+            assert client.post("/execute_python", json={"code": "value"}).json()["result"] == "42"
+        finally:
+            assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
+        assert server._sessions == {} and not worker._proc.is_alive()
+
     def test_legacy_seed_keeps_working(self) -> None:
         server, app = _session_server()
         client = TestClient(app)
