@@ -240,6 +240,10 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     queued = _queued_reverify_config(script)
     assert queued.withdraw_unresolved_admissions is True and queued.skip_spent_judge_failures is True
     assert "--model-type openai_model" in script
+    # Observability is on, so the job names where its model calls are captured: its own folder.
+    (line,) = [line for line in script.splitlines() if line.strip().startswith("gym eval reverify")]
+    assert "+observability_enabled=True" in line
+    assert f"+model_call_capture_dir={Path(job['receipt']).parent / 'model-calls'}" in line
     # The judge-only job is not a segment of the policy chain: no chain entry, no walltime charged, no retry spent.
     assert _accounting(job_dir) == before
     (entry,) = _journal(job_dir)

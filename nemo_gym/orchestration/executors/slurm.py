@@ -88,7 +88,11 @@ from nemo_gym.orchestration.executors.resume_script import (
     _walltime_to_seconds,
 )
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
-from nemo_gym.orchestration.executors.slurm_script import _resolve_env, build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import (
+    _resolve_env,
+    _with_default_capture_dir,
+    build_sbatch_script,
+)
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
@@ -1674,6 +1678,9 @@ class SlurmExecutor(BaseExecutor):
             queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
             nonce = new_gym_job_id(utc_now())
             output = job_dir / "reverification" / nonce / "rollouts.jsonl"
+            # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
+            # evaluation captures into its benchmark directory.
+            run = _with_default_capture_dir(run, output.parent)
             command = " ".join(
                 [
                     "gym eval reverify",
@@ -1891,6 +1898,9 @@ class SlurmExecutor(BaseExecutor):
         nonce = new_gym_job_id(utc_now())
         folder = job_dir / "reverification" / nonce
         output, receipt = folder / "rollouts.jsonl", folder / "receipt.json"
+        # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
+        # evaluation captures into its benchmark directory.
+        run = _with_default_capture_dir(run, folder)
         policy_type = config.driver.policy_model_type
         command = " ".join(
             [
