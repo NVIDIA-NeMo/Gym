@@ -982,6 +982,26 @@ def test_sync_loop_runner_times_out_async_operations() -> None:
         runner.close()
 
 
+def test_sync_loop_runner_keeps_a_timeout_raised_by_the_operation() -> None:
+    # On Python 3.11+ the wait's FutureTimeoutError is the builtin TimeoutError, so an
+    # operation's own TimeoutError must not be reported as a sync-loop wait timeout.
+    runner = _AsyncLoopRunner()
+
+    async def provider_timeout() -> None:
+        raise TimeoutError("e2b command did not complete")
+
+    def call_timeout() -> None:
+        raise TimeoutError("e2b command did not complete")
+
+    try:
+        with pytest.raises(TimeoutError, match="^e2b command did not complete$"):
+            runner.run("exec", provider_timeout)
+        with pytest.raises(TimeoutError, match="^e2b command did not complete$"):
+            runner.call("exec", call_timeout)
+    finally:
+        runner.close()
+
+
 def test_sync_sandbox_file_operations(tmp_path: Path) -> None:
     provider = FakeSandboxProvider()
     with Sandbox(provider) as sandbox:

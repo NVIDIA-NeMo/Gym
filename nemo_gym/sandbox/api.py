@@ -862,6 +862,10 @@ class _AsyncLoopRunner:
         try:
             return future.result(timeout=self._wait_timeout_s)
         except FutureTimeoutError as e:
+            # FutureTimeoutError is the builtin TimeoutError on Python 3.11+, so a finished
+            # future here means the operation itself raised it (or finished just now).
+            if future.done():
+                return future.result()
             future.cancel()
             raise TimeoutError(
                 f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
@@ -887,13 +891,7 @@ class _AsyncLoopRunner:
     def run(self, operation: str, awaitable_factory: Callable[[], Awaitable[T]]) -> T:
         self._ensure_can_block(operation)
         future = asyncio.run_coroutine_threadsafe(awaitable_factory(), self._loop)
-        try:
-            return future.result(timeout=self._wait_timeout_s)
-        except FutureTimeoutError as e:
-            future.cancel()
-            raise TimeoutError(
-                f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
-            ) from e
+        return self._wait_for_result(operation, future)
 
     def close(self) -> None:
         if self._closed:
