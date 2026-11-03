@@ -488,9 +488,9 @@ READER_SRUN_WAIT_ENV = "NEMO_GYM_REMOTE_READER_SRUN_WAIT_S"
 READER_MAX_ENV = "NEMO_GYM_REMOTE_READER_MAX"
 # How long a reader waits for a slot when the user's reader steps are at the cap (0: it does not wait).
 READER_QUEUE_WAIT_ENV = "NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S"
-_READER_QUEUE_WAIT_DEFAULT_S = 1800
+_READER_QUEUE_WAIT_DEFAULT_S = 600
 # How often a queued reader counts the reader steps again.
-_READER_QUEUE_POLL_S = 2
+_READER_QUEUE_POLL_S = 10
 # With a reader step, whether a reader that cannot run in its step may read on the login host instead: "forbid" (the
 # default) or "allow". Forbidden, such a read is unavailable: nothing is read on the login host or decided from it.
 READER_LOGIN_FALLBACK_ENV = "NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK"
@@ -545,7 +545,7 @@ COLLECTOR_NOT_RUN = (
 def reader_step() -> ReaderStep | None:
     """The reader step from ``NEMO_GYM_REMOTE_READER_SRUN`` (extra srun arguments, for example ``-p cpu -c 4``),
     ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120), ``NEMO_GYM_REMOTE_READER_MAX`` (default 8),
-    ``NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S`` (default 1800; 0 does not wait) and
+    ``NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S`` (default 600; 0 does not wait) and
     ``NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK`` (``allow``; anything else forbids it); None when the arguments are unset
     or empty."""
     raw = os.environ.get(READER_SRUN_ENV, "").strip()

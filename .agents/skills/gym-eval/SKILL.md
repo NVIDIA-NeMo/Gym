@@ -160,7 +160,7 @@ Where readers run in Slurm steps (`NEMO_GYM_REMOTE_READER_SRUN`), an inspect tha
 returns `UNKNOWN` with "nothing was read or decided". That is not a problem of the run: read the
 reason on stderr (`gym: the reader did not run: ...`). A reader at the per-user limit of reader steps
 (`NEMO_GYM_REMOTE_READER_MAX`, default 8) queues first, printing `gym-reader progress: queued behind N
-reader steps`, and runs once one ends; it waits up to `NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S` (default 1800,
+reader steps`, and runs once one ends; it waits up to `NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S` (default 600,
 0 does not wait). When the reason still says that reader steps are already running or pending, raise the
 limit or the wait and run the same command again. Other reasons (the step did not
 start within its wait) have their own remedy.

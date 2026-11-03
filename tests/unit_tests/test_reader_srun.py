@@ -411,8 +411,8 @@ def test_a_reader_still_at_the_cap_after_its_queue_wait_says_how_long_it_queued(
     assert not (log / "srun").exists()
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("", 1800), ("0", 0), ("90", 90), ("-5", 1800), ("x", 1800)])
-def test_the_queue_wait_defaults_to_half_an_hour_and_zero_does_not_wait(
+@pytest.mark.parametrize(("raw", "expected"), [("", 600), ("0", 0), ("90", 90), ("-5", 600), ("x", 600)])
+def test_the_queue_wait_defaults_to_ten_minutes_and_zero_does_not_wait(
     monkeypatch: pytest.MonkeyPatch, raw: str, expected: int
 ) -> None:
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN", "-p cpu")
