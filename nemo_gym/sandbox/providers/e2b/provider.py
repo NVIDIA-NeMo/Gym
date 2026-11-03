@@ -609,12 +609,10 @@ class E2BProvider:
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause the sandbox through the E2B SDK without replaying failed requests."""
-        sandbox = self._sandbox(handle)
-        if await sandbox.pause(**self._request_params()) is False:
-            # The SDK maps every 409 to False; only an already-paused sandbox is a no-op.
-            info = await sandbox.get_info(**self._request_params())
-            if info.state != "paused":
-                raise RuntimeError(f"e2b sandbox {handle.sandbox_id!r} was not paused (state: {info.state})")
+        if await self._sandbox(handle).pause(**self._request_params()) is False:
+            # The SDK maps every 409 to False. AgentENV sends 409 during a snapshot or fork, which status
+            # reports as paused although the VM then runs again, so no 409 counts as paused.
+            raise RuntimeError(f"e2b sandbox {handle.sandbox_id!r} was not paused (409 Conflict)")
 
     async def resume(self, handle: SandboxHandle) -> None:
         """Resume the sandbox and replace its SDK handle only after success."""

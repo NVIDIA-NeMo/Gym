@@ -503,7 +503,8 @@ async def test_real_sdk_pause_resume_and_status_use_only_the_control_plane(monke
     requests.clear()
     assert await provider.status(handle) is SandboxStatus.RUNNING
     await provider.pause(handle)
-    await provider.pause(handle)  # A 409 on an already-paused sandbox is a no-op.
+    with pytest.raises(RuntimeError, match="was not paused"):  # A 409 is never confirmed as paused.
+        await provider.pause(handle)
     assert await provider.status(handle) is SandboxStatus.PAUSED
     await provider.resume(handle)
     assert await provider.status(handle) is SandboxStatus.RUNNING
@@ -514,11 +515,10 @@ async def test_real_sdk_pause_resume_and_status_use_only_the_control_plane(monke
         ("POST", "/sandboxes/sbx-1/pause"),
         ("POST", "/sandboxes/sbx-1/pause"),
         ("GET", "/sandboxes/sbx-1"),
-        ("GET", "/sandboxes/sbx-1"),
         ("POST", "/sandboxes/sbx-1/connect"),
         ("GET", "/sandboxes/sbx-1"),
     ]
-    assert json.loads(requests[5][2]) == {"timeout": 3600}
+    assert json.loads(requests[4][2]) == {"timeout": 3600}
 
 
 # --------------------------------------------------------------------------
@@ -1300,8 +1300,7 @@ async def test_public_pause_resume_refreshes_e2b_handle(monkeypatch: pytest.Monk
         health_check = AsyncMock(side_effect=AssertionError("Status must not wake a paused sandbox"))
         monkeypatch.setattr(original, "is_running", health_check)
         await sandbox.pause()
-        await sandbox.pause()  # Already-paused SDK responses are successful no-ops.
-        assert original.pause_calls == [{"request_timeout": 12}] * 2
+        assert original.pause_calls == [{"request_timeout": 12}]
         assert await sandbox.status() is SandboxStatus.PAUSED
         health_check.assert_not_called()
 
@@ -1371,7 +1370,8 @@ async def test_lifecycle_rejects_closed_handle(operation: str) -> None:
 async def test_pause_raises_when_the_sandbox_did_not_pause(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = E2BProvider(create={"template": "base"})
     handle = await provider.create(_spec())
-    # The SDK returns False for every 409, including states that cannot be paused.
+    # AgentENV answers 409 during a snapshot or fork, while status reports the sandbox as paused.
+    handle.raw.paused = True
     monkeypatch.setattr(handle.raw, "pause", AsyncMock(return_value=False))
     with pytest.raises(RuntimeError, match="was not paused"):
         await provider.pause(handle)
