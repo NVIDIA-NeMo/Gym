@@ -16,7 +16,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import SAVED_CONFIG, SubmitConfig
 
 
 COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
@@ -472,3 +472,217 @@ def test_command_benchmark_without_resumable_is_accepted():
     driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": False}}}
     config = SubmitConfig.model_validate(_config(driver=driver))
     assert config.driver.benchmarks["gsm8k"].resume_config is None
+
+
+JUDGE = {"type": "openai_compatible", "base_url": "https://judge.example.com:8443/v1", "model": "gpt-4o"}
+POOLS = {
+    "cluster": {
+        "type": "slurm",
+        "account": "a",
+        "hostname": "h",
+        "node_pools": {"main": {"partition": "p", "nodes": 1}, "aux": {"partition": "p", "nodes": 1}},
+    }
+}
+
+
+def _run(**run):
+    return _config(driver={**DRIVER, "benchmarks": {"gsm8k": {"run": run}}})
+
+
+def test_declarative_service_is_not_deployed():
+    config = SubmitConfig.model_validate(_config(services={"svc": SERVICE, "judge": JUDGE}))
+    assert list(config.deployed_services) == ["svc"]
+
+
+def test_declarative_service_rejects_deployment_fields():
+    with pytest.raises(ValidationError, match="container"):
+        SubmitConfig.model_validate(_config(services={"judge": {**JUDGE, "container": "x"}}))
+
+
+def test_whole_server_reference_expands_by_server_type():
+    cfg = _run(judge={"responses_api_models": {"openai_model": "service:judge"}})
+    config = SubmitConfig.model_validate({**cfg, "services": {"svc": SERVICE, "judge": JUDGE}})
+    server = config.driver.benchmarks["gsm8k"].run["judge"]["responses_api_models"]["openai_model"]
+    assert server == {
+        "openai_base_url": "https://judge.example.com:8443/v1",
+        "openai_model": "gpt-4o",
+        "openai_api_key": "dummy",  # pragma: allowlist secret
+    }
+
+
+def test_whole_server_reference_to_vllm_service_uses_vllm_fields():
+    cfg = _run(m={"responses_api_models": {"vllm_model": "service:svc"}})
+    run = SubmitConfig.model_validate(cfg).driver.benchmarks["gsm8k"].run
+    assert run["m"]["responses_api_models"]["vllm_model"] == {
+        "base_url": "http://localhost:8000/v1",
+        "model": "org/model",
+        "api_key": "dummy",  # pragma: allowlist secret
+    }
+
+
+def test_field_reference_fills_one_value():
+    cfg = _run(openai_base_url="service:judge.url", port="service:judge.port", host="service:judge.host")
+    config = SubmitConfig.model_validate({**cfg, "services": {"judge": JUDGE}})
+    run = config.driver.benchmarks["gsm8k"].run
+    assert (run["openai_base_url"], run["port"], run["host"]) == (JUDGE["base_url"], "8443", "judge.example.com")
+
+
+def test_served_model_name_is_the_model_field():
+    cfg = _run(name="service:svc.model")
+    config = SubmitConfig.model_validate({**cfg, "services": {"svc": {**SERVICE, "served_model_name": "alias"}}})
+    assert config.driver.benchmarks["gsm8k"].run["name"] == "alias"
+    assert config.deferred_host_services == []
+
+
+def test_pinned_service_host_is_deferred_to_a_driver_env_var():
+    cfg = _run(url="service:svc.url")
+    config = SubmitConfig.model_validate(
+        {**cfg, "compute": POOLS, "services": {"svc": {**SERVICE, "node_pool": "aux"}}}
+    )
+    assert config.driver.benchmarks["gsm8k"].run["url"] == "http://${oc.env:GYM_SERVICE_SVC_HOST}:8000/v1"
+    assert config.deferred_host_services == ["svc"]
+
+
+def test_a_saved_config_still_defers_the_hosts_its_resolved_references_use():
+    cfg = _run(url="service:svc.url")
+    config = SubmitConfig.model_validate(
+        {**cfg, "compute": POOLS, "services": {"svc": {**SERVICE, "node_pool": "aux"}}}
+    )
+    resumed = SubmitConfig.model_validate(config.model_dump(mode="json"), context={SAVED_CONFIG: True})
+    assert resumed.deferred_host_services == ["svc"]
+
+
+def test_a_server_per_node_service_references_every_nodes_url():
+    pools = {
+        "cluster": {
+            **POOLS["cluster"],
+            "node_pools": {"main": {"partition": "p", "nodes": 3, "gpus_per_node": 8}},
+        }
+    }
+    service = {**SERVICE, "node_pool": "main", "server_per_node": True}
+    cfg = _run(urls="service:svc.url", host="service:svc.host")
+    config = SubmitConfig.model_validate({**cfg, "compute": pools, "services": {"svc": service}})
+    run = config.driver.benchmarks["gsm8k"].run
+    assert run["urls"] == [f"http://${{oc.env:GYM_POOL_MAIN_NODE_{i}}}:8000/v1" for i in range(3)]
+    assert run["host"] == "${oc.env:GYM_SERVICE_SVC_HOST}"
+
+
+def test_unreferenced_pinned_service_defers_nothing():
+    config = SubmitConfig.model_validate(_config(compute=POOLS, services={"svc": {**SERVICE, "node_pool": "aux"}}))
+    assert config.deferred_host_services == []
+
+
+@pytest.mark.parametrize(
+    "run, match",
+    [
+        ({"u": "service:nope.url"}, "does not match any service"),
+        ({"u": "service:svc.bogus"}, "unknown field 'bogus'"),
+        ({"u": "service:svc"}, "not a server type"),
+    ],
+)
+def test_bad_service_reference_names_the_benchmark(run, match):
+    with pytest.raises(ValidationError, match=f"Benchmark 'gsm8k' run config: .*{match}"):
+        SubmitConfig.model_validate(_run(**run))
+
+
+def test_reference_to_a_ray_service_is_rejected():
+    ray = {"type": "ray", "container": "c", "node_pools": ["main"]}
+    cfg = _run(u="service:r.url")
+    with pytest.raises(ValidationError, match="does not serve a model"):
+        SubmitConfig.model_validate({**cfg, "compute": POOLS, "services": {"r": ray}})
+
+
+def test_resolving_service_references_leaves_the_input_config_untouched():
+    raw = _run(outer={"inner": {"url": "service:svc.url"}, "server": {"vllm_model": "service:svc"}})
+    config = SubmitConfig.model_validate(raw)
+    assert raw["driver"]["benchmarks"]["gsm8k"]["run"]["outer"] == {
+        "inner": {"url": "service:svc.url"},
+        "server": {"vllm_model": "service:svc"},
+    }
+    assert config.driver.benchmarks["gsm8k"].run["outer"]["inner"]["url"] == "http://localhost:8000/v1"
+
+
+@pytest.mark.parametrize(
+    "base_url", ["judge.example.com/v1", "ftp://judge.example.com", "https:///v1", "http://h:99999/v1"]
+)
+def test_declarative_service_base_url_must_be_an_http_url_with_a_host(base_url):
+    with pytest.raises(ValidationError, match="base_url"):
+        SubmitConfig.model_validate(_config(services={"judge": {**JUDGE, "base_url": base_url}}))
+
+
+def test_declarative_service_port_defaults_from_the_scheme():
+    cfg = _run(a="service:j.port", b="service:k.port")
+    services = {
+        "j": {**JUDGE, "base_url": "https://judge.example.com/v1"},
+        "k": {**JUDGE, "base_url": "http://judge.example.com/v1"},
+    }
+    run = SubmitConfig.model_validate({**cfg, "services": services}).driver.benchmarks["gsm8k"].run
+    assert (run["a"], run["b"]) == ("443", "80")
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("base_url", "https://h/v1?a=1,2"),
+        ("base_url", "https://h/v1#frag"),
+        ("base_url", "https://h/${oc.env:HOME}"),
+        ("base_url", "http://[::1]:8000/v1"),
+        ("model", "my model"),
+        ("model", "${oc.env:SECRET}"),
+    ],
+)
+def test_declarative_service_rejects_values_hydra_cannot_carry(field, value):
+    with pytest.raises(ValidationError, match="Hydra override"):
+        SubmitConfig.model_validate(_config(services={"judge": {**JUDGE, field: value}}))
+
+
+def test_two_referenced_pinned_services_sharing_a_host_variable_are_rejected():
+    pinned = {**SERVICE, "node_pool": "aux"}
+    services = {"a-b": pinned, "a_b": {**pinned, "port": 8001}}
+    cfg = _run(p="service:a-b.url", q="service:a_b.url")
+    with pytest.raises(ValidationError, match="GYM_SERVICE_A_B_HOST"):
+        SubmitConfig.model_validate({**cfg, "compute": POOLS, "services": services})
+
+
+def test_service_references_resolve_alongside_policy_injection():
+    cfg = _config(
+        driver={**DRIVER, "policy_model": "svc", "benchmarks": {"gsm8k": {"run": {"u": "service:judge.url"}}}}
+    )
+    config = SubmitConfig.model_validate({**cfg, "services": {"svc": SERVICE, "judge": JUDGE}})
+    run = config.driver.benchmarks["gsm8k"].run
+    assert run["u"] == JUDGE["base_url"]
+    assert run["policy_base_url"] == "http://localhost:8000/v1"
+
+
+def test_a_deployed_model_service_describes_its_own_fields():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "served_model_name": "alias"}}))
+    accessors = config.services["svc"].accessors("svc")
+    assert (accessors.url, accessors.host, accessors.port, accessors.model) == (
+        "http://localhost:8000/v1",
+        "localhost",
+        "8000",
+        "alias",
+    )
+    assert not accessors.host_deferred
+
+
+def test_a_pinned_service_defers_its_host_to_the_name_derived_variable():
+    config = SubmitConfig.model_validate(
+        _config(compute=POOLS, services={"my-judge": {**SERVICE, "node_pool": "aux"}})
+    )
+    accessors = config.services["my-judge"].accessors("my-judge")
+    assert accessors.host == "${oc.env:GYM_SERVICE_MY_JUDGE_HOST}"
+    assert accessors.url == "http://${oc.env:GYM_SERVICE_MY_JUDGE_HOST}:8000/v1"
+    assert accessors.host_deferred
+
+
+def test_a_declarative_service_describes_its_own_fields():
+    config = SubmitConfig.model_validate(_config(services={"judge": JUDGE}))
+    accessors = config.services["judge"].accessors("judge")
+    assert (accessors.url, accessors.host, accessors.port, accessors.model) == (
+        "https://judge.example.com:8443/v1",
+        "judge.example.com",
+        "8443",
+        "gpt-4o",
+    )
+    assert not accessors.host_deferred

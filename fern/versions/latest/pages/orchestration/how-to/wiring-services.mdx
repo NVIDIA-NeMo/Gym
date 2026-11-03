@@ -1,0 +1,74 @@
+---
+title: "Wiring Services"
+description: "Point a benchmark's judge or grader at a deployed or hosted service with service: references."
+position: 6
+---
+
+A benchmark that grades with a model (a judge, a reward model) needs that model's address in its `run` config. Instead of building the URL by hand, declare the model under `services` and refer to it with `service:`. The model can be a deployed service that runs in your job, or a declarative one, an endpoint that already exists. See [Service references](/orchestration/configuration#service-references) for every field.
+
+## Point a judge at a service you deploy
+
+Deploy the judge, give it a node pool so it has GPUs of its own (see [Node Pools and Ray](/orchestration/how-to/node-pools-and-ray)), and replace the benchmark's judge server with it. The key under `run` is the name the benchmark's own config gives that server.
+
+```yaml
+services:
+  judge:
+    type: vllm
+    container: vllm/vllm-openai:v0.26.0
+    model: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+    served_model_name: Qwen3-235B-A22B-Instruct-2507-FP8
+    tensor_parallel_size: 4
+    node_pool: judge
+    port: 8100
+
+driver:
+  benchmarks:
+    aalcr:
+      run:
+        Qwen3-235B-A22B-Instruct-2507-FP8:
+          responses_api_models:
+            vllm_model: service:judge
+```
+
+The judge runs on its own node, so its hostname is not known when you submit. Submit exports it to the driver as `GYM_SERVICE_JUDGE_HOST`, and the rendered override is:
+
+```text
++Qwen3-...-FP8.responses_api_models.vllm_model.base_url=http://${oc.env:GYM_SERVICE_JUDGE_HOST}:8100/v1
+```
+
+You do not write or escape that expression yourself. `--dry-run` prints the overrides and the export.
+
+## Point a grader at a hosted endpoint
+
+An `openai_compatible` service is a declarative service: it describes an endpoint that already exists, and nothing is deployed for it.
+
+```yaml
+services:
+  hosted_grader:
+    type: openai_compatible
+    base_url: https://grader.example.com/v1
+    model: my-grader
+
+driver:
+  benchmarks:
+    my_benchmark:
+      run:
+        grader:
+          responses_api_models:
+            openai_model:
+              openai_base_url: service:hosted_grader.url
+              openai_model: service:hosted_grader.model
+```
+
+This is the dict form: each `service:NAME.field` fills one value, which suits a server with extra settings of its own. Declarative services carry no credentials yet, so this works for endpoints that need no API key.
+
+A complete config is in `examples/slurm_vllm_service_wiring.yaml`.
+
+## Troubleshooting
+
+| Error | Cause |
+| --- | --- |
+| `does not match any service` | The name after `service:` is not under `services`. |
+| `unknown field` | Use one of `url`, `host`, `port`, `model`, `key`. |
+| `is not a server type` | A reference without a field must sit under `vllm_model` or `openai_model`. Otherwise add a field, such as `service:judge.url`. |
+| `does not serve a model` | The service is a `ray` service. |

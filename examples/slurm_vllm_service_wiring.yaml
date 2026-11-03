@@ -1,0 +1,93 @@
+# Wiring a non-policy service into a benchmark with `service:` references.
+#
+# AA-LCR grades answers with a judge model. Here the judge is a vLLM service that runs on a node pool of
+# its own, and the benchmark's judge server is pointed at it with `service:judge`. The judge's hostname is
+# only known once the job has nodes, so submit exports it to the driver (GYM_SERVICE_JUDGE_HOST) and the
+# override carries `${oc.env:GYM_SERVICE_JUDGE_HOST}`; nothing here needs escaping.
+#
+# Run it:
+#   gym eval submit --config examples/slurm_vllm_service_wiring.yaml
+# See the wired values without submitting:
+#   gym eval submit --config examples/slurm_vllm_service_wiring.yaml --dry-run
+
+compute:
+  cluster:
+    type: slurm
+    hostname: myslurmcluster
+    walltime: "01:00:00"
+    account: myaccount
+    node_pools:
+      policy:
+        partition: batch
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: 4
+      judge:
+        partition: batch
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: 4
+
+services:
+  policy_model:
+    type: vllm
+    container: vllm/vllm-openai:v0.26.0
+    model: Qwen/Qwen2.5-0.5B-Instruct
+    tensor_parallel_size: 4
+    node_pool: policy
+    port: 8000
+    health_check:
+      timeout_seconds: 1200
+
+  # Deployed by this job, on its own node: a pinned service, so its host is a deferred value.
+  judge:
+    type: vllm
+    container: vllm/vllm-openai:v0.26.0
+    model: Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+    served_model_name: Qwen3-235B-A22B-Instruct-2507-FP8
+    tensor_parallel_size: 4
+    node_pool: judge
+    port: 8100
+    health_check:
+      timeout_seconds: 1800
+
+  # Already running somewhere else: nothing is deployed, so there is no container, node_pool or placement.
+  # Reference it exactly like a deployed service. Its url, host, port and model are known at submit time.
+  hosted_grader:
+    type: openai_compatible
+    base_url: https://grader.example.com/v1
+    model: my-grader
+
+driver:
+  policy_model: policy_model
+  container: python:3.12
+  gym_install:
+    ref: main
+  benchmarks:
+    aalcr:
+      prepare:
+        config_paths:
+          - benchmarks/aalcr/config.yaml
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/aalcr/config.yaml
+
+        # String form: `service:NAME` replaces the whole server value. The server type (the key it sits
+        # under) picks the field names: vllm_model -> base_url/model/api_key,
+        # openai_model -> openai_base_url/openai_model/openai_api_key.
+        Qwen3-235B-A22B-Instruct-2507-FP8:
+          responses_api_models:
+            vllm_model: service:judge
+
+        # Dict form: `service:NAME.field` fills one value. Fields: url, host, port, model, key.
+        # Use it to wire a server the benchmark config does not declare, or one with extra settings.
+        extra_grader:
+          responses_api_models:
+            openai_model:
+              openai_base_url: service:hosted_grader.url
+              openai_model: service:hosted_grader.model
+              openai_api_key: service:hosted_grader.key
+
+job:
+  output_path: /shared/gym-jobs

@@ -496,3 +496,28 @@ def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
     assert env["NEMO_GYM_POLICY_BASE_URL"] == "http://localhost:8000/v1"
     assert env["NEMO_GYM_POLICY_MODEL_NAME"] == "org/model"
     assert env["NEMO_GYM_POLICY_API_KEY"] == "dummy"
+
+
+def test_a_declarative_service_gets_no_sidecar(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    services = {
+        "vllm_model": {"type": "vllm", "container": "vllm/vllm-openai:latest", "model": "org/model"},
+        "hosted": {"type": "openai_compatible", "base_url": "https://grader.example.com/v1", "model": "g"},
+    }
+    config = _submit_config(tmp_path, ["bench_a"], services=services)
+    compute = next(iter(config.compute.values()))
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        config.driver.benchmarks["bench_a"],
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    assert [c["name"] for c in job["spec"]["template"]["spec"]["initContainers"]] == ["vllm-model"]
