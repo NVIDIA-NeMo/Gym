@@ -637,9 +637,12 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
     assert client.calls == []
 
 
-@pytest.mark.parametrize("skip_verification", [False, True])
-@pytest.mark.parametrize("masked", [False, True])
-async def test_aggregation_preserves_execution_metrics_without_valid_scores(
+@pytest.mark.parametrize(
+    ("skip_verification", "masked"),
+    # Masking is never read when verification is skipped, so that case needs no masked twin.
+    [(False, False), (False, True), (True, False)],
+)
+async def test_aggregation_reports_execution_metrics_with_or_without_valid_scores(
     skip_verification: bool, masked: bool
 ) -> None:
     environment_server, client = _skipping_environment_server(

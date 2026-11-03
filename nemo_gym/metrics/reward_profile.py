@@ -1179,6 +1179,14 @@ def _add_completion_token_metrics(
         agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
 
 
+def _summarize_execution(verify_responses: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Summarize ``ng_perf`` over every supplied row; rows without one count toward coverage only."""
+    return compute_perf_summary(
+        [row["ng_perf"] for row in verify_responses if isinstance(row.get("ng_perf"), dict)],
+        total_rollouts=len(verify_responses),
+    )
+
+
 def add_execution_metrics(
     metrics: AggregateMetrics,
     verify_responses: List[Dict[str, Any]],
@@ -1190,15 +1198,14 @@ def add_execution_metrics(
     into the corresponding repeat rows and compute their across-repeat confidence intervals.
     Missing observations do not imply zero usage. Neither input is modified.
 
-    This function owns the execution statistics: it replaces ``perf_summary`` rather than merging
-    into one already in ``metrics``, and it removes ``agent_ref`` from every repeat row. When any
-    row carries ``ng_perf``, the repeat rows already in ``metrics`` must carry ``_ng_rollout_index``.
+    This function owns the execution statistics: when any row carries ``ng_perf`` it replaces
+    ``perf_summary`` rather than merging into one already in ``metrics`` (a summary Resources
+    published itself is kept only when nothing was observed), and it removes ``agent_ref`` from
+    every repeat row. When any row carries ``ng_perf``, the repeat rows already in ``metrics`` must
+    carry ``_ng_rollout_index``.
     """
     result = metrics.model_copy(deep=True)
-    result.perf_summary = compute_perf_summary(
-        [row["ng_perf"] for row in verify_responses if isinstance(row.get("ng_perf"), dict)],
-        total_rollouts=len(verify_responses),
-    )
+    result.perf_summary = _summarize_execution(verify_responses) or result.perf_summary
     _add_completion_token_metrics(
         RewardProfiler(), verify_responses, result.repeat_level_metrics, result.agent_metrics
     )
@@ -1241,10 +1248,7 @@ def compute_aggregate_metrics(
         return AggregateMetrics(
             agent_metrics=dict(coverage),
             key_metrics=dict(coverage),
-            perf_summary=compute_perf_summary(
-                [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)],
-                total_rollouts=len(verify_responses),
-            ),
+            perf_summary=_summarize_execution(verify_responses),
         )
 
     rp = RewardProfiler()

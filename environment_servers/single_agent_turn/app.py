@@ -3,6 +3,7 @@
 
 """Resources-backed single-agent environment server."""
 
+import asyncio
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -154,7 +155,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             await raise_for_status(response)
             metrics = AggregateMetrics.model_validate(await get_response_json(response))
-        return add_execution_metrics(metrics, body.verify_responses)
+        # The reduction is CPU-bound over every row, so keep it off the server's event loop.
+        return await asyncio.to_thread(add_execution_metrics, metrics, body.verify_responses)
 
     async def run(
         self,

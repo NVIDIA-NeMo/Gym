@@ -1353,6 +1353,125 @@ class TestAddExecutionMetrics:
         assert "mean/reward" not in result.repeat_level_metrics[0]
         assert [row["mean/reward"] for row in result.repeat_level_metrics[1:]] == [0.0, 1.0]
 
+    def test_a_benchmark_perf_summary_survives_only_when_nothing_was_observed(self) -> None:
+        # Execution accounting replaces a summary Resources published itself, but a batch without
+        # observations has nothing to replace it with.
+        benchmark = AggregateMetrics(perf_summary={"from_resources": 1.0})
+        unobserved = [{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}]
+        observed = [{**unobserved[0], "ng_perf": {"completion_tokens": 10, "num_turns": 2}}]
+
+        assert add_execution_metrics(benchmark, unobserved).perf_summary == {"from_resources": 1.0}
+        replaced = add_execution_metrics(benchmark, observed).perf_summary
+        assert "from_resources" not in replaced
+        assert replaced["total_completion_tokens"] == 10
+
+    def test_a_mixed_batch_keeps_the_results_the_reducer_published_before_it_was_split(self) -> None:
+        # Frozen from compute_aggregate_metrics before add_execution_metrics existed (origin/main):
+        # one masked sample, one rollout without observations, two repeats.
+        def perf(tokens: int, turns: int, prompt: int, latency: float) -> dict:
+            return {
+                "completion_tokens": tokens,
+                "num_turns": turns,
+                "prompt_tokens": prompt,
+                "total_latency_ms": latency,
+                "token_observability_coverage": 1.0,
+            }
+
+        rows = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "ng_perf": perf(10, 2, 100, 1000.0)},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "ng_perf": perf(30, 3, 120, 3000.0)},
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 0.5,
+                "mask_sample": True,
+                "ng_perf": perf(50, 5, 200, 5000.0),
+            },
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0},
+        ]
+
+        result = compute_aggregate_metrics(rows)
+
+        assert result.key_metrics == pytest.approx(
+            {
+                "mean/reward": 2 / 3,
+                "coverage/measured_rollouts": 3,
+                "coverage/masked_rollouts": 1,
+                "coverage/measured_tasks": 2,
+                "coverage/fully_masked_tasks": 0,
+            }
+        )
+        assert result.perf_summary == pytest.approx(
+            {
+                "overall_observability_coverage": 0.75,
+                "token_observability_coverage": 0.75,
+                "mean_prompt_tokens": 140.0,
+                "median_prompt_tokens": 120,
+                "total_prompt_tokens": 420,
+                "mean_completion_tokens": 30.0,
+                "median_completion_tokens": 30,
+                "total_completion_tokens": 90,
+                "mean_num_turns": 10 / 3,
+                "median_num_turns": 3,
+                "std_num_turns": 1.247219128924647,
+                "min_num_turns": 2,
+                "p90_num_turns": 4.6,
+                "max_num_turns": 5,
+                "mean_tokens_per_turn": 25 / 3,
+                "median_tokens_per_turn": 10.0,
+                "total_latency_p50_ms": 3000.0,
+                "total_latency_p90_ms": 4600.0,
+                "total_latency_p99_ms": 4960.0,
+                "total_latency_mean_ms": 3000.0,
+            }
+        )
+        execution_columns = ("mean_completion_tokens", "mean_tokens_per_turn")
+        assert [
+            {k: v for k, v in row.items() if k in (ROLLOUT_INDEX_KEY_NAME, "mean/reward", *execution_columns)}
+            for row in result.repeat_level_metrics
+        ] == [
+            pytest.approx(
+                {
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "mean/reward": 1.0,
+                    "mean_completion_tokens": 30.0,
+                    "mean_tokens_per_turn": 7.5,
+                }
+            ),
+            pytest.approx(
+                {
+                    ROLLOUT_INDEX_KEY_NAME: 1,
+                    "mean/reward": 0.5,
+                    "mean_completion_tokens": 30.0,
+                    "mean_tokens_per_turn": 10.0,
+                }
+            ),
+        ]
+        assert all(AGENT_REF_KEY_NAME not in row for row in result.repeat_level_metrics)
+        token_stats = {k: v for k, v in result.agent_metrics.items() if "across_repeats/mean_" in k}
+        assert token_stats == pytest.approx(
+            {
+                "mean_across_repeats/mean_completion_tokens": 30.0,
+                "median_across_repeats/mean_completion_tokens": 30.0,
+                "std_across_repeats/mean_completion_tokens": 0.0,
+                "min_across_repeats/mean_completion_tokens": 30.0,
+                "max_across_repeats/mean_completion_tokens": 30.0,
+                "se_across_repeats/mean_completion_tokens": 0.0,
+                "ci_low_95_across_repeats/mean_completion_tokens": 30.0,
+                "ci_high_95_across_repeats/mean_completion_tokens": 30.0,
+                "mean_across_repeats/mean_tokens_per_turn": 8.75,
+                "median_across_repeats/mean_tokens_per_turn": 8.75,
+                "std_across_repeats/mean_tokens_per_turn": 1.7677669529663689,
+                "min_across_repeats/mean_tokens_per_turn": 7.5,
+                "max_across_repeats/mean_tokens_per_turn": 10.0,
+                "se_across_repeats/mean_tokens_per_turn": 1.25,
+                "ci_low_95_across_repeats/mean_tokens_per_turn": -7.132755920218369,
+                "ci_high_95_across_repeats/mean_tokens_per_turn": 24.63275592021837,
+            }
+        )
+        assert result.agent_metrics["num_repeats"] == 2
+        assert [group["mean/reward"] for group in result.group_level_metrics] == [0.5, 1.0]
+
 
 class TestMaskedSamplesAreNotScored:
     """A masked sample is a completed rollout whose reward is not a valid measurement."""
