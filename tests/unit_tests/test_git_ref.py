@@ -18,10 +18,20 @@ from types import SimpleNamespace
 
 import pytest
 
+import nemo_gym.orchestration.executors.git_ref as git_ref
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+
+
+@pytest.fixture(autouse=True)
+def _no_waits_and_no_own_clone(monkeypatch, tmp_path):
+    # Retries do not wait in tests, and the local check looks at no real clone unless a test gives it one.
+    sleeps = []
+    monkeypatch.setattr(git_ref.time, "sleep", sleeps.append)
+    monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", tmp_path / "no-clone")
+    return sleeps
 
 
 def _config(repo: str, ref: str):
@@ -69,6 +79,107 @@ def test_missing_full_hash_fails(repo):
 def test_unreachable_repo_fails(tmp_path):
     with pytest.raises(ValueError, match="Could not list"):
         validate_gym_install_ref(_config(str(tmp_path / "missing"), "main"))
+
+
+def test_a_network_timeout_is_retried_with_backoff_and_then_succeeds(repo, monkeypatch, _no_waits_and_no_own_clone):
+    real_git, calls = git_ref._git, []
+
+    def flaky(*args, **kwargs):
+        if args[0] == "ls-remote":
+            calls.append(args)
+            if len(calls) <= 2:
+                raise subprocess.TimeoutExpired(["git", *args], 10)
+        return real_git(*args, **kwargs)
+
+    monkeypatch.setattr(git_ref, "_git", flaky)
+
+    validate_gym_install_ref(_config(repo.url, "main"))
+
+    assert len(calls) == 3 and _no_waits_and_no_own_clone == [10, 30]
+
+
+def test_a_network_check_that_keeps_timing_out_says_so_and_not_that_the_ref_is_missing(
+    repo, monkeypatch, _no_waits_and_no_own_clone
+):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["git", *args], 10)
+
+    monkeypatch.setattr(git_ref, "_git", timeout)
+
+    with pytest.raises(ValueError) as raised:
+        validate_gym_install_ref(_config(repo.url, repo.head))
+
+    message = str(raised.value)
+    assert "network check" in message and "not evidence that the ref is missing" in message
+    assert "failed 4 time(s)" in message and "not found" not in message
+    assert _no_waits_and_no_own_clone == [10, 30, 60]
+
+
+def test_a_missing_git_binary_is_not_retried(repo, monkeypatch, _no_waits_and_no_own_clone):
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(git_ref, "_git", missing)
+
+    with pytest.raises(ValueError, match="failed 1 time"):
+        validate_gym_install_ref(_config(repo.url, "main"))
+    assert _no_waits_and_no_own_clone == []
+
+
+def _own_clone(tmp_path, origin_url):
+    clone = tmp_path / "own-clone"
+    subprocess.run(["git", "clone", "-q", origin_url, str(clone)], check=True, capture_output=True)
+    return clone
+
+
+def test_a_pinned_commit_the_own_clone_has_from_the_repo_needs_no_network(repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", _own_clone(tmp_path, repo.url))
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("the network check ran")
+
+    monkeypatch.setattr(git_ref, "_ref_exists", no_network)
+
+    validate_gym_install_ref(_config(repo.url + "/", repo.head))
+
+
+def test_an_unpushed_local_commit_is_still_checked_over_the_network(repo, tmp_path, monkeypatch):
+    clone = _own_clone(tmp_path, repo.url)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(clone),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+        check=True,
+    )
+    local = subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    monkeypatch.setattr(git_ref, "_GYM_CHECKOUT", clone)
+
+    with pytest.raises(ValueError, match="not found"):
+        validate_gym_install_ref(_config(repo.url, local))
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("https://github.com/Org/Repo.git", "git@github.com:org/repo"),
+        ("https://github.com/Org/Repo/", "ssh://git@github.com/org/repo.git"),
+    ],
+)
+def test_one_repo_by_https_and_ssh_urls_is_the_same_repo(a, b):
+    assert git_ref._repo_key(a) == git_ref._repo_key(b)
 
 
 def test_no_gym_install_is_a_noop():
