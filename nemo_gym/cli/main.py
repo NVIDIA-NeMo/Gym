@@ -734,8 +734,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if record_path is not None and not inspect_only:
         args._parser.error("--record requires --inspect")
     repin, repin_reason = getattr(args, "repin", None), getattr(args, "repin_reason", None)
-    if (repin is not None or repin_reason is not None) and (not getattr(args, "recover", False) or inspect_only):
-        args._parser.error("--repin and --repin-reason need --recover and cannot be used with --inspect")
+    if (repin is not None or repin_reason is not None) and not getattr(args, "recover", False):
+        args._parser.error("--repin and --repin-reason need --recover")
     if (repin is None) != (repin_reason is None):
         args._parser.error("--repin and --repin-reason go together")
     if getattr(args, "extend_retries", None) is not None and not getattr(args, "recover", False):
@@ -1907,7 +1907,9 @@ COMMANDS = {
                     metavar="SHA",
                     help="With --recover: continue the run on this full Gym commit. The launcher must be that "
                     "revision; job.sh and resolved-config.yaml are rendered again with it, the old files are kept "
-                    "beside them, and saved rows and budgets stay as they are.",
+                    "beside them, and saved rows and budgets stay as they are. With --inspect: report the plan a "
+                    "recovery repinned to this commit would follow (its Store read at that commit) and change "
+                    "nothing.",
                 ),
             ),
             Flag(
