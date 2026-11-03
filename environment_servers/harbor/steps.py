@@ -17,8 +17,7 @@ import shlex
 
 from environment_servers.harbor.entrypoint import HealthcheckFailed
 from environment_servers.harbor.session import HarborSession
-from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.sandbox.transfer import SandboxProbeError, SandboxTransferError, upload_dir
+from nemo_gym.sandbox import SandboxExecResult, SandboxProbeError, SandboxTransferError, upload_dir
 from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTurn
 

@@ -122,39 +122,6 @@ def test_inspect_behavior_takes_the_finish_call_from_the_witness(behavior_episod
     assert checks["tools.witness_ids"]["status"] == status
 
 
-def _as_text_parts(outputs: list[str]) -> list[dict]:
-    return [{"type": "text", "text": output} for output in outputs]
-
-
-def test_tool_output_given_as_text_parts_matches_the_same_text(behavior_episode):
-    record, witness = behavior_episode
-    for call in witness["tool_calls"]:
-        call["outputs"] = [_as_text_parts(call["outputs"])]
-    assert {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}["tools.witness_output"]["status"] == "pass"
-    for call in record["ng_trajectory"]["tool_calls"]:
-        call["output"] = _as_text_parts(["val", "ue"])
-    assert {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}["tools.witness_output"]["status"] == "pass"
-
-
-def test_different_text_fails_the_output_check_in_any_form(behavior_episode):
-    record, witness = behavior_episode
-    witness["tool_calls"][0]["outputs"] = [_as_text_parts(["different"])]
-    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
-    assert checks["tools.witness_output"]["status"] == "fail"
-
-
-def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
-    record, witness = behavior_episode
-    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
-    assert all(c["status"] != "fail" for c in inspect_behavior(witness, record, **options))
-    del witness["tool_calls"][0]["outputs"]
-    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
-    assert checks["tools.witness_output"]["status"] == "fail"
-    assert checks["tools.witness_output"]["reasons"] == [
-        "retained tool output differs from the independent tool witness"
-    ]
-
-
 @pytest.mark.parametrize(
     "mutation,failed",
     [
@@ -198,3 +165,78 @@ def test_additional_native_executions_require_complete_independent_witnesses(beh
         assert checks[failed]["status"] == "fail"
     else:
         assert all(check["status"] != "fail" for check in checks.values())
+
+
+def _as_text_parts(outputs: list[str]) -> list[dict]:
+    return [{"type": "text", "text": output} for output in outputs]
+
+
+def test_tool_output_given_as_text_parts_matches_the_same_text(behavior_episode):
+    record, witness = behavior_episode
+    for call in witness["tool_calls"]:
+        call["outputs"] = [_as_text_parts(call["outputs"])]
+    assert {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}["tools.witness_output"]["status"] == "pass"
+    for call in record["ng_trajectory"]["tool_calls"]:
+        call["output"] = _as_text_parts(["val", "ue"])
+    assert {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}["tools.witness_output"]["status"] == "pass"
+
+
+def test_different_text_fails_the_output_check_in_any_form(behavior_episode):
+    record, witness = behavior_episode
+    witness["tool_calls"][0]["outputs"] = [_as_text_parts(["different"])]
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
+    assert checks["tools.witness_output"]["status"] == "fail"
+
+
+def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
+    record, witness = behavior_episode
+    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
+    assert all(c["status"] != "fail" for c in inspect_behavior(witness, record, **options))
+    del witness["tool_calls"][0]["outputs"]
+    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
+    assert checks["tools.witness_output"]["status"] == "fail"
+    assert checks["tools.witness_output"]["reasons"] == [
+        "retained tool output differs from the independent tool witness"
+    ]
+
+
+@pytest.mark.parametrize("missing", [None, "judge_call", "grade_reference", "verifier_owner"])
+def test_judge_scenario_requires_witnessed_grade_and_verifier_ownership(missing):
+    from copy import deepcopy
+
+    from scripts.harness_conformance.runner import _fingerprint
+
+    from nemo_gym.harness_capabilities.behavior import inspect_behavior
+    from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
+
+    record, witness = evidence_and_witness()
+    call = deepcopy(record["ng_trajectory"]["model_calls"][0])
+    call["model_call_id"] = "judge-call"
+    call["response_metadata"]["response_id"] = "judge-response"
+    record["ng_trajectory"]["model_calls"].append(call)
+    owner = {"invocation_id": "judge", "model_calls": [{"model_call_id": "judge-call"}]}
+    record["ng_trajectory"]["verifier_invocations"] = [owner]
+    record["judgement_id"] = "judge-response"
+    witness["judge_calls"] = [
+        {"request": {"input": "CONFORMANCE_DONE"}, "response": {"id": "judge-response"}, "status_code": 200}
+    ]
+    if missing == "judge_call":
+        witness["judge_calls"] = []
+    elif missing == "grade_reference":
+        record.pop("judgement_id")
+    elif missing == "verifier_owner":
+        record["ng_trajectory"]["verifier_invocations"] = []
+        record["ng_trajectory"]["invocations"].append(owner)
+    result = inspect_behavior(
+        witness,
+        record,
+        http_errors=(),
+        terminal_error=False,
+        tool_steps=2,
+        expected_reward=1.0,
+        fingerprint=_fingerprint,
+        judge_verifier=True,
+    )
+    check = next(c for c in result if c["id"] == "verifier.judge_reference")
+    assert check["tier"] == "P1"
+    assert check["status"] == ("pass" if missing is None else "fail")

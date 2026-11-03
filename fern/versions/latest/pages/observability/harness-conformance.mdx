@@ -1,10 +1,38 @@
 ---
 title: "Harness Conformance"
-description: "Check P0 trajectory evidence and compare harness artifact coverage."
+description: "Compare measured harness conformance and inspect retained trajectory evidence."
 position: 3
 ---
 
 # Harness Conformance
+
+## Results
+
+These results are updated automatically from scripted model, tool, and verifier
+scenarios at the linked Gym revision. Each P0, P1, or P2 cell shows
+**passing scenarios / measured scenarios**; a dash means no applicable measurements
+are available. Green counts mean all measured scenarios pass; red counts mean at
+least one does not pass.
+
+{/* BEGIN GENERATED TE TABLE */}
+
+<Note>Harness measurements are available on the published documentation page.</Note>
+
+{/* END GENERATED TE TABLE */}
+
+A scenario counts in a tier when it has applicable checks at that priority, and
+passes when all of those checks pass. A scenario can contribute to more than one
+tier; failures in one tier do not change another tier's count. Completed check
+results remain visible when a probe reports execution errors. Expand the details
+to see each harness's passing and not-passing scenarios by tier, followed by the
+full check matrix. Follow the linked CI results to investigate individual failures.
+
+These measurements cover local execution, independently of benchmark accuracy.
+Remote sandboxes, agent sessions, multimodal inputs, compaction, and parallel
+execution require separate qualification. See
+[Rollout Evidence](/main/observability/rollout-evidence) for collection setup.
+
+## Inspect rollout evidence
 
 Check the evidence retained by a harness/benchmark pair after collecting an evaluation:
 
@@ -128,55 +156,3 @@ a benchmark accuracy result.
 Checker unit tests use hand-authored synthetic evidence contracts, independent of
 harness implementations. Mutations verify missing, conflicting, and malformed
 evidence without prescribing which checks a real harness should pass.
-
-The [Trajectory Capability Matrix](/main/reference/trajectory-capabilities) is
-updated automatically from scripted harness checks. It shows measured results
-at the linked Gym revision, independently of benchmark accuracy.
-
-## Onboard a producer
-
-### Simple Agent probes
-
-Run the built-in Simple Agent through its agent-session interface and the Environment Server:
-
-```bash
-python scripts/run_harness_conformance.py --harness simple --output results/simple-conformance
-```
-
-The fixture provides a direct HTTP shell tool through the Resources Server. It needs
-Gym's Python dependencies and `sh`, with no external harness runtime or sandbox provider.
-All seven scenarios use the same P0 expectations as the other registered harnesses.
-
-Simple Agent retries model HTTP 408, 425, 429 and 5xx responses twice by default,
-repeating the model request without repeating completed tool executions. Set
-`max_model_retries` in its agent configuration to change the number of additional
-attempts, or set it to `0` to disable them. Backoff starts at 0.5 seconds and doubles
-up to 8 seconds. A terminal model HTTP error in an agent session returns a failed
-response with its cause, partial output and retained observations; the Environment
-Server decides whether to verify, retry the episode or report a failure.
-
-### Custom producers
-
-Enable `observability_enabled: true` and set `model_call_capture_dir` to a shared
-absolute directory. Route requests through Gym's correlated model URL and retain
-all attempts. See [Model-Call Capture](/main/model-server/model-call-capture).
-
-Return `ng_agent_observations` with `AgentInvocation` and exact `ModelCallRef`
-keys (`model_call_id`, or unique `model_ref` plus `response_id`). Forward the
-invocation id as `x-session-id` for failed-call joins through the collector.
-A timestamp or shared model name never establishes ownership.
-
-Supply explicit `TrajectoryTurn` records with the actual prompt and decision
-boundaries. Preserve tool request/result pairs and `ToolCallObservation` outcomes,
-including failures and terminal submission. Keep resolution unknown on
-intermediate steps. Retain the resources server's verification response.
-See [Rollout Evidence](/main/observability/rollout-evidence).
-
-Inspect a small collected evaluation, fix producer gaps, and collect again.
-Run [rollout health checks](/main/evaluation/rollout-health) separately. Evidence
-checks neither rewrite `quality_summary.json` nor treat a truthfully recorded
-failed model call as missing evidence.
-
-```bash
-python -m pytest tests/unit_tests/harness_capabilities -q
-```

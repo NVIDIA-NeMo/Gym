@@ -9,11 +9,13 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.gdpval import prepare as preparation
-from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+from environment_servers.single_agent_turn_legacy.app import (
+    SingleAgentTurnLegacyEnvironmentServer,
+    SingleAgentTurnLegacyEnvironmentServerConfig,
+)
 from nemo_gym.benchmarks import BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
-from nemo_gym.global_config import GlobalConfigDictParser
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import GlobalConfigDictParser
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -37,7 +39,7 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     monkeypatch.setenv("TAVILY_API_KEY", "unused")
     monkeypatch.setenv("GDPVAL_SANDBOX_IMAGE", "fixture:1")
     monkeypatch.setenv("PERSIST_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
-    monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda **_: 12345)
+    monkeypatch.setattr("nemo_gym.config.global_config._find_open_port_using_range", lambda **_: 12345)
     recipe = ROOT / "benchmarks/gdpval/nooa.yaml"
     assert recipe in _benchmark_config_paths(recipe.parent)
     assert _benchmark_config_name(recipe.relative_to(ROOT / "benchmarks")) == "gdpval/nooa"
@@ -79,7 +81,7 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     )
     expected_environment["agent_server"]["name"] = benchmark.agent_name
     assert OmegaConf.to_container(environment_block) == expected_environment
-    environment = SingleAgentTurnEnvironmentServerConfig(
+    environment = SingleAgentTurnLegacyEnvironmentServerConfig(
         name="gdpval_environment_server",
         host="localhost",
         port=8000,

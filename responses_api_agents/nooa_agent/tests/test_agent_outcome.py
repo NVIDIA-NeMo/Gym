@@ -12,7 +12,8 @@ from pydantic import ValidationError
 
 from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -22,8 +23,7 @@ from nemo_gym.rollout_collection import (
     _episode_record,
     failures_path_for,
 )
-from nemo_gym.rollout_observability import AgentInvocation
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation
 from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.provenance import provenance_metadata

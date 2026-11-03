@@ -84,17 +84,9 @@ from environment_servers.harbor.verifier import (
     _verifier_key,
     summing_components,
 )
-from nemo_gym import RESULTS_DIR, failure_kinds
+from nemo_gym import RESULTS_DIR
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.atif_export import AtifExportError
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    HandledEpisodeError,
-    dependency_failure,
-)
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
@@ -103,20 +95,33 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
 )
-from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, TaskId
-from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict, get_global_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
-from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    TOKEN_ID_CAPTURE_BLOCK,
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    get_first_server_config_dict,
+    get_global_config_dict,
 )
-from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
+from nemo_gym.core import NeMoGymResponse, TaskId, failure_kinds
+from nemo_gym.metrics import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxAccess
+from nemo_gym.server_runtime import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    CleanupContext,
+    HandledEpisodeError,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+    SingleAgentTurnFailure,
+    SingleAgentTurnResult,
+    ToolAccess,
+    dependency_failure,
+)
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
 from nemo_gym.tasks.harbor.compose_overlay import ComposeOverlayError, HarborComposeOverlay, wrap_first_instruction
@@ -134,7 +139,8 @@ from nemo_gym.tasks.harbor.task_data import (
     load_task_data_schema,
 )
 from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
-from nemo_gym.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
+from nemo_gym.trajectory import AgentObservationBundle, AtifExportError, TrajectoryRecord
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
@@ -214,7 +220,7 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     stay in ``verifier_rewards`` alone. The ``verifier_*`` fields are ``None`` when ``test.sh`` never ran.
 
     That mapping is Harbor's optional, task-specific reading of ``reward.json``, not the shared multi-reward
-    contract of :class:`~nemo_gym.base_resources_server.BaseMultiRewardVerifyResponse` (a required mapping whose
+    contract of :class:`~nemo_gym.server_runtime.base_resources_server.BaseMultiRewardVerifyResponse` (a required mapping whose
     objective keys are the same on every task of an environment): a task names whatever keys its ``test.sh``
     wrote, two tasks of one dataset may name different ones, and a measured episode names none when the file
     had a ``reward`` key, was missing or invalid (a measured 0), or its components did not sum to the roll-up.

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     DeleteJsonlDatasetGitlabConfig,
     DownloadJsonlDatasetGitlabConfig,
     DownloadJsonlDatasetHuggingFaceConfig,
@@ -22,12 +22,12 @@ from nemo_gym.config_types import (
     UploadJsonlDatasetHuggingFaceConfig,
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
+from nemo_gym.config.global_config import GlobalConfigDictParserConfig, get_global_config_dict
 from nemo_gym.dataset_orchestrator import (
     delete_jsonl_dataset_from_gitlab,
     upload_jsonl_dataset_to_hf_maybe_delete,
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset, upload_jsonl_dataset
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
 from nemo_gym.hf_utils import download_hf_dataset_as_jsonl
 from nemo_gym.prompt import MaterializePromptsConfig, materialize_prompts
 from nemo_gym.train_data_utils import TrainDataProcessor

@@ -17,10 +17,10 @@ from scripts.harness_conformance.nooa import BorrowedSandboxProbe, observer_modu
 from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionResponse
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers import create_provider
+from nemo_gym.server_runtime import ResourcesSeedSessionResponse
 
 
 SCENARIO = {scenario.name: scenario for scenario in SCENARIOS}
@@ -31,11 +31,18 @@ PYTHON_CELL = {
 }
 
 
-def test_nooa_config_selects_production_borrower_and_bench_agent(tmp_path):
+@pytest.fixture
+def probe_ports() -> dict[int | str, int]:
+    # Support this stack's positional ports and main's named-port API from #4631.
+    named = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
+    return {**dict(enumerate(named.values())), **named}
+
+
+def test_nooa_config_selects_production_borrower_and_bench_agent(tmp_path, probe_ports):
     pytest.importorskip("nooa")
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 
-    config = _config("nooa", tmp_path, [10001, 10002, 10003, 10004], 23, use_agent_sessions=True)
+    config = _config("nooa", tmp_path, probe_ports, 23, use_agent_sessions=True)
     agent = NOOAAgentConfig.model_validate(config["probe_agent"]["responses_api_agents"]["nooa_agent"])
 
     assert agent.nooa.execution_mode == "sandboxed"
@@ -47,10 +54,10 @@ def test_nooa_config_selects_production_borrower_and_bench_agent(tmp_path):
     assert config["probe_sandbox"] == {"conformance_local": {"concurrency": 1}}
 
 
-async def test_resources_seed_supports_real_borrowed_execution_and_owner_cleanup(tmp_path, monkeypatch):
+async def test_resources_seed_supports_real_borrowed_execution_and_owner_cleanup(tmp_path, monkeypatch, probe_ports):
     monkeypatch.setattr("scripts.harness_conformance.nooa.install_observer", AsyncMock())
     probe = BorrowedSandboxProbe(SCENARIO["tool_success"], tmp_path)
-    config = _config("nooa", tmp_path, [10001, 10002, 10003, 10004], 23, use_agent_sessions=True)
+    config = _config("nooa", tmp_path, probe_ports, 23, use_agent_sessions=True)
     session = {
         "resources_session_id": "resources-session",
         "episode_id": {"rollout_id": "episode", "attempt": 0},

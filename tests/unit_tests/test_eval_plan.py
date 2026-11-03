@@ -10,9 +10,9 @@ import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 from nemo_gym.cli.eval import plan_benchmark
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.eval_plan import (
     EvalPlan,
     PlanBenchmark,
@@ -123,7 +123,7 @@ class TestEvalPlanJson:
 
 @pytest.fixture(autouse=True)
 def _mock_port_allocation(monkeypatch):
-    monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", lambda **_: 12345)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", lambda **_: 12345)
 
 
 class TestPlanBenchmarkCommand:

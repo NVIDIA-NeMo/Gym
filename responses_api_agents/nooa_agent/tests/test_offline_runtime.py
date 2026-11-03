@@ -17,7 +17,7 @@ from responses_api_agents.nooa_agent import offline_runtime
 
 @pytest.fixture(params=["1000:1001", "0:0"])
 def builder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.FixtureRequest) -> AsyncMock:
-    from nemo_gym import server_utils
+    from nemo_gym.client import http_client
     from responses_api_agents.miniswe_sandboxed_agent import bootstrap
 
     python_archive = tmp_path / "python.tar.gz"
@@ -28,7 +28,7 @@ def builder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.Fix
     monkeypatch.setattr(offline_runtime, "_runtime_archive", lambda root: (b"source", "source-fingerprint"))
     monkeypatch.setattr(offline_runtime.shutil, "which", lambda tool: "/bin/docker")
     monkeypatch.setattr(bootstrap, "cached_download", AsyncMock(return_value=python_archive))
-    monkeypatch.setattr(server_utils, "is_global_aiohttp_client_setup", lambda: True)
+    monkeypatch.setattr(http_client, "is_global_aiohttp_client_setup", lambda: True)
 
     async def command(*arguments: str, **kwargs: object) -> str:
         if arguments[1:3] == ("image", "inspect"):

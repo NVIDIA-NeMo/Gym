@@ -18,7 +18,7 @@ from collections.abc import Callable
 from nooa.storage.serialization import deserialize, serialize
 from nooa.unifiedllm import LLMResponse
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessageForTraining, NeMoGymResponseOutputText
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputMessageForTraining, NeMoGymResponseOutputText
 from responses_api_agents.nooa_agent.gym_llm import _assistant_parts, _responses_input
 
 

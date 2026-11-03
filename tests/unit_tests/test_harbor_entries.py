@@ -39,8 +39,6 @@ from nemo_gym.tasks.harbor.manifest import Manifest, dataset_files_digest, datas
 from nemo_gym.tasks.harbor.task_data import load_task_data_schema
 from tests.unit_tests.test_harbor_tasks import (
     commit_repo,
-    fake_registry,  # noqa: F401
-    no_real_registry,  # noqa: F401 (autouse fixture)
     registry_dataset,
     registry_repo,  # noqa: F401
     write_task,

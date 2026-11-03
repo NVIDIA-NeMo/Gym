@@ -13,7 +13,6 @@ import pytest
 
 from nemo_gym.tasks.harbor import discover_tasks
 from nemo_gym.tasks.harbor.materialize import write_rows
-from tests.unit_tests.test_harbor_tasks import fake_registry  # noqa: F401 (fixture)
 
 
 @pytest.mark.usefixtures("fake_registry")

@@ -146,7 +146,7 @@ class BorrowedSandboxProbe(Probe):
 
 async def prepare_runtime() -> None:
     """Warm NOOA's ordinary sandbox runtime inside the disposable CI job container."""
-    from nemo_gym.server_utils import get_global_aiohttp_client
+    from nemo_gym.client import get_global_aiohttp_client
 
     with TemporaryDirectory(prefix="nooa-conformance-setup-") as workdir:
         sandbox = AsyncSandbox(BorrowableLocalProvider(concurrency=1), SandboxSpec(workdir=workdir))

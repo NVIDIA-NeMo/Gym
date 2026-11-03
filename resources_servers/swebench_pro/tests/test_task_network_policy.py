@@ -11,9 +11,9 @@ import pytest
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest
 from resources_servers.swebench_pro.app import (
     SWEBenchProSeedSessionRequest,
     SWEBenchProTaskNetworkPolicy,

@@ -19,7 +19,7 @@ Errors that prevent servers from starting.
 ### Unset Required Config Value(s)
 
 ```
-nemo_gym.config_types.ConfigMissingValuesError: 1 required config value(s) are unset (still '???') after merging:
+nemo_gym.config.config_types.ConfigMissingValuesError: 1 required config value(s) are unset (still '???') after merging:
   - policy_api_key
 
 Provide each value via a CLI override, in env.yaml, or in a config you pass via config_paths.
@@ -47,7 +47,7 @@ gym env start \
 ### Server Reference Not Found
 
 ```
-nemo_gym.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
+nemo_gym.config.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
 Did you mean: 'weather'?
 ```
 
@@ -75,7 +75,7 @@ gym env start \
 ### Config Path Not Found
 
 ```
-nemo_gym.config_types.ConfigPathNotFoundError: config_paths entry 'resources_servers/weather/config.yaml' was not found. Looked in:
+nemo_gym.config.config_types.ConfigPathNotFoundError: config_paths entry 'resources_servers/weather/config.yaml' was not found. Looked in:
   - /path/to/cwd/resources_servers/weather/config.yaml
   - /path/to/gym/resources_servers/weather/config.yaml
 Check the path is spelled correctly and is relative to your working directory or the Gym install root.
@@ -90,7 +90,7 @@ Gym install root, so running from the repository root usually fixes it; an absol
 ### Malformed `config_paths`
 
 ```
-nemo_gym.config_types.MalformedConfigPathsError: 'config_paths' must be a list of paths. Got: 'resources_servers/weather/config.yaml'.
+nemo_gym.config.config_types.MalformedConfigPathsError: 'config_paths' must be a list of paths. Got: 'resources_servers/weather/config.yaml'.
 Pass each config with --config (it builds the list for you), e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml
 ```
@@ -107,7 +107,7 @@ config_paths:
 ### Malformed `head_server` Values
 
 ```
-nemo_gym.config_types.HeadServerConfigMalformedError: 'head_server' is invalid: head_server.port (Input should be a valid integer, unable to parse string as an integer).
+nemo_gym.config.config_types.HeadServerConfigMalformedError: 'head_server' is invalid: head_server.port (Input should be a valid integer, unable to parse string as an integer).
 `head_server.host` must be a hostname or IP; `head_server.port` and, if set, `head_server.num_workers` must be integers. Set them in a config or as overrides, e.g.:
   ++head_server.host=127.0.0.1 ++head_server.port=11000
 ```
@@ -129,7 +129,7 @@ head_server:
 ### No Server Instances Configured
 
 ```
-nemo_gym.config_types.NoServerInstancesError: No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
+nemo_gym.config.config_types.NoServerInstancesError: No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml
 ```
 
@@ -303,6 +303,28 @@ gym env start \
     --config config.yaml \
     +error_on_agent_without_environment_server=true
 ```
+
+### Environment Server Config Does Not Match Its Server
+
+```
+Error: Environment Server config is invalid, so `gym env start` would fail when the server launches.
+'my_environment_server' (environment_servers/single_agent_turn_legacy/app.py) does not match SingleAgentTurnEnvironmentServerConfig:
+  my_environment_server.environment_servers.single_agent_turn_legacy.cleanup_timeout_seconds: Field required
+  my_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transport: Extra inputs are not permitted
+```
+
+**When**: An environment server block names its server type and entrypoint, but its fields don't match the config class of the server that entrypoint runs.
+`gym env validate` reports this before anything starts.
+`gym env start` reports it only when that server launches, after the other servers are up.
+`gym env resolve` still prints the config and reports the same fields as a warning.
+
+**Common causes**:
+- Switching a block to another server type (for example, `legacy_agent` to `single_agent_turn_legacy`) without adding the fields the new type requires
+- A misspelled field name
+
+**Fix**: Set or correct each field at the path listed. The server's `configs/` directory under `environment_servers/` shows the fields it accepts.
+
+If the server's entrypoint can't be loaded in the environment `gym` runs in, for example because it needs a package installed only in the server's own virtual environment, `gym env validate` warns that it could not check that server and leaves the check to its launch.
 
 ---
 

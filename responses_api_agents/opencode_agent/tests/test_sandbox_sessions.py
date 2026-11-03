@@ -19,9 +19,8 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
@@ -530,8 +529,11 @@ def test_cleanup_receipt_is_required():
         parse_cleanup_receipt({"return_code": 0, "error": None})
 
 
-def test_instructions_and_text_parts_reach_opencode(setup):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_instructions_and_text_parts_reach_opencode(setup, mode):
     agent, sandbox = setup
+    agent.config.system_prompt_mode = mode
+    agent.config.opencode_config = {"tools": {"*": False}, "permission": {"bash": "deny"}}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         result = client.post(
@@ -547,7 +549,16 @@ def test_instructions_and_text_parts_reach_opencode(setup):
         assert result.status_code == 200, result.text
         payload = sandbox.params()
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert sandbox.files[config["instructions"][0]] == "outer\n\nsystem"
+        assert config["tools"] == {"*": False}
+        assert config["permission"] == {"bash": "deny"}
+        if mode == "replace":
+            assert payload["command"][payload["command"].index("--agent") + 1] == "build"
+            assert config["agent"]["build"]["prompt"] == "outer\n\nsystem"
+            assert "instructions" not in config
+            assert f"{sandbox.directory}/instructions.md" not in sandbox.files
+        else:
+            assert "--agent" not in payload["command"]
+            assert sandbox.files[config["instructions"][0]] == "outer\n\nsystem"
         assert payload["prompt"] == "task"
         assert config["enabled_providers"] == ["nemo_gym"]
 
@@ -1101,7 +1112,7 @@ async def test_file_cleanup_failure_keeps_connection_and_can_retry(setup):
 
 
 def test_malformed_later_artifact_keeps_partial_output(setup):
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     agent, _ = setup
     export = json.loads(events())

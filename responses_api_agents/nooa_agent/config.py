@@ -21,7 +21,7 @@ from typing import Literal
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from responses_api_agents.nooa_agent.invocation import (
     NOOAInvocationAdapter as NOOAInvocationAdapter,
 )

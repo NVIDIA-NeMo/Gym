@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from nooa.tools.shell_lifecycle import preserve_background_services
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.task_agent import _latest_user_text
 from responses_api_agents.nooa_agent.termination import cleanup_errors
 

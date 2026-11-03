@@ -27,16 +27,16 @@ import yaml
 from omegaconf import OmegaConf
 from starlette.requests import Request
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
 from responses_api_agents.kilocode_agent.app import (
     KiloCodeAgent,
     KiloCodeAgentConfig,
@@ -247,6 +247,14 @@ class TestDeepMerge:
 
 
 class TestEnv:
+    def test_model_output_budget_overrides_inherited_cli_cap(self, monkeypatch) -> None:
+        monkeypatch.setenv("KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX", "1")
+        agent = _make_agent(
+            max_output_tokens=65536,
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+        )
+        assert agent._env("/tmp/data", "/tmp/config")["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "65536"
+
     def test_env_passthrough_and_isolation(self) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
         env = agent._env("/tmp/data", "/tmp/config")

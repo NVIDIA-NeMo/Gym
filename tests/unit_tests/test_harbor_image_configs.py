@@ -43,6 +43,12 @@ MAIN_IMAGE = "harborframework/terminal-bench:ctr-environment-abc@sha256:" + "a" 
 SIDECAR_IMAGE = "harborframework/terminal-bench:ctr-sidecar-api-def@sha256:" + "b" * 64
 
 
+@pytest.fixture(autouse=True)
+def no_real_registry():
+    """Opts out of the conftest fake: this module runs the real ``RegistryClient`` against its own fake HTTP
+    registry (``patch_opener``), so what it checks is how prepare reads and records what a registry answers."""
+
+
 def write_task(
     root: Path,
     name: str,

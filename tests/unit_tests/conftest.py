@@ -7,7 +7,40 @@ import logging
 
 import pytest
 
-from nemo_gym.global_config import reset_global_config_dict
+import nemo_gym.artifacts.exporters as exporters_module
+from nemo_gym.config.global_config import reset_global_config_dict
+from tests.unit_tests.harbor_registry_fakes import FakeRegistryClient
+
+
+def _use_fake_registry(monkeypatch: pytest.MonkeyPatch) -> type[FakeRegistryClient]:
+    from nemo_gym.tasks.harbor import image_configs as image_configs_module
+
+    monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
+    monkeypatch.setattr(FakeRegistryClient, "missing", set())
+    monkeypatch.setattr(FakeRegistryClient, "resolved", [])
+    return FakeRegistryClient
+
+
+@pytest.fixture
+def fake_registry(monkeypatch):
+    """``prepare`` records base images through the fake registry client, which its ``missing`` and ``resolved``
+    state lets a test fail a reference or read what was asked for."""
+    return _use_fake_registry(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def no_real_registry(request):
+    """No Harbor test reaches a registry. A task's default Dockerfile is ``FROM ubuntu:24.04`` and prepare records
+    base images, so a test that did not ask for ``fake_registry`` went to Docker Hub and failed on its rate limit
+    (HTTP 429) whatever the code under test did. It is autouse here, and not imported into each module, so a new
+    Harbor test module cannot forget it. A test that needs another client patches ``RegistryClient`` itself, which
+    wins over this one, and the ones that exercise the real client build it from ``nemo_gym.tasks.harbor.registry``.
+
+    ``monkeypatch`` is requested only for Harbor modules: requesting it for every test sets it up before the other
+    autouse fixtures, so it is torn down after them, and a fixture such as the telemetry state reset would then run
+    its teardown while the test's patches are still in place."""
+    if request.module.__name__.rpartition(".")[2].startswith("test_harbor"):
+        _use_fake_registry(request.getfixturevalue("monkeypatch"))
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +52,16 @@ def fresh_global_config():
     reset_global_config_dict()
     yield
     reset_global_config_dict()
+
+
+@pytest.fixture(autouse=True)
+def fresh_run_failure():
+    """``mark_run_failed`` sets a process-wide flag that exporters read when they close their run. A CLI test whose
+    collection fails would otherwise leave it set, and the next test's exporter would close its run FAILED. Every
+    test starts and ends with the flag clear."""
+    exporters_module._RUN_FAILED = False
+    yield
+    exporters_module._RUN_FAILED = False
 
 
 @pytest.fixture(autouse=True)

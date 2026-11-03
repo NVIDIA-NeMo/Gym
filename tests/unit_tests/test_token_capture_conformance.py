@@ -13,16 +13,11 @@ import warnings
 
 import pytest
 
-from nemo_gym.token_id_capture import (
-    FileLineageStore,
-    InMemoryLineageStore,
-    TokenCaptureFrozenError,
-    TokenCaptureRetiredError,
-    TokenCaptureSnapshot,
-    TokenCaptureStore,
-    TokenEntry,
-)
 from nemo_gym.token_id_capture.conformance import ConformanceError, ConformanceWarning, run_conformance
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenCaptureSnapshot
+from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 
 def test_file_store_passes_all_checks(tmp_path):
@@ -171,7 +166,7 @@ class _FeedLineage:
     """Implement backend hooks while reusing Gym's lineage matching."""
 
     def __new__(cls, backend):
-        from nemo_gym.token_id_capture import IncrementalLineageStore
+        from nemo_gym.token_id_capture.lineage import IncrementalLineageStore
 
         class _Impl(IncrementalLineageStore):
             def __init__(self, backend):
@@ -288,8 +283,8 @@ def test_conformance_does_not_treat_a_broken_freeze_as_an_empty_rollout():
 
 
 def test_kit_rejects_a_sink_whose_refusal_leaves_the_intent_dangling(tmp_path):
-    from nemo_gym.token_id_capture import TokenCaptureRetiredError
     from nemo_gym.token_id_capture.conformance import ConformanceError
+    from nemo_gym.token_id_capture.protocols import TokenCaptureRetiredError
 
     class _Forgetful(TokenCaptureStore):
         async def record_engine_refusal(

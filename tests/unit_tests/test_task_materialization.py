@@ -8,15 +8,15 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.global_config import GlobalConfigDictParser
+from nemo_gym.config.global_config import GlobalConfigDictParser
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _environment_server_for_config_row,
     _episode_request_body,
 )
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 from nemo_gym.task_data import TaskDataValidator
 from nemo_gym.task_materialization import materialize_task
 from nemo_gym.train_data_utils import TrainDataProcessor
@@ -343,7 +343,7 @@ class CustomTaskInput(BaseModel):
 
 
 def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
-    from nemo_gym.episode_types import BaseEpisodeRequest
+    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest
 
     row = {"scenario": "order", "user_profile": {"name": "Example"}}
     source = tmp_path / "custom.jsonl"

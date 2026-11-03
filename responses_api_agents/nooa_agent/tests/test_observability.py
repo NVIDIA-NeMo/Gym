@@ -31,8 +31,8 @@ from nooa.runtime.hooks import hooks_scope
 from nooa.strategies.codeact_v2 import CodeActV2
 from pydantic import BaseModel
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -42,7 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
+from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.nooa_agent.gym_llm import (
     GymModelCall,
     GymResponsesLLM,

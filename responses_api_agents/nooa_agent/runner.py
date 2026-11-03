@@ -29,9 +29,9 @@ from uuid import uuid4
 from aiohttp import ClientResponseError
 from nooa.runtime.hooks import hooks_scope
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.trajectory import AgentEpisode, TrajectoryRecord
 from responses_api_agents.nooa_agent.gym_llm import (
     GymModelClient,
     GymResponsesLLM,

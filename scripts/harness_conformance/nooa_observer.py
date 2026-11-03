@@ -10,7 +10,7 @@ from typing import Any
 from nooa import Agent
 from nooa.runtime.hooks import InstrumentationHooks, hooks_scope
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.bench_agent_adapter import invoke_bench_agent
 
 

@@ -39,16 +39,16 @@ from nooa.unifiedllm.limits import REPLY_CAP_KEYS, ContextLimits
 from nooa.unifiedllm.unifiedllm import ResponsesClient
 from pydantic import BaseModel
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.trajectory import ModelCallRef, ObservationGap
 
 
 try:

@@ -40,12 +40,15 @@ from nemo_gym.base_responses_api_model import (
     CaptureStore,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
+    NeMoGymResponseReasoningInputItemForTraining,
+    NeMoGymResponseReasoningItemForTraining,
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
@@ -57,7 +60,6 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 def _build_response(output: list) -> NeMoGymResponse:
@@ -407,11 +409,10 @@ class TestSanitizeStreamingBody:
         body = {"stream": True, "input": [{"role": "user", "content": "fix multiply"}, reasoning, call, result]}
         original = json.loads(json.dumps(body))
         cleaned, _ = sanitize_streaming_responses_body(body)
-        item_id = cleaned["input"][1]["id"]
-        assert item_id == provided_id if provided_id is not None else item_id.startswith("rs_")
-        assert cleaned["input"][1] == {**reasoning, "id": item_id}
+        assert cleaned["input"][1] == reasoning
         assert body == original
         params = validate_streaming_responses_params(cleaned)
+        assert params.input[1].id == provided_id
         assert params.input[1].summary[0].text == summary
         converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
             params
@@ -434,8 +435,29 @@ class TestSanitizeStreamingBody:
         }
         cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
         params = validate_streaming_responses_params(cleaned)
-        actual = params.input[0].model_dump(mode="json")
-        assert actual == {**reasoning, "id": actual["id"]}
+        # The encrypted content verifies only under the id it was issued for, so none is sent.
+        assert params.model_dump(mode="json", exclude_unset=True)["input"][0] == reasoning
+
+    @pytest.mark.parametrize("provided_id", [None, "rs_original"])
+    def test_token_bearing_reasoning_replay_keeps_its_tokens_and_id(self, provided_id: str | None) -> None:
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "think"}],
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        }
+        if provided_id is not None:
+            reasoning["id"] = provided_id
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
+        params = validate_streaming_responses_params(cleaned)
+        expected_type = (
+            NeMoGymResponseReasoningInputItemForTraining
+            if provided_id is None
+            else NeMoGymResponseReasoningItemForTraining
+        )
+        assert type(params.input[0]) is expected_type
+        assert params.model_dump(mode="json", exclude_unset=True)["input"][0] == reasoning
 
     def test_drops_unknown_top_level_fields(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
@@ -914,6 +936,29 @@ class _EchoModel(SimpleResponsesAPIModel):
         raise NotImplementedError
 
 
+class _ReasoningReplayModel(_EchoModel):
+    last_payload: dict | None = None
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        # Match model servers' upstream serialization, including its unset-field filtering.
+        self.last_payload = body.model_dump(mode="json", exclude_unset=True)
+        return _build_response(
+            [
+                {
+                    "type": "reasoning",
+                    "id": "rs_readable",
+                    "summary": [
+                        {"type": "summary_text", "text": "First."},
+                        {"type": "summary_text", "text": "Second."},
+                    ],
+                    "encrypted_content": "opaque-readable",
+                },
+                _function_call_item("shell"),
+                {"type": "reasoning", "id": "rs_opaque", "summary": [], "encrypted_content": "opaque-only"},
+            ]
+        )
+
+
 class _RequestAwareEchoModel(_EchoModel):
     saw_request: bool = False
 
@@ -955,6 +1000,87 @@ def _client(model_cls, *, global_config_dict: dict | None = None) -> tuple[TestC
         server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict or {}),
     )
     return TestClient(server.setup_webserver()), server
+
+
+class TestAnthropicReasoningReplayRoute:
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_replayed_reasoning_has_explicit_summaries_in_forwarded_payload(self, stream) -> None:
+        client, server = _client(_ReasoningReplayModel)
+        first = client.post(
+            "/v1/messages",
+            json={
+                "model": "synthetic",
+                "max_tokens": 10,
+                "stream": stream,
+                "messages": [{"role": "user", "content": "Go"}],
+            },
+        )
+        assert first.status_code == 200
+        if stream:
+            events = [json.loads(line[6:]) for line in first.text.splitlines() if line.startswith("data: ")]
+            content = []
+            for event in events:
+                if event["type"] == "content_block_start":
+                    content.append(event["content_block"])
+                elif event["type"] == "content_block_delta":
+                    block = content[event["index"]]
+                    delta = event["delta"]
+                    if delta["type"] == "thinking_delta":
+                        block["thinking"] += delta["thinking"]
+                    elif delta["type"] == "signature_delta":
+                        block["signature"] = block.get("signature", "") + delta["signature"]
+                    elif delta["type"] == "input_json_delta":
+                        block["input"] = json.loads(delta["partial_json"])
+        else:
+            content = first.json()["content"]
+        assert content == [
+            {
+                "type": "thinking",
+                "thinking": "First.\n\nSecond.",
+                "signature": "nemo_gym_responses_reasoning:opaque-readable",
+            },
+            {"type": "tool_use", "id": "call_1", "name": "shell", "input": {}},
+            {"type": "redacted_thinking", "data": "nemo_gym_responses_reasoning:opaque-only"},
+        ]
+        replay = client.post(
+            "/v1/messages",
+            json={
+                "max_tokens": 10,
+                "messages": [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "Done"}]},
+                ],
+            },
+        )
+        assert replay.status_code == 200
+        forwarded = server.last_payload["input"]
+        assert [item["type"] for item in forwarded] == [
+            "reasoning",
+            "function_call",
+            "reasoning",
+            "function_call_output",
+        ]
+        reasoning = [item for item in forwarded if item["type"] == "reasoning"]
+        assert all("id" not in item for item in reasoning)
+        assert [item["summary"] for item in reasoning] == [[{"type": "summary_text", "text": "First.\n\nSecond."}], []]
+        assert [item["encrypted_content"] for item in reasoning] == ["opaque-readable", "opaque-only"]
+        assert forwarded[1]["call_id"] == forwarded[3]["call_id"] == "call_1"
+        assert forwarded[3]["output"] == "Done"
+
+    @pytest.mark.parametrize(
+        "block", [{"type": "redacted_thinking"}, {"type": "redacted_thinking", "data": "native-data"}]
+    )
+    def test_unsupported_redacted_history_does_not_fail_the_route(self, block) -> None:
+        client, server = _client(_ReasoningReplayModel)
+        result = client.post(
+            "/v1/messages",
+            json={
+                "max_tokens": 10,
+                "messages": [{"role": "assistant", "content": [block, {"type": "text", "text": "Continue"}]}],
+            },
+        )
+        assert result.status_code == 200
+        assert server.last_payload["input"] == [{"role": "assistant", "content": "Continue", "type": "message"}]
 
 
 class TestResponsesDispatchRoute:
@@ -1019,7 +1145,21 @@ class TestResponsesDispatchRoute:
         assert response.status_code == 200
         assert len(server.last_params.input) == 1
         assert server.last_params.input[0].summary[0].text == "Inspect multiply"
-        assert server.last_params.input[0].id.startswith("rs_")
+        assert server.last_params.input[0].id is None
+        assert "id" not in server.last_params.model_dump(exclude_unset=True)["input"][0]
+
+    def test_streaming_token_bearing_reasoning_replay_without_id_is_accepted(self) -> None:
+        client, server = _client(_EchoModel)
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "think"}],
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        }
+        response = client.post("/v1/responses", json={"stream": True, "input": [reasoning]})
+        assert response.status_code == 200
+        assert server.last_params.model_dump(mode="json", exclude_unset=True)["input"] == [reasoning]
 
     @pytest.mark.parametrize(
         "reasoning",

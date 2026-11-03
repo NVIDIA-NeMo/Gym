@@ -9,7 +9,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 
 from benchmarks.gdpval import prepare
-from nemo_gym.global_config import GlobalConfigDictParser
+from nemo_gym.config.global_config import GlobalConfigDictParser
 from nemo_gym.train_data_utils import TrainDataProcessor
 
 
@@ -45,7 +45,7 @@ def test_harness_reuse_preserves_source_and_output_guards(
     monkeypatch.setenv("TAVILY_API_KEY", "unused")
     monkeypatch.setenv("GDPVAL_SANDBOX_IMAGE", "fixture:1")
     monkeypatch.setattr("datasets.load_dataset", lambda *args, **kwargs: [row])
-    monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda *args, **kwargs: 12345)
+    monkeypatch.setattr("nemo_gym.config.global_config._find_open_port_using_range", lambda *args, **kwargs: 12345)
     monkeypatch.setattr(prepare, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(prepare, "OUTPUT_FPATH", tmp_path / "data" / "gdpval_benchmark.jsonl")
     source = prepare.prepare()

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+from nemo_gym.sandbox.adapters.docker_compose import PLACEMENT_GROUP_KEY, AsyncSandboxCompose
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
 
 
@@ -734,6 +734,8 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
         assert result.stdout == "external data"
         second_spec = provider.created[-1]
         assert second_spec.metadata["placement"] == "shared-disk"
+        # Helper, seeds and members all share pod IPs and storage: one placement group.
+        assert {spec.metadata.get(PLACEMENT_GROUP_KEY) for spec in provider.created} == {group.project}
         assert second_spec.provider_options["volumes"][-1]["read_only"] is True
         assert group._seeds and all(seed._stopped for seed in group._seeds)
         descriptor = json.loads(json.dumps(await group.serialize()))
@@ -2220,7 +2222,8 @@ async def test_forwarding_and_volumes_of_a_service_on_its_own_provider_go_throug
         assert [spec.image for spec in gpu.created] == ["alpine:3.22", "img", "img"]
         assert [spec.image for spec in cpu.created] == ["img"]
         helper, seed, side = gpu.created
-        assert helper.metadata == {"storage": "gpu"} and seed.metadata == {"storage": "gpu"}
+        expected = {"storage": "gpu", PLACEMENT_GROUP_KEY: group.project}
+        assert helper.metadata == expected and seed.metadata == expected
         assert side.metadata["storage"] == "gpu"
         assert seed.provider_options["volumes"] == [
             {"source": f"{group.project}/data", "target": "/tmp/compose-volumes", "read_only": False, "storage": "gpu"}

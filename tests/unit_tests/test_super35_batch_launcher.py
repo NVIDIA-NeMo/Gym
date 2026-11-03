@@ -16,7 +16,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.lmarena_v2 import prepare as lmarena_prepare
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
@@ -287,7 +287,7 @@ def test_serving_workers_do_not_install_gym_dependencies(checkout) -> None:
     assert not (root / "prefetch-args").exists()
 
 
-@pytest.mark.parametrize("batch, expected_venvs", [("core", 15), ("swe", 4)])
+@pytest.mark.parametrize("batch, expected_venvs", [("core", 16), ("swe", 4)])
 @pytest.mark.parametrize("missing_file", [None, "bin/python", "bin/activate"])
 def test_prebuilt_check_uses_resolved_server_environments(
     checkout, monkeypatch, capsys, batch: str, expected_venvs: int, missing_file: str | None
@@ -618,7 +618,7 @@ def test_shared_model_endpoints_only_define_model_connections() -> None:
         "gpt-5_2-2025-12-11": ("openai_model", "openai/openai/gpt-5.2"),
         "gpt-5_4-mini-2026-03-17": ("openai_model", "azure/openai/gpt-5.4-mini"),
         "Qwen3-235B-A22B-Instruct-2507-FP8": ("vllm_model", "nvidia/qwen/qwen-235b"),
-        "hle_benchmark_equivalence_judge_model": ("openai_model", "azure/openai/gpt-4o"),
+        "hle_benchmark_equivalence_judge_model": ("openai_model", "openai/openai/gpt-5.6-luna"),
         "genrm_model": ("openai_model", "gcp/google/gemini-3-flash-preview"),
     }
     assert set(shared) == set(expected_models)
@@ -669,7 +669,7 @@ def test_shared_container_config_with_core_suite_covers_both_batches(monkeypatch
             # Build-time interpolation must work without an endpoint or credentials.
             OmegaConf.to_container(config, resolve=True)
     assert components["core"] | components["swe"] <= components["container"]
-    assert len(components["core"] | components["swe"]) == 17
+    assert len(components["core"] | components["swe"]) == 18
 
 
 @pytest.mark.parametrize("extra_configs", [[], ["extra with spaces.yaml", "literal $(touch INJECTED).yaml"]])

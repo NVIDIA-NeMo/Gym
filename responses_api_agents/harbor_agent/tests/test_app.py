@@ -23,8 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.base_resources_server import AggregateMetricsRequest
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
@@ -443,6 +443,60 @@ class TestApp:
         assert len(response.response.output) == 0
         assert response.responses_create_params.temperature == 0.3
         assert response.responses_create_params.input == []
+
+    @pytest.mark.parametrize(
+        "exception_type, message",
+        [
+            ("AddTestsDirError", "Failed to add tests directory to environment."),
+            ("DownloadVerifierDirError", "Failed to download verifier directory from environment"),
+        ],
+    )
+    async def test_run_fails_when_the_verifier_files_never_reached_the_verifier(self, exception_type, message):
+        # Harbor could not move the verifier's files to or from the sandbox, so the task was never measured.
+        # The /run fails instead of returning a reward of 0 that would read as a model failure.
+        server = _make_server()
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "verifier_result": None,
+            "exception_info": {"exception_type": exception_type, "exception_message": message},
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY):
+            with pytest.raises(
+                RuntimeError, match=f"scientific::test_task_123: {exception_type}: {message}"
+            ) as raised:
+                await server.run(_make_run_request())
+        assert raised.type.__name__ == "HarborVerifierSetupError"
+
+    @pytest.mark.parametrize(
+        "exception_info, verifier_result, reward, agent_timeout_error",
+        [
+            # The agent ran out of its time: a scored 0, flagged as before.
+            ({"exception_type": "AgentTimeoutError", "exception_message": "timed out"}, None, 0.0, 1),
+            # The verifier ran and timed out (Harbor retries it once): still a scored 0.
+            ({"exception_type": "VerifierTimeoutError", "exception_message": "timed out"}, None, 0.0, 0),
+            # The verifier ran and wrote no reward file: still a scored 0.
+            ({"exception_type": "RewardFileNotFoundError", "exception_message": "no reward"}, None, 0.0, 0),
+            # A verifier result is a measurement, whatever exception the trial also recorded.
+            (
+                {"exception_type": "DownloadVerifierDirError", "exception_message": "late"},
+                {"rewards": {"reward": 0.0}},
+                0.0,
+                0,
+            ),
+            (None, {"rewards": {"reward": 0.0}}, 0.0, 0),
+        ],
+    )
+    async def test_run_keeps_measured_and_deadline_zeros(
+        self, exception_info, verifier_result, reward, agent_timeout_error
+    ):
+        server = _make_server()
+        trial_result = {**DEFAULT_TRIAL_RESULT, "verifier_result": verifier_result, "exception_info": exception_info}
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == reward
+        assert response.agent_timeout_error == agent_timeout_error
+        assert response.metadata["exception_info"] == exception_info
 
     @pytest.mark.parametrize(
         "model_name, expected",

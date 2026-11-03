@@ -31,7 +31,7 @@ def _prepared_rows(monkeypatch, tmp_path) -> list[dict]:
         _source_row("id-a", "Revision subset"),
     ]
     monkeypatch.setattr("datasets.load_dataset", lambda *args, **kwargs: source_rows)
-    monkeypatch.setattr("nemo_gym.global_config.get_global_config_dict", lambda: {})
+    monkeypatch.setattr("nemo_gym.config.global_config.get_global_config_dict", lambda: {})
 
     output_fpath = prepare.prepare(output_fpath=tmp_path / "hle_verified_benchmark.jsonl")
     return [json.loads(line) for line in output_fpath.read_text().splitlines()]

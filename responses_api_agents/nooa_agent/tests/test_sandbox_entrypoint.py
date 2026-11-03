@@ -17,9 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
@@ -694,13 +693,20 @@ def test_enable_trace_export_writes_journal_jsonl_per_session(tmp_path: Path) ->
     """The real NOOA exporter: a span stamped with session.id lands in <trace_dir>/<session>.nooa.jsonl, the
     message-journal file the viewer imports, with the journal manifest first and the OTLP spans after it."""
     pytest.importorskip("nooa.tracing")
+    from nooa.runtime import hooks
     from opentelemetry import trace
 
     trace_dir = tmp_path / "traces"
-    entrypoint.enable_trace_export(str(trace_dir))
-    with trace.get_tracer("test").start_as_current_span("probe") as span:
-        span.set_attribute("session.id", "probe-session")
-    lines = entrypoint.collect_trace_export(str(trace_dir), tmp_path / "traces.jsonl")
+    # enable_tracing installs NOOA's instrumentation hooks process-wide; leave the process as it was found so
+    # later tests that assert on the active hooks (the conformance witness) see only their own.
+    previous_hooks = hooks.get_hooks()
+    try:
+        entrypoint.enable_trace_export(str(trace_dir))
+        with trace.get_tracer("test").start_as_current_span("probe") as span:
+            span.set_attribute("session.id", "probe-session")
+        lines = entrypoint.collect_trace_export(str(trace_dir), tmp_path / "traces.jsonl")
+    finally:
+        hooks.set_hooks(previous_hooks)
     assert lines >= 2
     assert (trace_dir / "probe-session.nooa.jsonl").exists()
     assert not (trace_dir / "probe-session.jsonl").exists(), "spans must be written once, not by two exporters"

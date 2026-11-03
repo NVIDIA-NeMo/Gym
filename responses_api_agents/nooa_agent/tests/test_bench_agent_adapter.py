@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from nooa.tools.shell_tools import ShellTools
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from responses_api_agents.nooa_agent.bench_agent_adapter import invoke_bench_agent
 
 
@@ -674,7 +674,7 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
     from nooa.tools._bash_session import BashSession
 
     module = pytest.importorskip("nooa_bench.bench_agent")
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
     from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
     from responses_api_agents.nooa_agent.app import NOOAAgent
     from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig

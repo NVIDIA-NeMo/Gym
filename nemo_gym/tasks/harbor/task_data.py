@@ -43,7 +43,7 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from nemo_gym.episode_types import is_materialized_task_row
+from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 from nemo_gym.task_data import TaskDataValidationReport, TaskDataValidator
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 

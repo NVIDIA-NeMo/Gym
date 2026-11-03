@@ -29,7 +29,7 @@ from openai.types.completion_usage import CompletionUsage
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import BaseModel, Field
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,

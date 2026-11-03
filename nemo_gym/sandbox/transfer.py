@@ -27,7 +27,7 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 

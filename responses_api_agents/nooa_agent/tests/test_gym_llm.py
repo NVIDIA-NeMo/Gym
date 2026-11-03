@@ -30,7 +30,7 @@ from nooa.storage.sqlite import SQLiteStorageManager
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessageForTraining,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCallForTraining,
@@ -1072,7 +1072,7 @@ async def test_recovered_rate_limit_preserves_prior_evidence_and_summary_fatal_s
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_at", ["post", "backoff"])
 async def test_rate_limit_retry_cancellation_propagates_through_runner(monkeypatch, cancel_at: str) -> None:
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.nooa_agent.runner import NOOARunRequest
     from responses_api_agents.nooa_agent.tests.test_runner import invoke_model_directly, make_runner
 

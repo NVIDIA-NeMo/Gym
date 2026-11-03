@@ -170,7 +170,7 @@ async def prepare_runtime_wheelhouse(
         raise RuntimeError(
             "Offline NOOA preparation requires Docker on the controller, or a compatible prepared bundle"
         )
-    from nemo_gym.server_utils import (
+    from nemo_gym.client import (
         GlobalAIOHTTPAsyncClientConfig,
         is_global_aiohttp_client_setup,
         set_global_aiohttp_client,
