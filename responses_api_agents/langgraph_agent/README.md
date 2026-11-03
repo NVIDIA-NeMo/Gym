@@ -23,10 +23,11 @@ resource setup, verification and cleanup. Use a checked-in pairing, such as
 `--resources-server reasoning_gym/reflection_agent`, then select its configured
 agent name with `gym eval run --agent reasoning_gym_langgraph_agent`.
 
-The flavor configs contain `resources_server: null`, so `--agent-type` does not
-swap them onto a benchmark. For another benchmark, compose a flavor as the
-`environments/langgraph_*` pairings do: bind its `resources_server` and front it
-with `single_agent_turn_legacy` and `resources_tool_transports: []`.
+To run a benchmark with a flavor, use `--agent-type`, for example
+`gym eval run --benchmark aime24 --agent-type langgraph_agent/orchestrator_agent --model-type vllm_model`.
+This replaces the benchmark's agent, preserves its model, resources and dataset
+bindings, and disables tool grants for the model-only graph. Loading a flavor
+with `--config` keeps its `resources_server: null` for custom session wiring.
 
 Remove `sandbox_provider`, `sandbox_config`, and sandbox runtime settings from
 previous LangGraph recipes. An Environment Server enforces the episode deadline;

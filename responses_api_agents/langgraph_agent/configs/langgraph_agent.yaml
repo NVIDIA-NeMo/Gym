@@ -8,8 +8,7 @@ langgraph_agent:
       #   responses_api_agents/langgraph_agent/configs/parallel_thinking_agent.yaml
       #   responses_api_agents/langgraph_agent/configs/reflection_agent.yaml
       #   responses_api_agents/langgraph_agent/configs/rewoo_agent.yaml
-      # or from an environments/langgraph_* pairing. `--agent-type` does not swap these onto a benchmark;
-      # see the README.
+      # or select --agent-type langgraph_agent/<flavor> alongside a benchmark. See the README.
       entrypoint: ???
       resources_server: null
       model_server:
