@@ -124,3 +124,6 @@ sandbox:
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+      # Seconds after a create during which "not found" about the new sandbox means "not routable yet": AgentENV
+      # can briefly answer 404 for a sandbox that runs. A kill is repeated, and status reports UNKNOWN. 0 is off.
+      new_sandbox_grace_s: 15.0
