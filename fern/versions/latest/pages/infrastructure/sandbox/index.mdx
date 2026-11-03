@@ -334,7 +334,7 @@ Rewrites are ordered. The first matching `from` prefix wins.
 
 Command process exits, including nonzero exits, return `SandboxExecResult`. OpenSandbox allocation, readiness, lifecycle and runtime failures
 raise the shared `NgFailureEvent` with `boundary="sandbox"`. Its registered `failure_kind`, `operation`,
-HTTP status when observed, `sandbox` details and explicit cause carry the evidence; callers apply their
+HTTP status when observed, typed `details` and explicit cause carry the evidence; callers apply their
 own outcome policy. A failure kind does not decide attribution, retryability, health or a zero score.
 
 The registered kinds and their meanings live in
