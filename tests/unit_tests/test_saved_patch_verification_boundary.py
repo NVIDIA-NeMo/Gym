@@ -17,7 +17,7 @@ import json
 import pytest
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_reverification import InputRolloutPair, _build_verify_payload
+from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, failures_path_for
 
 

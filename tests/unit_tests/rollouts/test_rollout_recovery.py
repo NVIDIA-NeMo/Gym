@@ -2040,7 +2040,7 @@ async def test_health_reports_are_cleared_after_validation_and_written_under_run
 async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(
     runner_config, monkeypatch, specific_kind, has_answer
 ):
-    from nemo_gym.rollout_reverification import _is_judge_failure, _rollout_response
+    from nemo_gym.eval.rollout_reverification import _is_judge_failure, _rollout_response
 
     answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "saved answer"}]}]}
     post = AsyncMock(

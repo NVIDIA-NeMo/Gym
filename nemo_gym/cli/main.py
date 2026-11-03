@@ -29,6 +29,7 @@ from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, compo
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.utils.text import did_you_mean
+from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
 
 logger = logging.getLogger(__name__)
@@ -79,19 +80,6 @@ def dispatch(target: str, overrides: list[str]) -> None:
     sys.argv = [sys.argv[0], *overrides]
     func = getattr(importlib.import_module(module_path), func_name)
     func()
-
-
-def _hydra_quote(value: str) -> str:
-    """Single-quote `value` as a literal for Hydra's override grammar, so it parses back to the same string.
-
-    `json.dumps` is not that encoder: Hydra keeps `\\uXXXX`, `\\t` and a doubled backslash literally, so a Unicode
-    or backslash-containing filename would reach the command under another name. Hydra un-escapes a backslash
-    only when its run ends at a quote character, so only those runs (and the quote itself) are escaped here.
-    Everything else, Unicode included, is passed through unchanged.
-    """
-    escaped = re.sub(r"(\\*)(')", lambda m: m.group(1) * 2 + "\\'", value)
-    escaped = re.sub(r"(\\+)$", lambda m: m.group(1) * 2, escaped)
-    return f"'{escaped}'"
 
 
 def _value_flag(
@@ -380,7 +368,7 @@ _ASSETS = {
 def _asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches the roots from :func:`~nemo_gym.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
+    Searches the roots from :func:`~nemo_gym.environment.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
     cwd + install root), the same helper that backs `gym list`/`gym search`, so config resolution and
     discovery agree on where components live. On a name collision across roots the highest-priority root wins
     (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
@@ -433,7 +421,7 @@ def _asset_config_path(flag: str, value: str) -> str:
         # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
         # the generic one-level flavor/sibling search below can't see them.
         # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
-        from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
+        from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
 
         config_names = {
             _benchmark_config_name(p.relative_to(root / parent))

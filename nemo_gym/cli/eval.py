@@ -39,11 +39,6 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.artifacts.exporters import mark_run_failed
 from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME as QUALITY_SUMMARY_FILENAME
 from nemo_gym.artifacts.run_files import ROLLOUT_VERDICTS_FILENAME as ROLLOUT_VERDICTS_FILENAME
-from nemo_gym.benchmarks import (
-    BenchmarkConfig,
-    discover_benchmarks,
-)
-from nemo_gym.cli.env import RunHelper
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -118,8 +113,12 @@ from nemo_gym.data.tasks.harbor.validation_report import (
     _validation_rows,
     summarize_validation,
 )
-from nemo_gym.discovery import read_config_metadata
-from nemo_gym.eval_plan import (
+from nemo_gym.environment.benchmarks import (
+    BenchmarkConfig,
+    discover_benchmarks,
+)
+from nemo_gym.environment.discovery import read_config_metadata
+from nemo_gym.eval.eval_plan import (
     PlanBenchmark,
     PlanGym,
     build_eval_plan,
@@ -127,6 +126,7 @@ from nemo_gym.eval_plan import (
     write_eval_plan,
 )
 from nemo_gym.orchestration.jobs import installed_gym_commit
+from nemo_gym.orchestration.server_supervisor import RunHelper
 from nemo_gym.package_info import __version__
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
@@ -939,7 +939,7 @@ def export_run() -> None:  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reverify_rollouts():  # pragma: no cover
-    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
 
     rh = RunHelper()
     rh.start(None)
@@ -1024,9 +1024,9 @@ Repeat-level metrics: {repeat_level_metrics_fpath}""")
 
 @exit_cleanly_on_config_error
 def compare() -> None:  # pragma: no cover
-    from nemo_gym.comparison.report import render_key_metrics_tables, summary_lines
-    from nemo_gym.comparison.runner import invoked_command, run_comparison
-    from nemo_gym.comparison.schema import ComparisonConfig
+    from nemo_gym.eval.comparison.report import render_key_metrics_tables, summary_lines
+    from nemo_gym.eval.comparison.runner import invoked_command, run_comparison
+    from nemo_gym.eval.comparison.schema import ComparisonConfig
 
     config = ComparisonConfig.model_validate(get_global_config_dict())
 
