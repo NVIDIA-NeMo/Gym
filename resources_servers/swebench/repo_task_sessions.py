@@ -41,6 +41,7 @@ from typing import Any, ClassVar
 from fastapi import Request
 from pydantic import JsonValue, ValidationError
 
+from nemo_gym.agents import exec_idempotent
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config
@@ -164,7 +165,10 @@ class RepoTaskSessionResourcesServer(CheckpointedSandboxSessionResourcesServer):
         async def setup(sandbox: AsyncSandbox) -> None:
             await self._after_start(sandbox, task)
             await self._prepare_repository(sandbox, task)
-            head = await sandbox.exec(f"git -C {shlex.quote(workdir)} rev-parse HEAD")
+            # A new sandbox can refuse its first commands for a few seconds; this read is safe to repeat.
+            head = await exec_idempotent(
+                sandbox, f"git -C {shlex.quote(workdir)} rev-parse HEAD", what=f"{self.config.name}: reading HEAD"
+            )
             seed_head = (head.stdout or "").strip() if head.return_code == 0 else ""
             self._session_id_to_base_commit[session_id] = self._base_commit(task, seed_head)
             self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(sandbox, workdir)
@@ -287,12 +291,17 @@ class RepoTaskSessionResourcesServer(CheckpointedSandboxSessionResourcesServer):
     # -- internals ---------------------------------------------------------------------------------------------
 
     async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """The files ``workdir`` holds untracked before the agent touches it (excluded from its patch)."""
-        try:
-            result = await sandbox.exec(f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard")
-        except Exception:
-            LOG.exception("%s: failed to list pristine untracked files", self.config.name)
-            return frozenset()
+        """The files ``workdir`` holds untracked before the agent touches it (excluded from its patch).
+
+        A sandbox that cannot run the listing fails the seed after the retries: an empty set would make the patch
+        capture count the image's own untracked files as the agent's. A listing that runs and fails (``workdir`` is
+        not a git repository) gives the empty set, with a warning.
+        """
+        result = await exec_idempotent(
+            sandbox,
+            f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard",
+            what=f"{self.config.name}: listing pristine untracked files",
+        )
         if result.return_code != 0:
             LOG.warning("%s: failed to list pristine untracked files: %s", self.config.name, result.stderr)
             return frozenset()
