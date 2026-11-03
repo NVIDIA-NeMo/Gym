@@ -724,6 +724,11 @@ class RolloutStore:
         """Every rollout's attempt cap: the saved ``max_rollout_attempts`` plus the recorded extension."""
         return self._state.attempt_cap
 
+    def rerun_approved_identities(self) -> set[str]:
+        """The logical rollouts whose selected result is a masked one an operator approved to run again
+        (`--rerun-masked-without-artifact`): each counts one failed attempt and a later attempt supersedes it."""
+        return self._state.rerun_approved_identities()
+
     def replayable_identities(self) -> set[str]:
         """The logical rollouts this Store would run again under some attempt cap: its replay rule without the cap.
 

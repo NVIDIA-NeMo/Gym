@@ -105,6 +105,8 @@ def recover(
     judge_partition: str | None = None,
     judge_qos: str | None = None,
     auto_repin: bool = True,
+    rerun_masked_without_artifact: bool = False,
+    rerun_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
@@ -130,6 +132,10 @@ def recover(
     For a run whose chain accounting is unknown, the two are also an operator's explicit budget: the run continues
     as an OPERATOR-CONTINUATION with ``extend_retries`` (one when not given) infra retries remaining, recorded in the
     decision and the job dir's operator journal (see ``decide_from_collected``).
+    ``rerun_masked_without_artifact`` (with a nonempty ``rerun_reason``) runs again the masked results that kept a saved
+    answer but have neither a gradeable artifact nor a recorded grade, which a resume otherwise keeps and
+    re-verification cannot grade: the identities the plan finds qualifying are journaled with the reason in the run's
+    artifacts when the job is queued, and each counts one failed attempt within its cap.
     The outcome names the ``reader_token`` its login-host Store readers carry.
     """
     outcome = _recover(
@@ -157,6 +163,8 @@ def recover(
         judge_partition=judge_partition,
         judge_qos=judge_qos,
         auto_repin=auto_repin,
+        rerun_masked_without_artifact=rerun_masked_without_artifact,
+        rerun_reason=rerun_reason,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -181,6 +189,8 @@ def inspect_recovery(
     repin: str | None = None,
     repin_reason: str | None = None,
     auto_repin: bool = True,
+    rerun_masked_without_artifact: bool = False,
+    rerun_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action.
 
@@ -188,6 +198,10 @@ def inspect_recovery(
 
     With ``repin`` it reports the plan a recovery repinned to that commit would follow: the run's Store is read at the
     target commit, as the repinned resume would read it, and nothing is rendered, repinned or queued.
+
+    The masked results that kept a saved answer but have no gradeable artifact and no grade are named in the decision
+    (``masked_without_artifact``) and stay masked, with or without ``rerun_masked_without_artifact``: inspect never
+    journals an approval.
     """
     outcome = _recover(
         gym_job_id,
@@ -208,6 +222,8 @@ def inspect_recovery(
         mlflow_status=mlflow_status,
         mlflow_run_id=mlflow_run_id,
         auto_repin=auto_repin,
+        rerun_masked_without_artifact=rerun_masked_without_artifact,
+        rerun_reason=rerun_reason,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -247,6 +263,8 @@ def _recover(
     judge_partition: str | None = None,
     judge_qos: str | None = None,
     auto_repin: bool = True,
+    rerun_masked_without_artifact: bool = False,
+    rerun_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -267,6 +285,10 @@ def _recover(
         or not all(isinstance(key, str) or (type(key) is int and key >= 0) for key in score_key)
     ):
         raise ValueError("score_key must be a nonempty list of object keys and nonnegative array indices")
+    if rerun_masked_without_artifact and not (rerun_reason or "").strip():
+        raise ValueError("--rerun-masked-without-artifact needs a nonempty --rerun-reason")
+    if rerun_reason is not None and not rerun_masked_without_artifact:
+        raise ValueError("--rerun-reason goes with --rerun-masked-without-artifact")
     if max_unhealthy_fraction is not None and (
         isinstance(max_unhealthy_fraction, bool)
         or not isinstance(max_unhealthy_fraction, (int, float))
@@ -339,6 +361,8 @@ def _recover(
             **({"reader_ref": reader_ref} if reader_ref is not None else {}),
             **({"extend_retries": extend_retries} if extend_retries else {}),
             **({"extend_attempts": extend_attempts} if extend_attempts else {}),
+            # Inspect only reports the masked results the flag would reopen: it plans none of them as retries.
+            **({"rerun_masked_without_artifact": True} if rerun_masked_without_artifact and not inspect_only else {}),
             # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
             **({"max_walltime": max_walltime} if max_walltime is not None else {}),
             **({"operator_budget": operator_budget} if operator_budget is not None else {}),
@@ -529,6 +553,20 @@ def _recover(
                 # Under an operator continuation, N is the allowance its record fills, not a recorded extension.
                 **({"extend_retries": extend_retries} if extend_retries and operator is None else {}),
                 **({"extend_attempts": extend_attempts} if extend_attempts else {}),
+                # The approval of the masked results this plan runs again, journaled once the job is queued.
+                **(
+                    {
+                        "rerun_masked": {
+                            "reason": (rerun_reason or "").strip(),
+                            "identities": [
+                                {"identity": list(item.identity), "attempt": item.attempt, "attempts": item.attempts}
+                                for item in decision.rerun_masked
+                            ],
+                        }
+                    }
+                    if decision.rerun_masked
+                    else {}
+                ),
                 **(
                     {"max_walltime": max_walltime, "walltime_reason": walltime_reason}
                     if max_walltime is not None

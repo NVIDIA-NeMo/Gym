@@ -776,6 +776,14 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     judge_qos = getattr(args, "judge_qos", None)
     if judge_qos is not None and (not getattr(args, "recover", False) or inspect_only):
         args._parser.error("--judge-qos needs --recover and cannot be used with --inspect")
+    rerun_masked = getattr(args, "rerun_masked_without_artifact", False)
+    rerun_reason = getattr(args, "rerun_reason", None)
+    if (rerun_masked or rerun_reason is not None) and not getattr(args, "recover", False):
+        args._parser.error("--rerun-masked-without-artifact and --rerun-reason need --recover")
+    if rerun_masked and not (rerun_reason or "").strip():
+        args._parser.error("--rerun-masked-without-artifact needs a nonempty --rerun-reason")
+    if rerun_reason is not None and not rerun_masked:
+        args._parser.error("--rerun-reason goes with --rerun-masked-without-artifact")
 
     try:
         if run_dir is not None:
@@ -825,6 +833,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 extra["judge_partition"] = judge_partition
             if judge_qos is not None:
                 extra["judge_qos"] = judge_qos
+            if rerun_masked:
+                extra |= {"rerun_masked_without_artifact": True, "rerun_reason": rerun_reason.strip()}
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -2006,6 +2016,24 @@ COMMANDS = {
                     help="With --recover: keep the run's Gym pin. A run pinned at another commit is planned with "
                     "this Gym's rules; when that plan needs this revision to run, the recovery refuses and names "
                     "--repin instead of moving the run to it automatically.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--rerun-masked-without-artifact",
+                    action="store_true",
+                    help="With --recover and --rerun-reason: run again the masked results that kept a saved answer "
+                    "but have neither a gradeable artifact nor a recorded grade (a resume keeps them and re-verification "
+                    "cannot grade them; --inspect names them). Each counts one failed attempt within its attempt cap. "
+                    "The identities the plan finds qualifying are journaled with the reason in the run's artifacts "
+                    "(rerun-masked-journal.jsonl); nothing reopens them otherwise.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--rerun-reason",
+                    metavar="TEXT",
+                    help="With --rerun-masked-without-artifact: why those results run again; recorded in the journal.",
                 ),
             ),
             Flag(

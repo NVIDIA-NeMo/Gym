@@ -59,7 +59,12 @@ from nemo_gym.core.failure_kinds import (
     is_evaluation_side,
     is_server_status,
 )
-from nemo_gym.utils.path_utils import attempt_extension_path_for, failures_path_for, resubmit_offset_path_for
+from nemo_gym.utils.path_utils import (
+    attempt_extension_path_for,
+    failures_path_for,
+    rerun_masked_journal_path_for,
+    resubmit_offset_path_for,
+)
 
 
 def has_saved_generation(row: Mapping[str, Any]) -> bool:
@@ -303,16 +308,13 @@ def is_infrastructure_agent_timeout(row: Mapping[str, Any]) -> bool:
 _MASKED_REGRADE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE, AGENT_ROUTE_FAILED})
 
 
-def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
-    """The kind of a masked result that infrastructure, not the evaluated model, left unmeasured; else None.
+def _masked_evaluation_side_kind(row: Mapping[str, Any]) -> str | None:
+    """The evaluation-side kind of a masked result row that is not set aside for another owner; else None.
 
-    A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
-    reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
-    run. When the kind is evaluation-side (``is_evaluation_side``) the rollout is retried like an infrastructure
-    failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
-    model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
-    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. So does a
-    saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its verifier could grade of it.
+    The rules ``masked_infrastructure_kind`` and ``masked_kept_answer_kind`` share, all but the saved answer: the row
+    is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
+    ``failure_kind`` is registered, evaluation-side (``is_evaluation_side``), not one whose saved answer is graded
+    again (``_MASKED_REGRADE_KINDS``) and not a ``transport_*`` verify call.
     """
     if (
         row.get("mask_sample") is not True
@@ -329,9 +331,33 @@ def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
         or kind.startswith("transport_")
     ):
         return None
-    if _keeps_saved_answer(row):
-        return None
     return kind
+
+
+def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
+    """The kind of a masked result that infrastructure, not the evaluated model, left unmeasured; else None.
+
+    A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
+    reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
+    run. When the kind is evaluation-side (``is_evaluation_side``) the rollout is retried like an infrastructure
+    failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
+    model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
+    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. So does a
+    saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its verifier could grade of it.
+    """
+    kind = _masked_evaluation_side_kind(row)
+    return None if kind is None or _keeps_saved_answer(row) else kind
+
+
+def masked_kept_answer_kind(row: Mapping[str, Any]) -> str | None:
+    """The kind of a masked result that ``masked_infrastructure_kind`` rejects only for its saved answer and that has
+    no recorded grade (``has_recorded_grade``); else None.
+
+    The part of ``masked_without_artifact_kind`` that the Store can decide: the planner adds that no re-verification
+    cause applies. A graded result is a result and stays one.
+    """
+    kind = _masked_evaluation_side_kind(row)
+    return kind if kind is not None and _keeps_saved_answer(row) and not has_recorded_grade(row) else None
 
 
 def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:
@@ -572,6 +598,36 @@ def load_attempt_extension(output_fpath: str | Path) -> int:
         return int(text)
     except (ValueError, OSError) as error:
         raise ConfigError(f"Cannot read the recorded attempt extension {path}: {error}") from error
+
+
+def load_rerun_masked_approvals(output_fpath: str | Path) -> frozenset[tuple[int, int, int]]:
+    """The masked results an operator approved to run again (`--rerun-masked-without-artifact`): each approved
+    attempt as (task index, rollout index, attempt index); empty when none.
+
+    An approval names the attempt it covered, so a later attempt of the same rollout is never reopened by it. A line
+    or entry that cannot be read approves nothing: the default is that a saved answer is never sampled again.
+    """
+    path = rerun_masked_journal_path_for(Path(output_fpath))
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return frozenset()
+    approved = set()
+    for line in lines:
+        try:
+            entries = json.loads(line)["identities"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        for entry in entries if isinstance(entries, list) else ():
+            identity = entry.get("identity") if isinstance(entry, dict) else None
+            attempt = entry.get("attempt") if isinstance(entry, dict) else None
+            if (
+                isinstance(identity, list)
+                and len(identity) == 2
+                and all(type(value) is int and value >= 0 for value in (*identity, attempt))
+            ):
+                approved.add((identity[0], identity[1], attempt))
+    return frozenset(approved)
 
 
 def record_resubmit_offset(output_fpath: str | Path) -> int:

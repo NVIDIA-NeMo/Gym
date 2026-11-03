@@ -95,6 +95,7 @@ class BaseExecutor(ABC):
         operator_budget: OperatorBudget | None = None,
         server_spinup_timeout_seconds: int | None = None,
         spinup_timeout_reason: str | None = None,
+        rerun_masked_without_artifact: bool = False,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Decide from the run's persisted evidence, and return what was collected; without a collector, stop.
 
@@ -173,12 +174,15 @@ class BaseExecutor(ABC):
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
         fresh_restart: bool = False,
+        rerun_masked: Mapping[str, Any] | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark` of `record` again, in place, and return its updated entry.
 
         ``keep_budget`` (used by recovery) keeps the run's spent retry, walltime and attempt budget instead of
         starting a fresh one. ``fresh_restart`` (used by recovery of a run with no task inventory) starts a fresh
-        one with the longer ``max_walltime``.
+        one with the longer ``max_walltime``. ``rerun_masked`` (with ``keep_budget``) is the approval to run again the
+        masked results it names (``reason`` and ``identities``), journaled with the run's artifacts before the job is
+        queued and undone if it is not.
 
         Refuses while a job of that benchmark is still active, so two jobs never write one run.
         Persists the updated record before returning. An executor that cannot do this raises
