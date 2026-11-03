@@ -202,6 +202,13 @@ class TestModelSampling:
                     "harness_url": f"{self.base_url_for_run('http://model-host:8000', body)}/v1",
                     "model_url": self.resolve_model_base_url("policy_model", self.rollout_id_from_run(body)),
                 }
+                seen["untrained"] = {
+                    "model_path": self.url_path_for_run("/v1/chat/completions", body, trained=False),
+                    "harness_url": f"{self.base_url_for_run('http://model-host:8000', body, trained=False)}/v1",
+                    "model_url": self.resolve_model_base_url(
+                        "policy_model", self.rollout_id_from_run(body), trained=False
+                    ),
+                }
                 return {}
 
         client = MagicMock(spec=ServerClient)
@@ -235,6 +242,26 @@ class TestModelSampling:
             "self_call": "/v1/responses",
             "harness_url": "http://model-host:8000/v1",
             "model_url": "http://model-host:8000/v1",
+        }
+
+    def test_a_role_the_framework_does_not_train_gets_null_in_a_run_with_values(self) -> None:
+        agent, seen = self._agent()
+        row = {"_ng_task_index": 3, "_ng_rollout_index": 1, "responses_create_params": {"input": "task"}}
+
+        TestClient(agent.setup_webserver()).post("/run", json=row | {"_ng_model_sampling": self.VALUES})
+
+        assert seen["untrained"] == {
+            "model_path": "/ng-rollout/3-1/ng-sampling/null/v1/chat/completions",
+            "harness_url": "http://model-host:8000/ng-rollout/3-1/ng-sampling/null/v1",
+            "model_url": "http://model-host:8000/ng-rollout/3-1/ng-sampling/null/v1",
+        }
+
+        # Gym-only evaluation sends no values, so no role gets a segment.
+        TestClient(agent.setup_webserver()).post("/run", json=row)
+        assert seen["untrained"] == {
+            "model_path": "/ng-rollout/3-1/v1/chat/completions",
+            "harness_url": "http://model-host:8000/ng-rollout/3-1/v1",
+            "model_url": "http://model-host:8000/ng-rollout/3-1/v1",
         }
 
     @pytest.mark.parametrize("capture", ["", "/training-token-capture"])
