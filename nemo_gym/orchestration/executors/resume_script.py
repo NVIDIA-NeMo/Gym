@@ -809,7 +809,7 @@ _EPILOGUE_TEMPLATE = """\
 # --- A job that finishes the run ends its own chain ---
 _gym_driver_rc=$?
 _gym_end_own_chain() {{
-    local _rc=$1 _ended=run_complete _role _file _id _result _cancelled="" _kind=""
+    local _rc=$1 _ended=run_complete _role _file _id _result _cancelled="" _kind="" _superseded=""
     # A failure kind the follow-up's prologue turns into its own stop and remedy (its guard): that job keeps its
     # follow-up. Any other kind, or none, gets no stop from the follow-up.
     _file="$OUTPUT_DIR/{driver_failure_name}.$SLURM_JOB_ID"
@@ -831,8 +831,12 @@ _gym_end_own_chain() {{
     elif [[ $_rc != 0 ]] || ! _gym_run_complete; then
         return $_rc
     # This job COMPLETEs: Slurm would cancel its afternotok follow-up, and the follow-up's sentinel would then start on
-    # a full allocation only to write the record below and exit. A deliberate stop already in the marker stays.
-    elif [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+    # a full allocation only to write the record below and exit. A stop the chain recorded earlier (a refused
+    # follow-up, unknown accounting, a cap) described a run with rollouts missing; the complete run supersedes it.
+    else
+        if [[ -s "$_incomplete_file" ]] && ! grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+            _superseded=$(head -n 1 "$_incomplete_file" 2>/dev/null | cut -c1-300)
+        fi
         if _gym_export_required && ! _gym_receipt_current; then
             _ended={export_receipt_missing}
             echo "{export_receipt_missing_reason}" > "$_incomplete_file"
@@ -840,9 +844,11 @@ _gym_end_own_chain() {{
         else
             rm -f "$_incomplete_file"
             echo "Run complete: the Store covers all $_gym_complete_rollouts expected rollouts and $_gym_export_note; job $SLURM_JOB_ID ends the chain with nothing to recover."
+            if [[ -n "$_superseded" ]]; then
+                _ended=run_complete_stop_superseded
+                echo "The chain's earlier stop no longer applies: $_superseded"
+            fi
         fi
-    else
-        _ended=run_complete_stop_kept
     fi
     # The sentinel first: once its follow-up is gone, its afterany dependency is met and it could start.
     for _role in sentinel follow_up; do

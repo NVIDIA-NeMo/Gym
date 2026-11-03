@@ -1721,9 +1721,18 @@ def test_a_segment_that_completes_the_run_without_its_export_receipt_writes_the_
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-def test_a_segment_that_completes_the_run_keeps_a_deliberate_stop(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "stop",
+    [
+        "Accumulated walltime reached the cap; continue with gym eval resubmit --recover.",
+        # As a segment left it when its follow-up submission got no definite reply and the run then completed.
+        f"{ACCOUNTING_UNKNOWN_PREFIX} Follow-up submission may have succeeded without an observed reply.",
+        f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit",
+    ],
+    ids=["walltime-cap", "accounting-unknown", "follow-up-refused"],
+)
+def test_a_segment_that_completes_the_run_supersedes_an_earlier_stop(tmp_path, monkeypatch, stop):
     _segment_finishing_the_run(tmp_path, monkeypatch)
-    stop = "Accumulated walltime reached the cap; continue with gym eval resubmit --recover."
     result = _run_prologue(
         tmp_path,
         ResumeConfig(),
@@ -1733,11 +1742,12 @@ def test_a_segment_that_completes_the_run_keeps_a_deliberate_stop(tmp_path, monk
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == stop + "\n"
-    assert "Run complete" not in result.stdout
+    # A complete run leaves no incomplete-chain marker; the job log and the journal say what it superseded.
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+    assert "Run complete" in result.stdout and f"The chain's earlier stop no longer applies: {stop}" in result.stdout
     assert _scancel_calls(tmp_path) == ["998", "999"]
     [entry] = _chain_end_entries(tmp_path)
-    assert entry["ended"] == "run_complete_stop_kept"
+    assert entry["ended"] == "run_complete_stop_superseded"
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
