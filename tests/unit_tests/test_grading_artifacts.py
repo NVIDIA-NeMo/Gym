@@ -44,6 +44,7 @@ NO_FACTS = {
     "guarded_objectives": None,
     "native_score": None,
     "saved_model_patch": None,
+    "collected_patch": False,
 }
 
 

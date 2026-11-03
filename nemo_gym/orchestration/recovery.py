@@ -1569,6 +1569,10 @@ def saved_model_patch(r):
         return None
     patch, digest = r.get("model_patch"), r.get("model_patch_sha256")
     return isinstance(patch, str) and isinstance(digest, str) and hashlib.sha256(patch.encode("utf-8")).hexdigest() == digest
+def collected_patch(r):
+    # Whether the row's verifier collected the agent's workspace patch itself and timed it (patch_collection_time_s and
+    # verification_time_s): the verify response of a verifier that grades a collected patch on a fresh sandbox.
+    return all(type(r.get(k)) in (int, float) for k in ("patch_collection_time_s", "verification_time_s"))
 def judge_verdicts(value):
     # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
     # not parse; the label text stays local.
@@ -1628,6 +1632,7 @@ def grading_facts(r):
         "guarded_objectives": guarded_objectives(r),
         "native_score": native_score(r),
         "saved_model_patch": saved_model_patch(r),
+        "collected_patch": collected_patch(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -6384,12 +6389,15 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
 
 
 def _saved_model_patch(row: Mapping[str, Any]) -> bool:
-    """Whether the row saved the workspace patch its verifier graded, intact: the collector's projected fact, else the
-    same check on a full saved row (``saved_model_patch``)."""
+    """Whether the row saved, intact, the workspace patch its verifier collected and graded: the collector's projected
+    facts, else the same checks on a full saved row (``saved_model_patch``, ``collected_patch``). Only a verifier that
+    collects the patch itself can be given it back; one that reads the agent session at verify time cannot."""
     facts = row.get("_ng_collected_grading_facts")
     if isinstance(facts, Mapping) and "saved_model_patch" in facts:
-        return facts["saved_model_patch"] is True
-    return _collector_function("saved_model_patch")(row) is True
+        return facts["saved_model_patch"] is True and facts.get("collected_patch") is True
+    return (
+        _collector_function("saved_model_patch")(row) is True and _collector_function("collected_patch")(row) is True
+    )
 
 
 def reverification_cause(row: Mapping[str, Any]) -> str | None:
