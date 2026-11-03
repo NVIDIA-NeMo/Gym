@@ -69,6 +69,19 @@ MANIFEST_NAME = "gym-job.json"
 # without the file they were applied to.
 RESOLVED_CONFIG_NAME = "resolved-config.yaml"
 
+# What a benchmark's directory (`<run dir>/<benchmark>/`) holds, by name. The executors create it, the job script
+# writes into it and the exports read from it, so the names live in one place.
+LOGS_DIRNAME = "logs"
+ARTIFACTS_DIRNAME = "artifacts"
+EXPORTS_DIRNAME = "exports"
+ROLLOUTS_FILENAME = "rollouts.jsonl"
+# The exit code of `gym eval run`, which is also the job's.
+EVAL_EXIT_FILENAME = "eval.exit"
+# Created by the export tail when the evaluation succeeded; one file per attempt, so `.<Slurm job id>` follows.
+EVAL_SUCCEEDED_FILENAME = "eval.succeeded"
+# `<exports dir>/<exporter><suffix>`: the outcome of one export.
+EXPORT_RESULT_SUFFIX = ".result.json"
+
 
 # The nemo_gym package directory of the code that is running, however it got
 # onto sys.path: an install, an editable checkout, or a plain source tree.

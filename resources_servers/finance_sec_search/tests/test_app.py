@@ -41,7 +41,8 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.server_runtime.request_handling.session_routing import ResourcesSessionLifetimes
 from nemo_gym.testing.session_conformance import check_resources_session_contract
-from nemo_gym.verification import JudgeError
+from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
@@ -1537,7 +1538,7 @@ class TestVerify:
 
     @pytest.mark.asyncio
     async def test_verify_judge_call_failure_raises_after_retries(self, tmp_path) -> None:
-        """Judge HTTP call failing on every retry → JudgeError, so judge_failsafe
+        """Judge HTTP call failing on every retry → a judge failure, so judge_failsafe
         routes it to the failures sidecar instead of scoring 0.0."""
         server = self._create_server_with_judge(tmp_path)
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge unavailable"))
@@ -1547,8 +1548,9 @@ class TestVerify:
         )
         req = self._make_verify_request(response, "$391.0 billion")
         with patch("resources_servers.finance_sec_search.app.asyncio.sleep", AsyncMock()):
-            with pytest.raises(JudgeError, match="judge unavailable"):
+            with pytest.raises(NgFailureEvent, match="judge unavailable") as failure:
                 await server.verify(self._mock_request(), req)
+            assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_verify_extracts_answer_from_submit_tool(self, tmp_path) -> None:
