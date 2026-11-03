@@ -35,6 +35,9 @@ from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -48,12 +51,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.core.failure_kinds import (
-    PROVIDER_IO_TIMEOUT,
-    PROVIDER_OOM_KILLED,
-    PROVIDER_STATUS_UNAVAILABLE,
-    PROVIDER_UNAVAILABLE,
-)
+from nemo_gym.core.failure_kinds import PROVIDER_STATUS_UNAVAILABLE
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
 from nemo_gym.server_runtime import SandboxFailureDetails
 from nemo_gym.trajectory import (
@@ -620,7 +618,14 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
-        sandbox_mock.download = AsyncMock()
+
+        async def download(remote_path, local_path):
+            if str(remote_path).endswith(".json"):
+                Path(local_path).write_text(json.dumps({"messages": [{"info": {"role": "assistant"}, "parts": []}]}))
+            else:
+                raise FileNotFoundError(remote_path)
+
+        sandbox_mock.download = AsyncMock(side_effect=download)
         sandbox_mock.upload = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
@@ -927,7 +932,7 @@ class TestOpenCodeSandboxedAgent:
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
         )
 
-        with raises(error_type) as caught:
+        with raises(type(upload_error)) as caught:
             await server.run(request, body)
 
         assert caught.value is upload_error
@@ -1764,12 +1769,12 @@ class TestBenchmarkLifecycle:
         ("agent_result", "message"),
         [
             (
-                SimpleNamespace(stdout=None, stderr=app_module.DELETED_OUTPUT_NOTE, return_code=0, error_type=None),
-                "output was deleted",
+                SimpleNamespace(stdout=None, stderr="Command output was deleted", return_code=0, error_type=None),
+                "missing its launch marker",
             ),
             (
-                SimpleNamespace(stdout=None, stderr=app_module.DELETED_OUTPUT_NOTE, return_code=3, error_type=None),
-                "output was deleted",
+                SimpleNamespace(stdout=None, stderr="Command output was deleted", return_code=3, error_type=None),
+                "missing its launch marker",
             ),
             (
                 SimpleNamespace(stdout="Shell: bash\npartial", stderr="", return_code=0, error_type=None),
@@ -1999,7 +2004,7 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
         download=AsyncMock(),
         exec=AsyncMock(
             side_effect=[
-                SimpleNamespace(stdout="", stderr="MCP unavailable", return_code=1, error_type=None),
+                SimpleNamespace(stdout="Shell: /bin/bash", stderr="MCP unavailable", return_code=1, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None),
             ]
         ),
@@ -2270,8 +2275,9 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
     with raises(NgFailureEvent) as caught:
         await server.responses(request, body)
-    assert caught.value.failure_kind == "agent_route_failed"
-    assert caught.value.operation == "agent.sandbox_exec"
+    assert caught.value.boundary == "harness"
+    assert caught.value.failure_kind == "agent_invalid_output"
+    assert caught.value.operation == "opencode.execute"
     sandbox.exec.assert_awaited_once()
     sandbox.download.assert_not_awaited()
     server.server_client.post.assert_not_called()

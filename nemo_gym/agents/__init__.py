@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         restricted_network_policy,
         sandbox_server_url,
         seed_mcp_servers,
+        verification_failure_fields,
         verify_agent_response,
     )
     from nemo_gym.agents.base_responses_api_agent import (
@@ -134,6 +135,7 @@ _PUBLIC_API = {
     "shell_assignments": "utils.sandbox_session",
     "stage_skills": "skills",
     "uv_for_sandbox": "utils.uv_bootstrap",
+    "verification_failure_fields": "agent_tools",
     "verify_agent_response": "agent_tools",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
