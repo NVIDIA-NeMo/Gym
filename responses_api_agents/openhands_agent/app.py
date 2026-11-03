@@ -417,6 +417,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 model_ref=self.config.model_server,
                 conversation=conversation,
                 outcome=outcome,
+                sandbox_id=state.session.sandbox.sandbox_id,
             )
             bundle = AgentObservationBundle(source="openhands", records=evidence.records, gaps=evidence.gaps)
         except Exception:
@@ -434,6 +435,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 SandboxObservation(
                     role="agent",
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
+                    sandbox_id=state.session.sandbox.sandbox_id,
                     outcome="timeout"
                     if cleanup["timed_out"]
                     else "cancelled"

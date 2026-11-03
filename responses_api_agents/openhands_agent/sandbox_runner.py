@@ -52,6 +52,24 @@ def describe_error(error: BaseException) -> list[dict[str, object]]:
     return chain
 
 
+def write_inputrc(state_dir: str) -> str:
+    """Write a readline file that keeps the task's own settings and turns bracketed paste off.
+
+    OpenHands 1.59.0's subprocess terminal leaves the bracketed-paste escape codes that bash 5.1 and later
+    print around each command in the tool output the model reads.
+    """
+    lines = []
+    # Readline reads INPUTRC instead of ~/.inputrc or /etc/inputrc, so include the one it would have read.
+    for candidate in (os.path.expanduser("~/.inputrc"), "/etc/inputrc"):
+        if os.path.isfile(candidate):
+            lines.append(f"$include {candidate}")
+            break
+    lines.append("set enable-bracketed-paste off")
+    path = f"{state_dir}/inputrc"
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def _write_json(path: str, payload: dict[str, object]) -> None:
     temporary = f"{path}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -102,7 +120,11 @@ def main(argv: list[str]) -> int:
         # The subprocess terminal keeps every tool shell a child of this process. The tmux backend would start a
         # tmux server that daemonizes out of the supervised process group and outlives the run.
         # Bash history goes to the session directory instead of the task's home.
-        terminal = {"terminal_type": "subprocess", "env": {"HISTFILE": f"{config['state_dir']}/bash_history"}}
+        terminal_env = {
+            "HISTFILE": f"{config['state_dir']}/bash_history",
+            "INPUTRC": write_inputrc(config["state_dir"]),
+        }
+        terminal = {"terminal_type": "subprocess", "env": terminal_env}
         tools = [
             Tool(name=TerminalTool.name, params=terminal),
             Tool(name=FileEditorTool.name),

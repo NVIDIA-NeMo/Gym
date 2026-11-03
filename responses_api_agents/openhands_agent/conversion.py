@@ -160,11 +160,13 @@ def _response_ids(events: Iterable[tuple[float, dict[str, Any]]]) -> list[str]:
     return list(seen)
 
 
-def token_usages(result: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every per-call usage record OpenHands kept, across the agent and condenser LLMs."""
+def token_usages(result: Optional[dict[str, Any]], usage_id: Optional[str] = None) -> list[dict[str, Any]]:
+    """Per-call usage records OpenHands kept, for one LLM (``agent`` or ``condenser``) or for all of them."""
     stats = (result or {}).get("stats") or {}
     usages = []
-    for metrics in (stats.get("usage_to_metrics") or {}).values():
+    for name, metrics in (stats.get("usage_to_metrics") or {}).items():
+        if usage_id is not None and name != usage_id:
+            continue
         for usage in (metrics or {}).get("token_usages") or []:
             if isinstance(usage, dict) and isinstance(usage.get("response_id"), str) and usage["response_id"]:
                 usages.append(usage)
@@ -282,6 +284,7 @@ def observation_records(
     model_ref: Optional[ModelServerRef],
     conversation: list[Any],
     outcome: RunOutcome,
+    sandbox_id: Optional[str] = None,
 ) -> EvidenceRecords:
     """The invocation, its tool calls and context compactions, and gaps for what the events do not show."""
     evidence = EvidenceRecords()
@@ -289,12 +292,22 @@ def observation_records(
     def gap(code: str, detail: Optional[str] = None) -> None:
         evidence.gaps.append(ObservationGap(code=code, invocation_id=invocation_id, detail=detail))
 
-    usages = token_usages(result)
-    response_ids = list(dict.fromkeys([*_response_ids(events), *(usage["response_id"] for usage in usages)]))
+    # Policy calls are the agent's own; condenser summaries belong to their compaction records, not to steps.
+    compaction_ids = {
+        event["llm_response_id"]
+        for _, event in events
+        if event["kind"] == "Condensation" and isinstance(event.get("llm_response_id"), str)
+    }
+    agent_ids = [usage["response_id"] for usage in token_usages(result, "agent")]
+    response_ids = [
+        response_id
+        for response_id in dict.fromkeys([*_response_ids(events), *agent_ids])
+        if response_id not in compaction_ids
+    ]
     model_calls = [ModelCallRef(model_ref=model_ref, response_id=response_id) for response_id in response_ids]
     if result is None:
         gap("run_result_unavailable")
-    elif not usages:
+    elif not token_usages(result):
         gap("model_call_usage_unavailable")
     started, ended = (result or {}).get("started_at"), (result or {}).get("ended_at")
     duration_ms = (
@@ -331,6 +344,7 @@ def observation_records(
                 ToolCallObservation(
                     invocation_id=invocation_id,
                     tool_call_id=call_id,
+                    sandbox_id=sandbox_id,
                     tool_name=tool_name,
                     started_at=started_at,
                     completed_at=completed_at,
@@ -344,6 +358,7 @@ def observation_records(
                 ToolCallObservation(
                     invocation_id=invocation_id,
                     tool_call_id=call_id,
+                    sandbox_id=sandbox_id,
                     tool_name=tool_name,
                     started_at=started_at,
                     timing_source="harness",

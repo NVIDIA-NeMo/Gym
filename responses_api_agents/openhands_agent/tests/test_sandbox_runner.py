@@ -156,8 +156,12 @@ def test_finished_run_records_events_result_and_the_harness_configuration(tmp_pa
     # The subprocess terminal keeps tool shells in the supervised process tree; history stays in the session.
     assert terminal == {
         "name": "terminal",
-        "params": {"terminal_type": "subprocess", "env": {"HISTFILE": str(session / "state/bash_history")}},
+        "params": {
+            "terminal_type": "subprocess",
+            "env": {"HISTFILE": str(session / "state/bash_history"), "INPUTRC": str(session / "state/inputrc")},
+        },
     }
+    assert (session / "state/inputrc").read_text().endswith("set enable-bracketed-paste off\n")
     condenser_llm = [entry["llm"] for entry in log if "llm" in entry][1]
     assert condenser_llm["base_url"] == "http://model/ng-rollout/r/v1" and condenser_llm["usage_id"] == "condenser"
     assert {"closed": True} in log
@@ -186,3 +190,14 @@ def test_sigterm_keeps_partial_events_and_closes_the_terminal(tmp_path, stub):
     assert result["status"] == "terminated"
     assert [event["kind"] for _, event in events(session)] == ["MessageEvent", "ActionEvent"]
     assert {"closed": True} in notes(tmp_path)
+
+
+def test_inputrc_keeps_the_task_readline_file_and_turns_bracketed_paste_off(tmp_path, monkeypatch):
+    from responses_api_agents.openhands_agent.sandbox_runner import write_inputrc
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (home / ".inputrc").write_text("set bell-style none\n")
+    path = write_inputrc(str(tmp_path))
+    assert Path(path).read_text() == f"$include {home / '.inputrc'}\nset enable-bracketed-paste off\n"

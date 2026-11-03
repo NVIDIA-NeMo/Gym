@@ -86,7 +86,7 @@ the task's workdir. The interpreter runs as `openhands-gym`, so `pkill python3` 
 cannot stop it. The runner builds the agent the way OpenHands' default preset does (terminal, file editor,
 task tracker, default condenser, CLI-mode system prompt) with two deliberate changes: the terminal uses the
 subprocess backend, because the tmux backend starts a tmux server that daemonizes out of the supervised
-process group, and bash history goes to the session directory. It appends each OpenHands event to
+process group; bash history goes to the session directory; and bracketed paste is turned off (see below). It appends each OpenHands event to
 `events.jsonl` as it happens and writes `result.json` at the end. The supervisor's SIGTERM, at the deadline
 or on close, makes the runner write its result and close the terminal before it exits.
 
@@ -102,7 +102,9 @@ observation bundle, with an `agent_activation_interrupted` gap when no activatio
 - OpenHands' per-user directory (`~/.openhands`) is moved into the session directory with
   `OH_PERSISTENCE_DIR`; nothing is written under the task's home. Tool shells keep the task's `HOME` and
   `XDG_*` directories. They also see `OH_PERSISTENCE_DIR`, `OPENHANDS_SUPPRESS_BANNER`, OpenHands' own
-  `AI_AGENT=openhands` and `HISTFILE`.
+  `AI_AGENT=openhands`, `HISTFILE` and `INPUTRC`. `INPUTRC` points at a session file that includes the
+  readline file bash would have read (`~/.inputrc` or `/etc/inputrc`) and turns bracketed paste off: at 1.59.0
+  the subprocess terminal otherwise leaves bash 5.1+'s `ESC[?2004h` codes in the tool output.
 
 ## Responses and outcomes
 
@@ -134,6 +136,9 @@ runner saw the action and its result), a `ContextCompactionObservation` for each
 
 - Resources Server tool grants (MCP or direct HTTP) are not supported; required grants are refused.
 - The sandbox needs PyPI access at seed; there is no offline install yet.
+- Tool commands run as the task's user and can see the runtime. In the TB2.1 smoke, the agent found the
+  runtime's Python with `find / -name "python*"` in an image without Python and used it to test its answer.
+  The task's verifier never uses it, but the agent had an interpreter the task image does not provide.
 - Token IDs are not captured, so the adapter is evaluation only.
 - Browser tools and sub-agents are not enabled.
 - `prompt_cache_key` is sent as OpenHands sends it; Gym's Chat Completions schema accepts it.

@@ -251,4 +251,5 @@ def test_condensation_records_its_summary_call_and_neighbors():
     assert [call.response_id for call in compaction.model_calls] == ["s1"]
     assert compaction.before_model_call.response_id == "r1"
     assert compaction.after_model_call.response_id == "r2"
-    assert "s1" in [call.response_id for call in evidence.records[0].model_calls]
+    # The summary call belongs to the compaction, not to a policy step of the invocation.
+    assert [call.response_id for call in evidence.records[0].model_calls] == ["r1", "r2"]

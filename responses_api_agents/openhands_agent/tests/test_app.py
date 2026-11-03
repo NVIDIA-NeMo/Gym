@@ -158,6 +158,7 @@ def session_state(**session):
         "cleanup": {"timed_out": False, "return_code": 0, "cleanup_confirmed": True, "error": None},
         "artifacts": None,
         "expired": False,
+        "sandbox": SimpleNamespace(sandbox_id="nemo-gym-task"),
     }
     return adapter.OpenHandsSandboxSession(
         request=seed(), session=SimpleNamespace(**{**defaults, **session}), interpreter="/rt/interp/bin/openhands-gym"
@@ -287,6 +288,11 @@ async def test_deadline_keeps_partial_work_as_incomplete(monkeypatch):
     assert [item.type for item in response.output] == ["function_call", "function_call_output"]
     sandbox = state.observations.records[-1]
     assert (sandbox.kind, sandbox.outcome, sandbox.exit_code) == ("sandbox", "timeout", 143)
+    # Rollout evidence identifies the sandbox the harness and its tools ran in.
+    assert sandbox.sandbox_id == "nemo-gym-task"
+    assert {record.sandbox_id for record in state.observations.records if record.kind == "tool_call"} == {
+        "nemo-gym-task"
+    }
 
 
 @pytest.mark.asyncio
