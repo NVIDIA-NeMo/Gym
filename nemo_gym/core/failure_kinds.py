@@ -132,7 +132,7 @@ PROVIDER_COMMAND_TIMEOUT = "provider_command_timeout"
 PROVIDER_COMMAND_OUTCOME_UNKNOWN = "provider_command_outcome_unknown"
 # The budget for obtaining an already-submitted command's status expired.
 PROVIDER_STATUS_UNAVAILABLE = "provider_status_unavailable"
-# A transport failure or unavailable-backend HTTP response.
+# A transport failure, unavailable-backend HTTP response or structured endpoint-unavailability report.
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
 # Authoritative current-workload OOM evidence. OpenSandbox requires an explicit terminal

@@ -29,11 +29,11 @@ from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreami
 from nemo_gym.sandbox import (
     ConnectableProvider,
     LocalProvider,
-    SandboxBackendUnreachableError,
     SandboxCreateError,
     SandboxExecResult,
     SandboxSpec,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.harness_agent.app import (
     _RUN_CONTEXT,
     HarnessAgent,
@@ -720,12 +720,19 @@ def _sdk_exception(message: str) -> Exception:
     [
         (
             _sdk_exception('HTTP 410: {"code":"SANDBOX::ENDED","message":"container sandbox exited with code 137"}'),
-            "provider_oom_killed",
+            "provider_unavailable",
         ),
         (_sdk_exception('HTTP 410: {"code":"SANDBOX::ENDED","message":"pod evicted"}'), "provider_unavailable"),
-        (SandboxBackendUnreachableError("exec submission returned 502 three times"), "provider_unavailable"),
         (
-            SandboxBackendUnreachableError("Sandbox was OOM-killed. OpenSandbox status: message='out of memory'"),
+            NgFailureEvent(
+                boundary="sandbox", failure_kind="provider_unavailable", failure_reason="Backend unavailable"
+            ),
+            "provider_unavailable",
+        ),
+        (
+            NgFailureEvent(
+                boundary="sandbox", failure_kind="provider_oom_killed", failure_reason="Confirmed sandbox OOM"
+            ),
             "provider_oom_killed",
         ),
         (SandboxCreateError("pod never scheduled"), "provider_unavailable"),
@@ -767,7 +774,7 @@ async def test_sandbox_ending_mid_episode_masks_the_rollout_instead_of_failing_r
     assert result.mask_sample is True
     assert result.reward == 0.0
     assert result.evaluation_completed is False
-    assert result.failure_kind == "provider_oom_killed"
+    assert result.failure_kind == "provider_unavailable"
     assert "SANDBOX::ENDED" in result.failure_reason
     assert result.task_id == "task-1"
 
@@ -800,7 +807,9 @@ async def test_backend_loss_masks_the_rollout():
     body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     async def responses(_, __, ___):
-        raise SandboxBackendUnreachableError("Sandbox was OOM-killed. OpenSandbox status: message='out of memory'")
+        raise NgFailureEvent(
+            boundary="sandbox", failure_kind="provider_oom_killed", failure_reason="Confirmed sandbox OOM"
+        )
 
     with (
         patch.object(HarnessAgent, "responses", new=responses),
