@@ -137,23 +137,23 @@ def test_combine_enforces_the_configured_gate_across_checkout_roots(tmp_path, mo
 
 def test_workflow_requires_all_shards_sandbox_and_coverage_and_preserves_routing():
     jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-    core = jobs["core-tests"]
+    core = jobs["test"]
     assert core["strategy"] == {"fail-fast": False, "matrix": {"shard": [0, 1, 2, 3]}}
     assert any('core_unit_tests.sh "${{ matrix.shard }}" 4' in step.get("run", "") for step in core["steps"])
-    for job in ("core-tests", "sandbox-tests"):
+    for job in ("test", "sandbox-tests"):
         upload = next(step for step in jobs[job]["steps"] if "upload-artifact@" in step.get("uses", ""))
         assert upload["with"]["include-hidden-files"] is True
         assert upload["with"]["if-no-files-found"] == "error"
-    assert jobs["core-coverage"]["needs"] == ["core-tests", "sandbox-tests"]
-    assert set(jobs["test"]["needs"]) == {
+    assert jobs["core-coverage"]["needs"] == ["test", "sandbox-tests"]
+    assert set(jobs["test-result"]["needs"]) == {
         "detect",
-        "core-tests",
+        "test",
         "sandbox-tests",
         "core-coverage",
         "changed-server-tests",
     }
-    assert jobs["test"]["name"] == "Test"
-    assert jobs["test"]["if"] == "always()"
+    assert jobs["test-result"]["name"] == "Test"
+    assert jobs["test-result"]["if"] == "always()"
     assert jobs["changed-server-tests"]["if"] == "needs.detect.outputs.run_servers == 'true'"
     assert jobs["server-suite"]["strategy"]["matrix"]["shard"] == list(range(8))
 
@@ -163,7 +163,7 @@ def test_workflow_requires_all_shards_sandbox_and_coverage_and_preserves_routing
 )
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_existing_test_gate_fails_closed(failed, result):
-    command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test"]["steps"][0]["run"]
+    command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test-result"]["steps"][0]["run"]
     env = {
         name: "success"
         for name in ("DETECT_RESULT", "CORE_RESULT", "SANDBOX_RESULT", "COVERAGE_RESULT", "SERVERS_RESULT")
@@ -176,7 +176,7 @@ def test_existing_test_gate_fails_closed(failed, result):
 
 
 def test_docs_only_gate_needs_successful_detection_but_no_tests():
-    command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test"]["steps"][0]["run"]
+    command = yaml.safe_load(WORKFLOW.read_text())["jobs"]["test-result"]["steps"][0]["run"]
     completed = subprocess.run(
         ["bash", "-c", command], env={"DETECT_RESULT": "success", "RUN_FULL": "false", "RUN_SERVERS": "false"}
     )

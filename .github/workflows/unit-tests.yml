@@ -73,7 +73,7 @@ jobs:
             tests/e2e/session_routing/**
 
   # Four isolated runners keep file-scoped fixtures, ports, Ray, and subprocesses private.
-  core-tests:
+  test:
     name: Core tests (shard ${{ matrix.shard }})
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
@@ -178,7 +178,7 @@ jobs:
 
   core-coverage:
     name: Combined core coverage
-    needs: [core-tests, sandbox-tests]
+    needs: [test, sandbox-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -272,10 +272,10 @@ jobs:
           fi
 
   # Preserve the existing required check name; fail closed on missing or failed work.
-  test:
+  test-result:
     name: Test
     timeout-minutes: 45
-    needs: [detect, core-tests, sandbox-tests, core-coverage, changed-server-tests]
+    needs: [detect, test, sandbox-tests, core-coverage, changed-server-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -284,7 +284,7 @@ jobs:
           DETECT_RESULT: ${{ needs.detect.result }}
           RUN_FULL: ${{ needs.detect.outputs.run_full }}
           RUN_SERVERS: ${{ needs.detect.outputs.run_servers }}
-          CORE_RESULT: ${{ needs.core-tests.result }}
+          CORE_RESULT: ${{ needs.test.result }}
           SANDBOX_RESULT: ${{ needs.sandbox-tests.result }}
           COVERAGE_RESULT: ${{ needs.core-coverage.result }}
           SERVERS_RESULT: ${{ needs.changed-server-tests.result }}
