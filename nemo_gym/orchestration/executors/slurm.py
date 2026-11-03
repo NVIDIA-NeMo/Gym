@@ -488,6 +488,19 @@ def _remote_reader_bound_s() -> int | None:
 # The heavy remote readers (the collector and the managed Store reader) can run in a Slurm step instead of on the
 # login host, which may allow each user one core. Unset, they run on the login host exactly as before.
 READER_SRUN_ENV = "NEMO_GYM_REMOTE_READER_SRUN"
+# How long a remote reader's cold install of the pinned Gym waits for uv's lock: the caller's UV_LOCK_TIMEOUT, else the
+# default a Gym run uses (global_config's uv_lock_timeout_seconds).
+_READER_UV_LOCK_TIMEOUT_DEFAULT_S = 1800
+
+
+def _reader_env_lines() -> list[str]:
+    """The settings a remote reader takes from its caller: the reader's command starts from a cleared environment on
+    another host, so without this a cold install there waits uv's own default for the lock and gives up early."""
+    raw = os.environ.get("UV_LOCK_TIMEOUT", "").strip()
+    lock_timeout = raw if raw.isdecimal() and int(raw) > 0 else str(_READER_UV_LOCK_TIMEOUT_DEFAULT_S)
+    return [f"export UV_LOCK_TIMEOUT={lock_timeout}"]
+
+
 READER_SRUN_WAIT_ENV = "NEMO_GYM_REMOTE_READER_SRUN_WAIT_S"
 READER_MAX_ENV = "NEMO_GYM_REMOTE_READER_MAX"
 # How long a reader waits for a slot when the user's reader steps are at the cap (0: it does not wait).
@@ -935,6 +948,7 @@ def _reader_command(
         ]
     steps = [
         "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+        *_reader_env_lines(),
         *([f"export {READER_TOKEN_ENV}={shlex.quote(token)}"] if token is not None else []),
         f"_gym_bytes=$(stat -c %s -- {sources} 2>/dev/null | awk '{{s += $1}} END {{print s + 0}}')",
         f"_gym_bound={size_bound}",
@@ -974,6 +988,8 @@ def _reader_command_in_step(
         run_login = [login, "_gym_rc=$?"]
     steps = [
         "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+        # Exported before srun, so the reader in its step gets them too.
+        *_reader_env_lines(),
         f"export {READER_TOKEN_ENV}={shlex.quote(token)}",
         *_bound_lines(job_dir, bound_s=bound_s, factor=factor),
         'echo "__GYM_READER_BOUND:$_gym_bound $_gym_bytes"',

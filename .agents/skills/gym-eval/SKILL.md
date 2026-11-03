@@ -163,6 +163,10 @@ for a run pinned at <old>"), and `--inspect` shows the same decision. `--no-auto
 pin and refuses that case, naming `--repin`; `--repin <full commit> --repin-reason "<why>"` stays the
 explicit way to move a run, and the repin target must be the Gym that runs the command.
 
+A remote reader installs the run's pinned Gym on the cluster's login host (or in its step) and takes
+your `UV_LOCK_TIMEOUT` for that install (default 1800 s); set it higher before an inspect on a host
+where many installs wait for the same uv lock.
+
 Where readers run in Slurm steps (`NEMO_GYM_REMOTE_READER_SRUN`), an inspect that could not read
 returns `UNKNOWN` with "nothing was read or decided". That is not a problem of the run: read the
 reason on stderr (`gym: the reader did not run: ...`). A reader at the per-user limit of reader steps
