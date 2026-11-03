@@ -79,10 +79,15 @@ From the client this is an ordinary command failure:
 
 ### The whole sandbox died
 
-OpenSandbox reports confirmed OOM as `NgFailureEvent(boundary="sandbox", failure_kind="provider_oom_killed")`.
-Both command execution and PTY loss use the same evidence collector: an explicit terminal `OOMKilled` lifecycle
-reason, or the opt-in inspect fallback's current user-container state. Message text, exit 137, historical state
-and sidecar OOMs are insufficient.
+When an OOM kill terminates the whole sandbox container, its exec daemon also stops.
+The next command request cannot reach it, and an attached PTY can lose its connection. Those symptoms
+also occur for other reasons, such as node loss or sandbox expiry.
+
+On command execution failure or PTY loss, Gym checks the sandbox's lifecycle status within the remaining
+diagnostic budget. An explicit terminal `OOMKilled` reason, or the opt-in inspect fallback's current
+user-container state, confirms OOM. Gym then raises
+`NgFailureEvent(boundary="sandbox", failure_kind="provider_oom_killed")` with the evidence source.
+Without that evidence, the event describes the observed request or command-outcome failure; it does not claim OOM.
 
 ```python
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
@@ -115,9 +120,11 @@ lookup cannot replace the original failure. Confirm support with the deployment 
 
 ### Counting OOMs across a run
 
-Count distinct saved failure-event IDs whose kind is `provider_oom_killed`. Do not count backend disconnects,
-legacy `sandbox_error` outcomes or exit code 137 as confirmed OOMs. Failed read attempts may also accompany a
-successful command: they remain observations and do not change its result or automatically make it unhealthy.
+Count distinct saved failure-event IDs whose kind is `provider_oom_killed` to measure confirmed sandbox OOMs.
+Group them by task ID to find tasks with repeated OOMs. Exit code 137 alone does not confirm OOM.
+
+Failed read attempts may also accompany a successful command: they remain observations and do not change
+its result or automatically make it unhealthy.
 
 ## Cluster-side checks
 
