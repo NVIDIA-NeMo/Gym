@@ -450,6 +450,12 @@ class RolloutStore:
                 f"Retry budget exhausted for {exhausted} rollout(s) at the cap of {max_attempts} counted failures. "
                 f"They will not be dispatched with this cap. Failures: {failures_path_for(self.output)}."
             )
+        stopped = self._state.stopped_count(max_attempts)
+        if stopped:
+            print(
+                f"{stopped} failed rollout(s) are not run again: a kept answer or a judge failure is left to "
+                f"verification recovery, an unclassified execution to recovery. Failures: {failures_path_for(self.output)}."
+            )
         rows = [dict(row, **{RUN_ID_KEY: self.manifest.run_id}) for row in self._state.pending(max_attempts)]
         elapsed = {}
         if dispatch_longest_first:

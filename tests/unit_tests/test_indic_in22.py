@@ -220,7 +220,7 @@ def _resolve_cli_config(config_names: list[str], flags: list[str] = ()) -> dict:
 
 def test_manifest_is_discoverable_under_its_catalog_path(monkeypatch: pytest.MonkeyPatch) -> None:
     from nemo_gym.environment import validation
-    from nemo_gym.registry import discover_environment_catalog, resolve_catalog_entry
+    from nemo_gym.environment.registry import discover_environment_catalog, resolve_catalog_entry
 
     # Check real catalog identity and configuration without downloading gated benchmark data.
     monkeypatch.setattr(validation, "_validate_dataset", lambda *args, **kwargs: None)
