@@ -69,19 +69,17 @@ from nemo_gym.core import (
     rollout_context,
 )
 from nemo_gym.failure_transport import FailureHeader
-from nemo_gym.models import (
-    CaptureAdmission,
+from nemo_gym.models import PolicyModelParticipant, VLLMWorkerCaptureHandler, generation_cut_requester
+from nemo_gym.models.token_capture import (
     CaptureContext,
     InMemoryLineageStore,
     ParentResolutionStatus,
-    PolicyModelParticipant,
     TokenCaptureStore,
-    VLLMWorkerCaptureHandler,
-    generation_cut_requester,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.models.token_capture.staging import CaptureAdmission
 from nemo_gym.rollouts import is_terminal_failure
 from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row
 from nemo_gym.server_runtime import (
