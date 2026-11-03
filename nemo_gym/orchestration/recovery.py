@@ -5665,6 +5665,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     rollout that records its own failure kind or whose judge recorded no verdict, or an observed grading without a
     valid verdict, by the cause its failure kind names (``trial_failure_cause``).
     """
+    decision = _health_view(decision)
     population = trial_population(decision)
     if population <= 0:
         return None
@@ -5787,6 +5788,7 @@ def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | N
     leaves out of its metric, such as an agent deadline that kept its answer, is a trial the metric did not cover.
     The denominator is the trial gate's: every expected trial, less the rows an accepted partial stage omitted.
     """
+    decision = _health_view(decision)
     from nemo_gym.rollout_collection import is_non_superseding_rollout_row
 
     declared = collected.benchmark_metric_coverage if collected is not None else None

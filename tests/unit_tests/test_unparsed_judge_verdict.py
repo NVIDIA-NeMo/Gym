@@ -83,6 +83,8 @@ def test_the_gate_counts_an_unparsed_judge_verdict_as_a_grading_fault_while_a_re
     assert report["evaluation"]["kinds"] == {"judge_unparseable": 1}
     assert task["trial_counts"]["unhealthy"] == 1 and task["trial_counts"]["observed_healthy"] == 99
     assert task["status"] == "PLANNED"
+    # The row's reward is in the metric while the re-judge is pending: coverage and failure facts count it as scored.
+    assert task["failures"]["metric_coverage"]["trials"] == 100
 
 
 def test_unparsed_judge_verdicts_at_the_limit_fail_evaluation_health():
@@ -204,6 +206,7 @@ def test_the_gate_counts_a_pairwise_row_with_a_game_lacking_its_verdict_as_judge
     passed, reason, report, task = _observed(collected)
     assert passed is True and report["exact"] is True, reason
     assert report["evaluation"]["kinds"] == {"judge_unparseable": 1}
+    assert task["trial_counts"]["unhealthy"] == 1 and task["trial_counts"]["observed_healthy"] == 99
     assert task["status"] == "PLANNED"
 
 
