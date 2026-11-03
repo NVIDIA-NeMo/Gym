@@ -418,3 +418,88 @@ def test_the_queue_wait_defaults_to_ten_minutes_and_zero_does_not_wait(
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN", "-p cpu")
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", raw)
     assert slurm.reader_step().queue_wait_s == expected
+
+
+_REFUSE_THEN_START_SRUN = """#!/bin/bash
+echo "$@" >> "$FAKE_LOG/srun"
+n=$(cat "$FAKE_LOG/refusals" 2>/dev/null || echo 0)
+if (( n > 0 )); then
+    echo $(( n - 1 )) > "$FAKE_LOG/refusals"
+    echo "srun: error: Unable to allocate resources: Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)" >&2
+    exit 1
+fi
+while [[ $# -gt 0 && $1 != bash ]]; do shift; done
+export SLURM_JOB_ID=4242
+exec "$@"
+"""
+
+
+@pytest.mark.parametrize("watched", [False, True], ids=["plain", "watched"])
+def test_a_reader_step_refused_by_a_submit_limit_is_submitted_again_until_it_starts(
+    fake_slurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, watched: bool
+) -> None:
+    log = fake_slurm(_REFUSE_THEN_START_SRUN)
+    (log / "refusals").write_text("2")
+    monkeypatch.setattr(slurm, "_READER_SRUN_RETRY_S", 1)
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", "30")
+    command = slurm._reader_command(
+        "bash -c 'cat <&3'",
+        tmp_path,
+        "PAYLOAD-LINE",
+        bound_s=300,
+        factor=1,
+        token="tok",
+        step=slurm.reader_step(),
+        watchdog=watched,
+    )
+
+    if watched:
+        # The watcher ends the reader when the shell's input closes: hold it open, as the recovery reader does.
+        result: dict[str, str] = {}
+        runner = threading.Thread(target=lambda: result.update(output=LocalConnection().run_with_input_held(command)))
+        runner.start()
+        runner.join(timeout=60)
+        assert not runner.is_alive(), "the watched reader did not end the shell"
+        stdout, stderr = result["output"], ""
+    else:
+        done = subprocess.run(["bash", "-s"], input="\n".join(command), text=True, capture_output=True)
+        stdout, stderr = done.stdout, done.stderr
+
+    assert slurm.reader_placement(stdout) == ("cpu:4242", None), stderr
+    assert len((log / "srun").read_text().splitlines()) == 3
+    assert "PAYLOAD-LINE" in stdout.splitlines()
+    if not watched:
+        refusals = [line for line in stderr.splitlines() if "the reader step was refused" in line]
+        assert len(refusals) == 2 and "job submit limit" in refusals[0] and "retrying in 1 s" in refusals[0]
+
+
+def test_a_refusal_that_outlasts_the_queue_wait_gives_up_with_how_long_it_resubmitted(
+    fake_slurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = fake_slurm(_REFUSE_THEN_START_SRUN)
+    (log / "refusals").write_text("99")
+    monkeypatch.setattr(slurm, "_READER_SRUN_RETRY_S", 1)
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", "3")
+
+    output = LocalConnection().run(_reader(tmp_path))
+
+    host, reason = slurm.reader_placement(output)
+    assert host == "login" and reason.startswith(
+        "the reader step did not start within 1 s and was cancelled after 3 s"
+    )
+    assert "job submit limit" in reason
+    # 1 + 2 s of back-off fit in the 3 s wait: three submissions, then the fallback.
+    assert len((log / "srun").read_text().splitlines()) == 3
+
+
+def test_an_srun_failure_that_is_not_a_refusal_is_not_submitted_again(
+    fake_slurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = fake_slurm(_REFUSED_SRUN)  # "Requested node configuration is not available": a config error, not a limit
+    monkeypatch.setattr(slurm, "_READER_SRUN_RETRY_S", 1)
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", "30")
+
+    output = LocalConnection().run(_reader(tmp_path))
+
+    assert slurm.reader_placement(output)[0] == "login"
+    assert len((log / "srun").read_text().splitlines()) == 1
