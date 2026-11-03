@@ -899,6 +899,9 @@ def _ended_sdk_error(reason: str, container_line: str):
     "reason, container_line, kind, cause",
     [
         ("OOMKilled", "container sandbox exited with code 137 (OOMKilled)", "provider_oom_killed", "oom"),
+        # A helper container's memory kill is not the agent's own: infrastructure, whatever the reason says.
+        ("OOMKilled", "container execd exited with code 137 (OOMKilled)", "provider_unavailable", "oom"),
+        ("OOMKilled", "init container setup exited with code 137 (OOMKilled)", "provider_unavailable", "oom"),
         # An exit status 137 in a report whose provider reason is not a memory kill is not one: the typed reason
         # decides, the old text markers no longer override it.
         ("Error", "container execd exited with code 137 (Error)", "provider_unavailable", "unknown"),
