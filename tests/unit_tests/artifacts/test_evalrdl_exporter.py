@@ -277,6 +277,23 @@ class TestRunDirectory:
         # The run directory itself is left as it was.
         assert identity.exists() and not fake_sdk["log"].with_name("model-calls").is_symlink()
 
+    def test_a_resume_identity_anywhere_under_the_run_dir_is_left_out(self, tmp_path: Path) -> None:
+        # An identity can hold credentials: one in any directory under the upload is left out, not only the rollouts'.
+        run_dir = tmp_path / "bench"
+        nested = run_dir / "reverification" / "n1"
+        nested.mkdir(parents=True)
+        (run_dir / "gpqa_rollouts.jsonl").write_text("{}\n")
+        identity = nested / "gpqa_rollouts_manifest.identity.json"
+        identity.write_text('{"exa_api_key": "CANARY-SECRET-456"}')  # pragma: allowlist secret
+        (nested / "receipt.json").write_text("{}")
+
+        uploaded = _without_resume_identity(run_dir, tmp_path / "work")
+
+        assert uploaded != run_dir
+        assert (uploaded / "reverification" / "n1" / "receipt.json").exists()
+        assert not (uploaded / "reverification" / "n1" / identity.name).exists()
+        assert identity.exists()
+
     def test_a_run_dir_above_the_rollouts_leaves_out_the_resume_identity_beside_them(self, tmp_path: Path) -> None:
         # The upload is the benchmark directory; the identity sits beside the rollouts, one level down.
         run_dir, artifacts_dir = tmp_path / "bench", tmp_path / "bench" / "artifacts"
@@ -286,7 +303,7 @@ class TestRunDirectory:
         identity.write_text('{"exa_api_key": "CANARY-SECRET-123"}')  # pragma: allowlist secret
         (run_dir / "eval.exit").write_text("0")
 
-        uploaded = _without_resume_identity(run_dir, tmp_path / "work", artifacts_dir)
+        uploaded = _without_resume_identity(run_dir, tmp_path / "work")
 
         assert uploaded != run_dir and uploaded.name == run_dir.name
         assert (uploaded / "eval.exit").exists() and (uploaded / "artifacts" / "gpqa_rollouts.jsonl").exists()

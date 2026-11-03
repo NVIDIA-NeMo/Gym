@@ -31,23 +31,21 @@ UPLOAD_ALLOWANCE_S = 3600
 RESUME_IDENTITY_SUFFIX = "manifest.identity.json"
 
 
-def _without_resume_identity(run_dir: Path, workdir: Path, rollouts_dir: Path | None = None) -> Path:
-    """The run directory to upload: as it is, or, when the rollouts' directory (``rollouts_dir``, by default the run
-    directory itself) holds a resume identity, a mirror without that file.
+def _without_resume_identity(run_dir: Path, workdir: Path) -> Path:
+    """The run directory to upload: as it is, or, when it holds a resume identity anywhere below it, a mirror without
+    any such file.
 
     The mirror, under `workdir` and named like the run directory, has the run's directories and a link to each of its
     files, so nothing is copied and the run directory is left as it is.
     """
-    rollouts_dir = run_dir if rollouts_dir is None else rollouts_dir
-    if not any(path.name.endswith(RESUME_IDENTITY_SUFFIX) for path in rollouts_dir.iterdir()):
+    if next(run_dir.rglob(f"*{RESUME_IDENTITY_SUFFIX}"), None) is None:
         return run_dir
-    identity_dir = rollouts_dir.relative_to(run_dir)
     mirror = workdir / "upload" / run_dir.name
     for directory, subdirectories, names in os.walk(run_dir):
         relative = Path(directory).relative_to(run_dir)
         (mirror / relative).mkdir(parents=True, exist_ok=True)
         for name in names + [name for name in subdirectories if (Path(directory) / name).is_symlink()]:
-            if relative == identity_dir and name.endswith(RESUME_IDENTITY_SUFFIX):
+            if name.endswith(RESUME_IDENTITY_SUFFIX):
                 continue
             (mirror / relative / name).symlink_to(Path(directory, name).absolute())
     return mirror
@@ -135,7 +133,7 @@ class EvalRDLExporter(IsolatedExporter):
             )
         config = self.config
         return {
-            "run_dir": str(_without_resume_identity(run_dir, workdir, rollouts.parent)),
+            "run_dir": str(_without_resume_identity(run_dir, workdir)),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,
