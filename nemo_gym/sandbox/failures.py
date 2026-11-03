@@ -46,6 +46,7 @@ def sandbox_failure(
     sdk_kind = None
     try:
         from opensandbox.exceptions import (
+            SandboxApiException,
             SandboxInternalException,
             SandboxReadyTimeoutException,
             SandboxUnhealthyException,
@@ -58,6 +59,9 @@ def sandbox_failure(
             if isinstance(cause.__cause__, (*timeout_types, *transport_types)):
                 observed = cause.__cause__
                 sdk_kind = None
+        elif isinstance(cause, SandboxApiException) and cause.error.code == "KUBERNETES::POD_IP_NOT_AVAILABLE":
+            # A structured endpoint-availability observation, even when returned as HTTP 404.
+            sdk_kind = PROVIDER_UNAVAILABLE
         elif isinstance(cause, SandboxReadyTimeoutException):
             sdk_kind = PROVIDER_CREATE_TIMEOUT
         elif isinstance(cause, SandboxUnhealthyException):
