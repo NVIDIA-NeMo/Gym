@@ -880,3 +880,26 @@ def test_gym_tar_ships_the_data_package_but_not_the_agents_datasets(monkeypatch:
     assert "nemo_gym/data/__init__.py" in names
     assert any(name.startswith("responses_api_agents/anyswe_agent/") for name in names)
     assert not any(name.startswith("responses_api_agents/anyswe_agent/data") for name in names)
+
+
+@pytest.mark.parametrize("kind", ["provider_create_pending", "provider_setup_failed", "provider_pty_busy"])
+def test_typed_sandbox_failure_keeps_its_kind_without_message_inference(kind):
+    from nemo_gym.typed_exceptions import NgFailureEvent
+    from responses_api_agents.harness_agent.app import sandbox_infra_failure_kind
+
+    assert (
+        sandbox_infra_failure_kind(
+            NgFailureEvent(
+                boundary="sandbox",
+                failure_kind=kind,
+                failure_reason="OOMKilled text does not override the explicit kind",
+            )
+        )
+        == kind
+    )
+    assert (
+        sandbox_infra_failure_kind(
+            NgFailureEvent(boundary="harness", failure_kind="agent_run_error", failure_reason="OOMKilled")
+        )
+        is None
+    )

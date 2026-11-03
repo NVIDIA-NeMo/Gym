@@ -104,6 +104,17 @@ JUDGE_UNPARSEABLE = "judge_unparseable"
 VERIFIER_ERROR = "verifier_error"
 
 # --- provider: sandboxes, browsers, containers ----------------------------------------- #
+# Creation observations stay separate from retry choices, including Pending fail-fast.
+PROVIDER_CREATE_TIMEOUT = "provider_create_timeout"
+PROVIDER_CREATE_PENDING = "provider_create_pending"
+PROVIDER_NOT_READY = "provider_not_ready"
+PROVIDER_SETUP_FAILED = "provider_setup_failed"
+# An SDK internal error without a recognized transport cause.
+PROVIDER_INTERNAL_ERROR = "provider_internal_error"
+# PTY refusal, availability and protocol evidence do not assert whole-sandbox death.
+PROVIDER_PTY_UNAVAILABLE = "provider_pty_unavailable"
+PROVIDER_PTY_BUSY = "provider_pty_busy"
+PROVIDER_PROTOCOL_ERROR = "provider_protocol_error"
 PROVIDER_REQUEST_FAILED = "provider_request_failed"
 PROVIDER_IO_TIMEOUT = "provider_io_timeout"
 PROVIDER_COMMAND_TIMEOUT = "provider_command_timeout"
@@ -173,6 +184,14 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
+        PROVIDER_CREATE_TIMEOUT,
+        PROVIDER_CREATE_PENDING,
+        PROVIDER_NOT_READY,
+        PROVIDER_SETUP_FAILED,
+        PROVIDER_INTERNAL_ERROR,
+        PROVIDER_PTY_UNAVAILABLE,
+        PROVIDER_PTY_BUSY,
+        PROVIDER_PROTOCOL_ERROR,
         PROVIDER_REQUEST_FAILED,
         PROVIDER_IO_TIMEOUT,
         PROVIDER_COMMAND_OUTCOME_UNKNOWN,
