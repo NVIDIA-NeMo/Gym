@@ -277,45 +277,41 @@ def _patch(intact):
 @pytest.mark.parametrize(
     "kind,fields",
     [
-        ("session_lost", {"model_patch": None}),
-        ("verifier_error", {"model_patch": None}),
-        ("verifier_error", _agent_sandbox_verified()),
-        ("verifier_error", {"session_id": "s-1", "sandbox_resource_limit": None}),
-    ],
-    ids=["patch-never-collected", "verifier-patch-never-collected", "agent-sandbox-graded", "sandboxed-session"],
-)
-def test_a_masked_transcript_without_a_gradeable_artifact_is_an_infrastructure_retry(tmp_path, kind, fields):
-    output, _ = _run(tmp_path, [[_masked(kind) | _ANSWER | fields]])
-    store = RolloutStore.read(output, import_legacy=False)
-    assert [(row["_ng_task_index"], row["_ng_attempt_index"]) for row in store.pending()] == [(1, 1)]
-    _, decision = _decide(tmp_path, allocation_cut=False)
-    assert decision.counts == {"scored": 1, "retryable": 1}, decision.reason
-    assert _evidence(decision, (1, 0)).failure_kind == kind
-
-
-@pytest.mark.parametrize(
-    "kind,fields",
-    [
         ("verifier_error", {}),
         ("session_lost", {}),
         ("verifier_error", _patch(intact=True)),
         ("judge_failed", _agent_sandbox_verified()),
+        # A saved answer is never regenerated, also when its verifier had no intact workspace to grade.
+        ("session_lost", {"model_patch": None}),
+        ("verifier_error", {"model_patch": None}),
+        ("verifier_error", _patch(intact=False)),
+        ("verifier_error", _agent_sandbox_verified()),
+        ("verifier_error", {"session_id": "s-1", "sandbox_resource_limit": None}),
     ],
-    ids=["text-answer", "text-answer-session-lost", "intact-patch", "judge-failure"],
+    ids=[
+        "text-answer",
+        "text-answer-session-lost",
+        "intact-patch",
+        "judge-failure",
+        "patch-never-collected",
+        "verifier-patch-never-collected",
+        "patch-not-intact",
+        "agent-sandbox-graded",
+        "sandboxed-session",
+    ],
 )
-def test_a_masked_result_with_a_gradeable_answer_is_not_sampled_again(tmp_path, kind, fields):
+def test_a_masked_result_with_a_saved_answer_is_not_sampled_again(tmp_path, kind, fields):
     output, _ = _run(tmp_path, [[_masked(kind) | _ANSWER | fields]])
     store = RolloutStore.read(output, import_legacy=False)
     assert store.pending() == []
 
 
-def test_the_store_retries_a_sandboxed_session_row_it_reads_without_its_trajectory(tmp_path):
-    # The recovery reader reads the Store with the trajectory skipped: the session verify response alone must still
-    # say the graded workspace was the agent's own sandbox, so the Store plans the same retry recovery decides.
+def test_the_store_keeps_a_sandboxed_session_row_it_reads_without_its_trajectory(tmp_path):
+    # The recovery reader reads the Store with the trajectory skipped: a saved answer stays the result there too.
     output, _ = _run(
         tmp_path, [[_masked("verifier_error") | _ANSWER | {"session_id": "s-1", "sandbox_resource_limit": None}]]
     )
     store = RolloutStore.read(
         output, import_legacy=False, skip_keys=frozenset({"ng_trajectory", "ng_agent_observations"})
     )
-    assert [(row["_ng_task_index"], row["_ng_attempt_index"]) for row in store.pending()] == [(1, 1)]
+    assert store.pending() == []

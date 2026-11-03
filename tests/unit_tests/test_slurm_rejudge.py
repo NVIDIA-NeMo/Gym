@@ -142,6 +142,11 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
             (script,) = job.glob("reverify-*.sh")
             commands = _rendered_gym_commands(script.read_text())
             assert commands and all(_unrecognized_flags(words) == [] for words in commands), commands
+            # Model-call capture as a submitted run's job.sh renders it, in the re-judge's own folder.
+            [words] = commands
+            assert "+observability_enabled=True" in words, words
+            [capture] = [word for word in words if word.startswith("+model_call_capture_dir=")]
+            assert "/reverification/" in capture and capture.endswith("/model-calls"), capture
     assert (tmp_path / "calls").exists() is (case == "ok")
     assert (job / ".gym_infra_retries").read_text() == "0\n"
     if case == "ok":

@@ -64,6 +64,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -715,6 +716,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             plugins.append("required-mcp.js")
         return plugins
 
+    @staticmethod
+    def _agent_sandbox_facts(sandbox: AsyncSandbox, **facts: Any) -> str:
+        """The failure_reason prefix for the agent's own command: its phase, provider, sandbox and command."""
+        handle = getattr(sandbox, "_handle", None)
+        provider = getattr(handle, "provider_name", None)
+        sandbox_id = getattr(handle, "sandbox_id", None)
+        return sandbox_failure_prefix(
+            phase="agent",
+            provider=provider if isinstance(provider, str) else None,
+            sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+            command="opencode_run",
+            **facts,
+        )
+
     def _agent_sandbox_observation(
         self,
         *,
@@ -1020,12 +1035,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
-        # A provider exception does not establish how the command ended. Propagate
-        # it to the agent boundary rather than grade a substituted partial run.
-        result = await sandbox.exec(
-            command=command,
-            timeout_s=self.config.sandbox_timeout,
-        )
+        try:
+            result = await sandbox.exec(
+                command=command,
+                timeout_s=self.config.sandbox_timeout,
+            )
+        except Exception as error:
+            # A provider exception does not establish how the command ended: report it at the agent boundary, with
+            # the sandbox facts known here, rather than grade a substituted partial run.
+            raise NgFailureEvent(
+                boundary="agent",
+                failure_kind=AGENT_ROUTE_FAILED,
+                failure_reason=self._agent_sandbox_facts(
+                    sandbox, reason=provider_error_reason(error), http_status=error_to_http_status(error)
+                )
+                + f"Agent operation agent.sandbox_exec failed: {type(error).__name__}",
+                operation="agent.sandbox_exec",
+                stage="agent",
+            ) from error
 
         if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
             # A native command deadline is a protocol result. The provider's -1 sentinel or an execution error
@@ -1033,7 +1060,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             raise NgFailureEvent(
                 boundary="agent",
                 failure_kind=AGENT_ROUTE_FAILED,
-                failure_reason="Sandbox command outcome cannot be classified",
+                failure_reason=self._agent_sandbox_facts(
+                    sandbox,
+                    reason=result.error_type if isinstance(result.error_type, str) else None,
+                    exit_code=result.return_code if isinstance(result.return_code, int) else None,
+                )
+                + "Sandbox command outcome cannot be classified",
                 exception_type=str(result.error_type) if result.error_type is not None else None,
                 operation="agent.sandbox_exec",
                 stage="agent",
