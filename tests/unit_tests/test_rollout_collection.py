@@ -1314,6 +1314,42 @@ class TestRolloutCollection:
         assert sorted(path.name for path in complete_dir.iterdir()) == ["beta.json"]
         assert len((tmp_path / "rollouts.jsonl").read_bytes().splitlines()) == 3
 
+    def test_completion_filenames_differ_for_agent_names_that_differ(self, tmp_path: Path) -> None:
+        """No two agent names share a completion file, and none reaches outside the completion directory."""
+        names = ["alpha", "alpha beta", "alpha_beta", "a/b", "a_b", "a%2Fb", "a..b", "../b"]
+
+        fpaths = [
+            nemo_gym.rollout_collection._agent_complete_fpath(tmp_path / "rollouts.jsonl", name) for name in names
+        ]
+
+        assert len({fpath.name for fpath in fpaths}) == len(names)
+        assert {fpath.parent for fpath in fpaths} == {tmp_path / "rollouts_agent_complete"}
+        assert fpaths[0].name == "alpha.json"
+
+    async def test_agents_whose_names_differ_only_in_punctuation_each_get_a_completion_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha beta", "alpha_beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha beta", "alpha_beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        complete_dir = tmp_path / "rollouts_agent_complete"
+        written = {orjson.loads(path.read_bytes())[AGENT_REF_KEY_NAME]["name"] for path in complete_dir.iterdir()}
+        assert written == {"alpha beta", "alpha_beta"}
+
     @pytest.mark.parametrize(
         "resume_from_cache, existing_rollouts",
         [(False, True), (True, True), (True, False)],

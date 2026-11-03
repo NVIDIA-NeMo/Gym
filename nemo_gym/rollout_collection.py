@@ -39,6 +39,7 @@ from itertools import repeat
 from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Set, Tuple, Union
+from urllib.parse import quote
 from uuid import uuid4
 
 import aiohttp
@@ -2767,7 +2768,7 @@ AGENT_COMPLETE_SCHEMA_VERSION = "1"
 
 def _agent_complete_fpath(output_fpath: Path, label: str) -> Path:
     """Where the completion file of the agent with this label goes (see ``agent_complete_dir_for``)."""
-    return agent_complete_dir_for(output_fpath) / (re.sub(r"[^A-Za-z0-9._-]", "_", label) + ".json")
+    return agent_complete_dir_for(output_fpath) / (quote(label, safe="._-") + ".json")
 
 
 def _failure_export_metrics(
