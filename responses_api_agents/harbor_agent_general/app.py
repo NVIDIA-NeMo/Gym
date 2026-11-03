@@ -556,11 +556,21 @@ class HarborAgent(SimpleResponsesAPIAgent):
             path_entries = [(task_paths.instruction_path, trial_paths.agent_dir / TaskPaths.TRAJECTORY_FILENAME)]
             step_rewards = [trial.verifier_result.rewards if trial.verifier_result is not None else None]
 
+        timed_out = any(
+            result.exception_info is not None and result.exception_info.exception_type == "AgentTimeoutError"
+            for result in [trial, *(trial.step_results or [])]
+        )
+        # An agent ended at its deadline may not have written its trajectory; its outcome is still the graded zero.
         trajectories = [
-            Trajectory.model_validate_json(trajectory_path.read_text()) for _, trajectory_path in path_entries
+            Trajectory.model_validate_json(trajectory_path.read_text())
+            for _, trajectory_path in path_entries
+            if not timed_out or trajectory_path.is_file()
         ]
         conversion_warnings: list[str] = []
+        if len(trajectories) < len(path_entries):
+            conversion_warnings.append("the agent timed out before it wrote its trajectory")
         output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
+        output = output or [[]]
 
         if len(output) > 1:
             logger.warning(
@@ -637,6 +647,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     ],
                 },
             }
+            # A terminal graded outcome: the row stays in the pass-rate denominator and a resume never runs it again.
+            | (
+                {"failure_kind": "agent_timeout", "evaluation_completed": True, "mask_sample": False}
+                if timed_out
+                else {}
+            )
         )
 
     def failure_response(self, body: HarborRunRequest, err: Exception) -> HarborVerifyResponse:
@@ -651,6 +667,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
             tools=[],
             status="failed",
         )
+        # A Ray task error wraps the worker's exception; its message names Harbor's own failure, for example
+        # "Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds".
+        cause = getattr(err, "cause", None) or err
+        reason = " ".join(f"{type(cause).__name__}: {cause}".split())
         return HarborVerifyResponse.model_validate(
             body.model_dump(by_alias=True)
             | {
@@ -658,6 +678,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 "reward": 0.0,
                 NG_FAILURE_CLASS_KEY: "harbor_failed",
                 "error": f"{type(err).__name__}: {err}",
+                "failure_reason": reason[:500],
             }
         )
 
@@ -691,15 +712,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     for result in [trial_result, *(trial_result.step_results or [])]
                     if result.exception_info is not None
                 ]
-                ## Harbor still runs the tests after an agent timeout and scores that result, so Gym keeps it too,
-                ## but only when every recorded failure is such a graded timeout.
+                ## An agent timeout is the trial's graded outcome: Harbor scores the tests it could still run, and a
+                ## timeout without a test result (the sandbox ends at the deadline) is a zero. Neither is retried.
                 failed = next(
-                    (
-                        result
-                        for result in failures
-                        if result.exception_info.exception_type != "AgentTimeoutError"
-                        or result.verifier_result is None
-                    ),
+                    (result for result in failures if result.exception_info.exception_type != "AgentTimeoutError"),
                     None,
                 )
                 if failed is not None:

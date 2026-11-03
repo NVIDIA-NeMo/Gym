@@ -23,6 +23,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -30,17 +31,34 @@ import stat
 import warnings
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
+from itertools import combinations
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Literal
 from uuid import uuid4
 
 from omegaconf import OmegaConf
-from omegaconf.errors import InterpolationResolutionError
+from omegaconf.errors import InterpolationResolutionError, OmegaConfBaseException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
+from nemo_gym.config.secret_utils import mask_url_passwords
+from nemo_gym.core.failure_kinds import (
+    AGENT_ROUTE_FAILED,
+    AGENT_TIMEOUT,
+    COLLECTION_RESUME_REFUSED,
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
+    MODEL_SERVER_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    PROVIDER_OOM_KILLED,
+    SESSION_RELEASE_FAILED,
+    TRANSPORT_PEER_DROP,
+    TRANSPORT_UNREACHABLE,
+    is_evaluation_side,
+    is_server_status,
+)
+from nemo_gym.utils.path_utils import attempt_extension_path_for, failures_path_for, resubmit_offset_path_for
 
 
 def has_saved_generation(row: Mapping[str, Any]) -> bool:
@@ -104,6 +122,227 @@ def has_recorded_grade(row: Mapping[str, Any]) -> bool:
     evaluation is the grade's durable record. Only a row with neither a kept answer nor a recorded grade may run fresh.
     """
     return row.get("evaluation_completed") is True
+
+
+def _row_failure_kind(row: Mapping[str, Any]) -> Any:
+    """The selected failure event's kind when the row selects one (None when that event is missing), else the row's."""
+    events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
+    selected = events.get(selected_id) if isinstance(events, Mapping) and isinstance(selected_id, str) else None
+    if isinstance(selected, Mapping):
+        return selected.get("failure_kind")
+    if "_ng_failure_id" in row:
+        return None
+    return row.get("failure_kind") if row.get("failure_kind") is not None else row.get("_ng_failure_class")
+
+
+def is_answered_agent_deadline(row: Mapping[str, Any]) -> bool:
+    """Whether the agent ran out of its own deadline and kept its answer: the evaluated model's final result.
+
+    The deadline belongs to the agent, so what it kept is its result, scored by the benchmark's rule (a recorded
+    grade, else a settled zero). Recovery classifies it as final, and no resume or in-process retry runs it again:
+    that would replace the model's answer. The kind is the selected failure event's when the row selects one, else
+    the row's own. A timeout that kept no answer keeps its retry policy, and so does one whose window held a recorded
+    server-side fault (``is_infrastructure_agent_timeout``): what it kept was cut short by us, not by its deadline.
+    """
+    return (
+        _row_failure_kind(row) == AGENT_TIMEOUT
+        and (has_saved_generation(row) or keeps_partial_response(row))
+        and not is_infrastructure_agent_timeout(row)
+    )
+
+
+# The collector's minimal projection of a saved row's captured model calls (``COLLECT_SCRIPT`` in
+# ``nemo_gym.orchestration.recovery`` writes it in ``captured_model_calls``'s normalized shape).
+COLLECTED_MODEL_CALLS_KEY = "_ng_collected_model_calls"
+# Faulted model calls own an agent's deadline when they took at least this share of its window.
+AGENT_TIMEOUT_FAULT_SHARE = 0.25
+# Capture error categories of a server-side failure: a 5xx class reply or an upstream error event, and a connection
+# that failed. ``timeout``, ``cancelled``, ``stream_truncated`` and client errors are not: a slow model is the model's
+# result under its time limit, and the agent's own deadline cancels the call it was waiting on.
+SERVER_FAULT_CATEGORIES = frozenset({"upstream_error", "connection"})
+# Failure-report kinds of a server-side failure; ``transport_timeout`` is left out for the same reason.
+SERVER_FAULT_EVENT_KINDS = frozenset(
+    {MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR, TRANSPORT_UNREACHABLE, TRANSPORT_PEER_DROP}
+)
+
+
+def captured_model_calls(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The row's captured model calls in capture order, each reduced to the facts a server fault is read from.
+
+    ``status_code``, ``upstream_status_code``, ``error_category``, ``failure_events`` (each failure-report event's
+    ``failure_kind`` and ``http_status``), ``started_at`` and ``duration_ms``. Read from the collector's projection
+    when the row is one, else from ``ng_model_call_capture.calls``, else from ``ng_trajectory.model_calls``.
+    """
+    collected = row.get(COLLECTED_MODEL_CALLS_KEY)
+    if isinstance(collected, list):
+        return [call for call in collected if isinstance(call, dict)]
+    capture = row.get("ng_model_call_capture")
+    raw = capture.get("calls") if isinstance(capture, Mapping) else None
+    if not isinstance(raw, list):
+        trajectory = row.get("ng_trajectory")
+        raw = trajectory.get("model_calls") if isinstance(trajectory, Mapping) else None
+    calls = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        meta = item.get("response_metadata")
+        meta = meta if isinstance(meta, Mapping) else item
+        report = meta.get("failure_report")
+        events = report.get("events") if isinstance(report, Mapping) else None
+        duration = item.get("latency_total_ms", item.get("duration_ms"))
+        calls.append(
+            {
+                "status_code": meta.get("status_code"),
+                "upstream_status_code": meta.get("upstream_status_code"),
+                "error_category": meta.get("error_category"),
+                "failure_events": [
+                    {"failure_kind": event.get("failure_kind"), "http_status": event.get("http_status")}
+                    for event in (events.values() if isinstance(events, Mapping) else ())
+                    if isinstance(event, Mapping)
+                ],
+                "started_at": item.get("started_at"),
+                "duration_ms": duration,
+            }
+        )
+    return calls
+
+
+def is_server_fault_call(call: Mapping[str, Any]) -> bool:
+    """Whether a captured model call recorded a server-side fault of the model server or the path to it.
+
+    Any of: ``status_code`` or ``upstream_status_code`` in the 5xx class (``is_server_status``); ``error_category``
+    ``upstream_error`` or ``connection``; a failure-report event of kind ``model_transport_error``,
+    ``model_server_error``, ``transport_unreachable`` or ``transport_peer_drop``, or with a 5xx ``http_status``.
+    A timeout, a cancellation, a truncated stream and a 4xx rejection are not (``SERVER_FAULT_CATEGORIES``).
+    """
+    if is_server_status(call.get("status_code")) or is_server_status(call.get("upstream_status_code")):
+        return True
+    if call.get("error_category") in SERVER_FAULT_CATEGORIES:
+        return True
+    events = call.get("failure_events")
+    return any(
+        isinstance(event, Mapping)
+        and (event.get("failure_kind") in SERVER_FAULT_EVENT_KINDS or is_server_status(event.get("http_status")))
+        for event in (events if isinstance(events, list) else ())
+    )
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+
+
+def _material_model_call_faults(row: Mapping[str, Any]) -> bool:
+    """Whether server-faulted model calls own the window: the agent's last call faulted, or faulted calls took at
+    least ``AGENT_TIMEOUT_FAULT_SHARE`` of it. The window is the attempt's recorded elapsed time, else the span of its
+    captured calls; an early fault that a retry recovered within a long window is the model's time, not ours."""
+    calls = captured_model_calls(row)
+    if not calls:
+        return False
+    starts = [_number(call.get("started_at")) for call in calls]
+    if all(start is not None for start in starts):
+        # Capture order is append order; when every call recorded its start, the last started is the last call.
+        order = sorted(range(len(calls)), key=lambda index: (starts[index], index))
+        calls, starts = [calls[index] for index in order], [starts[index] for index in order]
+    if is_server_fault_call(calls[-1]):
+        return True
+    faulted = sum(_number(call.get("duration_ms")) or 0.0 for call in calls if is_server_fault_call(call))
+    if not faulted:
+        return False
+    elapsed = _number(row.get("_ng_elapsed_s")) or observed_elapsed(dict(row))
+    if elapsed:
+        window_ms = elapsed * 1000
+    else:
+        spans = [
+            (start, start + (_number(call.get("duration_ms")) or 0.0) / 1000)
+            for start, call in zip(starts, calls)
+            if start is not None
+        ]
+        window_ms = (max(end for _, end in spans) - min(start for start, _ in spans)) * 1000 if spans else 0.0
+    return window_ms > 0 and faulted >= AGENT_TIMEOUT_FAULT_SHARE * window_ms
+
+
+def _sandbox_or_tool_fault(row: Mapping[str, Any]) -> bool:
+    """Whether the row recorded a sandbox or tool-server failure event, selected or not.
+
+    A sandbox provider's or session's failure (``provider_*``, ``session_*``) other than an out-of-memory kill (the
+    model's own command can exhaust it) or a release failure after the episode; or a resources server's tool call
+    that failed with a 5xx status or a server-side transport kind. A verification failure is not one.
+    """
+    events = row.get("_ng_failure_events")
+    for event in events.values() if isinstance(events, Mapping) else ():
+        if not isinstance(event, Mapping) or not isinstance(event.get("failure_kind"), str):
+            continue
+        kind = event["failure_kind"]
+        if kind.startswith(("provider_", "session_")) and kind not in (PROVIDER_OOM_KILLED, SESSION_RELEASE_FAILED):
+            return True
+        if (
+            event.get("boundary") == "resources_server"
+            and event.get("operation") != "verify"
+            and (kind in SERVER_FAULT_EVENT_KINDS or is_server_status(event.get("http_status")))
+        ):
+            return True
+    return False
+
+
+def is_infrastructure_agent_timeout(row: Mapping[str, Any]) -> bool:
+    """Whether an ``agent_timeout`` row's window held a recorded server-side fault: the evaluation's failure.
+
+    The row (a failure row, or a graded result such as Harbor's) names ``agent_timeout`` and either recorded a sandbox
+    or tool-server failure event (``_sandbox_or_tool_fault``), or its captured model calls show a server fault
+    (``is_server_fault_call``) that owns the window (``_material_model_call_faults``). A clean agent timeout stays the
+    model's result under the benchmark's time limit. Read from saved rows alone, so it applies to existing runs.
+    """
+    return _row_failure_kind(row) == AGENT_TIMEOUT and (
+        _sandbox_or_tool_fault(row) or _material_model_call_faults(row)
+    )
+
+
+# Masked kinds whose saved answer is graded again (judge) or whose verify call may have been lost in transport: their
+# recovery reads the saved answer and never reruns the rollout, so they are not rerun here either.
+_MASKED_REGRADE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE, AGENT_ROUTE_FAILED})
+
+
+def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
+    """The kind of a masked result that infrastructure, not the evaluated model, left unmeasured; else None.
+
+    A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
+    reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
+    run. When the kind is evaluation-side (``is_evaluation_side``) the rollout is retried like an infrastructure
+    failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
+    model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
+    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result.
+    """
+    if (
+        row.get("mask_sample") is not True
+        or row.get("_ng_failure_class") is not None
+        or row.get("_ng_omitted_rollout") is True
+        or row.get("_ng_rejudge_operation_id") is not None
+    ):
+        return None
+    kind = row.get("failure_kind")
+    if (
+        not isinstance(kind, str)
+        or not is_evaluation_side(kind)
+        or kind in _MASKED_REGRADE_KINDS
+        or kind.startswith("transport_")
+    ):
+        return None
+    if _keeps_saved_answer(row):
+        return None
+    return kind
+
+
+def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:
+    """Whether the masked result holds a model answer a rerun would replace: never sampled again.
+
+    Same facts as recovery's saved-answer test: a collector projection's own flag, else the retained generation of the
+    response (``has_saved_generation``, which leaves out a no-generation placeholder) or of a native partial response.
+    """
+    flag = row.get("_ng_collected_saved_answer")
+    if isinstance(flag, bool):
+        return flag
+    answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
+    return has_saved_generation({"response": answer}) or keeps_partial_response(row)
 
 
 def holds_response(row: Mapping[str, Any]) -> bool:
@@ -227,6 +466,9 @@ _COLLECTION_OPTIONS = frozenset(
         "count_failure_classes_as_zero",
         "count_missing_rollouts_as_zero",
         "route_failures_to_sidecar",
+        # How long a refused /run is resent: dispatch tuning, not a task setting. It is in ``_ADDED_COLLECTION_DEFAULTS``
+        # too, so a run saved with it in its digest still resumes.
+        "dispatch_connect_grace_s",
         # Timing/queue reports observe the run; they do not change task execution.
         "dispatch_start_report_within_s",
         "dispatch_start_report_min_fraction",
@@ -308,6 +550,24 @@ def load_resubmit_offset(output_fpath: str | Path) -> int:
     except (ValueError, OSError) as error:
         raise ConfigError(f"Cannot read resubmit budget offset {path}: {error}") from error
     return offset
+
+
+def load_attempt_extension(output_fpath: str | Path) -> int:
+    """Attempts an explicit recovery added to every rollout's saved attempt cap (`--extend-attempts`); 0 when none.
+
+    A rollout's cap is the run's saved ``max_rollout_attempts`` plus this. An unreadable record stops the run rather
+    than guess its cap.
+    """
+    path = attempt_extension_path_for(Path(output_fpath))
+    if not path.exists():
+        return 0
+    try:
+        text = path.read_text().strip()
+        if not (text.isascii() and text.isdecimal()):
+            raise ValueError(f"not a whole number: {text[:40]!r}")
+        return int(text)
+    except (ValueError, OSError) as error:
+        raise ConfigError(f"Cannot read the recorded attempt extension {path}: {error}") from error
 
 
 def record_resubmit_offset(output_fpath: str | Path) -> int:
@@ -407,11 +667,71 @@ def _normalize_runtime_references(value: Any) -> Any:
     return value
 
 
-def _configuration_identity(config: dict, global_config: dict, rows: list[dict]) -> dict:
+# A setting holding a credential, matched on its name lower-cased with `-`, `.`, spaces and case changes as `_`:
+# `exa_api_key`, `X-Api-Key`, `Authorization`, `X_TOKEN`, `my_service_pw`, but not `max_tokens` or `author`.
+_CREDENTIAL_NAME = re.compile(
+    r"api_?key|secret|passw(or)?d|credential|private_?key|access_?key|cookie"
+    r"|(^|_)(token|pw|pwd|pass|bearer|o?auth)$|(^|_)o?auth(orization|entication)?(_|$)"
+)
+_REDACTED = "<redacted>"
+# An environment variable or config reference by name, a `NAME=value` assignment, and an HTTP credential scheme.
+_ENV_REFERENCE = re.compile(r"\$\{oc\.env:\s*([A-Za-z_][A-Za-z0-9_]*)[^{}]*\}")
+_CONFIG_REFERENCE = re.compile(r"\$\{([A-Za-z_][\w.\-]*)\}")
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$", re.DOTALL)
+_HTTP_CREDENTIAL = re.compile(r"(?i)^(bearer|basic)\s+\S+$")
+
+
+def _is_credential_name(name: object) -> bool:
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name))
+    return bool(_CREDENTIAL_NAME.search(re.sub(r"[\s.\-]", "_", normalized).lower()))
+
+
+def _credential_safe(value: Any, *, secret: bool = False) -> Any:
+    """The value with every credential replaced by a fixed marker; it is what a run persists for its identity.
+
+    A credential is any value below a credential-named key (every value of a ``secrets`` mapping, an ``Authorization``
+    header), the ``value`` of a ``{name: SOME_TOKEN, value: ...}`` entry, the value of a ``SOME_TOKEN=...`` string, an
+    HTTP ``Bearer``/``Basic`` credential, a URL password, and an interpolation of a credential-named environment variable
+    or setting. Applied before interpolations are resolved, so such a credential is never read from the environment.
+    """
+    if isinstance(value, dict):
+        named = value.get("name", value.get("key"))
+        pair = isinstance(named, str) and _is_credential_name(named)
+        return {
+            key: _credential_safe(item, secret=secret or _is_credential_name(key) or (pair and key == "value"))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_credential_safe(item, secret=secret) for item in value]
+    if value is None:
+        return None
+    if secret:
+        return _REDACTED
+    if not isinstance(value, str):
+        return value
+    value = _ENV_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1]) else m[0], value)
+    value = _CONFIG_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1].split(".")[-1]) else m[0], value)
+    assignment = _ASSIGNMENT.match(value)
+    if assignment and _is_credential_name(assignment[1]):
+        return f"{assignment[1]}={_REDACTED}"
+    credential = _HTTP_CREDENTIAL.match(value)
+    return f"{credential[1]} {_REDACTED}" if credential else mask_url_passwords(value)
+
+
+def _configuration_identity(
+    config: dict, global_config: dict, rows: list[dict], *, credential_safe: bool = True
+) -> dict:
+    """The configuration a run's results depend on, compared on resume.
+
+    Credentials are redacted (see ``_credential_safe``): they do not change what a run measures, and the identity is
+    persisted beside the manifest. ``credential_safe=False`` is the form an earlier Gym took its digest from; it is only
+    ever compared in memory, to resume such a run.
+    """
     # Resolve only the servers reachable from the materialized agents. Keep the
     # original root as interpolation context, but do not evaluate unused servers
     # (which may require credentials/environment variables unavailable here).
-    raw = _normalize_runtime_references(_plain(global_config))
+    safe = _credential_safe if credential_safe else lambda value: value
+    raw = safe(_normalize_runtime_references(_plain(global_config)))
     context = OmegaConf.create(raw)
     filtered = _without_runtime_options(raw)
     servers = {
@@ -480,14 +800,274 @@ def _configuration_identity(config: dict, global_config: dict, rows: list[dict])
         references(selected[name])
     # Collection overrides may themselves contain DictConfig/ListConfig values.
     collection = {key: _plain(value) for key, value in config.items() if key not in _COLLECTION_OPTIONS}
-    context["_collection_identity"] = _normalize_runtime_references(collection)
+    context["_collection_identity"] = safe(_normalize_runtime_references(collection))
     capture = raw.get("token_id_capture", {})
     context["_capture_identity"] = {key: value for key, value in capture.items() if key != "dir"}
-    return {
-        "collection": OmegaConf.to_container(context._collection_identity, resolve=True),
-        "servers": selected,
-        "token_id_capture": OmegaConf.to_container(context._capture_identity, resolve=True),
+    # Again after resolution: a resolved value can carry a credential its reference did not name (a URL password).
+    return safe(
+        {
+            "collection": OmegaConf.to_container(context._collection_identity, resolve=True),
+            "servers": selected,
+            "token_id_capture": OmegaConf.to_container(context._capture_identity, resolve=True),
+        }
+    )
+
+
+# Null defaults a server config once declared and later dropped. Null and absent resolve alike, so a run saved while a
+# config still declared them resumes on the config without them; any other difference keeps the identities apart.
+# These are the settings whose default is null, so only here a null and an absent setting are the same identity.
+_REMOVED_NULL_DEFAULTS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("responses_api_models", "vllm_model"): ("chat_template_kwargs", "sampling_overrides", "extra_body"),
+}
+
+
+def _server_settings(identity: dict) -> Iterator[tuple[str, str, str, dict]]:
+    """Each server block's settings with its concrete path: server name, kind and implementation."""
+    for name, block in identity["servers"].items():
+        for kind in _SERVER_KINDS:
+            implementations = block.get(kind) if isinstance(block, dict) else None
+            for implementation, settings in (implementations or {}).items():
+                if isinstance(settings, dict):
+                    yield name, kind, implementation, settings
+
+
+def _without_null_defaults(identity: dict) -> dict:
+    """The identity without null settings whose default is null: there a null setting and an absent one are the same.
+
+    Elsewhere null is a value of its own (claude_code_agent's ``max_turns: null`` is unlimited, its omission 30
+    turns), so it stays in the identity.
+    """
+    normalized = json.loads(json.dumps(identity))
+    for _, kind, implementation, settings in _server_settings(normalized):
+        for key in _REMOVED_NULL_DEFAULTS.get((kind, implementation), ()):
+            if key in settings and settings[key] is None:
+                del settings[key]
+    return normalized
+
+
+# Each configuration digest this process recorded, mapped to the digests an earlier Gym recorded for the same
+# configuration, each with the server settings it had as removed null defaults. Deterministic: configurations that
+# share a digest differ only by null settings.
+_LEGACY_CONFIG_DIGESTS: dict[str, dict[str, tuple[str, ...]]] = {}
+# Above this many absent defaults, only the variant with all of them restored is tried, not every subset.
+_LEGACY_SUBSET_LIMIT = 10
+
+
+# Collection settings added after a run could have been saved, with the default each had on release. They are left out
+# of the digest (``_COLLECTION_OPTIONS``), but a Gym that had them recorded them, so a run saved by it carries them in
+# its digest. A setting with a default must not change the resume fingerprint of a run saved before it existed.
+_ADDED_COLLECTION_DEFAULTS: dict[str, float] = {"dispatch_connect_grace_s": 60.0}
+
+
+def _earlier_collection_forms(identity: dict, config: Mapping[str, Any]) -> Iterator[dict]:
+    """The identity as the Gyms before and after each added collection setting recorded it.
+
+    First the identity as it is (a Gym before the setting existed), then with the setting restored at its default and at
+    the value this configuration sets. A run saved with another value is still compared on its saved identity, if any.
+    """
+    yield identity
+    for key, default in _ADDED_COLLECTION_DEFAULTS.items():
+        values = [default]
+        configured = config.get(key)
+        if isinstance(configured, (int, float)) and not isinstance(configured, bool) and configured != default:
+            values.append(configured)
+        for value in values:
+            variant = json.loads(json.dumps(identity))
+            variant.setdefault("collection", {})[key] = value
+            yield variant
+
+
+def _legacy_config_digests(identity: dict, config: Mapping[str, Any] | None = None) -> dict[str, tuple[str, ...]]:
+    """Digests an earlier Gym recorded for this configuration, with the settings each restored as null defaults.
+
+    Restoration is per concrete server path: a removed default is added only to a server that lacks it, never over a
+    value another server of the same implementation sets. Each form is also tried with the collection settings added
+    since restored (``_earlier_collection_forms``).
+    """
+    digests: dict[str, tuple[str, ...]] = {}
+    for base in _earlier_collection_forms(identity, config or {}):
+        for digest, restored in _null_default_digests(base).items():
+            digests.setdefault(digest, restored)
+    return digests
+
+
+def _null_default_digests(identity: dict) -> dict[str, tuple[str, ...]]:
+    digests: dict[str, tuple[str, ...]] = {_digest(identity): ()}
+    absent = sorted(
+        {
+            (name, kind, implementation, key)
+            for name, kind, implementation, settings in _server_settings(identity)
+            for key in _REMOVED_NULL_DEFAULTS.get((kind, implementation), ())
+            if key not in settings
+        }
+    )
+    sizes = range(1, len(absent) + 1) if len(absent) <= _LEGACY_SUBSET_LIMIT else (len(absent),)
+    for size in sizes:
+        for restored in combinations(absent, size):
+            variant = json.loads(json.dumps(identity))
+            for name, kind, implementation, settings in _server_settings(variant):
+                for server, k, i, key in restored:
+                    if (server, k, i) == (name, kind, implementation) and key not in settings:
+                        settings[key] = None
+            digests.setdefault(
+                _digest(variant), tuple(f"servers.{server}.{k}.{i}.{key}" for server, k, i, key in restored)
+            )
+    return digests
+
+
+# The normalized identity behind each configuration digest this process recorded (deterministic: digest of identity).
+_CONFIG_IDENTITIES: dict[str, dict] = {}
+
+
+def config_identity_path_for(manifest_path: Path) -> Path:
+    """The normalized configuration identity a manifest's ``config_digest`` was taken from, saved beside it."""
+    return manifest_path.with_suffix(".identity.json")
+
+
+def resume_drift_path_for(manifest_path: Path) -> Path:
+    """One line per resume that proceeded across operational configuration drift, naming the keys."""
+    return manifest_path.with_suffix(".resume-drift.jsonl")
+
+
+# Settings that change what is measured. A difference in any of them, anywhere in the identity, refuses a resume.
+_SEMANTIC_KEYS = frozenset(
+    {
+        # dataset, split and task limits
+        "split",
+        "dataset",
+        "datasets",
+        "limit",
+        "task_ids",
+        "num_repeats",
+        "num_repeats_add_seed",
+        # agent and policy model identity, and its served window
+        "agent_name",
+        "agent_map",
+        "fan_out",
+        "model",
+        "model_name",
+        "served_model_name",
+        "max_model_len",
+        "max_context_length",
+        "context_window",
+        # sampling
+        "responses_create_params",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "repetition_penalty",
+        "max_output_tokens",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_new_tokens",
+        "seed",
+        "sampling_overrides",
+        "extra_body",
+        "chat_template_kwargs",
     }
+)
+# A setting named like this is operational (timeouts, retries, transport, ports, concurrency, health, paths, tracking),
+# unless a segment above already made its key semantic. Every other setting is semantic: an unknown name could change
+# what the run produces (an agent's step budget, which tools it executes), so a resume across it is refused by name.
+_OPERATIONAL_SETTING = re.compile(
+    r"(^|_)(timeout|timeouts|deadline|retry|retries|attempts|backoff|wait|interval|port|ports|host|hostname|url|urls"
+    r"|endpoint|concurrency|concurrent|parallel|parallelism|workers|semaphore|pool|transport|version|log|logging"
+    r"|verbose|debug"
+    r"|dir|path|fpath|cache|health|heartbeat|keepalive|tracking|mlflow|wandb|otel|telemetry|canary)(_|$)|_(s|ms)$"
+)
+# Any other key under a segment naming grading or the model is semantic: a judge, grader, verifier, reward, rubric,
+# reference-answer or prompt setting.
+_SEMANTIC_PARTS = (
+    "judge",
+    "grad",
+    "verif",
+    "reward",
+    "scor",
+    "rubric",
+    "metric",
+    "prompt",
+    "model",
+    "sampling",
+    "eval_",
+    "answer",
+    "reference",
+)
+# A path to a prompt, template or rubric names what the model or verifier reads, not where something is kept: two
+# shipped grading templates are different rubrics. The generic path rule does not make such a path operational.
+_SEMANTIC_ASSET_PATH = re.compile(r"(^|_)(prompt|prompts|template|templates|rubric|rubrics)_(.+_)?(dir|path|fpath)$")
+
+
+def _is_semantic(key: str) -> bool:
+    segments = key.split(".")
+    # A credential is redacted, so only its presence can differ; the key used does not change what is measured.
+    if any(_is_credential_name(segment) for segment in segments):
+        return False
+    # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
+    if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
+        return True
+    if _SEMANTIC_ASSET_PATH.search(segments[-1]):
+        return True
+    if any(part in segment for segment in segments[:-1] for part in _SEMANTIC_PARTS):
+        # Under a grading or model segment only operational-named leaves (a judge's timeout) stay operational.
+        return not _OPERATIONAL_SETTING.search(segments[-1])
+    return not _OPERATIONAL_SETTING.search(segments[-1])
+
+
+def _differing_keys(saved: Any, current: Any, prefix: str = "") -> list[str]:
+    """Dotted keys whose values differ between two identities; a list is one value."""
+    if isinstance(saved, dict) and isinstance(current, dict):
+        keys = []
+        for key in sorted(set(saved) | set(current), key=str):
+            dotted = f"{prefix}.{key}" if prefix else str(key)
+            if key not in saved or key not in current:
+                keys.append(dotted)
+            else:
+                keys.extend(_differing_keys(saved[key], current[key], dotted))
+        return keys
+    return [] if saved == current else [prefix or "<root>"]
+
+
+def _configuration_drift(
+    path: Path, saved: "RunManifest", current: "RunManifest"
+) -> tuple[list[str], list[str]] | None:
+    """The semantic and operational keys that differ from the saved identity, or None when it was not saved.
+
+    The saved identity counts only when it is the one the manifest's ``config_digest`` was taken from.
+    """
+    try:
+        identity = json.loads(config_identity_path_for(path).read_bytes())
+    except (OSError, ValueError):
+        return None
+    if current.config_digest not in _CONFIG_IDENTITIES or _digest(identity) != saved.config_digest:
+        return None
+    # An identity an earlier Gym saved may hold credentials: compare on its credential-safe form.
+    keys = _differing_keys(_credential_safe(identity), _CONFIG_IDENTITIES[current.config_digest])
+    return [key for key in keys if _is_semantic(key)], [key for key in keys if not _is_semantic(key)]
+
+
+def _record_resume_drift(path: Path, saved: "RunManifest", current: "RunManifest", keys: list[str]) -> None:
+    from datetime import datetime, timezone
+
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "run_id": saved.run_id,
+        "saved_config_digest": saved.config_digest,
+        "current_config_digest": current.config_digest,
+        "operational_keys": keys,
+    }
+    with resume_drift_path_for(path).open("a", encoding="utf-8") as journal:
+        journal.write(json.dumps(entry, sort_keys=True) + "\n")
+    if not keys:
+        return
+    message = (
+        f"Resuming across operational configuration drift in {', '.join(keys)}; "
+        f"recorded in {resume_drift_path_for(path).name}."
+    )
+    logger.warning(message)
+    warnings.warn(message, stacklevel=3)
 
 
 def _file_digest(path: Path) -> str:
@@ -499,8 +1079,8 @@ def _file_digest(path: Path) -> str:
 
 
 @contextmanager
-def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
-    """Replace a file after a successful write, retaining its sharing permissions."""
+def atomic_output_file(path: Path, mode: int | None = None) -> Iterator[BinaryIO]:
+    """Replace a file after a successful write, retaining its sharing permissions unless ``mode`` sets them."""
     temporary = None
     try:
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -508,7 +1088,9 @@ def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
         # sharing permissions instead of inheriting NamedTemporaryFile's 0600.
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         with os.fdopen(descriptor, "wb") as file:
-            if path.exists():
+            if mode is not None:
+                os.fchmod(file.fileno(), mode)
+            elif path.exists():
                 os.fchmod(file.fileno(), stat.S_IMODE(path.stat().st_mode))
             yield file
             file.flush()
@@ -524,10 +1106,21 @@ def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
             temporary.unlink(missing_ok=True)
 
 
-def atomic_write_json(path: Path, value: dict) -> None:
+def atomic_write_json(path: Path, value: dict, mode: int | None = None) -> None:
     """Publish JSON metadata without exposing a partial rewrite to readers."""
-    with atomic_output_file(path) as file:
+    with atomic_output_file(path, mode) as file:
         file.write((json.dumps(value, indent=2, allow_nan=False) + "\n").encode("utf-8"))
+
+
+class PendingRejudge(BaseModel):
+    """A judge-only re-judgment admitted before its judge call; it closes when its outcome is saved."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operation_id: Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+    predecessor_failure_id: Annotated[str, Field(min_length=1)]
+    predecessor_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    admitted_at: Annotated[float, Field(ge=0, allow_inf_nan=False, strict=True)]  # UTC epoch seconds
 
 
 class RunManifest(BaseModel):
@@ -545,21 +1138,48 @@ class RunManifest(BaseModel):
     config_digest: str
     legacy_import: bool = False
     identity_overridden: bool = False
+    # Admitted judge-only re-judgments whose outcome is not saved yet, by logical rollout id.
+    pending_rejudge: dict[str, PendingRejudge] = Field(default_factory=dict)
 
     @classmethod
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
-        return cls(
+        identity = _configuration_identity(config, global_config, rows)
+        config_digest = _digest(_without_null_defaults(identity))
+        legacy = _legacy_config_digests(identity, config)
+        try:
+            # The digest an earlier Gym took over resolved credentials, compared in memory only, so its runs resume.
+            earlier = _configuration_identity(config, global_config, rows, credential_safe=False)
+        except (ConfigError, OmegaConfBaseException):
+            earlier = None
+        if earlier is not None:
+            legacy = {_digest(_without_null_defaults(earlier)): ()} | _legacy_config_digests(earlier, config) | legacy
+        _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(config_digest, {}) | legacy
+        manifest = cls(
             max_rollout_attempts=_get_max_rollout_attempts(),
             run_id=uuid4().hex,
             retry_terminal_timeouts=config.get("retry_terminal_timeouts", False),
             source_digest=_file_digest(source),
             materialized_digest=_digest(rows),
-            config_digest=_digest(_configuration_identity(config, global_config, rows)),
+            config_digest=config_digest,
         )
+        _CONFIG_IDENTITIES[config_digest] = _without_null_defaults(identity)
+        return manifest
+
+    def matches_config(self, saved_digest: str) -> bool:
+        """Whether a saved configuration digest names this configuration, in this or an earlier recorded form."""
+        return saved_digest == self.config_digest or saved_digest in _LEGACY_CONFIG_DIGESTS.get(self.config_digest, {})
 
     def write(self, path: Path) -> None:
-        # Publish a complete manifest, or leave the previous one intact.
-        atomic_write_json(path, self.model_dump(mode="json"))
+        # Publish a complete manifest, or leave the previous one intact. An empty pending_rejudge is omitted so a
+        # manifest without admissions keeps the version-2 shape that readers without the field accept.
+        value = self.model_dump(mode="json")
+        if not value["pending_rejudge"]:
+            del value["pending_rejudge"]
+        atomic_write_json(path, value)
+        # The identity behind config_digest, so a later resume can name the settings that differ. Readers trust it only
+        # while its digest is the manifest's config_digest.
+        if self.config_digest in _CONFIG_IDENTITIES:
+            atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[self.config_digest], mode=0o600)
 
     @classmethod
     def import_legacy(cls, rows: list[dict]) -> "RunManifest":
@@ -573,6 +1193,12 @@ class RunManifest(BaseModel):
         )
 
 
+class ResumeRefusedError(ConfigError):
+    """Saved rollouts whose identity does not verify against the current run are not resumed."""
+
+    failure_kind = COLLECTION_RESUME_REFUSED
+
+
 def validate_resume(
     path: Path,
     current: RunManifest | None,
@@ -581,6 +1207,12 @@ def validate_resume(
     allow_unsafe: bool = False,
 ) -> RunManifest | None:
     """Reject unknown or incompatible saved work before any output is modified.
+
+    A configuration that differs from the saved one is compared on the identity saved beside the manifest: a
+    difference only in operational settings (timeouts, retries, transport, ports, concurrency, health, paths,
+    tracking) resumes, with a warning and a line in the resume-drift journal; a difference in a semantic setting
+    (dataset, task limits, repeats, agent and model identity, sampling, judge and grading) refuses and names it. A
+    manifest saved without that identity can only be compared by digest, as before.
 
     ``allow_unsafe`` is an explicit compatibility escape hatch for legacy artifacts or
     deliberate identity overrides. Unsupported/corrupt manifests remain errors.
@@ -596,6 +1228,7 @@ def validate_resume(
         except (ValidationError, ValueError, OSError) as error:
             raise ConfigError(f"Cannot read recovery manifest {path} or materialized inputs: {error}") from error
         mismatches = []
+        operational_drift: list[str] = []
         if saved.legacy_import:
             mismatches.append("unverified legacy run identity")
         if saved.identity_overridden:
@@ -608,15 +1241,42 @@ def validate_resume(
             for field, description in (
                 ("source_digest", "source dataset"),
                 ("materialized_digest", "current materialized inputs"),
-                ("config_digest", "resolved configuration"),
             ):
                 if getattr(saved, field) != getattr(current, field):
                     mismatches.append(description)
+            if not current.matches_config(saved.config_digest):
+                drift = _configuration_drift(path, saved, current)
+                if drift is None:
+                    mismatches.append(
+                        "resolved configuration (this run saved only a digest of its configuration, so the "
+                        "settings that differ cannot be named)"
+                    )
+                elif drift[0]:
+                    mismatches.append(f"resolved configuration (semantic settings differ: {', '.join(drift[0])})")
+                else:
+                    operational_drift = drift[1]
+            elif current.config_digest != saved.config_digest:
+                # Matched as an earlier Gym recorded it: name the removed null defaults it still had, if any.
+                operational_drift = list(
+                    _LEGACY_CONFIG_DIGESTS.get(current.config_digest, {}).get(saved.config_digest, ())
+                )
+            elif (
+                current.config_digest == saved.config_digest
+                and current.config_digest in _CONFIG_IDENTITIES
+                and not config_identity_path_for(path).exists()
+            ):
+                # The same configuration: save its identity now, so a later resume of this run can name any drift.
+                atomic_write_json(
+                    config_identity_path_for(path), _CONFIG_IDENTITIES[current.config_digest], mode=0o600
+                )
         if not mismatches:
+            if operational_drift or resume_drift_path_for(path).exists():
+                # Once a run has drifted, every later resume adds a line, so the last one is the latest resume's.
+                _record_resume_drift(path, saved, current, operational_drift)
             return saved
         problem = "Cannot resume with incompatible " + ", ".join(mismatches) + "."
     if not allow_unsafe:
-        raise ConfigError(problem + " Start a fresh run or explicitly set allow_unsafe_resume=true.")
+        raise ResumeRefusedError(problem + " Start a fresh run or explicitly set allow_unsafe_resume=true.")
     warnings.warn(problem + " Continuing because allow_unsafe_resume=true; saved inputs will be reused.", stacklevel=2)
     return saved.model_copy(update={"identity_overridden": True}) if saved is not None else None
 
@@ -734,10 +1394,14 @@ class IncompleteEvaluationError(RuntimeError):
 
     exit_code = 75
 
-    def __init__(self, message: str, *, retryable: bool = True, made_progress: bool = True) -> None:
+    def __init__(
+        self, message: str, *, retryable: bool = True, made_progress: bool = True, failure_kind: str | None = None
+    ) -> None:
         if retryable and not made_progress:
             message += " No retry progress was made; automatic restarts use the infrastructure retry limit."
         super().__init__(message)
         # 75 continues productive work; an empty invocation must spend a bounded
         # infrastructure retry. 76 stops when another attempt cannot help.
         self.exit_code = (75 if made_progress else 1) if retryable else 76
+        # The registered kind that ended the run, left for the next segment's guard (see record_failure_kind).
+        self.failure_kind = failure_kind

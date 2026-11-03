@@ -67,7 +67,9 @@ does not turn them into failures.
 Native episode failures preserve the producer's `failure_kind`, including an unspecified value. The generic
 `environment_server_failed` label is used only for compatibility routing; it is not invented as the canonical kind.
 The terminal flag, stage, and partial-response diagnostics are retained. Nonterminal failures can retry the whole episode.
-Judge-only recovery is a follow-up. Built-in `judge_failsafe` results retain their saved answers without a reward;
+Judge-only recovery re-judges a saved answer without regenerating it: at the end of a run, before the policy work of a resumed run and again at its end, and
+through `gym eval resubmit --recover` when only judge failures remain (a judge-only CPU job for a run that served its own
+model). Built-in `judge_failsafe` results retain their saved answers without a reward;
 the collector accepts their two known legacy judge markers while rejecting other reserved result keys.
 
 Malformed replies become terminal `environment_protocol_violation` failures when routing is enabled; running the whole task again
@@ -112,7 +114,7 @@ Invalid or colliding IDs are configuration errors before dispatch.
 Tasks drained before dispatch by `dispatch_budget_s` consume no attempt and remain available on resume.
 The opt-in `retry_terminal_timeouts` and `dispatch_longest_first` controls
 also apply to manifest-backed runs. Incomplete final writes are repaired after history validation;
-conflicting or foreign payloads still fail validation. Core collection retries eligible unfinished tasks from their inputs. Saved judge answers, possibly delivered requests, and unclassified execution remain stopped. Manifest-backed judge-only reverification is not currently supported.
+conflicting or foreign payloads still fail validation. Core collection retries eligible unfinished tasks from their inputs. Possibly delivered requests and unclassified execution remain stopped. Saved judge answers are re-judged in place, at the end of a run, before the policy work of a resumed run and again at its end, and by `gym eval resubmit --recover` when only judge failures remain; a manifest-backed run settles each re-judgment into its source under the run lock.
 GDPVal manages its own cached-deliverable reuse; core invalid-judge migration options are no longer supported.
 
 Managed runs save `retry_terminal_timeouts` in the run manifest. Resume keeps that policy unless the option
@@ -203,12 +205,32 @@ Known runtime connection references (for example `${policy_base_url}` and `${pol
 settings) do not change experiment identity when their values change. Model names and task parameters still do.
 Arbitrary nested task fields named `port` or `api_key` are retained in the identity.
 
+### Configuration drift on resume
+
+A run saves its resolved configuration identity beside the manifest (`<stem>_manifest.identity.json`). When the
+configuration at resume differs from the saved one, Gym compares the two setting by setting:
+
+- **Semantic settings** change what is measured, and a difference refuses the resume, naming each setting. These are
+  the dataset, split and task limits, task data, repeats, the agent and the policy model and its served window,
+  sampling (temperature, top-p/top-k/min-p, penalties, output tokens, seed, `responses_create_params`,
+  `sampling_overrides`, `extra_body`, `chat_template_kwargs`), and judge, grader, verifier, reward, rubric,
+  reference-answer and prompt settings.
+- **Operational settings** are everything else, for example timeouts, retries, transport versions, ports,
+  concurrency, health limits, paths and tracking flags. The resume proceeds, Gym prints a warning that names the
+  settings, and one line per such resume is appended to `<stem>_manifest.resume-drift.jsonl`.
+
+A null setting and an absent one are the same setting. A run saved before identities were stored can only be
+compared as a whole: any change refuses it, and the error says that the differing settings cannot be named. Once
+such a run resumes on an unchanged configuration, its identity is saved for later resumes.
+
 ### Legacy artifacts and explicit overrides
 
 Older runs have no manifest. By default, Gym rejects a resume whose identity cannot be checked. To deliberately reuse
 legacy artifacts or accept an input/configuration mismatch, set `+allow_unsafe_resume=true` alongside resume.
 Gym warns and reuses the **saved materialized tasks**. The manifest records that identity was imported or overridden,
-and coverage reports `identity_verified=false`. Future resumes continue to require the override. Existing legacy
+and coverage reports `identity_verified=false`. For a submitted run, `gym eval resubmit --recover --allow-unsafe-resume
+--unsafe-resume-reason "<why>"` sets the override on the queued job; the reason is required, and it is recorded with the
+user in the run directory's `unsafe-resume-journal.jsonl`. Future resumes continue to require the override. Existing legacy
 payloads are preserved; newly written payloads carry the run identifier. Gym still rejects corrupt or unsupported
 manifests and materialized inputs that no longer match their saved manifest.
 

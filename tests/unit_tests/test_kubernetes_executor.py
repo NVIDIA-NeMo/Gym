@@ -496,3 +496,28 @@ def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
     assert env["NEMO_GYM_POLICY_BASE_URL"] == "http://localhost:8000/v1"
     assert env["NEMO_GYM_POLICY_MODEL_NAME"] == "org/model"
     assert env["NEMO_GYM_POLICY_API_KEY"] == "dummy"
+
+
+def test_initial_manifest_and_local_record_share_observed_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("SOURCE_KEY", "test-private-value")
+    raw = _submit_config(tmp_path, ["bench_a"]).model_dump(mode="json")
+    raw["driver"]["env"] = {"API_KEY": "host:SOURCE_KEY"}
+    config = SubmitConfig.model_validate(raw)
+    fake = _FakeKubectl([(0, "created", "")])
+    _install(monkeypatch, fake)
+    build = kubernetes_module.build_job_manifest
+    observed = []
+
+    def capture(*args, **kwargs):
+        observed.append(SubmissionRecord.load(json.loads(kwargs["manifest"])))
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(kubernetes_module, "build_job_manifest", capture)
+    record = KubernetesExecutor().run(config)
+    assert observed[0].environment == record.environment
+    assert record.environment.required_env == ["SOURCE_KEY"]
+    assert record.environment.forwarded_env == []
+    assert record.environment.telemetry.enabled is False
+    assert "test-private-value" not in observed[0].dumps()
+    assert "WORKER_LOCAL" not in record.environment.model_dump_json()
