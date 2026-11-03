@@ -22,9 +22,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,
@@ -32,6 +33,8 @@ from nemo_gym.sandbox import (
     list_providers,
     register_provider,
 )
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.litmus_agent.app import (
     _ANSWER_FORMAT_REGEXES,
     _CODE_EXEC_DRIVER_PATH,
@@ -565,6 +568,8 @@ class _LocalFakeProvider:
         self.created = 0
         self.closed = 0
         self.aclosed = 0
+        # Set to make close fail the way a remote stop can.
+        self.close_error: Exception | None = None
         self._files: dict[str, dict[str, str]] = {}
         _LocalFakeProvider.instances.append(self)
 
@@ -602,6 +607,8 @@ class _LocalFakeProvider:
         return SandboxStatus.RUNNING
 
     async def close(self, handle) -> None:
+        if self.close_error is not None:
+            raise self.close_error
         self.closed += 1
 
     async def aclose(self) -> None:
@@ -778,3 +785,160 @@ class TestSandboxSpecAndRouting:
 
         without_tool = _make_server().setup_webserver()
         assert not any("stateful" in r.path for r in without_tool.routes)
+
+
+EPISODE_ID = EpisodeId(rollout_id="rollout", attempt=0)
+
+
+def _seed(resources_session_id: str) -> dict:
+    return ResourcesSeedSessionRequest(
+        resources_session_id=resources_session_id,
+        episode_id=EPISODE_ID,
+        task_id=TaskId(taskset="litmus_agent", task_id="0"),
+        task_data={"expected_answer": "3", "answer_type": FLOAT},
+    ).model_dump(mode="json")
+
+
+def _close(resources_session_id: str) -> dict:
+    return ResourcesCloseSessionRequest(resources_session_id=resources_session_id, episode_id=EPISODE_ID).model_dump(
+        mode="json"
+    )
+
+
+VERIFY_BODY = _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT).model_dump(mode="json")
+
+
+def _session_client(**client_options) -> tuple[LitmusAgentResourcesServer, TestClient]:
+    server = _make_sandbox_server()
+    return server, TestClient(server.setup_webserver(), **client_options)
+
+
+class TestResourcesSessions:
+    def test_session_contract(self):
+        server = _make_sandbox_server()
+
+        check_resources_session_contract(
+            server.setup_webserver(),
+            ResourcesSeedSessionRequest.model_validate(_seed("contract-session")),
+            keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server._session_episodes,
+            verify_body=VERIFY_BODY,
+        )
+
+    def test_close_without_verify_stops_the_sandbox(self):
+        server, client = _session_client()
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        tool_call = client.post("/stateful_python_code_exec", json={"code": "x = 21\nprint(x * 2)"})
+        assert tool_call.status_code == 200 and tool_call.text.strip() == "42"
+        provider = _LocalFakeProvider.instances[-1]
+
+        # An Environment Server whose seed reply was lost closes without the cookie.
+        client.cookies.clear()
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+
+        assert provider.closed == 1
+        assert server._sessions == {} and server._session_locks == {}
+        assert "rs-1" not in server._session_episodes
+
+    def test_failed_stop_leaves_session_open_for_a_retry(self):
+        server, client = _session_client(raise_server_exceptions=False)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(1)"}).status_code == 200
+        provider = _LocalFakeProvider.instances[-1]
+
+        provider.close_error = RuntimeError("sandbox API unavailable")
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 500
+        assert server._fence.closed_episode("rs-1") is None
+        assert "rs-1" in server._sessions
+
+        provider.close_error = None
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+        assert provider.closed == 1
+        assert server._sessions == {}
+        assert server._fence.closed_episode("rs-1") == EPISODE_ID
+
+    def test_failed_stop_at_verify_keeps_the_score(self):
+        server, client = _session_client(raise_server_exceptions=False)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(1)"}).status_code == 200
+        provider = _LocalFakeProvider.instances[-1]
+        provider.close_error = RuntimeError("sandbox API unavailable")
+
+        verified = client.post("/verify", json=VERIFY_BODY)
+
+        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
+        # The sandbox stays registered, so the close retries the stop and reports its failure.
+        assert "rs-1" in server._sessions
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 500
+        provider.close_error = None
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+        assert provider.closed == 1 and server._sessions == {}
+
+    def test_tool_call_after_close_is_a_lost_session(self):
+        server, client = _session_client()
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+        providers_before = len(_LocalFakeProvider.instances)
+
+        response = client.post("/stateful_python_code_exec", json={"code": "print(1)"})
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == "session_lost"
+        # The refused call started no sandbox.
+        assert len(_LocalFakeProvider.instances) == providers_before
+        assert server._sessions == {}
+
+    def test_tool_call_racing_close_stops_its_sandbox(self, monkeypatch):
+        server, client = _session_client()
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        real_exec = _LocalFakeProvider.exec
+
+        async def exec_then_close(provider, handle, command, **kwargs):
+            result = await real_exec(provider, handle, command, **kwargs)
+            # A close that ran before this call registered its sandbox found nothing to stop.
+            server._fence.mark_closed("rs-1", EPISODE_ID)
+            return result
+
+        monkeypatch.setattr(_LocalFakeProvider, "exec", exec_then_close)
+        response = client.post("/stateful_python_code_exec", json={"code": "print(1)"})
+
+        assert response.status_code == 404
+        assert _LocalFakeProvider.instances[-1].closed == 1
+        assert server._sessions == {}
+
+    def test_verify_then_close_stops_the_sandbox_once(self):
+        server, client = _session_client()
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(1)"}).status_code == 200
+        provider = _LocalFakeProvider.instances[-1]
+
+        verified = client.post("/verify", json=VERIFY_BODY)
+        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+
+        assert provider.closed == 1
+        assert server._sessions == {}
+
+    def test_legacy_seed_keeps_working(self):
+        server, client = _session_client()
+
+        # An Agent's /run seeds with the row itself.
+        seeded = client.post("/seed_session", json=VERIFY_BODY)
+        assert seeded.status_code == 200 and seeded.json() == {}
+        assert server._session_episodes == {}
+        assert client.post("/stateful_python_code_exec", json={"code": "print(2)"}).text.strip() == "2"
+        assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
+        assert server._sessions == {}
+
+    async def test_shutdown_stops_the_rest_after_a_failed_stop(self):
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "print(1)")
+        failing = _LocalFakeProvider.instances[-1]
+        await _run_code(server, "s2", "print(2)")
+        healthy = _LocalFakeProvider.instances[-1]
+        failing.close_error = RuntimeError("sandbox API unavailable")
+
+        await server._shutdown_all_sessions()
+
+        assert healthy.closed == 1
+        assert list(server._sessions) == ["s1"]

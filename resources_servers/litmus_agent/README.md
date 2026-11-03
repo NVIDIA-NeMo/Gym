@@ -180,6 +180,17 @@ reaped when that rollout's `/verify` runs (and any stragglers on server
 shutdown). Direct (no-tool) rows never create a sandbox, so a run with no
 tool-using rows works even without provider credentials.
 
+Under an Environment Server, such as `litmus_agent_environment_server`
+(`single_agent_turn_legacy`), `/seed_session` binds the session cookie to the
+`resources_session_id`, and `/close_session` stops the session's sandbox even
+when `/verify` never ran. A stop that fails makes the close fail, and the sandbox
+stays registered, so the caller's retry stops it. A failed stop at `/verify` is
+logged and keeps the score. Closing an unknown or already closed session
+succeeds, and a seed that arrives after its session closed is refused with 409
+for `session_close_retry_window_seconds`. A tool call for a closed session gets
+404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked
+sample with reward 0.
+
 **Statefulness (replay model).** The sandbox runs one-shot commands, not a live
 Python kernel. Statefulness across calls within a session is emulated by
 replaying every prior **known-good** cell — with its stdout/stderr suppressed —

@@ -82,6 +82,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import math
 import re
 import statistics
@@ -95,16 +96,30 @@ from fastapi.responses import PlainTextResponse
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.verification import judge_failsafe
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +610,13 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
     _sessions: Dict[str, _SandboxSession] = PrivateAttr(default_factory=dict)
     _session_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _registry_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
+    # The episode and task each Environment Server seed bound to its resources_session_id.
+    _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    _fence: ResourcesSessionFence = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     # -- tool serving -------------------------------------------------------
 
@@ -681,7 +703,10 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         suppressed) ahead of the new cell. A clean run appends the cell to the
         session history; a replay-reset clears it.
         """
-        session_id = request.session.get(SESSION_ID_KEY) or "litmus-no-session"
+        # The session middleware always sets the session ID, which keys the session's sandbox.
+        session_id = request.session[SESSION_ID_KEY]
+        if self._fence.closed_episode(session_id) is not None:
+            raise ResourcesSessionLostError(f"litmus_agent session {session_id} is closed")
         try:
             body = await request.json()
         except Exception:
@@ -701,26 +726,82 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             elif result.return_code == _EXIT_REPLAY_RESET:
                 session.cells.clear()
 
+        if self._fence.closed_episode(session_id) is not None:
+            # The session closed while this call ran, so stop the sandbox the call may have started.
+            await self._cleanup_session(session_id)
+            raise ResourcesSessionLostError(f"litmus_agent session {session_id} closed during the tool call")
+
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         return PlainTextResponse(_truncate_output(output, self.config.code_exec_max_output_chars))
 
-    async def _cleanup_session(self, session_id: Optional[str]) -> None:
-        if not session_id:
-            return
+    async def _cleanup_session(self, session_id: str) -> None:
+        """Stop the session's sandbox; one whose stop fails stays registered, so a later cleanup retries it."""
         if self._registry_lock is None:
             self._registry_lock = asyncio.Lock()
         async with self._registry_lock:
-            session = self._sessions.pop(session_id, None)
-            self._session_locks.pop(session_id, None)
-        if session is not None:
-            try:
-                await session.sandbox.stop()
-            except Exception:
-                pass
+            session = self._sessions.get(session_id)
+        if session is None:
+            return
+        await session.sandbox.stop()
+        async with self._registry_lock:
+            # A concurrent cleanup may already have dropped it, and a later call may have started another.
+            if self._sessions.get(session_id) is session:
+                del self._sessions[session_id]
+                self._session_locks.pop(session_id, None)
 
     async def _shutdown_all_sessions(self) -> None:
         for session_id in list(self._sessions):
-            await self._cleanup_session(session_id)
+            try:
+                await self._cleanup_session(session_id)
+            except Exception:
+                logger.exception("Could not stop the sandbox of litmus_agent session %s at shutdown", session_id)
+
+    # -- sessions -----------------------------------------------------------
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Bind an Environment Server's resources session to the request's cookie.
+
+        The sandbox itself starts lazily on the first tool call. An Agent's ``/run`` seeds with its legacy body,
+        which keeps no state here; verify stops that rollout's sandbox.
+        """
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            return BaseSeedSessionResponse()
+
+        resources_session_id = body.resources_session_id
+        async with self._fence.locked(resources_session_id):
+            self._fence.raise_if_closed(resources_session_id)
+            identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
+            if identity != (body.episode_id, body.task_id):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+        # The tool and verify find the sandbox by the cookie, so it must name this resources session.
+        request.session[SESSION_ID_KEY] = resources_session_id
+        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Stop the session's sandbox, even when verify never ran.
+
+        Releases by ``resources_session_id``, since a close whose seed reply was lost carries no cookie. A failed
+        stop propagates, so the session is not recorded as closed and the caller can retry.
+        """
+        resources_session_id = body.resources_session_id
+        async with self._fence.locked(resources_session_id):
+            closed_episode = self._fence.closed_episode(resources_session_id)
+            if closed_episode is not None:
+                if closed_episode != body.episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+                return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
+            identity = self._session_episodes.get(resources_session_id)
+            if identity is not None and identity[0] != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            # Verify has already stopped a verified episode's sandbox, so this finds none.
+            await self._cleanup_session(resources_session_id)
+            self._session_episodes.pop(resources_session_id, None)
+            self._fence.mark_closed(resources_session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     # -- verification -------------------------------------------------------
 
@@ -734,10 +815,21 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         End of a rollout is the natural point to drop the session's sandbox so
         it does not leak; scoring is delegated unchanged to ``verify``.
         """
+        session_id = request.session[SESSION_ID_KEY]
+        if self._fence.closed_episode(session_id) is not None:
+            # An Environment Server verifies before it closes, so this verify is out of order; mask it.
+            passthrough = {k: v for k, v in body.model_dump().items() if k not in _RESERVED_RESPONSE_FIELDS}
+            return LitmusAgentVerifyResponse(
+                **(passthrough | lost_session_verification(f"litmus_agent session {session_id} is closed"))
+            )
         try:
             return await self.verify(body)
         finally:
-            await self._cleanup_session(request.session.get(SESSION_ID_KEY))
+            try:
+                await self._cleanup_session(session_id)
+            except Exception:
+                # The score stands; the sandbox stays registered, so /close_session retries the stop and reports it.
+                logger.exception("Could not stop the sandbox of litmus_agent session %s", session_id)
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
         answer_type = resolve_answer_type(body.answer_type)
