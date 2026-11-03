@@ -11,8 +11,7 @@ from pytest import MonkeyPatch
 import resources_servers.deepswe.app as app_module
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import ENVIRONMENT_SERVER_FAILED, SESSION_LOST, VERIFIER_ERROR
-from nemo_gym.failure_transport import RequestFailureLog
+from nemo_gym.core import ENVIRONMENT_SERVER_FAILED, SESSION_LOST, VERIFIER_ERROR, RequestFailureLog
 from nemo_gym.sandbox import SandboxResources
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,

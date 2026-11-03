@@ -44,22 +44,24 @@ from nemo_gym.agents import (
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
+    failure_report_for,
 )
-from nemo_gym.core.failure_kinds import INFRASTRUCTURE_ERROR, MODEL_POLICY_RESPONSE_TIMEOUT
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core.failure_kinds import INFRASTRUCTURE_ERROR
 from nemo_gym.models import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,

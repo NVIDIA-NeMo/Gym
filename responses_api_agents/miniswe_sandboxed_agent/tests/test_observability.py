@@ -293,7 +293,7 @@ async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, 
     After a native limit the agent's result stands and the cleanup stays an unselected failure event; a
     submission keeps the cleanup as its failure. A nonzero model command is always the agent's result.
     """
-    from nemo_gym.failure_transport import FailureHeader, FailureReportRow, RequestFailureLog
+    from nemo_gym.core import FailureHeader, FailureReportRow, RequestFailureLog
 
     app = FastAPI()
     requests = []

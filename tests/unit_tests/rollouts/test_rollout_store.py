@@ -559,10 +559,10 @@ def test_health_selects_no_stale_result_after_interruption(prepared_run, alias):
 @pytest.mark.parametrize("mismatch", ["run_id", "rollout_id", "attempt", "terminal", "failure_kind"])
 def test_nested_failure_must_agree_with_saved_envelope(prepared_run, mismatch):
     from nemo_gym.core.episode import EpisodeId
+    from nemo_gym.core.episode_types import EpisodeFailure
     from nemo_gym.rollouts.rollout_collection import _failure_compatibility_row
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollouts.rollout_records import logical_rollout_id
-    from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -1218,10 +1218,10 @@ def test_an_interruption_with_no_recorded_cause_stops_automatic_recovery_and_kee
 )
 def test_a_known_interruption_retries_only_before_an_answer(prepared_run, stage, partial, retried) -> None:
     from nemo_gym.core.episode import EpisodeId
+    from nemo_gym.core.episode_types import EpisodeFailure
     from nemo_gym.rollouts.rollout_collection import _failure_compatibility_row
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollouts.rollout_records import logical_rollout_id
-    from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -1246,10 +1246,10 @@ def test_a_known_interruption_retries_only_before_an_answer(prepared_run, stage,
 @pytest.mark.parametrize("saved_answer", [True, False])
 def test_a_delivered_verification_failure_with_its_answer_is_not_regenerated(prepared_run, saved_answer) -> None:
     from nemo_gym.core.episode import EpisodeId
+    from nemo_gym.core.episode_types import EpisodeFailure
     from nemo_gym.rollouts.rollout_collection import _failure_compatibility_row
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollouts.rollout_records import logical_rollout_id
-    from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     answer = {
         "id": "retained",

@@ -1676,7 +1676,7 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
         cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
     )
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import NgFailureEvent
 
     with raises(NgFailureEvent) as caught:
         await server.responses(request, body)
@@ -1695,8 +1695,8 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
 
 @mark.parametrize("error_type", ["UnknownError", None])
 async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_path, error_type):
+    from nemo_gym.core import NgFailureEvent
     from nemo_gym.sandbox import SandboxExecResult
-    from nemo_gym.typed_exceptions import NgFailureEvent
 
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
@@ -1730,8 +1730,8 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
 
 
 async def test_a_provider_ending_the_agents_sandbox_records_its_code_status_and_sandbox(tmp_path):
+    from nemo_gym.core import NgFailureEvent, failure_report_for
     from nemo_gym.sandbox import SandboxHandle
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
     class SandboxApiException(Exception):
         def __init__(self, message):
@@ -1777,8 +1777,8 @@ def _ended_sdk_error(reason: str, container_line: str):
 
 
 async def test_a_provider_ended_agent_sandbox_is_observed_as_a_typed_sandbox_failure(tmp_path, monkeypatch):
+    from nemo_gym.core import NgFailureEvent
     from nemo_gym.sandbox import SandboxHandle
-    from nemo_gym.typed_exceptions import NgFailureEvent
     from responses_api_agents.opencode_sandboxed_agent import app as agent_app
 
     observed = []
@@ -1808,7 +1808,7 @@ async def test_a_provider_ended_agent_sandbox_is_observed_as_a_typed_sandbox_fai
 
 
 async def test_a_provider_exception_that_reports_no_ended_sandbox_observes_nothing(tmp_path, monkeypatch):
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import NgFailureEvent
     from responses_api_agents.opencode_sandboxed_agent import app as agent_app
 
     observed = []

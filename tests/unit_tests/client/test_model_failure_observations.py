@@ -14,10 +14,10 @@ from aiohttp.test_utils import TestServer
 
 import nemo_gym.client.http_client as http_client
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.core.episode_types import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
-from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureEvent, FailureReport
-from nemo_gym.typed_exceptions import failure_report_for
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.typed_exceptions import failure_report_for
 
 
 @pytest.mark.parametrize("error_type", [aiohttp.ServerDisconnectedError, aiohttp.ClientOSError])
@@ -499,8 +499,8 @@ async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode
 @pytest.mark.parametrize("mode", ["truncated", "timeout"])
 @pytest.mark.parametrize("status", [401, 422, 503])
 async def test_a_failed_error_body_read_selects_the_attempt_that_returned_it(monkeypatch, status, mode, forwarded):
-    from nemo_gym.failure_transport import FailureHeader
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
     hits = 0
     remote = NgFailureEvent(

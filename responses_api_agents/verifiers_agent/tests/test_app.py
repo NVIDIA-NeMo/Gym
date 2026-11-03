@@ -763,7 +763,7 @@ class TestOwnGradingRecord:
         record = invocation["grading_record"]
         assert (record["verifier"], record["score"], record["verdict"]) == ("automationbench", 1.0, "scored")
         # Bound to the row as collection saves it: the response and reward of this /run reply.
-        from nemo_gym.trajectory.trajectory_record import grading_result_binding
+        from nemo_gym.trajectory import grading_result_binding
 
         assert record["result_binding_sha256"] == grading_result_binding(body)
         assert body["reward"] == 1.0 and body.get("mask_sample") is False

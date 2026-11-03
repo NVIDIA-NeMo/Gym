@@ -43,9 +43,8 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     failure_kinds,
+    observe_failure,
 )
-from nemo_gym.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
-from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     ConnectableProvider,
     SandboxBackendUnreachableError,
@@ -57,6 +56,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.sandbox.failure_details import ended_sandbox, sandbox_failure_event
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
 
 LOG = logging.getLogger(__name__)

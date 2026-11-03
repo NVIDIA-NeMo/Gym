@@ -593,7 +593,7 @@ class TestImportSurface:
         Keep its replacement in the snapshot so compatibility checks cannot silently discard the canonical API.
         The v1 EpisodeFailure data envelope is retained; only its old raised-error wrapper and type variable go away.
         """
-        from nemo_gym.typed_exceptions import NgFailureEvent
+        from nemo_gym.core.typed_exceptions import NgFailureEvent
 
         retired = {
             "nemo_gym.agent_utils.sandbox_session": ("HarnessTerminationError",),
@@ -607,8 +607,8 @@ class TestImportSurface:
             for name in old_names:
                 assert name not in self.surface[module]
                 assert not hasattr(current, name)
-        assert "NgFailureEvent" in self.surface["nemo_gym.typed_exceptions"]
-        assert "FailureReportRow" in self.surface["nemo_gym.failure_transport"]
+        assert "NgFailureEvent" in self.surface["nemo_gym.core.typed_exceptions"]
+        assert "FailureReportRow" in self.surface["nemo_gym.core.failure_transport"]
 
     def test_every_recorded_name_still_resolves_at_its_old_path(self) -> None:
         missing = []
