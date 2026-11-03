@@ -61,22 +61,22 @@ class MySandboxProvider:
         return None
 ```
 
-Provider implementations should preserve the same lifecycle contract as the built-in providers:
+New provider implementations should follow this lifecycle and failure contract:
 
 - Return a `SandboxHandle` from `create()` only after the sandbox is ready enough to run commands and transfer files.
 - Return command status through `SandboxExecResult` for process exits, including nonzero exits.
-- For runtime failures, raise `NgFailureEvent` with `boundary="sandbox"`, the operation and a registered provider kind.
+- For allocation, readiness and runtime failures, raise `NgFailureEvent` with `boundary="sandbox"`, the operation
+  and a kind registered in [failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py).
   Use `nemo_gym.sandbox.failures.sandbox_failure` and `raise ... from error` to retain the original cause.
 - A provider-request timeout leaves remote completion unknown. Report `provider_io_timeout`; do not invent a command timeout.
 - Report `provider_oom_killed` only from authoritative current-sandbox evidence, retaining its source.
 - Choose runtime actions through configurable `OutcomePolicyConfig` rules. Bound retries by the operation's
   existing budget and never replay a command whose delivery is uncertain. Record failed attempts with
   `observe_failure` before retrying, so successful recovery still carries evidence upstream.
-- Raise `SandboxCreateError` or `SandboxCreateVerificationError` for sandbox allocation and readiness failures.
 - Make `close()` safe to call from cleanup paths.
 - Use `aclose()` for provider-scoped resources such as SDK clients.
 
-OpenSandbox implements the runtime failure-event contract. Other providers have not yet migrated.
+Use OpenSandbox as the reference implementation for failure events and outcome policies.
 
 ## Provider Config
 
