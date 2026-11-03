@@ -50,9 +50,11 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SandboxCommand,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restrict_sandbox_network,
     shell_assignments,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -522,6 +524,23 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     openclaw_version: str
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox OpenClaw creates: `model_only` allows only the model server's host, "
+            "`model_and_tools` also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a "
+            "session that borrows one rejects any other value than `inherit`."
+        ),
+    )
+    sandbox_runtime_dir: Optional[str] = Field(
+        default=None,
+        pattern=r"^/",
+        description=(
+            "Directory inside the sandbox that already holds `node/` and `openclaw/` as "
+            "`install_openclaw_runtime.sh` lays them out, for sandboxes that cannot download the runtime. Setup "
+            "checks that it holds `openclaw_version` instead of installing one."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     # Per-request timeout of a sandbox session's MCP tool grants (OpenClaw's mcp.servers.<name>.timeout).
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -590,6 +609,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "OpenClaw requires direct SandboxAccess")
+            if self.config.network_access != "inherit":
+                raise HTTPException(
+                    422, "OpenClaw network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or workdir in ("/", "/tmp"):
@@ -633,6 +656,21 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider_name=provider.name,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess)
+                    ],
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -641,7 +679,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         directory = f"/tmp/nemo-gym-openclaw-sessions/{uuid4().hex}"
-        runtime = f"/tmp/nemo-gym-openclaw-node-22.19.0-{self.config.openclaw_version}"
+        runtime = (
+            self.config.sandbox_runtime_dir or f"/tmp/nemo-gym-openclaw-node-22.19.0-{self.config.openclaw_version}"
+        )
         state = OpenClawSandboxSession(
             request=body,
             session=SandboxSession(
@@ -669,22 +709,38 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"stderr={(prepared.stderr or '')[-16000:]}; stdout={(prepared.stdout or '')[-16000:]}"
                 )
             prepared_directory = True
-            # Install only the agent runtime in the existing task sandbox.
-            # Resources has already prepared the task repository and its dependencies.
-            installer = "install_openclaw_runtime.sh"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            installed = await sandbox.exec(
-                f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
-                f"{shlex.quote(self.config.openclaw_version)}",
-                cwd=workdir,
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if installed.return_code != 0 or installed.error_type:
-                raise RuntimeError(
-                    f"OpenClaw runtime setup failed (exit {installed.return_code}, error={installed.error_type}): "
-                    f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
-                    f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
+            if self.config.sandbox_runtime_dir:
+                # The installer's own check: the version the package declares.
+                checked = await sandbox.exec(
+                    f"{shlex.quote(runtime + '/node/bin/node')} -e "
+                    f"{shlex.quote('process.stdout.write(require(process.argv[1]).version)')} "
+                    f"{shlex.quote(runtime + '/openclaw/node_modules/openclaw/package.json')}",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
+                if checked.return_code != 0 or checked.error_type or checked.stdout != self.config.openclaw_version:
+                    raise RuntimeError(
+                        f"OpenClaw runtime in {runtime} does not hold openclaw_version {self.config.openclaw_version} "
+                        f"(exit {checked.return_code}, error={checked.error_type}): "
+                        f"stderr={(checked.stderr or '')[-16000:]}; stdout={(checked.stdout or '')[-16000:]}"
+                    )
+            else:
+                # Install only the agent runtime in the existing task sandbox.
+                # Resources has already prepared the task repository and its dependencies.
+                installer = "install_openclaw_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+                installed = await sandbox.exec(
+                    f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
+                    f"{shlex.quote(self.config.openclaw_version)}",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
+                )
+                if installed.return_code != 0 or installed.error_type:
+                    raise RuntimeError(
+                        f"OpenClaw runtime setup failed (exit {installed.return_code}, error={installed.error_type}): "
+                        f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
+                        f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
+                    )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
