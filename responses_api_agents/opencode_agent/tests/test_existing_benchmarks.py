@@ -56,7 +56,8 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
         "*git *@*:*",
     ):
         assert permissions.bash[command] == "deny"
-    assert settings.opencode_config.tools.webfetch is False
+    assert settings.opencode_config.permission.webfetch == "deny"
+    assert "tools" not in settings.opencode_config
     assert "opencode_version" not in settings
 
 
