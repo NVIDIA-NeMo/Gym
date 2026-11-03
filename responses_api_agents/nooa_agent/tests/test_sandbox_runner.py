@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agents import CleanupReceipt
+from nemo_gym.core import NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import NOOARunFailure
 from responses_api_agents.nooa_agent.sandbox_entrypoint import (

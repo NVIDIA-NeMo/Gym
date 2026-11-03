@@ -47,7 +47,8 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode import (
     current_rollout_id,
 )
-from nemo_gym.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -60,7 +61,6 @@ from nemo_gym.telemetry.connection_pool import (
 from nemo_gym.telemetry.observer import request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.utils.server_process import (
     get_nemo_gym_fastapi_num_workers,
     is_nemo_gym_fastapi_worker,

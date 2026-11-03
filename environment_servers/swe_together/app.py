@@ -58,8 +58,10 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     JUDGE_FAILED,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     verifier_invocation_context,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
@@ -75,10 +77,8 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    FailureBoundary,
+    handled_episode_failure,
 )
-from nemo_gym.server_runtime.base_environment_server import handled_episode_failure
-from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

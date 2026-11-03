@@ -21,8 +21,8 @@ from environment_servers.single_agent_turn.app import (
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import MaterializedTask, SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId
+from nemo_gym.server_runtime import SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
 class _Cookie:
@@ -422,8 +422,9 @@ async def test_protocol_failure_metadata_survives_collection(
     from unittest.mock import AsyncMock
 
     import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.core import EpisodeFailure
     from nemo_gym.rollouts import RolloutFailureRecord, RolloutStore, logical_rollout_id
-    from nemo_gym.server_runtime import EpisodeFailure, SingleAgentTurnFailure, SingleAgentTurnResponse
+    from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResponse
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     environment, client = _environment_server()
@@ -597,8 +598,7 @@ async def test_legacy_rows_take_part_in_checkpoints() -> None:
 
 
 def _chain_report(model_status: int):
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import FailureBoundary, NgFailureEvent, failure_report_for
 
     model = NgFailureEvent(
         boundary=FailureBoundary.MODEL,
@@ -625,7 +625,7 @@ def _chain_report(model_status: int):
 
 @pytest.mark.parametrize("model_status", [200, 503])
 def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) -> None:
-    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.core import FailureReportRow
     from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
     from nemo_gym.server_runtime import SingleAgentTurnResponse
 
@@ -651,13 +651,12 @@ def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) 
 
 @pytest.mark.parametrize("own_failure", [False, True])
 def test_the_flat_result_keeps_its_reward_selection_and_cleanup_observations(own_failure: bool) -> None:
-    from nemo_gym.failure_transport import FailureReportRow
-    from nemo_gym.server_runtime import FailureReport, SingleAgentTurnResponse
+    from nemo_gym.core import FailureReport, FailureReportRow
+    from nemo_gym.server_runtime import SingleAgentTurnResponse
 
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import FailureBoundary, NgFailureEvent, failure_report_for
 
     judge = failure_report_for(
         NgFailureEvent(boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="judge")
