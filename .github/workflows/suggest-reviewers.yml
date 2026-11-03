@@ -2,10 +2,10 @@ name: Suggest Reviewers
 
 # Advisory only: requests reviewers on the PR based on `# suggest:` comment
 # lines in .github/CODEOWNERS. This uses the same "request a reviewer" GitHub
-# API/UI as CODEOWNERS-driven requests, but is NOT a merge requirement — only
-# the real (non-comment) CODEOWNERS lines are enforced by branch protection.
-# `# suggest:` entries are invisible to GitHub's own CODEOWNERS parser, since
-# it ignores comment lines entirely, so they can never become required.
+# API/UI as CODEOWNERS-driven requests. This workflow only routes reviewers.
+# GitHub ignores comment entries; scripts/ci/check-review-approvals.sh reads
+# them with the standard rules and applies the staged package approval policy.
+# Seeded teams remain suggested while their approval requirement is optional.
 #
 # Triggers the same way cicd-main.yml does: on a push to the pull-request/N
 # mirror branch NVIDIA's copy-pr-bot creates only after a vetter has approved

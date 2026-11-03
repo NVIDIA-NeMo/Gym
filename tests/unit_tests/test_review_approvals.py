@@ -3,6 +3,7 @@
 
 """Exercise portable approval decisions without importing the Gym runtime."""
 
+import argparse
 import base64
 import importlib.util
 import io
@@ -38,6 +39,12 @@ def review(number: int, user_id: int, state: str, head: str = "head") -> dict:
 def initial_reviewers() -> list[dict]:
     """Return the verified GitHub identities used to seed specialist teams."""
     return [{"id": 2382532, "login": "ananthsub"}, {"id": 54727607, "login": "yaoyu-33"}]
+
+
+def suggestion_policy(text: str) -> list[dict]:
+    """Read the tagged reviewer hints consumed by the shared suggestion workflow."""
+    entries = [line.removeprefix("# suggest: ") for line in text.splitlines() if line.startswith("# suggest: ")]
+    return approvals.parse_policy("\n".join(entries))
 
 
 class RolloutTests(unittest.TestCase):
@@ -156,7 +163,7 @@ class PolicyTests(unittest.TestCase):
 
     def test_last_match_overrides_model_ownership(self) -> None:
         """Checkpoint hooks use runtime reviewers while token capture uses model reviewers."""
-        rules = approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text())
+        rules = approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text(), include_suggestions=True)
         matches = approvals.match_policy(
             [
                 "nemo_gym/models/_checkpoint.py",
@@ -209,14 +216,16 @@ class PolicyTests(unittest.TestCase):
     def test_all_library_files_have_frontier_alternative(self) -> None:
         """Every tracked package file retains the requested shared alternative."""
         paths = [str(path.relative_to(ROOT)) for path in (ROOT / "nemo_gym").rglob("*.py")]
-        matches = approvals.match_policy(paths, approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text()))
+        matches = approvals.match_policy(
+            paths, approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text(), include_suggestions=True)
+        )
         self.assertEqual({path for match in matches for path in match["files"]}, set(paths))
         for match in matches:
             self.assertIn("@NVIDIA-NeMo/frontier-evals", match["owners"])
 
     def test_benchmark_fallback_and_bionemo_override(self) -> None:
         """Preserve coverage outside packages while retaining dedicated BioNeMo owners."""
-        policy = approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text())
+        policy = approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text(), include_suggestions=True)
         matches = approvals.match_policy(
             ["benchmarks/new-benchmark/config.yaml", "benchmarks/larp/config.yaml"], policy
         )
@@ -228,6 +237,49 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(
             by_path["benchmarks/larp/config.yaml"], ["@nvidia-nemo/gym_bionemo", "@nvidia-nemo/gym_maintainers"]
         )
+
+
+class SuggestionTests(unittest.TestCase):
+    """Keep reviewer routing active independently of native and portable approval gates."""
+
+    def test_package_hints_survive_native_owner_deduplication(self) -> None:
+        """The existing workflow must still request specialist and Frontier Eval teams."""
+        source = (ROOT / ".github/CODEOWNERS").read_text()
+        paths = ["nemo_gym/agents/example.py"]
+        native = approvals.match_policy(paths, approvals.parse_policy(source))
+        suggested = approvals.match_policy(paths, suggestion_policy(source))
+        native_owners = {owner for rule in native for owner in rule["owners"]}
+        requested = {owner for rule in suggested for owner in rule["owners"]} - native_owners
+        self.assertEqual(requested, {"@NVIDIA-NeMo/gym_reviewers_agents", "@NVIDIA-NeMo/frontier-evals"})
+        self.assertEqual(native, [])
+
+    def test_native_ci_owner_suppresses_fallback_suggestions(self) -> None:
+        """CI retains its native owner without requesting the broad suggestion fallback."""
+        source = (ROOT / ".github/CODEOWNERS").read_text()
+        paths = [".github/workflows/example.yml"]
+        combined = approvals.match_policy(paths, approvals.parse_policy(source, include_suggestions=True))
+        self.assertEqual(combined[0]["owners"], ["@nvidia-nemo/automation"])
+        self.assertEqual(approvals.match_policy(paths, suggestion_policy(source)), [])
+
+    def test_reviewer_only_hints_preserve_approval_fallback(self) -> None:
+        """An implementation hint cannot replace the existing maintainer approval policy."""
+        source = (ROOT / ".github/CODEOWNERS").read_text()
+        paths = ["responses_api_models/example/app.py"]
+        combined = approvals.match_policy(paths, approvals.parse_policy(source, include_suggestions=True))
+        suggested = approvals.match_policy(paths, suggestion_policy(source))
+        self.assertEqual(combined[0]["owners"], ["@NVIDIA-NeMo/gym_maintainers", "@NVIDIA-NeMo/frontier-evals"])
+        self.assertEqual(suggested[0]["owners"], ["@NVIDIA-NeMo/gym_reviewers_model"])
+        dependency = approvals.match_policy(
+            ["responses_api_models/example/pyproject.toml"],
+            approvals.parse_policy(source, include_suggestions=True),
+        )
+        self.assertEqual(dependency[0]["owners"], ["@nvidia-nemo/automation"])
+
+    def test_suggestion_policy_validation_is_not_skipped(self) -> None:
+        """Invalid suggestion owners and patterns fail closed when used as approval policy."""
+        for entry in ("# suggest: /agents/ @person", "# suggest: !file @org/team"):
+            with self.subTest(entry=entry), self.assertRaises(ValueError):
+                approvals.parse_policy(entry, include_suggestions=True)
 
 
 class ReviewTests(unittest.TestCase):
@@ -377,6 +429,38 @@ class ProviderTests(unittest.TestCase):
         """Transport failures exit distinctly and do not write a passing report."""
         with patch.object(approvals, "run_check", side_effect=ValueError("HTTP 403")):
             self.assertEqual(approvals.main(["github", "--number", "1"]), 2)
+
+    def test_check_enforces_suggested_package_policy(self) -> None:
+        """Real check orchestration stages and enforces package entries stored as suggestions."""
+        roster = initial_reviewers()
+        reviews = []
+        policy = ".github/ @NVIDIA-NeMo/automation\n# suggest: /agents/ @NVIDIA-NeMo/gym_reviewers_agents @NVIDIA-NeMo/frontier-evals"
+
+        def read(base, token, path):
+            """Serve a stable request and live team membership to the actual checker."""
+            if path.endswith("/pulls/1"):
+                return {"head": {"sha": "head"}, "base": {"sha": "target"}, "changed_files": 1, "user": {"id": 99}}
+            if "/files?" in path:
+                return [{"filename": "agents/example.py"}]
+            if "/reviews?" in path:
+                return reviews
+            if "/contents/" in path:
+                return encoded_file(policy)
+            if "/teams/gym_reviewers_agents/" in path:
+                return roster
+            if "/teams/frontier-evals/" in path:
+                return [{"id": 1000, "login": "fe-reviewer"}]
+            raise AssertionError(f"Unexpected API request: {path}")
+
+        args = argparse.Namespace(provider="github", repository="NVIDIA-NeMo/Gym", number=1)
+        with patch.object(approvals, "api_json", side_effect=read):
+            initial = approvals.run_check(args)
+            self.assertEqual(initial["rules"][0]["optional_owners"], ["@NVIDIA-NeMo/gym_reviewers_agents"])
+            self.assertTrue(initial["passed"])
+            roster.append({"id": 6000, "login": "specialist"})
+            self.assertFalse(approvals.run_check(args)["passed"])
+            reviews.append(review(1, 1000, "APPROVED"))
+            self.assertTrue(approvals.run_check(args)["passed"])
 
 
 class GitLabStatusTests(unittest.TestCase):

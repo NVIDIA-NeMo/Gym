@@ -99,10 +99,12 @@ def compile_pattern(pattern: str) -> re.Pattern:
     return re.compile("".join(pieces) + ("/.+$" if directory_only else "(?:/.*)?$"))
 
 
-def parse_policy(text: str) -> list[dict]:
-    """Read standard CODEOWNERS rules; advisory comments never gate approvals."""
+def parse_policy(text: str, *, include_suggestions: bool = False) -> list[dict]:
+    """Read native rules or the combined standard-and-suggestion approval policy."""
     rules = []
     for line_number, line in enumerate(text.splitlines(), start=1):
+        if include_suggestions:
+            line = re.sub(r"^\s*#\s*suggest:\s*", "", line)
         fields = line.split("#", 1)[0].split()
         if not fields:
             continue
@@ -247,7 +249,7 @@ def run_check(args: argparse.Namespace) -> dict:
         gitlab = functools.partial(api_json, args.gitlab_api, os.environ.get("GITLAB_TOKEN", ""))
         collect = functools.partial(gitlab_snapshot, gitlab, args.project_id, args.number)
     snapshot = collect()
-    matches = match_policy(snapshot["paths"], parse_policy(snapshot["policy"]))
+    matches = match_policy(snapshot["paths"], parse_policy(snapshot["policy"], include_suggestions=True))
     owners = sorted({owner for match in matches for owner in match["owners"]})
     teams = {
         owner: all_pages(github, f"orgs/{owner[1:].split('/')[0]}/teams/{owner.split('/')[1]}/members")

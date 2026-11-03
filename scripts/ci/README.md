@@ -16,9 +16,11 @@ also requires `GITLAB_TOKEN` and `CI_API_V4_URL`. Exit codes are 0 for satisfied
 missing approvals, and 2 for API, configuration, or evidence errors. `--output FILE` saves the
 structured verdict and its head SHA.
 
-Each changed file uses the last matching standard CODEOWNERS rule. One member of any team on
-that line must approve: the specialist team and `frontier-evals` are alternatives. Different
-packages require their respective approvals; one Frontier Eval approval can cover every package.
+Package mappings use `# suggest:` entries consumed by the existing Suggest Reviewers workflow.
+The portable checker explicitly reads both standard rules and suggestion entries, in file order,
+and uses the last match for each changed file. GitHub itself ignores the suggestion comments.
+One member of any team on that line must approve: the specialist team and `frontier-evals` are alternatives.
+Different packages require their respective approvals; one Frontier Eval approval can cover every package.
 During rollout, a non-Frontier owner group is automatically satisfied while its live membership is
 exactly Ananth (`ananthsub`, account ID `2382532`) and Yuya (`yaoyu-33`, account ID `54727607`).
 The checker reports `OPTIONAL` and records `optional_owners` without inventing an approval.
@@ -29,7 +31,12 @@ approval from that specialist team or Frontier Eval then satisfies it. Empty gro
 groups, and other two-person groups do not receive the exemption.
 Paths outside the package map retain a maintainer fallback with Frontier Eval as an alternative;
 CI infrastructure and the existing BioNeMo overrides keep their dedicated owners.
-`# suggest:` comments never gate approval. Renames check old and new paths. The checker rejects
+Seeded teams remain suggested even when their portable approval requirement is optional. Empty
+suggestion overrides before native CI entries suppress broad reviewer hints for those paths.
+Reviewer-only implementation hints are followed by standard entries preserving their existing
+maintainer/Frontier Eval approval fallback. CI and BioNeMo retain their native ownership rules.
+The suggestion workflow only requests reviewers; the shared check determines approval requirements.
+Renames check old and new paths. The checker rejects
 truncated file lists, author approvals, and GitHub approvals for an older head. GitLab must reset
 approvals on push, which is verified through its API. A changing evidence snapshot fails the check.
 
