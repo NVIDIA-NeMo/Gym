@@ -3,7 +3,8 @@
 ## Measurement contract
 
 **Source.** [`nvidia/acmg_variant_benchmark`](https://huggingface.co/datasets/nvidia/acmg_variant_benchmark)
-(private, NVIDIA-authored; card license `other`), revision `59fb412e7e39e8b209f431fce522458587ca8fec`. The benchmark
+(private, NVIDIA-authored; card license `other`), revision `59fb412e7e39e8b209f431fce522458587ca8fec`. Evaluation code and
+metric definitions: https://gitlab-master.nvidia.com/caof/acmg_classification_benchmark (commit `94dd961`). The benchmark
 folders (`data/`, `rules/`, `prompts/`) are byte-identical to the earlier revision `f656c889` used for the team's
 SFT and RL evaluations. The dataset is 395 real variants classified by ClinGen variant curation expert panels, each
 rewritten as an evidence packet with identifiers, citations and criterion codes blocked. Answer keys are

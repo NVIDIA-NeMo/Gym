@@ -6,7 +6,9 @@ Deterministic verifier for ACMG/AMP variant classification answers, used by the 
 
 `official_reward.py` is the `nvidia/acmg_variant_benchmark` dataset's standalone `training/reward.py`, vendored byte
 for byte from revision `59fb412e7e39e8b209f431fce522458587ca8fec` (upstream SHA-256
-`e2a80a9d3d0cc5051d73c9d6ea6245e4e2272ea5ef00cb6375a978b152666f1f`). It is excluded from ruff in `pyproject.toml` and
+`e2a80a9d3d0cc5051d73c9d6ea6245e4e2272ea5ef00cb6375a978b152666f1f`). The same file is `scripts/acmg_reward.py` at commit
+`94dd961` of the benchmark's source repository, https://gitlab-master.nvidia.com/caof/acmg_classification_benchmark, whose
+`docs/acmg_anchor_benchmark.md` defines the metrics below. It is excluded from ruff in `pyproject.toml` and
 `tests/test_scoring.py` checks the checksum of everything below the provenance header. Change `scoring.py`, not the
 vendored file.
 
