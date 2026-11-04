@@ -427,11 +427,11 @@ def test_retry_after_does_not_search_other_events_causes():
         httpx.HTTPStatusError("busy", request=request, response=response)
     )
     failure = opensandbox_failure(operation="status", cause=sdk_error)
-    assert module._retry_delay(failure, fallback=1) == 27
+    assert module._retry_delay(failure, fallback=1, max_delay_s=60) == 27
     outer = opensandbox_failure(operation="create", cause=failure, http_status=429)
-    assert module._retry_delay(outer, fallback=1) == 1
+    assert module._retry_delay(outer, fallback=1, max_delay_s=60) == 1
     response.headers["Retry-After"] = "invalid"
-    assert module._retry_delay(failure, fallback=1) == 1
+    assert module._retry_delay(failure, fallback=1, max_delay_s=60) == 1
 
 
 async def test_retry_after_cannot_extend_status_recovery_budget(monkeypatch):
@@ -578,3 +578,109 @@ async def test_download_timeout_retry_budget_is_bounded(tmp_path):
     assert read.await_count == 3
     assert len(report.events) == 3
     assert all(event.failure_kind == PROVIDER_IO_TIMEOUT for event in report.events.values())
+
+
+@pytest.mark.parametrize("phase", ["operation", "create", "connect", "status", "orphan-list", "orphan-kill"])
+@pytest.mark.parametrize("cap", [0, 0.25])
+async def test_retry_after_obeys_configured_delay_cap(monkeypatch, phase, cap):
+    from functools import partial
+
+    import httpx
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+
+    request = httpx.Request("GET", "https://sandbox.example/status")
+    response = httpx.Response(429, headers={"Retry-After": "3600"}, request=request)
+    error = ExceptionConverter.to_sandbox_exception(httpx.HTTPStatusError("busy", request=request, response=response))
+    waits = []
+
+    async def sleep(delay):
+        waits.append(float(delay))
+
+    retry_tools = module._require_tenacity()
+    monkeypatch.setattr(module, "_require_tenacity", lambda: (partial(retry_tools[0], sleep=sleep), *retry_tools[1:]))
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)
+    config = {"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": cap}
+    if phase in ("create", "connect"):
+        provider = module.OpenSandboxProvider(create={**config, "connect_poll_s": 0.01})
+    else:
+        provider = module.OpenSandboxProvider(
+            operations={
+                **config,
+                "background_exec": True,
+                "background_poll_initial_s": 0.01,
+                "background_poll_interval_s": 0.01,
+            }
+        )
+    action = AsyncMock(side_effect=[error, "recovered"])
+    with RequestFailureLog.capture() as log:
+        if phase == "create":
+            provider._create_once = action
+            assert await provider.create(module.SandboxSpec(image="test")) == "recovered"
+        elif phase == "operation":
+            assert (
+                await provider._await_sdk_operation(
+                    action,
+                    operation="status",
+                    sandbox_id="sb",
+                    timeout_s=1,
+                    replay_safe=True,
+                )
+                == "recovered"
+            )
+        elif phase == "connect":
+            action = AsyncMock(side_effect=[error, SimpleNamespace(id="sb")])
+            sdk = SimpleNamespace(connect=action)
+            monkeypatch.setattr(module, "_require_opensandbox_sdk", lambda: (sdk, object, dict, object, object))
+            monkeypatch.setattr(provider, "_connection_config", lambda **kwargs: None)
+            handle = await provider._connect_after_create(
+                SandboxHandle("sb", "opensandbox", None),
+                module.SandboxSpec(image="test", ready_timeout_s=1),
+            )
+            assert handle.sandbox_id == "sb"
+        elif phase == "status":
+            action = AsyncMock(side_effect=[error, SimpleNamespace(running=False, exit_code=0, error=None)])
+            commands = SimpleNamespace(
+                run=AsyncMock(return_value=SimpleNamespace(id="exec-1")),
+                get_command_status=action,
+                get_background_command_logs=AsyncMock(return_value=SimpleNamespace(content="done")),
+            )
+            monkeypatch.setattr(provider, "_sandbox_death_evidence", AsyncMock(return_value=None))
+            result = await provider.exec(
+                SandboxHandle("sb", "opensandbox", SimpleNamespace(commands=commands)), "echo ok", timeout_s=1
+            )
+            assert result.return_code == 0
+            commands.run.assert_awaited_once()
+        else:
+            page = SimpleNamespace(
+                sandbox_infos=[SimpleNamespace(id="sb", metadata={"attempt": "owned"}, status=None)],
+                pagination=SimpleNamespace(has_next_page=False),
+            )
+            service = SimpleNamespace(
+                list_sandboxes=AsyncMock(side_effect=[error, page] if phase == "orphan-list" else [page]),
+                kill_sandbox=AsyncMock(side_effect=[error, None] if phase == "orphan-kill" else [None]),
+            )
+            factory = lambda config: SimpleNamespace(create_sandbox_service=lambda: service)
+            monkeypatch.setattr(module, "_require_opensandbox_lifecycle_sdk", lambda: (factory, lambda **kwargs: None))
+            monkeypatch.setattr(provider, "_connection_config", lambda **kwargs: None)
+            found = await provider._reap_orphaned_create({"attempt": "owned"}, "attempt")
+            assert [item["id"] for item in found] == ["sb"]
+            action = service.list_sandboxes if phase == "orphan-list" else service.kill_sandbox
+    assert action.await_count == 2
+    # Retrying a failed poll never shortens its explicit polling interval.
+    assert waits == [max(0.01, cap) if phase in ("connect", "status") else cap]
+    assert len(log.report.events) == 1
+    assert next(iter(log.report.events.values())).http_status == 429
+
+
+@pytest.mark.parametrize("header", [None, "invalid"])
+def test_retry_cap_does_not_replace_polling_fallback(header):
+    import httpx
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter
+
+    headers = {} if header is None else {"Retry-After": header}
+    request = httpx.Request("GET", "https://sandbox.example/status")
+    response = httpx.Response(429, headers=headers, request=request)
+    error = ExceptionConverter.to_sandbox_exception(httpx.HTTPStatusError("busy", request=request, response=response))
+    failure = opensandbox_failure(operation="status", cause=error)
+    assert module._retry_delay(failure, fallback=2, max_delay_s=0) == 2
+    assert module._retry_delay(None, fallback=2, max_delay_s=0) == 2

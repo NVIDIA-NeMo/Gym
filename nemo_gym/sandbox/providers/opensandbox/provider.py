@@ -315,8 +315,8 @@ def _is_retryable_create_error(
     return failure_outcome_policy(failure, config=config or OpenSandboxCreateOutcomePolicy()) == OutcomeAction.RETRY
 
 
-def _retry_delay(error: BaseException | None, *, fallback: float) -> float:
-    """Honor this request's Retry-After without searching other failure events' causes."""
+def _retry_delay(error: BaseException | None, *, fallback: float, max_delay_s: float) -> float:
+    """Bound this request's Retry-After without searching other failure events' causes."""
     if not isinstance(error, NgFailureEvent) or error.http_status != 429:
         return fallback
     import httpx
@@ -328,7 +328,9 @@ def _retry_delay(error: BaseException | None, *, fallback: float) -> float:
     if isinstance(cause, SandboxApiException):
         cause = cause.__cause__
     if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 429:
-        return _retry_after_seconds(cause.response.headers.get("Retry-After"), fallback=fallback)
+        # Parsed waits are nonnegative; -1 preserves the polling fallback for an absent or invalid header.
+        delay = _retry_after_seconds(cause.response.headers.get("Retry-After"), fallback=-1)
+        return min(delay, max_delay_s) if delay >= 0 else fallback
     return fallback
 
 
@@ -355,6 +357,22 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
         return True
     message = str(exception).lower()
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
+
+
+def _is_terminal_delete_error(error: BaseException) -> bool:
+    # The SDK wraps transport failures, including PermissionError, in
+    # exceptions whose outer text can misleadingly look transient or missing.
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (asyncio.CancelledError, PermissionError)) or _exception_status_code(current) in (
+            401,
+            403,
+        ):
+            return True
+        current = current.__cause__
+    return False
 
 
 def _execution_outcome(
@@ -398,7 +416,7 @@ def _log_create_retry(retry_state: Any) -> None:
         record_sandbox_create_retry(provider="opensandbox")
 
 
-def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str = "?") -> None:
+def _log_operation_retry(retry_state: Any, *, operation: str = "?", sandbox_id: str | None = "?") -> None:
     # operation + sandbox_id make an absorbed create-probe retry distinguishable
     # from a failing agent exec; without them every 502 retry looks identical.
     exception = retry_state.outcome.exception() if retry_state.outcome else None
@@ -1424,7 +1442,7 @@ class OpenSandboxProvider:
         awaitable: Any,
         *,
         operation: str,
-        sandbox_id: str,
+        sandbox_id: str | None,
         timeout_s: float | None,
     ) -> Any:
         if timeout_s is None:
@@ -1446,7 +1464,7 @@ class OpenSandboxProvider:
         operation_factory: Callable[[], Awaitable[Any]],
         *,
         operation: str,
-        sandbox_id: str,
+        sandbox_id: str | None,
         timeout_s: float | None,
         retries: int | None = None,
         # The default classifier treats per-call timeouts as terminal, which is
@@ -1455,7 +1473,7 @@ class OpenSandboxProvider:
         is_retryable: Callable[[BaseException], bool] | None = None,
         replay_safe: bool = False,
     ) -> Any:
-        renewal = self._renewals.get(sandbox_id)
+        renewal = self._renewals.get(sandbox_id) if sandbox_id is not None else None
         if renewal is not None and renewal.done() and not renewal.cancelled():
             error = renewal.exception()
             if error is not None:
@@ -1487,7 +1505,9 @@ class OpenSandboxProvider:
         retry_policy = AsyncRetrying(
             retry=retry_if_exception(retry_allowed),
             stop=stop_after_attempt(max_attempts),
-            wait=lambda state: _retry_delay(state.outcome.exception(), fallback=backoff(state)),
+            wait=lambda state: _retry_delay(
+                state.outcome.exception(), fallback=backoff(state), max_delay_s=self._operations.retry_max_delay_s
+            ),
             before_sleep=_before_sleep,
             reraise=True,
         )
@@ -1729,7 +1749,14 @@ class OpenSandboxProvider:
                         raise
                     raise last_exception from e
                 sleep_s = min(
-                    _retry_delay(last_exception, fallback=self._create.connect_poll_s),
+                    max(
+                        self._create.connect_poll_s,
+                        _retry_delay(
+                            last_exception,
+                            fallback=self._create.connect_poll_s,
+                            max_delay_s=self._create.retry_max_delay_s,
+                        ),
+                    ),
                     max(deadline - loop.time(), 0.0),
                 )
                 if sleep_s > 0:
@@ -2016,6 +2043,8 @@ class OpenSandboxProvider:
                 self._delete_sandboxes_by_metadata(scope, attempt_key), timeout=ORPHAN_REAP_TIMEOUT_S
             )
         except Exception as e:
+            if not isinstance(e, NgFailureEvent):
+                observe_failure(opensandbox_failure(operation="reap_orphaned_create", cause=e))
             LOGGER.warning(
                 "Could not reap the sandbox left by a timed-out OpenSandbox create; scope=%s; error=%r", scope, e
             )
@@ -2027,7 +2056,13 @@ class OpenSandboxProvider:
         found: list[dict[str, Any]] = []
         page = 1
         while True:
-            listed = await service.list_sandboxes(SandboxFilter(metadata=scope, page=page, page_size=100))
+            listed = await self._await_sdk_operation(
+                lambda: service.list_sandboxes(SandboxFilter(metadata=scope, page=page, page_size=100)),
+                operation="list_sandboxes",
+                sandbox_id=None,
+                timeout_s=self._connection.request_timeout_s,
+                replay_safe=True,
+            )
             for info in listed.sandbox_infos:
                 # The server-side metadata filter is advisory; never delete a sandbox this attempt did not make.
                 if (info.metadata or {}).get(attempt_key) != scope.get(attempt_key):
@@ -2045,11 +2080,7 @@ class OpenSandboxProvider:
                 break
             page += 1
         for orphan in found:
-            try:
-                await service.kill_sandbox(orphan["id"])
-            except Exception as e:
-                if not _is_missing_sandbox_delete_error(e):
-                    raise
+            await self._kill_with_retry(lambda: service.kill_sandbox(orphan["id"]), sandbox_id=orphan["id"])
             LOGGER.warning(
                 "Deleted OpenSandbox sandbox %s left by a timed-out create; state=%s, reason=%s, message=%s",
                 orphan["id"],
@@ -2072,7 +2103,9 @@ class OpenSandboxProvider:
                 )
             ),
             stop=stop_after_attempt(self._create.retries + 1),
-            wait=lambda state: _retry_delay(state.outcome.exception(), fallback=backoff(state)),
+            wait=lambda state: _retry_delay(
+                state.outcome.exception(), fallback=backoff(state), max_delay_s=self._create.retry_max_delay_s
+            ),
             before_sleep=_log_create_retry,
             reraise=True,
         )
@@ -2473,7 +2506,13 @@ class OpenSandboxProvider:
                 if status.running is False:
                     break
             limits = [value for value in (deadline, status_failure_deadline) if value is not None]
-            delay = _retry_delay(status_failure_error, fallback=poll_interval)
+            # Retry caps must not shorten the configured polling cadence, even when the cap is zero.
+            delay = max(
+                poll_interval,
+                _retry_delay(
+                    status_failure_error, fallback=poll_interval, max_delay_s=self._operations.retry_max_delay_s
+                ),
+            )
             if limits:
                 delay = min(delay, max(0, min(limits) - loop.time()))
             await asyncio.sleep(delay)
@@ -2879,55 +2918,43 @@ class OpenSandboxProvider:
         except TimeoutError as error:
             raise opensandbox_failure(operation="provider I/O", sandbox_id=handle.sandbox_id, cause=error) from error
 
-    async def close(self, handle: SandboxHandle) -> None:
-        """Terminate the sandbox and close local SDK resources."""
-        renewal_error = await self._stop_renewal(handle.sandbox_id)
-
-        def terminal_delete_error(error: BaseException) -> bool:
-            # The SDK wraps transport failures, including PermissionError, in
-            # exceptions whose outer text can misleadingly look transient or missing.
-            seen: set[int] = set()
-            current: BaseException | None = error
-            while current is not None and id(current) not in seen:
-                seen.add(id(current))
-                if isinstance(current, (asyncio.CancelledError, PermissionError)) or _exception_status_code(
-                    current
-                ) in (
-                    401,
-                    403,
-                ):
-                    return True
-                current = current.__cause__
-            return False
+    async def _kill_with_retry(self, kill: Callable[[], Awaitable[None]], *, sandbox_id: str) -> None:
+        """Apply the same idempotent deletion and permission guards to handles and orphan cleanup."""
 
         async def kill_ignore_missing() -> None:
             # Terminate is idempotent: not-found means the sandbox is already
             # gone (double-termination race, or a previous run's leftover).
             # Swallow it before the retry wrapper so the 404 is never retried.
             try:
-                await handle.raw.kill()
+                await kill()
             except Exception as e:
-                if terminal_delete_error(e) or not _is_missing_sandbox_delete_error(e):
+                if _is_terminal_delete_error(e) or not _is_missing_sandbox_delete_error(e):
                     raise
-                LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
+                LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", sandbox_id)
 
         def retry_delete(error: BaseException) -> bool:
             # This predicate is a safety constraint; the shared outcome policy
             # still selects whether the observed failure should be retried.
-            return not terminal_delete_error(error)
+            return not _is_terminal_delete_error(error)
+
+        await self._await_sdk_operation(
+            kill_ignore_missing,
+            operation="kill",
+            sandbox_id=sandbox_id,
+            timeout_s=self._operations.close_timeout_s,
+            is_retryable=retry_delete,
+            replay_safe=True,
+        )
+
+    async def close(self, handle: SandboxHandle) -> None:
+        """Terminate the sandbox and close local SDK resources."""
+        renewal_error = await self._stop_renewal(handle.sandbox_id)
 
         # DELETE is idempotent, so a lost reply can be reconciled. Attempts and
         # backoff share one budget; failure keeps the SDK handle usable for retry.
         try:
             async with asyncio.timeout(self._operations.close_timeout_s):
-                await self._await_sdk_operation(
-                    kill_ignore_missing,
-                    operation="kill",
-                    sandbox_id=handle.sandbox_id,
-                    timeout_s=self._operations.close_timeout_s,
-                    is_retryable=retry_delete,
-                    replay_safe=True,
-                )
+                await self._kill_with_retry(handle.raw.kill, sandbox_id=handle.sandbox_id)
         except TimeoutError as error:
             failure = opensandbox_failure(
                 operation="kill",

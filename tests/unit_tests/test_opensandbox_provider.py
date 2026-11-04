@@ -4586,3 +4586,74 @@ async def test_cancelled_create_request_reaps_its_orphan(
         async with asyncio.timeout(0.05):
             await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=100))
     assert service.killed == ["cancelled"]
+
+
+@pytest.mark.parametrize("operation", ["list", "kill"])
+@pytest.mark.parametrize("status", [429, 503, None])
+async def test_orphan_reap_retries_requests_and_retains_failures(monkeypatch, operation, status):
+    from opensandbox.exceptions import SandboxApiException
+
+    attempt_key = "create-attempt"
+    scope = {attempt_key: "owned"}
+    info = orphan("owned-id", scope)
+    page = SimpleNamespace(
+        sandbox_infos=[info, orphan("other-attempt", {attempt_key: "other"}), orphan("unrelated", {})],
+        pagination=SimpleNamespace(has_next_page=False),
+    )
+    error = (
+        TimeoutError("lost control-plane reply")
+        if status is None
+        else SandboxApiException("transient control-plane failure", status_code=status)
+    )
+    service = FakeLifecycleService(sandboxes=[])
+    service.list_sandboxes = AsyncMock(side_effect=[error, page] if operation == "list" else [page])
+    service.kill_sandbox = AsyncMock(side_effect=[error, None] if operation == "kill" else [None])
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0},
+    )
+    with RequestFailureLog.capture() as log:
+        found = await provider._reap_orphaned_create(scope, attempt_key)
+    assert [item["id"] for item in found] == ["owned-id"]
+    assert service.list_sandboxes.await_count == (2 if operation == "list" else 1)
+    assert [call.args[0] for call in service.kill_sandbox.await_args_list] == ["owned-id"] * (
+        2 if operation == "kill" else 1
+    )
+    event = next(iter(log.report.events.values()))
+    assert event.http_status == status and event.boundary.value == "sandbox"
+    assert event.details.sandbox_id == (None if operation == "list" else "owned-id")
+    assert log.report.failure_id is None
+
+
+async def test_orphan_reap_retries_share_original_deadline(monkeypatch):
+    from opensandbox.exceptions import SandboxApiException
+
+    service = FakeLifecycleService(sandboxes=[])
+    service.list_sandboxes = AsyncMock(side_effect=SandboxApiException("busy", status_code=429))
+    install_lifecycle(monkeypatch, service)
+    monkeypatch.setattr(opensandbox_provider, "ORPHAN_REAP_TIMEOUT_S", 0.03)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 100, "retry_delay_s": 1, "retry_max_delay_s": 1},
+    )
+    started = asyncio.get_running_loop().time()
+    with RequestFailureLog.capture() as log:
+        assert await provider._reap_orphaned_create({"attempt": "owned"}, "attempt") == []
+    assert asyncio.get_running_loop().time() - started < 0.2
+    service.list_sandboxes.assert_awaited_once()
+    assert any(event.http_status == 429 for event in log.report.events.values())
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+async def test_orphan_delete_permission_and_missing_semantics(monkeypatch, status):
+    from opensandbox.exceptions import SandboxApiException
+
+    service = FakeLifecycleService(sandboxes=[orphan("owned-id", {"attempt": "owned"})])
+    # An auth error whose text says 'not found' must not be swallowed as a missing sandbox.
+    service.kill_sandbox = AsyncMock(side_effect=SandboxApiException("sandbox not found", status_code=status))
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retries": 3, "retry_delay_s": 0})
+    with RequestFailureLog.capture() as log:
+        result = await provider._reap_orphaned_create({"attempt": "owned"}, "attempt")
+    assert [item["id"] for item in result] == (["owned-id"] if status == 404 else [])
+    service.kill_sandbox.assert_awaited_once()
+    assert any(event.http_status == status for event in log.report.events.values()) is (status != 404)

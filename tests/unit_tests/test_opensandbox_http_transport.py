@@ -346,5 +346,5 @@ async def test_sdk_rate_limit_retains_header_and_obeys_provider_policy(
     assert caught.value.http_status == 429
     assert len(shared_server.calls) == attempts
     assert len([event for event in report.events.values() if event.boundary.value == "sandbox"]) == attempts
-    assert sleep.await_args_list == ([call(27.0)] if action == "retry" else [])
+    assert sleep.await_args_list == ([call(27.0 if create else 15.0)] if action == "retry" else [])
     await provider.aclose()
