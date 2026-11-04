@@ -453,6 +453,27 @@ async def test_a_grade_saved_before_the_coverage_write_failed_counts_as_settled(
     assert failed_judge_jobs_blocking([failed_job | {"job_id": "1"}, failed_job | {"job_id": "2"}]) is None
 
 
+async def test_a_failed_pass_counts_each_withdrawn_admission_once(tmp_path, monkeypatch):
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper
+
+    _, output, identities = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        if task == 0:
+            return json | {"reward": 0.0, "mask_sample": True}  # answered without a grade: withdrawn
+        return json | {"reward": 1.0, "response": ANSWER | {"id": "resp_other"}}  # grades another answer: refused
+
+    _verifier(monkeypatch, reply)
+    helper = RolloutReverificationHelper()
+    config, receipt = _settling_pass(helper, output, tmp_path)
+    with pytest.raises(ConfigError):
+        await helper.run_from_config(config)
+
+    _, failed, pending = _state(output)
+    assert failed == sorted(identities) and pending == {}  # both rows stay as they were; both admissions withdrawn
+    assert receipt() == {"selected": 2, "judged": 2, "settled": 0, "withdrawn": 2}
+
+
 @pytest.mark.parametrize(
     "masked",
     [
