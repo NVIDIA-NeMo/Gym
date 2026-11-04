@@ -75,7 +75,7 @@ async def test_rescore_uses_only_selected_completed_answers(prepared_run, monkey
 
 
 async def test_rescore_accepts_a_judge_failure_settled_by_the_stack(tmp_path, monkeypatch):
-    from tests.unit_tests.test_rejudge_saved_judge_failures import _run, _settle
+    from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _run, _settle
 
     output, failures = _run(tmp_path, judge_failures=1)
     _settle(output, failures[0], 0.25)
