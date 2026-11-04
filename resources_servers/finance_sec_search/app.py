@@ -978,15 +978,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         (e.g. edgar_search sub-documents/exhibits) map to distinct cache files.
         Returns None if the URL doesn't match the expected SEC format.
         """
-        parts = self._parse_sec_url(url)
-        if not parts:
+        parsed = parse_sec_archives_url(url)
+        if parsed is None:
             return None
-        cik_padded = str(parts["cik"]).zfill(10)
-        acc_nodash = parts["accession_number"].replace("-", "")
-        # Flatten the document path into one safe filename; fall back to "index"
-        # when the URL stops at the accession directory (no document component).
-        safe_doc = re.sub(r"[^A-Za-z0-9._-]", "_", parts.get("document", "")) or "index"
-        return self._filings_dir / cik_padded / acc_nodash / f"{safe_doc}.txt"
+        # cache_filename never contains a bare "%", so this cannot clash with a document.
+        filename = parsed.cache_filename or "%index"
+        return self._filings_dir / parsed.padded_cik / parsed.accession / f"{filename}.txt"
 
     # ========================================================================
     # sec_filing_search Endpoint

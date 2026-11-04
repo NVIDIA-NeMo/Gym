@@ -316,7 +316,7 @@ byte-identical to a live call and survives an upstream formatting bump.
 |--------|-------------|
 | `price_history` (Tiingo) | per-`(endpoint, ticker)` master of raw records, sliced on read by the upstream `_records_to_csv` |
 | `edgar_search` (sec-api.io) | raw `filings` list keyed by the normalized request |
-| `parse_html_page` on sec.gov filing URLs | parsed text at `filings/<cik>/<accession>/<primary-doc>.txt`; general web is not cached |
+| `parse_html_page` on sec.gov filing URLs | parsed text at `filings/<cik>/<accession>/<document>.txt` (document path percent-encoded, shared with `finance_sec_search`); general web is not cached |
 
 Caching is on by default. Point `cache_dir` at a shared absolute path so it
 survives across jobs:
