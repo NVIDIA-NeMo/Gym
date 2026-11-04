@@ -79,9 +79,10 @@ jobs:
           key: pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-${{ hashFiles('sample/uv.lock') }}
           restore-keys: |
             pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-
-      - name: Cache compatible Pants artifacts
+      - name: Restore compatible Pants artifacts
+        id: pants-cache
         if: inputs.engine == 'pants'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cache/pants/full-ci
@@ -146,6 +147,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # Shared job-type keys have one writer; other shards must not compress losing archives.
+      - name: Save compatible Pants artifacts
+        if: success() && inputs.engine == 'pants' && matrix.shard == 0 && steps.pants-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cache/pants/full-ci
+            ~/.cache/pants/named_caches
+            ~/.cache/pants/lmdb_store
+            ~/.cache/scie-pants
+          key: ${{ steps.pants-cache.outputs.cache-primary-key }}
+
   other:
     name: ${{ matrix.job }} / ${{ matrix.shard }}
     runs-on: ${{ matrix.runner }}
@@ -185,9 +198,10 @@ jobs:
           key: pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-${{ hashFiles('sample/uv.lock') }}
           restore-keys: |
             pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-
-      - name: Cache compatible Pants artifacts
+      - name: Restore compatible Pants artifacts
+        id: pants-cache
         if: inputs.engine == 'pants'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cache/pants/full-ci
@@ -247,6 +261,18 @@ jobs:
           path: sample/results/server-workers
           if-no-files-found: warn
           retention-days: 14
+
+      # Shared job-type keys have one writer; other shards must not compress losing archives.
+      - name: Save compatible Pants artifacts
+        if: success() && inputs.engine == 'pants' && matrix.shard == 0 && steps.pants-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cache/pants/full-ci
+            ~/.cache/pants/named_caches
+            ~/.cache/pants/lmdb_store
+            ~/.cache/scie-pants
+          key: ${{ steps.pants-cache.outputs.cache-primary-key }}
 
   coverage:
     name: combined coverage

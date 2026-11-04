@@ -213,7 +213,8 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
     overrides = uv_config.get("override-dependencies", [])
     config = f"""{HEADER}[GLOBAL]
 pants_version = "2.30.2"
-backend_packages = ["pants.backend.python", "pants.backend.project_info"]
+backend_packages = ["pants.backend.python", "pants.backend.project_info", "scripts.pants.native_core"]
+pythonpath = ["%(buildroot)s"]
 build_patterns = ["BUILD.native"]
 pants_ignore = ["/.git", "/.venv", "/.pants-bin", "__pycache__"]
 pants_ignore_use_gitignore = false

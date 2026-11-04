@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree
 
+from batching import validate_plan, verify_batch_result
 from collect import targets
 from prepare import BATCH_SIZE, requirement_pins, snapshot_distribution, validate_lock, write_build_configuration
 
@@ -146,6 +147,7 @@ def run(args: argparse.Namespace) -> int:
             "local_parallelism": 1,
             "pytest_workers": workers or 1,
             "pytest_distribution": "loadfile" if workers is not None else "serial",
+            "actual_pytest_batches": None,
         },
     }
     try:
@@ -242,6 +244,29 @@ def run(args: argparse.Namespace) -> int:
                 [args.uv, "python", "find", (checkout / ".python-version").read_text().strip()], text=True
             ).strip()
             environment["PATH"] = str(Path(interpreter).parent) + os.pathsep + environment.get("PATH", "")
+            if args.group == "core":
+                with (output / "batch-plan.log").open("w") as log:
+                    planning = subprocess.run(
+                        command[:4] + ["native-batch-plan", *selected],
+                        cwd=checkout,
+                        env=environment,
+                        stdout=subprocess.PIPE,
+                        stderr=log,
+                        text=True,
+                        check=True,
+                    )
+                plan = json.loads(planning.stdout)
+                size = validate_plan(plan, selected)
+                (output / "batch-plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+                command[command.index("--") : command.index("--")] = [
+                    f"--test-batch-size={size}",
+                    "--test-experimental-report-test-result-info",
+                ]
+                metadata["batching"].update(
+                    target_files=size,
+                    partition="verified-single-forced-batch",
+                    expected_pytest_batches=1,
+                )
             (output / "command.json").write_text(json.dumps(command, indent=2) + "\n")
             with (output / "pants.log").open("w") as log:
                 result = subprocess.run(command, cwd=checkout, env=environment, stdout=log, stderr=subprocess.STDOUT)
@@ -276,6 +301,8 @@ def run(args: argparse.Namespace) -> int:
                 )
             if result.returncode:
                 raise subprocess.CalledProcessError(result.returncode, command)
+            if args.group == "core":
+                metadata["batching"].update(verify_batch_result(checkout, reports, output, selected))
             if not raw.is_file() or not list((output / "junit").rglob("*.xml")):
                 raise ValueError("Native execution did not return both raw coverage and JUnit reports")
             metadata["exit_code"] = 0

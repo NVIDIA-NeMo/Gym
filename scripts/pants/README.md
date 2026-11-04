@@ -68,17 +68,17 @@ controller assets before dispatch; stale locks fail the comparison explicitly.
 
 ## What Pants does in this phase
 
-Core and sandbox suites use native Pants Python targets, one per test file. Compatible
-targets within each resolve share pytest processes with `[test].batch_size = 128`.
-Pants uses stable hash boundaries, so this targets approximately 128 files per batch;
-a target does not imply a separate process. Batches run serially; within each core
-batch, pytest matches the sampled main's worker count and file-based distribution
-(currently four workers with `--dist=loadfile`). The sampled core worker environment
-also caps numerical-library threads. Sandbox keeps its serial pytest execution,
-and test result reuse remains disabled. The four core jobs retain Gym's duration-balanced file
-assignments; the sandbox job
-runs the complete sandbox selection. The adapter checks dependency parity against
-`uv.lock` and preserves each job's JUnit and raw coverage inputs.
+Core and sandbox suites use native Pants Python targets, one per test file.
+Each forced core shard plans one pytest batch using the installed Pants 2.30.2
+compatibility and stable partitioners. The planner selects a supported batch size
+for the actual target set and rejects incompatible or incomplete selections;
+execution also verifies that exactly one batch produced results. This removes
+extra serial batches without changing the target graph or shard assignments.
+Core pytest matches the sampled main's worker count and file-based distribution
+(currently four workers with `--dist=loadfile`), including its numerical-library
+thread limits. Sandbox keeps serial pytest and the existing stable batching
+policy. Test-result reuse remains disabled. The adapter checks dependency parity
+against `uv.lock` and preserves each job's JUnit and raw coverage inputs.
 
 Server tests, session-routing E2E and lint retain their existing commands through
 Pants workspace processes, preserving nested server environments and external
@@ -104,9 +104,12 @@ The uv cache mirrors main's policy: one immutable OS/`uv.lock` key shared across
 jobs, with an OS-level restore prefix. Baseline and Pants use separate namespaces
 so one arm cannot warm the other. The `pants-full-v2-uv-` namespace starts cold
 for both arms and excludes earlier experiment caches. Pants engine caches are shared by shards of the same job type. Their keys include
-the implementation/dependency contract and sampled source commit. Immutable
-first-writer-wins storage avoids duplicate multi-gigabyte core archives; other
-shards can rebuild any missing content-addressed entries. The monitor bounds
+the implementation/dependency contract and sampled source commit. Every shard
+restores, but only shard zero of each job type saves after a primary-key miss.
+This avoids compressing duplicate archives that would lose the shared-key race.
+The saved contents therefore come from shard zero; other shards rebuild any
+missing content-addressed entries. If shard zero fails, that job type does not
+refresh its engine cache. The monitor bounds
 branch-scoped experiment caches to 5 GiB and removes obsolete experiment entries.
 Actual cache hits must be inspected: matching policies alone do not establish
 matching cache warmth.
