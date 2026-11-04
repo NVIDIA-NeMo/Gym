@@ -89,6 +89,9 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | [agentic_turn_simulation](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/agentic_turn_simulation) | Whole agent turns in your own agent-harness conversations (Claude Code, Hermes, Cline, ...) against simulated tools | LLM judge + code gates | |
 | [tales](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tales) | Text-adventure games (AlfWorld, ScienceWorld, Jericho, TextWorld) in Gymnasium API style | Rule-based (task completion) | |
 | [google_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/google_search) | MCQA with integrated Google search tool | Exact match | |
+| [geobenchx](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/geobenchx) | GeoBenchX: 202 multistep GIS tasks scored against reference tool sequences ([arXiv:2503.18129](https://arxiv.org/abs/2503.18129)) | Reference-solution match | |
+
+[GeoBenchX](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/geobenchx/README.md) preparation and a public run use a public model config plus `geobenchx.yaml`. The default backend is a simulator and needs no external data. Simulator scores are not comparable with real-tools scores. The real-tools backend runs the upstream tools on a local copy of the upstream data snapshot; that snapshot is not redistributed.
 
 ## Instruction Following & Safety
 
