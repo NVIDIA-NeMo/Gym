@@ -35,3 +35,12 @@ def test_opensandbox_provider_config_excerpt_matches_shipped_values():
     ]["opensandbox"]
     for name, settings in documented.items():
         assert settings == {key: canonical[name][key] for key in settings}, f"{name} has drifted from shipped config"
+
+
+def test_the_shipped_create_timeout_defaults_to_the_request_plus_the_readiness_wait():
+    """A fixed create bound below request + readiness would abandon slow but healthy creates and retry them."""
+    root = Path(__file__).resolve().parents[2]
+    shipped = yaml.safe_load((root / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml").read_text())
+    create = shipped["sandbox"]["opensandbox"]["create"]
+    assert create["timeout_s"] is None
+    assert create["request_timeout_s"] == 1200
