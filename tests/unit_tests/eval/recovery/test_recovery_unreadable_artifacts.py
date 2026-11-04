@@ -21,13 +21,13 @@ import sys
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import (
+from nemo_gym.eval.recovery.decision import RecoveryAction
+from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
     CollectedEvidence,
-    RecoveryAction,
-    decide_from_collected,
-    gate_summary_from_collected,
 )
+from nemo_gym.eval.recovery.gate import gate_summary_from_collected
+from nemo_gym.eval.recovery.planner import decide_from_collected
 
 
 pytestmark = pytest.mark.skipif(

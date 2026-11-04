@@ -24,7 +24,8 @@ import json
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import decide_from_collected, final_zero_trials
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.trials import final_zero_trials
 from tests.unit_tests.test_evaluation_health import _gate, _run
 from tests.unit_tests.test_recovery_health_binding import collect, save_rows, setup
 from tests.unit_tests.test_trajectory_evidence_reporting import _simulated_user_shape

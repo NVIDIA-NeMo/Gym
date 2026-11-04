@@ -7,13 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import (
+from nemo_gym.eval.recovery.evidence import (
     CollectedEvidence,
     ManagedRecoveryFact,
-    decide_from_collected,
+)
+from nemo_gym.eval.recovery.gate import (
     trial_health,
     trial_verdict,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
 
 
 def session_fixture(case="healthy"):
@@ -128,7 +130,7 @@ def test_session_metadata_is_reported_and_only_grading_or_failures_reject(mutati
     ],
 )
 def test_reader_checkpoint_fact_comes_from_bound_saved_config(tmp_path, config, expected):
-    from nemo_gym.eval.recovery.planner import select_managed_evidence
+    from nemo_gym.eval.recovery.evidence import select_managed_evidence
     from tests.unit_tests.test_managed_recovery_selection import collect, prepare_managed
 
     prepare_managed(tmp_path, "healthy")

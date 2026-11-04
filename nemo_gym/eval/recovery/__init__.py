@@ -14,6 +14,17 @@
 # limitations under the License.
 """The evaluation recovery policy: what `gym eval resubmit --recover` decides from a run's saved evidence.
 
-``planner`` decides, ``evidence`` holds the collector script that reads a job directory, and ``markers`` holds
-the strings the chain scripts write for it. This package never imports ``nemo_gym.orchestration``.
+The entry points, each in the module that owns it:
+
+- ``evidence``: ``COLLECT_SCRIPT`` reads a job directory into ``CollectedEvidence``; ``select_managed_evidence`` adds
+  the run's own Store selection.
+- ``planner``: ``decide_from_collected`` turns the evidence into a ``RecoveryDecision`` (``decision``) under the
+  run's ``RecoveryOutcomePolicyConfig`` (``policy``) and budgets (``budgets``).
+- ``gate``: ``gate_summary_from_collected`` and ``gate_task_summary`` report the acceptance gate of a decision.
+- ``grading``: ``reverification_cause`` says why a saved row is graded again from its saved answer.
+- ``continuation``: ``continuation_admission``, which a chain's job script runs in the run's installed runtime.
+
+``rows`` (identity states), ``trials`` (trial observations and fault classes) and ``markers`` (the strings the chain
+scripts write) serve those modules. Executing a decision (queueing a follow-up, a judge-only job, a fresh restart) is
+the caller's part. This package never imports ``nemo_gym.orchestration``; import-linter enforces it.
 """

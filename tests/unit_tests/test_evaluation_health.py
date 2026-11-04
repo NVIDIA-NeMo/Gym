@@ -20,13 +20,13 @@ Runs are built from the one-trial programmatic-grading fixture, repeated with fr
 import json
 from pathlib import Path
 
-from nemo_gym.eval.recovery.planner import (
-    CollectedEvidence,
-    decide_from_collected,
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import (
     gate_summary_from_collected,
-    trial_counts,
     trial_verdict,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.trials import trial_counts
 from tests.unit_tests.test_eval_resubmit_decision import final_model_zero
 
 

@@ -12,12 +12,12 @@ from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutco
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_records import FailureEvent, FailureReport
 from nemo_gym.core.failure_transport import FailureReportRow
-from nemo_gym.eval.recovery.planner import (
+from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
     CollectedEvidence,
-    decide_from_collected,
     select_managed_evidence,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.rollouts.rollout_records import logical_rollout_id
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore

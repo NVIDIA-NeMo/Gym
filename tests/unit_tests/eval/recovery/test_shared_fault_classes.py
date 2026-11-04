@@ -17,13 +17,15 @@
 import pytest
 
 from nemo_gym.core import failure_kinds
-from nemo_gym.eval.recovery import planner as recovery
-from nemo_gym.eval.recovery.planner import (
+from nemo_gym.eval.recovery import trials as recovery
+from nemo_gym.eval.recovery.gate import (
     GateCriteria,
-    fault_class,
-    fault_report,
     gate_summary_from_collected,
     trial_verdict,
+)
+from nemo_gym.eval.recovery.trials import (
+    fault_class,
+    fault_report,
 )
 from tests.unit_tests.test_eval_resubmit_decision import complete_job, fake_executor, run_cli  # noqa: F401
 from tests.unit_tests.test_evaluation_health import _gate, _run

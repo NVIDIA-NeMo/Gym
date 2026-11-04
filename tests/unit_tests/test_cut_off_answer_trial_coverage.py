@@ -24,7 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import CollectedEvidence, decide_from_collected, trial_verdict
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import trial_verdict
+from nemo_gym.eval.recovery.planner import decide_from_collected
 
 
 FIXTURE = Path(__file__).parent / "fixtures/cpu-grading-mcqa-healthy.json"

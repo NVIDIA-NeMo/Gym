@@ -25,14 +25,18 @@ import sys
 import pytest
 
 from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE, is_gate_derived
-from nemo_gym.eval.recovery.planner import (
-    COLLECT_SCRIPT,
-    CollectedEvidence,
+from nemo_gym.eval.recovery.decision import (
     IdentityState,
     RecoveryAction,
-    decide_from_collected,
-    decide_recovery,
-    failure_facts,
+)
+from nemo_gym.eval.recovery.evidence import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+)
+from nemo_gym.eval.recovery.gate import failure_facts
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.rows import decide_recovery
+from nemo_gym.eval.recovery.trials import (
     fault_class,
     fault_report,
     trial_faults,

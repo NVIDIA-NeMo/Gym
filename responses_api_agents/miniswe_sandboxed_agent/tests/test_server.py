@@ -1019,7 +1019,7 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
         report_for_current_request,
         rollout_context,
     )
-    from nemo_gym.eval.recovery.planner import _policy_evidence
+    from nemo_gym.eval.recovery.policy import _policy_evidence
 
     f = fixture
     if graded in {"cleanup_unconfirmed", "limit_then_cleanup"}:
@@ -1210,7 +1210,10 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
         NeMoGymResponseCreateParamsNonStreaming,
         rollout_context,
     )
-    from nemo_gym.eval.recovery.planner import _policy_evidence, _policy_replay_is_unsupported
+    from nemo_gym.eval.recovery.policy import (
+        _policy_evidence,
+        _policy_replay_is_unsupported,
+    )
     from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
     f = fixture

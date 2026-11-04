@@ -329,7 +329,7 @@ caller can pass `outcome_policy` to `recover(...)`, which replaces the config's 
 
 ```python
 from nemo_gym.agents import OutcomeAction
-from nemo_gym.eval.recovery.planner import RecoveryOutcomePolicyConfig
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.orchestration.submit import recover
 
 recover(job_id, benchmark, outcome_policy=RecoveryOutcomePolicyConfig(by_status_code={401: OutcomeAction.FAIL}))

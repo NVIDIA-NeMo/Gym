@@ -18,7 +18,7 @@ import shlex
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import CollectedEvidence
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.orchestration.executors import slurm
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection
 from tests.unit_tests.test_remote_managed_recovery import config

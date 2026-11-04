@@ -19,8 +19,8 @@ import sys
 
 import pytest
 
-from nemo_gym.eval.recovery import planner as recovery
-from nemo_gym.eval.recovery.planner import select_managed_evidence
+from nemo_gym.eval.recovery import continuation as recovery
+from nemo_gym.eval.recovery.evidence import select_managed_evidence
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors import slurm
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection

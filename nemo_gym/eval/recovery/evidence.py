@@ -18,7 +18,18 @@ over the executor's connection (or locally), that reads the job directory and pr
 Decisions live in ``nemo_gym.eval.recovery.planner``; this module holds the script and the constants it embeds.
 """
 
-from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+import hashlib
+import os
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.core.failure_kinds import (
+    PROVIDER_CREDENTIALS_REJECTED,
+)
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.eval.recovery.markers import (
     ACCOUNTING_UNKNOWN_PREFIX,
@@ -969,4 +980,329 @@ def judge_job_acknowledgements():
 collected["judge_job_acknowledgements"] = judge_job_acknowledgements()
 print(json.dumps(collected))
 """
+)
+
+
+TASK_INDEX = "_ng_task_index"
+ROLLOUT_INDEX = "_ng_rollout_index"
+
+
+Identity = tuple[int, int]
+
+
+class ManagedRecoveryFact(BaseModel):
+    """Read-only facts from the authoritative Store, not a second retry policy."""
+
+    identity: Identity
+    attempts: int = Field(ge=0, strict=True)
+    max_attempts: int = Field(ge=1, strict=True)
+    pending: bool
+    reserved: bool
+    # Whether the Store would run it again under some attempt cap (its replay rule without the cap). None from a
+    # Store reader that predates attempt extensions (`--extend-attempts`), which then cannot be applied to the run.
+    replayable: bool | None = None
+    # The selected result is a masked one the operator approved to run again (`--rerun-masked-without-artifact`):
+    # the Store counts it as a failed attempt and runs it again within its cap.
+    rerun_approved: bool = False
+
+
+class OperatorEpoch(BaseModel):
+    """Where the last operator continuation started the chain's accounting: its chain length and walltime baseline."""
+
+    chain_length: int = Field(ge=0)
+    walltime_s: float = Field(ge=0, allow_inf_nan=False)
+
+
+def _identity(row: Mapping[str, Any]) -> Identity | None:
+    task, rollout = row.get(TASK_INDEX), row.get(ROLLOUT_INDEX)
+    if all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in (task, rollout)):
+        return task, rollout
+    return None
+
+
+class CollectedEvidence(BaseModel):
+    materialized: list[dict[str, Any]] | None
+    results: list[dict[str, Any]] | None
+    failures: list[dict[str, Any]]
+    resubmit_offset: int = 0
+    infra_retries_used: float | None = None
+    infra_retries_state: str = "absent"
+    walltime_used_s: float | None = None
+    walltime_state: str = "absent"
+    job_chain: list[str] = Field(default_factory=list)
+    chain_incomplete: bool = False
+    accounted_walltime_s: float | None = None
+    quality: dict[str, Any] | None = None
+    score: float | None = None
+    mlflow: dict[str, Any] | None = None
+    managed_store: bool = False
+    source_digests: dict[str, str | None] | None = None
+    # Job-dir accounting file -> sha256 (None when absent) at collection, plus the saved resume_config.
+    accounting_snapshot: dict[str, str | None] | None = None
+    source_job_identity: tuple[str, int, int] | None = None
+    managed_selection: list[ManagedRecoveryFact] | None = None
+    managed_reader_error: str | None = None
+    # Rollouts with an admitted re-judgment and no saved outcome: its row is still the selected judge failure.
+    unresolved_rejudgments: list[str] = Field(default_factory=list)
+    # True when the Store reader could not run (install failure, crash, timeout, lost transport): nothing was read,
+    # unlike a reader that ran and could not verify the artifacts.
+    managed_reader_unavailable: bool = False
+    # Effective setting derived by the installed runtime from the bound saved configuration, not an observation.
+    checkpoint_enabled: bool | None = Field(default=None, strict=True)
+    # Artifacts that exist but could not be read, relative to the job dir: what they hold is unknown.
+    unreadable_files: list[str] = Field(default_factory=list)
+    # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
+    coverage_allocation_id: str | None = None
+    # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
+    coverage_scored: tuple[int, int] | None = None
+    # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
+    # the benchmark's headline metric covered, as the benchmark declares them.
+    benchmark_metric_coverage: tuple[int, int, str | None] | None = None
+    # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
+    # states (absent, ok, malformed) when the sources were stable.
+    accounting_unknown_reason: str | None = None
+    counter_states: dict[str, str] | None = None
+    # Set by an executor that reconciled a requeued chain from complete terminal scheduler records.
+    accounting_reconciled: bool = False
+    # Infra retries an explicit recovery added to the configured cap (.gym_infra_retry_extension), and its state.
+    infra_retry_extension: float | None = None
+    infra_retry_extension_state: str = "absent"
+    # The follow-up job id each allocation of the chain claimed (.gym_followup_queued.<allocation>).
+    followup_claims: dict[str, str] = Field(default_factory=dict)
+    # The sentinel job id each allocation queued behind its follow-up (.gym_followup_sentinel.<allocation>).
+    followup_sentinels: dict[str, str] = Field(default_factory=dict)
+    # The last operator continuation's epoch (OPERATOR_CONTINUATION_JOURNAL_NAME): the chain is accounted after it.
+    operator_epoch: OperatorEpoch | None = None
+    # Where the heavy readers ran: "login" or "cpu:<job id>" with a reader step (NEMO_GYM_REMOTE_READER_SRUN), and why
+    # one stayed on the login host; all None without a reader step.
+    collector_host: str | None = None
+    collector_fallback_reason: str | None = None
+    reader_host: str | None = None
+    reader_fallback_reason: str | None = None
+    # The operational settings the run's latest resume crossed (its resume-drift journal), None when it crossed none.
+    resume_drift_keys: list[str] | None = None
+    # Attempts an explicit recovery added to every rollout's cap (artifacts/rollouts_attempt_extension) and its state
+    # (absent, ok, malformed), as the plain collector read them; and the extension the run's Store reader applied,
+    # None from a reader that predates attempt extensions.
+    attempt_extension: int | None = None
+    attempt_extension_state: str = "absent"
+    attempt_extension_applied: int | None = None
+    # True when the run's Store reader applies the approvals of ``RERUN_MASKED_JOURNAL_NAME``; None from a reader
+    # that predates them, which would not run an approved result again.
+    rerun_masked_applied: bool | None = None
+    # The run's configured infra-retry cap (its saved resume_config), set by the executor that read it.
+    infra_retries_configured: int | None = None
+    # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
+    chain_continuation_note: str | None = None
+    # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
+    # profile kind and the services it starts, walltime, rows, receipt path and ``state`` ("queued" without a receipt,
+    # else the receipt's "completed" or "failed" with its counts); the executor adds the scheduler's state of a job
+    # without a receipt.
+    judge_jobs: list[dict[str, Any]] = Field(default_factory=list)
+    # The acknowledgements of failed judge-only jobs (JUDGE_JOB_ACK_JOURNAL_NAME): the job ids each covers.
+    judge_job_acknowledgements: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# The host sets the reader placement; a reader neither receives it nor replaces it.
+READER_PLACEMENT_FIELDS = ("collector_host", "collector_fallback_reason", "reader_host", "reader_fallback_reason")
+
+
+def _managed_source_digest(path: Path) -> str | None:
+    """Hash one stable file with bounded memory, using the exporter's existing identity checks.
+
+    Two streaming passes must agree on stat identity and bytes: a same-size in-place rewrite within one timestamp
+    tick changes no stat field. This doubles source reads; it does not make the reader atomic against ABA writes.
+    """
+    identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    first = None
+    for _ in range(2):
+        try:
+            source = path.open("rb")
+        except FileNotFoundError:
+            if first is None:
+                return None
+            raise RuntimeError("managed source changed while hashing")
+        digest = hashlib.sha256()
+        with source:
+            before = os.fstat(source.fileno())
+            for block in iter(lambda: source.read(1 << 20), b""):
+                digest.update(block)
+            after = os.fstat(source.fileno())
+        current = path.stat()
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise RuntimeError("managed source changed while hashing")
+        if first is not None and first != (identity(before), digest.hexdigest()):
+            raise RuntimeError("managed source changed while hashing")
+        first = (identity(before), digest.hexdigest())
+    return first[1]
+
+
+def _managed_trial_metadata(
+    artifacts: Path, source_digests: dict, quality: dict | None, results: list[dict], store: object
+) -> tuple[list[dict], bool | None]:
+    """Session trial metadata from the bound saved config and the Store's own inputs, after Store selection.
+
+    Returns the results with ``materialized_task_id`` on each session row and the effective checkpoint setting, or
+    the results unchanged and ``None`` when any fact is missing. Self-contained: the remote Store reader runs this
+    source inside the saved install, on that install's Store, materialization and checkpoint APIs.
+    """
+    import hashlib
+
+    # A config that differs from the collection snapshot is a changed source: raise, never report it as unknown.
+    expected = source_digests["rollouts_resolved_config.yaml"]
+    try:
+        config_bytes = (artifacts / "rollouts_resolved_config.yaml").read_bytes()
+    except FileNotFoundError:
+        config_bytes = None
+    if (None if config_bytes is None else hashlib.sha256(config_bytes).hexdigest()) != expected:
+        raise ValueError("resolved config changed after collection")
+    if config_bytes is None:
+        return results, None
+    try:
+        import yaml
+
+        from nemo_gym.data.task_materialization import materialize_task
+        from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+
+        try:
+            config = yaml.safe_load(config_bytes)
+        except yaml.YAMLError as error:
+            raise ValueError("resolved config is not YAML") from error
+        if not isinstance(config, dict):
+            raise ValueError("resolved config is not a mapping")
+        checkpoint_enabled = checkpoint_settings(config) is not None
+        servers = ((quality or {}).get("provenance") or {}).get("servers", {})
+        bound_results = []
+        for result, original in zip(results, store.inputs_for(results), strict=True):
+            projected = dict(result)
+            if result.get("_ng_result_type") == "single_agent_turn_legacy":
+                agent = servers[result["agent_ref"]["name"]]
+                taskset = original.get("_ng_task_source", agent["resources_server"])
+                task = materialize_task(original, taskset=taskset)
+                projected["materialized_task_id"] = task["task_id"]["task_id"]
+            bound_results.append(projected)
+        return bound_results, checkpoint_enabled
+    except (ImportError, AttributeError, OSError, ValueError, KeyError, TypeError):
+        return results, None
+
+
+# Row values the Store selection never reads, and the largest ones in agent runs. The model-call capture is read: an
+# agent timeout's captured calls decide whether its window held a server-side fault (is_infrastructure_agent_timeout).
+STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_agent_observations"})
+
+
+def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> CollectedEvidence:
+    """Read locally accessible Store history in this installed Gym process; never copy its selection rules.
+
+    The plain remote collector remains dependency-free. Call only on the same host as the installed caller,
+    after collection. Both snapshots must include the manifest and journal and remain byte-identical.
+    """
+    if not collected.managed_store:
+        return collected
+    try:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from nemo_gym.rollouts import RolloutStore, logical_rollout_id
+
+        artifacts = job_dir / "artifacts"
+        names = (
+            "rollouts.jsonl",
+            "rollouts_failures.jsonl",
+            "rollouts_materialized_inputs.jsonl",
+            "rollouts_resolved_config.yaml",
+            "rollouts_aggregate_metrics.json",
+            "quality_summary.json",
+            "rollouts_manifest.json",
+            "rollouts_attempts.jsonl",
+            "rollouts_resubmit_offset",
+            "rollouts_coverage.json",
+            "../.gym_infra_retries",
+            "../.gym_accumulated_walltime",
+            "../.gym_job_chain",
+        )
+
+        def snapshot():
+            return {name: _managed_source_digest(artifacts / name) for name in names}
+
+        if collected.source_digests is None or collected.source_digests != snapshot():
+            raise ValueError("managed source changed or has no stable collection snapshot")
+        # No selection rule reads a trajectory or model-call capture: large rows are read without them.
+        store = RolloutStore.read(artifacts / "rollouts.jsonl", import_legacy=False, skip_keys=STORE_SKIP_KEYS)
+        if store is None or collected.materialized is None:
+            raise ValueError("managed source has no readable manifest or inventory")
+        if store.manifest.max_rollout_attempts is None:
+            raise ValueError("managed manifest does not preserve its rollout attempt cap")
+        unresolved_rejudgments = store.unresolved_rejudgments()
+        coverage = store.coverage()
+        if len(collected.materialized) != coverage["expected"] or not coverage["identity_verified"]:
+            raise ValueError("managed inventory is ambiguous or its identity is not verified")
+        with redirect_stdout(StringIO()):
+            pending = {logical_rollout_id(row) for row in store.pending()}
+        replayable = store.replayable_identities()
+        approved = store.rerun_approved_identities()
+        facts = []
+        for row in collected.materialized:
+            identity = _identity(row)
+            if identity is None:
+                raise ValueError("managed input has no supported task/rollout identity")
+            logical = logical_rollout_id(row)
+            facts.append(
+                ManagedRecoveryFact(
+                    identity=identity,
+                    attempts=store.attempt_count(row),
+                    # The recorded extension reaches only a rollout the Store would run again; any other keeps the
+                    # saved cap that its own readers (the judge re-judgment budget) apply.
+                    max_attempts=coverage["max_rollout_attempts"]
+                    - (0 if logical in replayable else store.attempt_extension),
+                    pending=logical in pending,
+                    reserved=logical in store.manifest.next_attempt,
+                    replayable=logical in replayable,
+                    rerun_approved=logical in approved,
+                )
+            )
+        selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
+        for disposition in ("success", "failure", "omitted"):
+            for record in store.selected_records(disposition).values():
+                matches = [name for name in selected if (artifacts / name).resolve() == record.path.resolve()]
+                if len(matches) != 1:
+                    raise ValueError("selected outcome is outside the collected source files")
+                selected[matches[0]].add(record.line_number - 1)
+        results = [row for row in collected.results or [] if row.get("_line") in selected["rollouts.jsonl"]]
+        failures = [
+            row
+            for row in collected.failures
+            if row.get("_line") in selected["rollouts_failures.jsonl"] or row.get("_ng_unrouted_run_error") is True
+        ]
+        if len(results) != len(selected["rollouts.jsonl"]) or len(
+            [row for row in failures if row.get("_line") in selected["rollouts_failures.jsonl"]]
+        ) != len(selected["rollouts_failures.jsonl"]):
+            raise ValueError("selected outcomes are absent from the collected projection")
+        results, checkpoint_enabled = _managed_trial_metadata(
+            artifacts, collected.source_digests, collected.quality, results, store
+        )
+        if collected.source_digests != snapshot():
+            raise ValueError("managed source changed during authoritative selection")
+        return collected.model_copy(
+            update={
+                "results": results,
+                "failures": failures,
+                "managed_selection": facts,
+                "checkpoint_enabled": checkpoint_enabled,
+                "unresolved_rejudgments": unresolved_rejudgments,
+                "attempt_extension_applied": store.attempt_extension,
+                "rerun_masked_applied": True,
+            }
+        )
+    except ImportError as error:
+        update = {"managed_selection": None, "managed_reader_error": str(error), "managed_reader_unavailable": True}
+        return collected.model_copy(update=update)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
+        return collected.model_copy(update={"managed_selection": None, "managed_reader_error": str(error)})
+
+
+# A Store reader that could not run read nothing; the decision says so instead of stopping the run.
+STORE_READER_UNAVAILABLE = (
+    "the run was written by a rollout store and its Store reader could not run, so nothing was decided and the "
+    "saved artifacts were not judged"
 )

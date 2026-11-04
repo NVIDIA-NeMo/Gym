@@ -24,12 +24,12 @@ import sys
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import (
+from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
     CollectedEvidence,
-    decide_from_collected,
     select_managed_evidence,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore

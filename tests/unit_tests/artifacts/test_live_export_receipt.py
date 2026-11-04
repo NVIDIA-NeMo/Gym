@@ -182,7 +182,7 @@ def test_final_live_delivery_uses_same_run_and_existing_consumer(live):
         "uploaded_rollouts": True,
         "rollout_projection_version": 1,
     }
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     assert mlflow_errors(collected, "FINISHED", observed_run_id="live-run") == []
 
@@ -284,7 +284,7 @@ def _post_run_client(monkeypatch) -> Client:
 
 def test_a_reopened_live_run_is_exported_after_the_run_with_a_bound_receipt(live, monkeypatch):
     artifacts, exporter, client = live
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     # A later segment reopened the live run an earlier segment opened, and completes the run.
     exporter.reopened = True
@@ -508,7 +508,7 @@ def test_live_receipt_rejects_verifier_observations_not_in_acknowledged_rows(liv
 
 @pytest.mark.parametrize("projection", [None, 0, 2, True, "1"])
 def test_old_or_unknown_projection_receipt_cannot_certify_canonical_delivery(live, projection):
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     artifacts, exporter, client = live
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
@@ -544,7 +544,7 @@ def test_malformed_canonical_observations_cannot_be_silently_certified(live):
 
 def test_postrun_mlflow_export_keeps_canonical_evidence_and_projection_receipt(live, monkeypatch):
     artifacts, live_exporter, live_client = live
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     client = Client()
     monkeypatch.setattr(module, "MlflowClient", lambda **kwargs: client)
@@ -913,8 +913,8 @@ def test_existing_unhashable_health_summary_is_not_treated_as_absent(live, raw):
 @pytest.mark.parametrize("case", ["healthy", "wrong", "recovered", "invalid"])
 def test_health_export_projects_validated_collector_facts_without_changing_scores(live, monkeypatch, case):
     """Explicit collector projection boundary; real classifier, persisted metadata and SDK delivery."""
-    import nemo_gym.eval.recovery.planner as recovery
     from nemo_gym.cli.eval import _prepare_run_health_metrics
+    from nemo_gym.eval.recovery import evidence
     from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _recovered_fixture
     from tests.unit_tests.test_tool_trial_coverage import fixture
 
@@ -935,7 +935,7 @@ def test_health_export_projects_validated_collector_facts_without_changing_score
     }
     before = collected.model_dump()
     scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
-    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    monkeypatch.setattr(evidence, "select_managed_evidence", lambda *_: collected)
     values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
     assert collected.model_dump() == before
     assert values["health/response/known"] == 1
@@ -1115,9 +1115,11 @@ def test_noncolliding_sanitized_scientific_metric_still_exports(live, monkeypatc
 @pytest.mark.parametrize("case", ["settled_zero", "missing"])
 def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omissions(live, monkeypatch, case):
     """49 scored trials, then one settled zero (or one missing row), and 50 rows an accepted stage omitted."""
-    import nemo_gym.eval.recovery.planner as recovery
     from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
     from nemo_gym.cli.eval import _prepare_run_health_metrics
+    from nemo_gym.eval.recovery import evidence
+    from nemo_gym.eval.recovery.gate import trial_health
+    from nemo_gym.eval.recovery.planner import decide_from_collected
     from tests.unit_tests.test_evaluation_health import _run
 
     artifacts, _, _ = live
@@ -1133,10 +1135,10 @@ def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omission
                 ACCEPTED_STAGE_OMISSION: {"stage_index": 1, "tolerate_unresolved": True},
             }
         )
-    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
-    decision = recovery.decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    monkeypatch.setattr(evidence, "select_managed_evidence", lambda *_: collected)
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     assert decision.counts.get("omitted") == 50
-    passed, reason = recovery.trial_health(decision, collected)
+    passed, reason = trial_health(decision, collected)
     values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
     assert values["health/trial/expected"] == 50 and values["health/trial/omitted"] == 50
     assert values["health/trial/counts_known"] == 0

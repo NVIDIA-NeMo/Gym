@@ -22,13 +22,13 @@ verifier's captured judge reply must also have completed; a truncated reply leav
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import (
-    RecoveryBudget,
-    decide_recovery,
+from nemo_gym.eval.recovery.budgets import RecoveryBudget
+from nemo_gym.eval.recovery.grading import (
     grading_artifact,
     reverification_cause,
     saved_row_evidence,
 )
+from nemo_gym.eval.recovery.rows import decide_recovery
 from tests.unit_tests.eval.recovery.test_grading_artifacts import _judge_call, _observed, _ungraded
 from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 from tests.unit_tests.test_evaluation_health import _run
@@ -153,7 +153,9 @@ def test_a_judge_grading_whose_verifier_record_outcome_is_unknown_is_selected_fo
 
 
 def test_the_gate_counts_a_grading_with_an_unknown_outcome_as_judge_unparseable():
-    from nemo_gym.eval.recovery.planner import decide_from_collected, gate_summary_from_collected, trial_counts
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.eval.recovery.trials import trial_counts
     from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _recovered_fixture
 
     collected, _, grade = _recovered_fixture()

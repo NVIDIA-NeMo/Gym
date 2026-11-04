@@ -5,11 +5,11 @@
 import pytest
 
 from nemo_gym.core.episode_context import rollout_context
-from nemo_gym.eval.recovery.planner import (
+from nemo_gym.eval.recovery.gate import trial_health
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.trials import (
     _observed_trial_operations,
-    decide_from_collected,
     trial_counts,
-    trial_health,
 )
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _dep, _judge_call, _own

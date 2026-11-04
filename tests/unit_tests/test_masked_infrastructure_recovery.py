@@ -22,7 +22,7 @@ import json
 import pytest
 
 from nemo_gym.agents.agent_outcome import OutcomeAction
-from nemo_gym.eval.recovery.planner import RecoveryOutcomePolicyConfig
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_allocation_cut_recovery import _decide
@@ -188,7 +188,7 @@ def test_inspect_of_a_saved_run_with_one_masked_session_lost_result_resubmits(tm
 
 def test_unmanaged_masked_results_are_still_kept(tmp_path):
     # Without a Store selection the legacy resume reuses every result row, so recovery keeps the masked row.
-    from nemo_gym.eval.recovery.planner import decide_recovery
+    from nemo_gym.eval.recovery.rows import decide_recovery
 
     decision = decide_recovery(
         materialized=[{"_ng_task_index": 0, "_ng_rollout_index": 0}],
@@ -200,7 +200,7 @@ def test_unmanaged_masked_results_are_still_kept(tmp_path):
 
 
 def _budget():
-    from nemo_gym.eval.recovery.planner import RecoveryBudget
+    from nemo_gym.eval.recovery.budgets import RecoveryBudget
 
     return RecoveryBudget(live_job=False, max_infra_retries=2, infra_retries_used=0)
 

@@ -4,7 +4,7 @@
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import select_managed_evidence
+from nemo_gym.eval.recovery.evidence import select_managed_evidence
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config

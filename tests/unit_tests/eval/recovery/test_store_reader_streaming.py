@@ -21,7 +21,7 @@ import tracemalloc
 import pytest
 
 import nemo_gym.rollouts.rollout_records as records
-from nemo_gym.eval.recovery.planner import STORE_SKIP_KEYS
+from nemo_gym.eval.recovery.evidence import STORE_SKIP_KEYS
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 

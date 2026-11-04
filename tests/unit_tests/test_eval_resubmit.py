@@ -206,7 +206,7 @@ def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, execu
 def test_recover_on_an_executor_without_a_collector_stops_with_every_recovery_control(
     tmp_path: Path, slurm_bin: Path
 ) -> None:
-    from nemo_gym.eval.recovery.planner import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
     from nemo_gym.orchestration.submit import recover
 
     job_dir = _staged_run(tmp_path, executor=KubernetesExecutor.name)

@@ -20,12 +20,12 @@ import json
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import (
-    OPERATOR_CONTINUATION_JOURNAL_NAME,
+from nemo_gym.eval.recovery.decision import (
     OPERATOR_CONTINUATION_NOTE,
     UNKNOWN_BUDGET_HINT,
     UNKNOWN_BUDGET_REASON,
 )
+from nemo_gym.eval.recovery.evidence import OPERATOR_CONTINUATION_JOURNAL_NAME
 from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX, RETRY_EXTENSION_NAME
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.jobs import load_submission_record

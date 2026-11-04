@@ -238,7 +238,7 @@ def _run_prologue(
         # Explicit installed-runtime boundary: host PATH below intentionally has no Gym installation.
         code = (
             f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r}); "
-            "from nemo_gym.eval.recovery.planner import continuation_admission; "
+            "from nemo_gym.eval.recovery.continuation import continuation_admission; "
             f"print('__GYM_CONTINUATION:' + continuation_admission({str(tmp_path)!r}, "
             f"{resume.max_retries}, {_walltime_to_seconds(resume.max_walltime) if resume.max_walltime else None!r}, sys.argv[1], sys.argv[2], sys.argv[3]))"
         )
@@ -512,7 +512,8 @@ def test_only_a_definite_refusal_of_the_follow_up_is_a_typed_stop(tmp_path, repl
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_recovery_resubmits_a_run_whose_follow_up_the_scheduler_refused(tmp_path):
-    from nemo_gym.eval.recovery.planner import RecoveryAction, decide_from_collected
+    from nemo_gym.eval.recovery.decision import RecoveryAction
+    from nemo_gym.eval.recovery.planner import decide_from_collected
     from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir
 
     # The segment's prologue took its follow-up claim, and the scheduler refused the submission.
@@ -1011,7 +1012,11 @@ def test_manual_follower_without_predecessor_cannot_claim_a_fresh_chain(tmp_path
 def test_collector_preserves_unknown_budget_even_with_apparently_complete_counters(tmp_path):
     import json
 
-    from nemo_gym.eval.recovery.planner import COLLECT_SCRIPT, CollectedEvidence, decide_from_collected
+    from nemo_gym.eval.recovery.evidence import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+    )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -1043,7 +1048,10 @@ def test_manual_reset_cannot_erase_malformed_spent_counters(tmp_path, name):
 def test_collector_binds_dynamic_followup_claim_set_and_contents(tmp_path, mutation):
     import json
 
-    from nemo_gym.eval.recovery.planner import COLLECT_SCRIPT, CollectedEvidence
+    from nemo_gym.eval.recovery.evidence import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+    )
 
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()

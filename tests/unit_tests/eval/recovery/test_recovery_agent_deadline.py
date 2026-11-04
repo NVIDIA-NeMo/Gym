@@ -25,16 +25,20 @@ import sys
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import (
-    COLLECT_SCRIPT,
-    CollectedEvidence,
+from nemo_gym.eval.recovery.decision import (
     IdentityState,
     RecoveryAction,
-    decide_from_collected,
-    decide_recovery,
+)
+from nemo_gym.eval.recovery.evidence import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+)
+from nemo_gym.eval.recovery.gate import (
     failure_facts,
     gate_summary_from_collected,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.rows import decide_recovery
 from tests.unit_tests.eval.recovery.test_eval_recovery_gate import (
     OK_BUDGET,
     ident,
@@ -209,7 +213,7 @@ async def test_collection_keeps_an_answered_agent_deadline_and_a_resume_does_not
 
 @pytest.mark.parametrize("marked", [False, True])
 def test_an_answered_deadline_is_a_scored_sample_only_when_the_metric_scores_it(marked) -> None:
-    from nemo_gym.eval.recovery.planner import gate_task_summary
+    from nemo_gym.eval.recovery.gate import gate_task_summary
     from nemo_gym.rollouts.rollout_collection import _counted_failure_rows
 
     timeout = deadline(1) | ({"_ng_failure_counts_as_zero": True} if marked else {})

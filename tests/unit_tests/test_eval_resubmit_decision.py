@@ -29,16 +29,20 @@ from types import SimpleNamespace
 import pytest
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.eval.recovery.planner import (
-    COLLECT_SCRIPT,
-    CollectedEvidence,
-    GateCriteria,
+from nemo_gym.eval.recovery.decision import (
     RecoveryAction,
     RecoveryOutcome,
-    RecoveryOutcomePolicyConfig,
-    decide_from_collected,
+)
+from nemo_gym.eval.recovery.evidence import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+)
+from nemo_gym.eval.recovery.gate import (
+    GateCriteria,
     gate_task_summary,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
@@ -523,7 +527,7 @@ GOOD_VERDICTS = {"healthy": 4, "unhealthy": 0, "unobserved": 0}
 def test_quality_inputs_keep_validity_and_health_apart_and_fail_closed(
     tmp_path, quality, criterion, summary_valid, health
 ) -> None:
-    from nemo_gym.eval.recovery.planner import quality_inputs
+    from nemo_gym.eval.recovery.gate import quality_inputs
 
     job = complete_job(tmp_path)
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
@@ -534,7 +538,7 @@ def test_quality_inputs_keep_validity_and_health_apart_and_fail_closed(
 
 
 def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_everything_holds(tmp_path) -> None:
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = complete_job(tmp_path)
     produce_quality(job)
@@ -944,7 +948,7 @@ def test_a_legitimate_model_zero_grade_stays_scored(tmp_path) -> None:
 
 
 def test_an_unavailable_score_is_an_explicit_blocker(tmp_path) -> None:
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = complete_job(tmp_path)
     produce_quality(job)
@@ -957,7 +961,7 @@ def test_an_unavailable_score_is_an_explicit_blocker(tmp_path) -> None:
 
 
 def test_verdict_counts_that_do_not_cover_the_inventory_make_health_unknown(tmp_path) -> None:
-    from nemo_gym.eval.recovery.planner import quality_inputs
+    from nemo_gym.eval.recovery.gate import quality_inputs
 
     job = complete_job(tmp_path)
     collected = collect(job)
@@ -969,7 +973,7 @@ def test_verdict_counts_that_do_not_cover_the_inventory_make_health_unknown(tmp_
 
 @pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
 def test_a_nonfinite_aggregate_score_cannot_be_accepted(tmp_path, score) -> None:
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = complete_job(tmp_path)
     produce_quality(job)
@@ -1082,7 +1086,7 @@ def test_attempts_before_the_resubmit_offset_do_not_count_towards_the_cap(tmp_pa
     ],
 )
 def test_health_criterion_and_counts_are_strict(tmp_path, verdicts, criterion, health) -> None:
-    from nemo_gym.eval.recovery.planner import quality_inputs
+    from nemo_gym.eval.recovery.gate import quality_inputs
 
     job = write_job_dir(tmp_path / "job", n=100, results=[ident(t, reward=1.0) for t in range(100)], failures=[])
     collected = collect(job)
@@ -1092,7 +1096,7 @@ def test_health_criterion_and_counts_are_strict(tmp_path, verdicts, criterion, h
 
 
 def test_absent_mlflow_evidence_is_a_pending_delivery_fact_not_a_failure(tmp_path) -> None:
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = complete_job(tmp_path)
     produce_quality(job)
@@ -1123,7 +1127,7 @@ def test_an_omitted_agent_error_without_interruption_class_stops(tmp_path, fake_
 
 
 def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path) -> None:
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = complete_job(tmp_path)
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
@@ -1162,7 +1166,7 @@ def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path
     ],
 )
 def test_malformed_health_facts_are_unknown_never_clean(field, value) -> None:
-    from nemo_gym.eval.recovery.planner import health_check_facts
+    from nemo_gym.eval.recovery.gate import health_check_facts
 
     good = {
         "issues": {"a": 0},
@@ -1202,13 +1206,13 @@ def test_the_receipt_fixture_matches_the_content_bound_producer(tmp_path) -> Non
     ],
 )
 def test_malformed_mlflow_evidence_never_passes(local) -> None:
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     assert mlflow_errors(local, "FINISHED")
 
 
 def test_a_current_post_run_receipt_with_finished_is_the_only_mlflow_pass() -> None:
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     assert (
         mlflow_errors(
@@ -1240,7 +1244,7 @@ def gate_job(tmp_path: Path, *, expected: int, final_zeros: int, missing: int = 
 
 
 def gate_of(job: Path, *, quality: dict | None = None) -> tuple:
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
@@ -1350,7 +1354,7 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
     ],
 )
 def test_a_malformed_persisted_trial_fact_is_named_never_read_or_raised(quality) -> None:
-    from nemo_gym.eval.recovery.planner import trial_boundary
+    from nemo_gym.eval.recovery.trials import trial_boundary
 
     text = trial_boundary(quality)
     assert "malformed" in text or "not reported" in text
@@ -1391,7 +1395,7 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
 def test_missing_mlflow_evidence_names_the_configuration_as_a_pending_fact(tmp_path, configured, message) -> None:
     job = gate_job(tmp_path, expected=100, final_zeros=0)
     (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     collected.quality = unit_quality(
@@ -1414,7 +1418,7 @@ def test_missing_mlflow_evidence_names_the_configuration_as_a_pending_fact(tmp_p
     ],
 )
 def test_a_finished_status_counts_only_for_the_receipt_s_own_run(observed_run_id, message) -> None:
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     local = {
         "live_run_id": None,
@@ -1442,7 +1446,7 @@ def test_a_finished_status_counts_only_for_the_receipt_s_own_run(observed_run_id
 def test_a_current_post_run_receipt_beside_an_earlier_live_run_is_the_run_of_record(
     observed_run_id, status, accepted
 ) -> None:
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     local = {
         "live_run_id": "live-old",
@@ -1538,7 +1542,7 @@ def test_cli_recover_refuses_a_malformed_score_path_before_reading_anything(fake
     ],
 )
 def test_a_receipt_without_an_uploaded_rollouts_record_is_not_delivery(scope, message) -> None:
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     receipt = {"run_id": "postrun-run", "current": True, "uploaded_rollouts": scope}
     errors = mlflow_errors({"live_run_id": None, "receipt": receipt}, "FINISHED", observed_run_id="postrun-run")
@@ -1635,7 +1639,7 @@ def test_review_invalid_criterion_cannot_dispatch(tmp_path, fake_executor, fract
 
 
 def test_review_boolean_expected_count_is_not_one(tmp_path):
-    from nemo_gym.eval.recovery.planner import quality_inputs
+    from nemo_gym.eval.recovery.gate import quality_inputs
 
     job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
     got = collect(job)
@@ -1655,7 +1659,7 @@ def test_review_unsupported_reverify_reports_failed_not_resuming(tmp_path, fake_
 
 @pytest.mark.parametrize("sources", [["other.jsonl"], ["rollouts.jsonl", "other.jsonl"], None])
 def test_review_quality_from_another_rollout_is_not_accepted(tmp_path, sources):
-    from nemo_gym.eval.recovery.planner import quality_inputs
+    from nemo_gym.eval.recovery.gate import quality_inputs
 
     job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
     produce_quality(job)
@@ -1748,7 +1752,7 @@ def test_review_duplicate_agent_needs_environment_and_duplicate_pair_rejects(tmp
     ],
 )
 def test_review_walltime_requires_all_terminal_allocations(accounting, expected):
-    from nemo_gym.eval.recovery.planner import accounted_chain_walltime
+    from nemo_gym.eval.recovery.continuation import accounted_chain_walltime
 
     assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=10) == expected
 
@@ -1801,7 +1805,7 @@ def test_review_contradictory_zero_cause_never_settles_model_failure(tmp_path, b
 
 
 def test_review_an_ambiguous_manual_reset_epoch_stays_unknown():
-    from nemo_gym.eval.recovery.planner import accounted_chain_walltime
+    from nemo_gym.eval.recovery.continuation import accounted_chain_walltime
 
     accounting = "101|COMPLETED|10\n102|FAILED|20\n"
     assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=0) is None
@@ -1897,7 +1901,7 @@ def test_review_gate_reports_its_effective_named_criteria(tmp_path):
 
 
 def test_review_trial_criterion_is_configurable_without_changing_decision_or_rows(tmp_path):
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = gate_job(tmp_path, expected=100, final_zeros=1)
     rollouts = (job / "artifacts" / "rollouts.jsonl").read_bytes()
@@ -2066,7 +2070,7 @@ def test_review_collector_keeps_saved_answer_presence_not_bytes(tmp_path):
         tmp_path / "job", n=2, results=[], failures=[_judge_failure(0, response=SAVED_ANSWER), _judge_failure(1)]
     )
     got = collect(job)
-    from nemo_gym.eval.recovery.planner import _saved_answer
+    from nemo_gym.eval.recovery.policy import _saved_answer
 
     assert [_saved_answer(row) for row in got.failures] == [True, False]
     assert got.failures[0]["response"]["id"] == SAVED_ANSWER["id"]
@@ -2126,21 +2130,23 @@ def test_explicit_missing_final_failure_id_is_not_validated_from_unrelated_obser
 
 @pytest.mark.parametrize("provenance", ["read", ["read"], 1, {"resolved_config": "read", "servers": []}])
 def test_mcqa_trial_operations_with_unsupported_provenance_are_unproven_not_raised(provenance) -> None:
-    from nemo_gym.eval.recovery import planner as recovery
+    from nemo_gym.eval.recovery.decision import IdentityState, RecoveryAction, RecoveryDecision
+    from nemo_gym.eval.recovery.evidence import ROLLOUT_INDEX, TASK_INDEX, CollectedEvidence
+    from nemo_gym.eval.recovery.trials import _observed_trial_operations
 
-    row = {recovery.TASK_INDEX: 0, recovery.ROLLOUT_INDEX: 0}
-    decision = recovery.RecoveryDecision(
-        action=recovery.RecoveryAction.NOOP,
+    row = {TASK_INDEX: 0, ROLLOUT_INDEX: 0}
+    decision = RecoveryDecision(
+        action=RecoveryAction.NOOP,
         reason="scored",
         expected=1,
-        counts={recovery.IdentityState.SCORED.value: 1},
-        identities={recovery.IdentityState.SCORED.value: [(0, 0)]},
+        counts={IdentityState.SCORED.value: 1},
+        identities={IdentityState.SCORED.value: [(0, 0)]},
         evidence=[],
     )
-    collected = recovery.CollectedEvidence(
+    collected = CollectedEvidence(
         materialized=[row], results=[row], failures=[], quality={"source_matches": True, "provenance": provenance}
     )
-    assert recovery._observed_trial_operations(decision, collected) is False
+    assert _observed_trial_operations(decision, collected) is False
 
 
 @pytest.mark.parametrize(
@@ -2260,7 +2266,7 @@ def test_projected_judge_answer_keeps_its_supported_reverification_path(tmp_path
     collected = collect(job)
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
     assert decision.action == (RecoveryAction.REVERIFY if saved else RecoveryAction.STOP)
-    from nemo_gym.eval.recovery.planner import _saved_answer
+    from nemo_gym.eval.recovery.policy import _saved_answer
 
     assert _saved_answer(collected.failures[0]) is saved
     assert '"text"' not in collected.model_dump_json()
@@ -2704,7 +2710,10 @@ _CURRENT_RECEIPT = {
 
 
 def test_both_runs_with_a_current_receipt_pass_with_a_note() -> None:
-    from nemo_gym.eval.recovery.planner import mlflow_errors, mlflow_notes
+    from nemo_gym.eval.recovery.gate import (
+        mlflow_errors,
+        mlflow_notes,
+    )
 
     local = {"live_run_id": "live-run", "receipt": _CURRENT_RECEIPT}
     assert mlflow_errors(local, "FINISHED", observed_run_id="live-run") == []
@@ -2715,7 +2724,7 @@ def test_both_runs_with_a_current_receipt_pass_with_a_note() -> None:
 
 
 def test_both_runs_with_a_stale_receipt_fail_naming_the_stale_one() -> None:
-    from nemo_gym.eval.recovery.planner import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     stale = {"live_run_id": "live-run", "receipt": {**_CURRENT_RECEIPT, "current": False}}
     errors = mlflow_errors(stale, "FINISHED", observed_run_id="live-run")
@@ -2728,7 +2737,7 @@ def test_both_runs_with_a_stale_receipt_fail_naming_the_stale_one() -> None:
 
 def _mlflow_gate(tmp_path: Path, *, tracking_required: bool | None) -> dict:
     """The gate of a complete run that exported nothing to MLflow, with the snapshot's tracking requirement."""
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = gate_job(tmp_path, expected=4, final_zeros=0)
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
@@ -2778,7 +2787,7 @@ def test_an_old_quality_summary_without_the_provenance_key_falls_back_to_the_sav
     tmp_path, config_line, state
 ) -> None:
     """A run born on a pin that did not report `tracking_required` in provenance still honours its saved config."""
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = gate_job(tmp_path, expected=4, final_zeros=0)
     (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
@@ -2813,7 +2822,7 @@ def _row_with_a_model_call(task: int, *, operations_field: bool) -> dict:
 def _trial_gate_of(
     tmp_path: Path, *, expected: int, final_zeros: int, operations_field: bool, recovery: dict | None = None
 ) -> tuple:
-    from nemo_gym.eval.recovery.planner import trial_health
+    from nemo_gym.eval.recovery.gate import trial_health
 
     scored = expected - final_zeros
     results = [_row_with_a_model_call(t, operations_field=operations_field) for t in range(scored)]
@@ -2898,7 +2907,7 @@ def test_a_repin_reaches_the_saved_answer_rejudgment(tmp_path, fake_executor) ->
 
 
 def _journal_judge_jobs(job: Path, entries: list[dict]) -> None:
-    from nemo_gym.eval.recovery.planner import JUDGE_JOB_JOURNAL_NAME
+    from nemo_gym.eval.recovery.evidence import JUDGE_JOB_JOURNAL_NAME
 
     (job / JUDGE_JOB_JOURNAL_NAME).write_text("".join(json.dumps(entry) + "\n" for entry in entries))
 
@@ -3005,7 +3014,7 @@ class _FakeClient:
 
 
 def _delivery_with_a_queried_status(tmp_path, *, uri, client, receipt=True, mlflow_status=None) -> dict:
-    from nemo_gym.eval.recovery.planner import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     job = gate_job(tmp_path, expected=4, final_zeros=0)
     if not receipt:

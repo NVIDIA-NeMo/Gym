@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.eval.recovery.planner import RecoveryAction
+from nemo_gym.eval.recovery.decision import RecoveryAction
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.slurm import WALLTIME_JOURNAL_NAME, SlurmExecutor

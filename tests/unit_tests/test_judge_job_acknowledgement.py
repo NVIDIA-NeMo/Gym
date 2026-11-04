@@ -22,13 +22,13 @@ import json
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import (
+from nemo_gym.eval.recovery.decision import (
     ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
-    JUDGE_JOB_ACK_JOURNAL_NAME,
     RecoveryAction,
     failed_judge_jobs_blocking,
     failed_judge_jobs_stop,
 )
+from nemo_gym.eval.recovery.evidence import JUDGE_JOB_ACK_JOURNAL_NAME
 from nemo_gym.orchestration.submit import inspect_recovery, recover
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index  # noqa: F401 - autouse fixture
@@ -221,7 +221,10 @@ def test_the_command_refuses_a_bad_combination_before_doing_anything(monkeypatch
 @pytest.mark.parametrize("inspect_only", [False, True])
 def test_the_command_passes_the_stripped_reason_to_recovery_and_inspect(monkeypatch, capsys, inspect_only):
     from nemo_gym.cli.main import _eval_resubmit, build_parser
-    from nemo_gym.eval.recovery.planner import RecoveryDecision, RecoveryOutcome
+    from nemo_gym.eval.recovery.decision import (
+        RecoveryDecision,
+        RecoveryOutcome,
+    )
     from nemo_gym.orchestration import submit
 
     seen = {}

@@ -18,7 +18,8 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from nemo_gym.cli import eval as eval_cli
 from nemo_gym.cli import main as cli_main
-from nemo_gym.eval.recovery.planner import JUDGE_JOB_JOURNAL_NAME, RecoveryAction
+from nemo_gym.eval.recovery.decision import RecoveryAction
+from nemo_gym.eval.recovery.evidence import JUDGE_JOB_JOURNAL_NAME
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm

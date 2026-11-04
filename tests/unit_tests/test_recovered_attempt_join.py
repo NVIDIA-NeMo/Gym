@@ -23,13 +23,13 @@ trial's call joins is reported as such and leaves the run unverified; it never f
 
 from pathlib import Path
 
-from nemo_gym.eval.recovery.planner import (
-    CollectedEvidence,
-    decide_from_collected,
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import (
     gate_summary_from_collected,
-    recovered_attempt_joins,
     trial_verdict,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.trials import recovered_attempt_joins
 
 
 FIXTURE = Path(__file__).parent / "fixtures/cpu-grading-mcqa-healthy.json"

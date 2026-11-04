@@ -14,7 +14,9 @@
 # limitations under the License.
 """The infra-retry cap note belongs to infra-cap decisions; an exhausted attempt cap says what raises it."""
 
-from nemo_gym.eval.recovery.planner import CollectedEvidence, RecoveryAction, decide_from_collected
+from nemo_gym.eval.recovery.decision import RecoveryAction
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from tests.unit_tests.eval.recovery.test_eval_recovery_gate import infra_failure, inventory
 
 

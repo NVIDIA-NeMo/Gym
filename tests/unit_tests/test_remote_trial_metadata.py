@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.eval.recovery.planner import _managed_trial_metadata, select_managed_evidence
+from nemo_gym.eval.recovery.evidence import (
+    _managed_trial_metadata,
+    select_managed_evidence,
+)
 from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence, _remote_managed_reader_script
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
