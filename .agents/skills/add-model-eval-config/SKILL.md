@@ -215,32 +215,43 @@ config points at it instead of restating it.
 | `driver.policy_model`, `driver.policy_model_type` | Which service is the policy, and the client Gym talks to it with. | Sections 2 and 3. Submit fills in `policy_base_url`, `policy_model_name` and `policy_api_key` in every benchmark's `run`. |
 | `driver.gym_install.ref` | The Gym commit the job installs, which holds the benchmark and scores the run. | A full commit of public Gym that has the benchmark. |
 | `driver.benchmarks.<benchmark>.prepare` | Overrides for `gym eval prepare`, which builds the benchmark's data in the job before it runs. | The benchmark's config path. |
-| `driver.benchmarks.<benchmark>.run` | Overrides for `gym eval run`: the benchmark's config, the split, and the model settings of section 3. | The benchmark's config path and split; your section 3 keys. |
+| `driver.benchmarks.<benchmark>.run` | Overrides for `gym eval run`: the benchmark's config, the dataset type to run, and the model settings of section 3. | The benchmark's config path and its dataset's `type`; your section 3 keys. |
 | `driver.benchmarks.<benchmark>.resumable` | Resuming across allocations (`max_retries`, `max_walltime`). | run-and-babysit-eval. |
 | `job`, `compute`, `otel` | The output directory, the cluster and its node pools, telemetry. | Your site (section 2). |
 
 ### Where a benchmark's evaluation config lives
 
 Each benchmark is a directory `benchmarks/<benchmark>/` in the Gym commit that `driver.gym_install.ref`
-pins (a benchmark with variants has one directory per variant, `benchmarks/<benchmark>/<variant>/`):
+pins. Most hold one `config.yaml`. Some hold one config per harness or setting,
+`benchmarks/<benchmark>/<flavor>.yaml`, which `gym eval run --benchmark <benchmark>/<flavor>` loads, and a
+few hold variants in subdirectories, `benchmarks/<benchmark>/<variant>/config.yaml`
+(`--benchmark <benchmark>/<variant>`). The benchmark's README names the config to use. Most directories
+also have these files:
 
-- `config.yaml` is the evaluation config. Through its own `config_paths` it chains to the resources
-  server's config, `resources_servers/<server>/configs/<server>.yaml`, and it declares the benchmark's
-  agent, its dataset (`type: benchmark`, the prepared `jsonl_fpath`, the `prepare_script`, `num_repeats`,
-  and a `prompt_config` where the benchmark has one) and the grading settings it changes on the server.
-- `manifest.yaml` describes the benchmark: its servers, its datasets, the split to evaluate
-  (`canonical_split`) and the reward range.
-- `prepare.py` builds the dataset file that `config.yaml` reads. Prepared data is not checked in, so a
-  benchmark without a `prepare` block finds no data in the job.
+- The config (`config.yaml` or a flavor file) is the evaluation config. Through its own `config_paths`
+  it chains to the resources server's config, `resources_servers/<server>/configs/<server>.yaml`, and
+  it declares the benchmark's agent, its dataset (`type: benchmark`, the prepared `jsonl_fpath`, the
+  `prepare_script`, `num_repeats`, and a `prompt_config` where the benchmark has one) and the grading
+  settings it changes on the server.
+- `manifest.yaml` describes the benchmark: its servers, its datasets, the reward range, and
+  `canonical_split`, the split of the source data it measures. That is the source's name for it
+  (`test`, `train`, ...), not Gym's `split`.
+- `prepare.py` builds the dataset file the config reads (the dataset's `prepare_script`). Prepared
+  data is not checked in, so a benchmark whose dataset has a `prepare_script` needs a `prepare` block,
+  or the job finds no data.
 - `README.md` names the source data, how it is graded, and the benchmark's own commands.
 
 Read them at the pinned commit, not on a newer branch: the benchmark's data, prompts and grading are
 part of what the run measures.
 
-Do not copy the benchmark's config into the submit config; name it. `run.config_paths:
-[benchmarks/<benchmark>/config.yaml]` loads what `gym eval run --benchmark <benchmark>` loads, the same
-path under `prepare.config_paths` prepares its data, and `run.split` is the manifest's
-`canonical_split`. The job composes them as `gym eval run` does: the benchmark's config, then the
+Do not copy the benchmark's config into the submit config; name it. Put the file that
+`gym eval run --benchmark <value>` resolves (`benchmarks/<benchmark>/config.yaml`, or the flavor or
+variant file) in `run.config_paths`, put the same path under `prepare.config_paths` to prepare its data,
+and set `run.split` to the `type` of the dataset the config declares, `benchmark` for an evaluation. Do
+not copy `canonical_split` into `split`: `gym eval run` accepts only `train`, `validation` and
+`benchmark` there. `gym env validate --benchmark <value>` (section 5) exits 2 for a name that does
+not resolve; `--resolve-only` does not open the files in `run.config_paths`, so it passes either way.
+The job composes them as `gym eval run` does: the benchmark's config, then the
 model type's config, then the `run` keys as `+key=value` overrides. So the model's settings from
 section 3 go in the same `run` mapping as the benchmark keys and win over both files, while the
 benchmark's own settings (prompts, sampling, `num_repeats`, grading) stay as Gym ships them. Overriding
@@ -251,8 +262,10 @@ one of those changes what is measured; section 8 says which ones a fair comparis
 `benchmarks/ifeval/` needs no judge and no credentials for its data. Its `config.yaml` chains to
 `resources_servers/instruction_following/configs/instruction_following.yaml` and reads
 `benchmarks/ifeval/data/ifeval_benchmark.jsonl` (541 prompts, one repeat each). Its `prepare.py`
-downloads them from the upstream repository, and `manifest.yaml` gives `canonical_split: benchmark`.
-With a small reasoning model from the Hub as the policy, the whole config is:
+downloads them from the upstream repository, and its dataset is `type: benchmark`. The download reads
+the upstream default branch, so the Gym commit does not pin the data: check that the prepared file still
+has 541 rows, and compare the run's materialized inputs when you compare two runs. With a small
+reasoning model from the Hub as the policy, the whole config is:
 
 ```yaml
 services:
@@ -412,8 +425,8 @@ resume and is named.
 
 ## Exit checks
 
-- [ ] Each benchmark's `run.config_paths` and `prepare.config_paths` name its `config.yaml` at the
-  pinned commit, and `run.split` is its manifest's `canonical_split`.
+- [ ] Each benchmark's `run.config_paths` and `prepare.config_paths` name the config file
+  `--benchmark` resolves at the pinned commit, and `run.split` is its dataset's `type` (`benchmark`).
 - [ ] `--resolve-only` and `gym env validate --server-types` pass, and the `--dry-run` job script
   shows each `run` override once, the partition and `--gpus-per-node`.
 - [ ] The smoke run completes, and its health and answers look right.
