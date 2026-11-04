@@ -29,6 +29,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -72,9 +73,12 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         rollout_id = identity.get("rollout_id")
         if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
             return task_id, rollout_id
-    task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
-    if task_id is None:
-        task_id = str(row[TASK_INDEX_KEY_NAME])
+    if is_materialized_task_row(row):
+        task_id = TaskId.model_validate(row["task_id"]).task_id
+    else:
+        task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+        if task_id is None:
+            task_id = str(row[TASK_INDEX_KEY_NAME])
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 

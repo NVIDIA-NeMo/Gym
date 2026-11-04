@@ -473,7 +473,11 @@ def test_all():  # pragma: no cover
     for root in component_search_roots():
         for server_type_dir in SERVER_TYPE_KEYS:
             for module_path in sorted((root / server_type_dir).glob("*")):
-                if "pycache" in module_path.name or not module_path.is_dir():
+                if (
+                    "pycache" in module_path.name
+                    or module_path.name.endswith((".egg-info", ".dist-info"))
+                    or not module_path.is_dir()
+                ):
                     continue
                 rel_path = f"{server_type_dir}/{module_path.name}"
                 if rel_path in seen_rel_paths:
