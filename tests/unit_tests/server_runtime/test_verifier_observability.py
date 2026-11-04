@@ -13,9 +13,9 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
-from nemo_gym.core.episode_types import FailureBoundary
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import RequestFailureLog
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
@@ -393,7 +393,7 @@ def test_owner_observation_outside_verification_does_not_create_an_invocation():
 
 
 def _verifier_cause_chain():
-    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
     from nemo_gym.core.typed_exceptions import NgFailureEvent
 
     model = NgFailureEvent(
@@ -442,7 +442,7 @@ async def test_a_verify_failure_returned_as_500_keeps_its_selected_failure_and_c
 async def test_an_http_exception_keeps_its_explicit_cause_and_an_existing_report():
     from starlette.exceptions import HTTPException
 
-    from nemo_gym.core.episode_types import FailureReport
+    from nemo_gym.core.failure_records import FailureReport
     from nemo_gym.core.failure_transport import FailureHeader
 
     resources, model = _verifier_cause_chain()

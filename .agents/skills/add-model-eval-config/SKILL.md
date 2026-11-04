@@ -1,5 +1,5 @@
 ---
-name: gym-add-model-config
+name: add-model-eval-config
 description: >
   Onboard a model's serving config for NeMo Gym evaluations: write the vLLM policy service
   (model path, served name, tensor/pipeline/data/expert parallelism, max model length, max
@@ -8,7 +8,7 @@ description: >
   kwargs, validate the config without GPUs, smoke it with a small `--limit`, and read the resolved
   config. Also says what must stay fixed for a fair comparison and what deployment tuning may
   change. Use when a new model or checkpoint has to be evaluated in Gym. Not for running the
-  evaluation itself (use gym-eval) or adding a benchmark (use add-benchmark). Triggered by:
+  evaluation itself (use run-and-babysit-eval) or adding a benchmark (use add-benchmark). Triggered by:
   "add a model", "new checkpoint", "serve this model in Gym", "model config", "vllm config",
   "enable thinking", "reasoning parser", "tool call parser", "compare two models fairly".
 ---
@@ -117,7 +117,7 @@ otel:
 `driver.gym_install.ref` is the Gym the job installs and scores the run with: a full commit of
 public Gym that has your benchmark, never a branch. Recovery (`gym eval resubmit --recover`) reads
 the run with that commit. The CLI you submit with may be newer than the pinned commit; the job
-still installs the pinned one. Install the CLI as gym-eval (step 1) describes. Site `#SBATCH`
+still installs the pinned one. Install the CLI as run-and-babysit-eval (step 1) describes. Site `#SBATCH`
 directives (a QoS, a node to avoid) go in `compute.cluster.extra_args`, without leading dashes:
 `{qos: <qos>, exclude: <node>}`.
 
@@ -147,7 +147,7 @@ the outputs and the score: they are part of the model config, not a memory setti
 Two readiness limits: the job waits `health_check.timeout_seconds` for the policy service, and
 the driver then waits `server_spinup_timeout_seconds` (under the benchmark's `run`, 600 s by
 default) for the Gym servers it starts for the benchmark. A benchmark whose servers start slowly
-ends the chain typed `server_spinup_timeout`; gym-eval says how to raise the limit on a saved run.
+ends the chain typed `server_spinup_timeout`; run-and-babysit-eval says how to raise the limit on a saved run.
 
 ## 3. The reasoning toggle
 
@@ -236,9 +236,9 @@ driver:
 
 `limit` counts tasks; the run log prints the tasks and the rows they become. Bound the smoke to
 one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`;
-when it completes, it cancels the chain's pending follow-up and sentinel itself (see gym-eval, step 2).
-Then follow the [gym-eval](../gym-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
-<benchmark> --recover --inspect` and `gym eval health-check` (gym-eval, step 6). Look for answers that end mid-thought (the output token
+when it completes, it cancels the chain's pending follow-up and sentinel itself (see run-and-babysit-eval, step 2).
+Then follow the [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
+<benchmark> --recover --inspect` and `gym eval health-check` (run-and-babysit-eval, step 6). Look for answers that end mid-thought (the output token
 budget or `--max-model-len` is too small), reasoning that lands in the answer (the reasoning parser
 or `uses_reasoning_parser` is wrong), and tool calls that arrive as plain text (the tool-call
 parser is wrong). For a tool-using benchmark also count the tool calls: `ng_perf.num_tool_calls` in `rollouts.jsonl`
