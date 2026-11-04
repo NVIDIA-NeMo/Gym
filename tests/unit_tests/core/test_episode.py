@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests of episode identity in `nemo_gym.core.episode`."""
+"""Tests of episode identity in `nemo_gym.core.episode_types`."""
 
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 
 
 def test_capture_key_qualifies_retries() -> None:

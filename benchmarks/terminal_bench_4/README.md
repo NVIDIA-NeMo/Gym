@@ -107,6 +107,14 @@ AA reproduction requires explicitly setting `++num_repeats=3` (the official
 Terminal-Bench leaderboard uses a separate five-attempt protocol). Scheduler allocations must cover
 setup, the full official agent budget, and verification.
 
+## Sandbox startup
+
+Each OpenSandbox creation or reconnect attempt has a five-minute client budget
+(`environment.sandbox_provider.opensandbox.create.timeout_s` and
+`connect_attempt_timeout_s`). The task package's overall environment build
+budget still bounds provisioning, including retries and Compose services.
+The 1,200-second readiness setting is an upper bound within those outer budgets.
+
 ## Infra validation
 
 For capped smoke runs, add `++tb4_max_steps=3` and

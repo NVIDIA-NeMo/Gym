@@ -26,8 +26,8 @@ from omegaconf import OmegaConf
 
 import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.core.episode_types import EpisodeFailure
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_records import (
@@ -1589,7 +1589,7 @@ async def test_incomplete_capture_policy_preserves_recovery_accounting(
 
     async def post(**kwargs):
         entry = TokenEntry(
-            rollout_id="0-0",
+            capture_key="0-0",
             model_call_id="kept-answer",
             model="m",
             prompt_token_ids=[1, 2, 3],

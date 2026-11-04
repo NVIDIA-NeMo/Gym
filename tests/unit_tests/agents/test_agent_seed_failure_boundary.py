@@ -3,7 +3,7 @@
 import pytest
 
 from nemo_gym.agents.base_responses_api_agent import AgentSessionSetupError, AgentSessionState
-from nemo_gym.core.episode_types import FailureBoundary
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureHeader
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from tests.unit_tests.server_runtime.test_session_routing import AgentWorker
