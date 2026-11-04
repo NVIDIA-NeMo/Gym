@@ -251,8 +251,10 @@ def test_superseded_journal_is_not_parsed_by_the_consumer(tmp_path):
 
 
 def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm
     from nemo_gym.orchestration.executors.connection import Connection, LocalConnection
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
     from nemo_gym.orchestration.submit import recover
 
     job, _, _ = _resumable_run(tmp_path)
@@ -269,7 +271,9 @@ def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin
         def write_text(self, remote, content, *, private=False):
             raise AssertionError("no dispatch")
 
-    monkeypatch.setattr(slurm, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda hostname: RemoteTransport())
     result = recover(*_handle(job))
     assert result.decision.action.value == "stop" and result.dispatched is None
     assert "authoritative Store reader" in result.decision.reason

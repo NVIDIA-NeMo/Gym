@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors.judge_profile import (
+from nemo_gym.orchestration.executors.slurm.judge_profile import (
     CPU_PLACEMENT_UNUSED,
     CPU_PROFILE,
     DEFAULT_JUDGE_WALLTIME,

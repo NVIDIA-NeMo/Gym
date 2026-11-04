@@ -15,6 +15,9 @@ from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from tests.unit_tests.test_slurm_judge_only_job import _rendered_gym_commands, _unrecognized_flags
 
 
@@ -122,9 +125,13 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
         ),
         with_benchmark=lambda _: None,
     )
-    (job.parent / sm.RESOLVED_CONFIG_NAME).write_text("fixture: true\n")
-    monkeypatch.setattr(sm, "get_connection", lambda _: Conn())
-    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "a" * 40)
+    (job.parent / slurm_chain.RESOLVED_CONFIG_NAME).write_text("fixture: true\n")
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: "a" * 40)
     monkeypatch.setattr(sm.SlurmExecutor, "_saved_config", staticmethod(lambda *a: cfg))
     decision = RecoveryDecision(
         action=RecoveryAction.REVERIFY,

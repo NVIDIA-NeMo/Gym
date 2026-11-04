@@ -31,6 +31,11 @@ from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
+from nemo_gym.orchestration.executors.slurm import scheduler as slurm_scheduler
 
 
 RECEIPT = {"run_id": "post-run", "current": True, "uploaded_rollouts": True, "rollout_projection_version": 1}
@@ -168,7 +173,7 @@ def test_slurm_export_runs_gym_export_on_the_login_host_with_the_saved_settings(
         "#!/bin/bash\n"
         f'printf "%s\\n" "$@" > {tmp_path}/args\n'
         f'echo "$TRACKING_VALUE" > {tmp_path}/forwarded\n'
-        f"test -e {sm._RESUBMIT_LOCK} && echo locked > {tmp_path}/lock\n"
+        f"test -e {slurm_scheduler._RESUBMIT_LOCK} && echo locked > {tmp_path}/lock\n"
         f'echo "Export mlflow: {status}"\n'
         + ('echo "  run_id: post-run"\n' if status == "succeeded" else 'echo "Error: refused" >&2; exit 1\n')
     )
@@ -207,15 +212,18 @@ def test_slurm_export_runs_gym_export_on_the_login_host_with_the_saved_settings(
                 raise RuntimeError(result.stderr)
             return result.stdout
 
-    monkeypatch.setattr(sm, "render_driver_entrypoint", entrypoint)
-    monkeypatch.setattr(sm, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_reader, "render_driver_entrypoint", entrypoint)
+    monkeypatch.setattr(slurm_executor, "render_driver_entrypoint", entrypoint)
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda _: Conn())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda _: Conn())
     monkeypatch.setattr(sm.SlurmExecutor, "_saved_config", staticmethod(lambda conn, run_dir: config))
     record = SimpleNamespace(
         hostname=None, run_dir=str(job.parent), benchmark_job=lambda _: SimpleNamespace(job_dir=str(job))
     )
     evidence = CollectedEvidence(materialized=[], results=[], failures=[], job_chain=["10"])
     result = sm.SlurmExecutor().export_tracking(record, "bench", evidence)
-    assert not (job / sm._RESUBMIT_LOCK).exists()
+    assert not (job / slurm_scheduler._RESUBMIT_LOCK).exists()
     if case in ("live", "purged-live"):
         assert result["state"] == "failed" and "still live" in result["error"]
         assert not (tmp_path / "args").exists()
@@ -268,7 +276,7 @@ def test_a_chain_purged_from_squeue_is_judged_by_its_accounting(tmp_path, accoun
         f.chmod(0o755)
     script = [
         'fail() { echo "Error: $*" >&2; exit 1; }',
-        *sm._chain_live_check(["10", "11"], "still live"),
+        *slurm_scheduler._chain_live_check(["10", "11"], "still live"),
         "echo free",
     ]
     env = {**os.environ, "PATH": f"{bins}:{os.environ['PATH']}"}

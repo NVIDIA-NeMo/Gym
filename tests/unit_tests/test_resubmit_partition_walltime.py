@@ -21,9 +21,11 @@ import pytest
 import yaml
 
 from nemo_gym.eval.recovery.decision import RecoveryAction
-from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import WALLTIME_JOURNAL_NAME, SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import scheduler as slurm_scheduler
+from nemo_gym.orchestration.executors.slurm.chain import WALLTIME_JOURNAL_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
@@ -165,8 +167,8 @@ def test_a_partition_too_short_for_one_segment_is_refused_before_the_evidence_re
 
 
 def test_a_run_without_segments_cannot_take_a_raise_above_max_time():
-    plan = sm._plan_walltime(
-        sm.SubmitConfig.model_validate(
+    plan = slurm_chain._plan_walltime(
+        slurm_scheduler.SubmitConfig.model_validate(
             {
                 "services": {},
                 "compute": {"c": {"type": "slurm", "account": "a", "walltime": "04:00:00"}},
@@ -200,13 +202,13 @@ def test_a_scheduler_refusal_returns_an_outcome_with_its_text(tmp_path, slurm_bi
     assert refusal["scheduler_text"] == text and refusal["benchmark"] == "gsm8k"
     assert refusal["restored"] == ["job.sh", "resolved-config.yaml", "resubmit lock released"]
     assert {path: path.read_bytes() for path in files} == files
-    assert not (run_dir / WALLTIME_JOURNAL_NAME).exists() and not (job_dir / sm._RESUBMIT_LOCK).exists()
+    assert not (run_dir / WALLTIME_JOURNAL_NAME).exists() and not (job_dir / slurm_scheduler._RESUBMIT_LOCK).exists()
     assert f"the scheduler refused the job: {text}" in out.decision.reason
     json.loads(out.model_dump_json())
     if ambiguous:
         # A lost reply may still have queued a job: the chain records that its accounting is unknown, as before.
         assert refusal["job_dir_restored"] is False and refusal["chain_marker"].startswith(
-            sm.ACCOUNTING_UNKNOWN_PREFIX
+            slurm_chain.ACCOUNTING_UNKNOWN_PREFIX
         )
     else:
         assert refusal["job_dir_restored"] is True and refusal["chain_marker"] is None
@@ -227,12 +229,12 @@ def test_a_scheduler_refusal_returns_an_outcome_with_its_text(tmp_path, slurm_bi
     ],
 )
 def test_partition_max_time_parses_slurm_durations(text, seconds):
-    assert sm._slurm_time_limit_seconds(text) == seconds
+    assert slurm_scheduler._slurm_time_limit_seconds(text) == seconds
 
 
 def test_partition_max_time_rejects_an_unknown_limit_and_reads_the_pool_partition():
     with pytest.raises(ValueError):
-        sm._slurm_time_limit_seconds("n/a")
+        slurm_scheduler._slurm_time_limit_seconds("n/a")
 
     class Conn:
         def __init__(self, answer):
@@ -242,19 +244,19 @@ def test_partition_max_time_rejects_an_unknown_limit_and_reads_the_pool_partitio
             self.commands += commands
             return self.answer
 
-    compute = sm.SlurmComputeConfig.model_validate(
+    compute = slurm_scheduler.SlurmComputeConfig.model_validate(
         {"type": "slurm", "account": "a", "node_pools": {"gpu": {"partition": "batch"}}}
     )
     conn = Conn("batch* 4:00:00\n")
-    assert sm._partition_time_limit(conn, compute) == {
+    assert slurm_scheduler._partition_time_limit(conn, compute) == {
         "partition": "batch",
         "max_time": "4:00:00",
         "max_time_s": 14400,
         "error": None,
     }
     assert conn.commands == ["sinfo -h -p batch -o '%P %l'"]
-    assert sm._partition_time_limit(Conn("batch UNLIMITED\n"), compute)["max_time_s"] is None
-    assert sm._partition_time_limit(Conn(""), compute)["error"] == "sinfo lists no partition batch"
+    assert slurm_scheduler._partition_time_limit(Conn("batch UNLIMITED\n"), compute)["max_time_s"] is None
+    assert slurm_scheduler._partition_time_limit(Conn(""), compute)["error"] == "sinfo lists no partition batch"
 
 
 def test_node_pools_on_several_partitions_take_the_lowest_max_time():
@@ -266,7 +268,7 @@ def test_node_pools_on_several_partitions_take_the_lowest_max_time():
             self.commands += commands
             return self.answer
 
-    compute = sm.SlurmComputeConfig.model_validate(
+    compute = slurm_scheduler.SlurmComputeConfig.model_validate(
         {
             "type": "slurm",
             "account": "a",
@@ -275,7 +277,7 @@ def test_node_pools_on_several_partitions_take_the_lowest_max_time():
         }
     )
     conn = Conn("long 2-00:00:00\nbatch 4:00:00\nopen UNLIMITED\n")
-    assert sm._partition_time_limit(conn, compute) == {
+    assert slurm_scheduler._partition_time_limit(conn, compute) == {
         "partition": "batch",
         "max_time": "4:00:00",
         "max_time_s": 14400,
@@ -283,6 +285,6 @@ def test_node_pools_on_several_partitions_take_the_lowest_max_time():
     }
     assert conn.commands == ["sinfo -h -p batch,long,open -o '%P %l'"]
     # Every pool's partition must be listed; one sinfo does not know leaves the limit unknown.
-    assert sm._partition_time_limit(Conn("long 2-00:00:00\nbatch 4:00:00\n"), compute)["error"] == (
+    assert slurm_scheduler._partition_time_limit(Conn("long 2-00:00:00\nbatch 4:00:00\n"), compute)["error"] == (
         "sinfo lists no partition open"
     )

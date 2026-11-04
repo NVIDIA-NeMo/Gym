@@ -41,7 +41,8 @@ from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConf
 from nemo_gym.orchestration.executors.base import SchedulerRefusedError
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm.reader import reader_token
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.utils.decorators import experimental
 

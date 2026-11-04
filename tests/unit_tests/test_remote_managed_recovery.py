@@ -6,7 +6,7 @@ import pytest
 
 from nemo_gym.eval.recovery.evidence import select_managed_evidence
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence
+from nemo_gym.orchestration.executors.slurm.reader import _remote_managed_evidence
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
 from tests.unit_tests.test_managed_recovery_selection import collect, decide, prepare_managed, saved_bytes
 
@@ -133,6 +133,10 @@ def test_unbound_remote_directory_is_not_installed(tmp_path):
 @pytest.mark.parametrize("changed_at", ["remote_selection", "collection"])
 def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch, changed_at):
     from nemo_gym.orchestration.executors import slurm
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+    from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
     from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
     prepare_managed(tmp_path, "infra")
@@ -155,8 +159,11 @@ def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch, cha
     changed.driver.benchmarks["task"].resumable = ResumeConfig(max_retries=0)
     # Reads: before collection, right after collection, after remote selection.
     reads = iter([saved, changed] if changed_at == "collection" else [saved, saved, changed])
-    monkeypatch.setattr(slurm, "get_connection", lambda _: Transport())
-    monkeypatch.setattr(slurm, "_remote_managed_evidence", lambda *_: selected)
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda _: Transport())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda _: Transport())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda _: Transport())
+    monkeypatch.setattr(slurm_reader, "_remote_managed_evidence", lambda *_: selected)
+    monkeypatch.setattr(slurm_chain, "_remote_managed_evidence", lambda *_: selected)
     monkeypatch.setattr(slurm.SlurmExecutor, "_saved_config", staticmethod(lambda *_: next(reads)))
     record = SubmissionRecord(
         gym_job_id="synthetic",
@@ -182,8 +189,9 @@ def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch, cha
 def test_large_projection_streams_outside_installer_argv(tmp_path, monkeypatch):
     import shlex
 
-    from nemo_gym.orchestration.executors import slurm
     from nemo_gym.orchestration.executors.connection import LocalConnection
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 
     prepare_managed(tmp_path, "healthy")
     raw = collect(tmp_path)
@@ -196,7 +204,8 @@ def test_large_projection_streams_outside_installer_argv(tmp_path, monkeypatch):
         code = "import json,sys; d=json.load(sys.stdin); print('__GYM_MANAGED:'+json.dumps(d))"
         return "bash -c " + shlex.quote("python3 -c " + shlex.quote(code) + " <&3")
 
-    monkeypatch.setattr(slurm, "render_driver_entrypoint", installed_stub)
+    monkeypatch.setattr(slurm_reader, "render_driver_entrypoint", installed_stub)
+    monkeypatch.setattr(slurm_executor, "render_driver_entrypoint", installed_stub)
     result = _remote_managed_evidence(LocalConnection(), raw, tmp_path, config())
     assert result.managed_reader_error is None
     assert result.results == raw.results

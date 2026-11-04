@@ -25,7 +25,11 @@ import nemo_gym.orchestration.executors.slurm as slurm_executor
 from nemo_gym.cli.main import build_parser
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import REPIN_JOURNAL_NAME, SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+from nemo_gym.orchestration.executors.slurm.chain import REPIN_JOURNAL_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 from tests.unit_tests.test_eval_resubmit import _handle
@@ -95,6 +99,8 @@ def launcher_at(monkeypatch):
     monkeypatch.setenv("NEMO_GYM_SUBMIT_NO_REF_CHECK", "true")
 
     def set_commit(commit):
+        monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: commit)
+        monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: commit)
         monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: commit)
 
     return set_commit

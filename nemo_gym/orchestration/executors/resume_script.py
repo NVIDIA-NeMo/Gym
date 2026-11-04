@@ -59,7 +59,7 @@ from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
 logger = logging.getLogger(__name__)
 
 
-# `_stage` in slurm.py always writes this benchmark's script to exactly this
+# `_stage` in slurm/executor.py always writes this benchmark's script to exactly this
 # filename inside its job dir, which `#SBATCH --chdir` makes `$PWD` at runtime.
 _JOB_SCRIPT_NAME = "job.sh"
 # The first line of the prologue, so a resubmit can tell a resumable job.sh from one without the chain.

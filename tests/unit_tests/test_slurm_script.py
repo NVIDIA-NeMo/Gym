@@ -1502,7 +1502,7 @@ def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_d
 from unittest.mock import MagicMock
 
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import _validate_mounts
+from nemo_gym.orchestration.executors.slurm.executor import _validate_mounts
 
 
 def _make_submit_config_with_mounts(driver_mounts=None, service_mounts=None):

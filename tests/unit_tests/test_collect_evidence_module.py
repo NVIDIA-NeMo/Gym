@@ -16,12 +16,12 @@
 
 from nemo_gym.eval.recovery import evidence as collect_evidence
 from nemo_gym.eval.recovery import planner as recovery
-from nemo_gym.orchestration.executors import slurm
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 
 
 def test_recovery_and_the_slurm_executor_run_the_collector_module_s_script():
     assert recovery.COLLECT_SCRIPT is collect_evidence.COLLECT_SCRIPT
-    assert slurm.COLLECT_SCRIPT is collect_evidence.COLLECT_SCRIPT
+    assert slurm_chain.COLLECT_SCRIPT is collect_evidence.COLLECT_SCRIPT
     compile(collect_evidence.COLLECT_SCRIPT, "<collect_evidence>", "exec")
 
 

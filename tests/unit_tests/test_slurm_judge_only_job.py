@@ -22,9 +22,13 @@ from nemo_gym.eval.recovery.decision import RecoveryAction
 from nemo_gym.eval.recovery.evidence import JUDGE_JOB_JOURNAL_NAME
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import READER_SRUN_ENV, SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+from nemo_gym.orchestration.executors.slurm import scheduler as slurm_scheduler
+from nemo_gym.orchestration.executors.slurm.reader import READER_SRUN_ENV
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionRecord
 from nemo_gym.orchestration.submit import inspect_recovery, recover
@@ -153,7 +157,9 @@ def judge_slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         (bins / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bins}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.delenv(READER_SRUN_ENV, raising=False)
-    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: "a" * 40)
     return bins
 
 
@@ -255,7 +261,7 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     record = SubmissionRecord.load(json.loads((job_dir.parent / MANIFEST_NAME).read_text()))
     assert record.benchmark_job("bench").job_id == "4242"
     assert "--no-requeue" in (judge_slurm_bin / "sbatch_args").read_text()
-    assert not (job_dir / sm._RESUBMIT_LOCK).exists()
+    assert not (job_dir / slurm_scheduler._RESUBMIT_LOCK).exists()
 
 
 def test_a_saved_cpu_pool_queues_the_judge_only_job_without_an_option(tmp_path, judge_slurm_bin) -> None:
@@ -445,7 +451,9 @@ def test_an_old_pin_model_served_run_is_rejudged_headless_on_the_installed_revis
 ) -> None:
     """No flags: the plan is made on the installed Gym and its judge-only job runs there, journaled as a repin."""
     monkeypatch.setenv("NEMO_GYM_SUBMIT_NO_REF_CHECK", "true")
-    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "b" * 40)
+    monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: "b" * 40)
+    monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: "b" * 40)
+    monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: "b" * 40)
     job_dir = _model_served_run(tmp_path)
 
     out = recover(*_handle(job_dir), judge_partition="cpu")

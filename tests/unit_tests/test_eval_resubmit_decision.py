@@ -2632,9 +2632,9 @@ def test_cli_inspection_reads_an_original_record_without_local_index(tmp_path, f
 
 
 def test_cli_outcome_names_the_reader_token(tmp_path, fake_executor, capsys, monkeypatch) -> None:
-    import nemo_gym.orchestration.executors.slurm as slurm
+    from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 
-    monkeypatch.setattr(slurm, "_reader_token", None)
+    monkeypatch.setattr(slurm_reader, "_reader_token", None)
     monkeypatch.setenv("GYM_READER_TOKEN", "caller-token")
     fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
     code, out = run_cli(["eval", "resubmit", "gym-job-t", "bench", "--recover", "--inspect"], capsys)

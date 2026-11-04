@@ -173,6 +173,9 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.cli._venv_setup": MovedPath(new="nemo_gym.utils.venv_setup", since="0.8.0"),
     "nemo_gym.orchestration.recovery": MovedPath(new="nemo_gym.eval.recovery.planner", since="0.8.0"),
     "nemo_gym.orchestration.collect_evidence": MovedPath(new="nemo_gym.eval.recovery.evidence", since="0.8.0"),
+    "nemo_gym.orchestration.executors.judge_profile": MovedPath(
+        new="nemo_gym.orchestration.executors.slurm.judge_profile", since="0.8.0"
+    ),
 }
 
 
@@ -748,6 +751,82 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
+    },
+    "nemo_gym.orchestration.executors.slurm": {
+        # Split into the executors/slurm package by part; served by the package's __getattr__ with a warning.
+        **_names(
+            "nemo_gym.orchestration.executors.slurm.scheduler",
+            "0.8.0",
+            """
+            _JOB_ID_RE _MARKER _parse_sbatch_results _RESUBMIT_LOCK _sbatch_command _submission_env_exports
+            _submission_exports _VALID_BENCHMARK_NAME
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.slurm.executor",
+            "0.8.0",
+            """
+            _validate_benchmark_names _validate_mounts
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.api",
+            "0.8.0",
+            """
+            SAVED_CONFIG SlurmComputeConfig SubmitConfig VllmPDServiceConfig
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.base",
+            "0.8.0",
+            """
+            BaseExecutor
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.connection",
+            "0.8.0",
+            """
+            Connection get_connection
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.git_ref",
+            "0.8.0",
+            """
+            validate_gym_install_ref
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.otel",
+            "0.8.0",
+            """
+            COLLECTOR_CONFIG_NAME collector_config_path COLLECTOR_DIR otel_active render_collector_config
+            resolve_token validate_destination validate_gym_telemetry
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.resume_script",
+            "0.8.0",
+            """
+            RESUBMIT_ENV
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.slurm_script",
+            "0.8.0",
+            """
+            build_sbatch_script
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.jobs",
+            "0.8.0",
+            """
+            BenchmarkJob installed_gym_commit new_gym_job_id RESOLVED_CONFIG_NAME SubmissionRecord utc_now
+            utc_timestamp
+            """,
+        ),
     },
     "nemo_gym.orchestration.recovery": {
         # Split by the question each part answers when the module moved to nemo_gym.eval.recovery.planner;

@@ -20,9 +20,10 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.orchestration.executors.slurm as slurm
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 from tests.unit_tests.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
@@ -63,7 +64,7 @@ def test_a_store_reader_whose_step_never_starts_reads_on_the_login_host_only_whe
     projection = "__GYM_MANAGED:" + collected.model_dump_json()
     _install(monkeypatch, f"touch {shlex.quote(str(ran))}; cat <&3 >/dev/null; echo {shlex.quote(projection)}")
 
-    result = slurm._remote_managed_evidence(LocalConnection(), collected, job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), collected, job, config())
     decision = decide_from_collected(result, max_infra_retries=3, max_walltime_s=None, live_job=False)
 
     if setting == "allow":
@@ -90,16 +91,18 @@ def test_a_collector_whose_step_never_starts_collects_on_the_login_host_only_whe
         monkeypatch.delenv("NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK", raising=False)
     else:
         monkeypatch.setenv("NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK", setting)
-    command = slurm.collector_command("echo '{\"collected\": true}'", tmp_path, slurm.reader_step(), "tok")
+    command = slurm_reader.collector_command(
+        "echo '{\"collected\": true}'", tmp_path, slurm_reader.reader_step(), "tok"
+    )
 
     output = LocalConnection().run(command)
 
     if setting == "allow":
-        assert slurm.reader_placement(output) == ("login", NOT_STARTED)
-        assert slurm.without_placement(output) == '{"collected": true}'
+        assert slurm_reader.reader_placement(output) == ("login", NOT_STARTED)
+        assert slurm_reader.without_placement(output) == '{"collected": true}'
     else:
-        assert slurm.reader_placement(output)[0] == "none"
-        assert slurm.without_placement(output) == ""
+        assert slurm_reader.reader_placement(output)[0] == "none"
+        assert slurm_reader.without_placement(output) == ""
 
 
 def test_a_collector_that_could_not_run_decides_nothing(tmp_path: Path, slurm_bin, monkeypatch) -> None:
@@ -110,7 +113,8 @@ def test_a_collector_that_could_not_run_decides_nothing(tmp_path: Path, slurm_bi
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN", "-p cpu")
     reason = f"{NOT_STARTED}; the login-host fallback is forbidden"
     report = f"__GYM_READER_HOST:none\n__GYM_READER_FALLBACK:{reason}\n"
-    monkeypatch.setattr(slurm, "collector_command", lambda *args: [f"printf %s {shlex.quote(report)}"])
+    monkeypatch.setattr(slurm_reader, "collector_command", lambda *args: [f"printf %s {shlex.quote(report)}"])
+    monkeypatch.setattr(slurm_chain, "collector_command", lambda *args: [f"printf %s {shlex.quote(report)}"])
 
     out = inspect_recovery(*_handle(job))
 

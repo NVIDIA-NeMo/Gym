@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 import nemo_gym.orchestration.executors.connection as connection
-import nemo_gym.orchestration.executors.slurm as slurm
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 
 
 PROGRESS = re.compile(r"^gym-reader progress: pass=(\d+) bytes=(\d+) elapsed_s=(\d+)$")
@@ -95,7 +95,7 @@ def test_the_watched_reader_reports_its_bytes_before_it_ends_and_stdout_is_uncha
         f'{sys.executable} -c \'import sys, time; f = open(sys.argv[1], "rb"); '
         f'[(f.read(4096), time.sleep(0.4)) for _ in range(10)]; print("__GYM_MANAGED:{{}}")\' {rollouts}'
     )
-    command = slurm._reader_command(
+    command = slurm_reader._reader_command(
         reader, tmp_path, "{}", bound_s=300, factor=1, token="progress-token", watchdog=True, progress_interval_s=1
     )
 
@@ -110,13 +110,13 @@ def test_the_watched_reader_reports_its_bytes_before_it_ends_and_stdout_is_uncha
     # Stdout carries the reader protocol exactly as before.
     assert "__GYM_MANAGED:{}" in output.splitlines() and "__GYM_READER_RC:0" in output
     assert not any(line.startswith("gym-reader progress") for line in output.splitlines())
-    assert slurm._reader_failure(output, 0.0) == (None, False)
+    assert slurm_reader._reader_failure(output, 0.0) == (None, False)
 
 
 @needs_reader_tools
 def test_the_progress_loop_ends_with_the_reader(tmp_path: Path, monkeypatch) -> None:
     # A quick reader with a long interval: the shell must not wait for the loop's sleep before it ends.
-    command = slurm._reader_command(
+    command = slurm_reader._reader_command(
         "true", tmp_path, "{}", bound_s=300, factor=1, token="quick-token", watchdog=True, progress_interval_s=60
     )
     started = time.monotonic()

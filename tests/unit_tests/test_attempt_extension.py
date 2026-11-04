@@ -21,7 +21,7 @@ import pytest
 
 from nemo_gym.eval.recovery.evidence import select_managed_evidence
 from nemo_gym.eval.recovery.planner import decide_from_collected
-from nemo_gym.orchestration.executors.slurm import RETRY_EXTENSION_JOURNAL_NAME
+from nemo_gym.orchestration.executors.slurm.chain import RETRY_EXTENSION_JOURNAL_NAME
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_eval_resubmit import _handle, _provider_failures, _resumable_run
@@ -186,7 +186,7 @@ def test_an_extension_needs_a_whole_number_in_range():
 
 
 def test_the_remote_reader_reports_the_applied_extension_and_an_older_reader_is_refused(tmp_path):
-    from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence
+    from nemo_gym.orchestration.executors.slurm.reader import _remote_managed_evidence
     from tests.unit_tests.test_remote_managed_recovery import ProjectionConnection, config
 
     prepare_managed(tmp_path, "exhausted")
@@ -291,10 +291,10 @@ def test_an_extension_whose_job_is_not_queued_restores_the_record_and_journals_n
 
 
 def test_the_journal_names_the_user_who_extended_the_attempts(tmp_path, slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm as slurm_module
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
     from nemo_gym.orchestration.submit import recover
 
-    monkeypatch.setattr(slurm_module.getpass, "getuser", lambda: "operator-a")
+    monkeypatch.setattr(slurm_chain.getpass, "getuser", lambda: "operator-a")
     job, _, _ = _resumable_run(tmp_path)
     prepare_managed(job, "exhausted", n=2)
 

@@ -261,10 +261,10 @@ def _accounting(slurm_bin):
 
 
 def test_recover_with_the_flag_journals_one_line_and_queues_the_job(tmp_path, slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm as slurm_module
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
     from nemo_gym.orchestration.submit import inspect_recovery, recover
 
-    monkeypatch.setattr(slurm_module.getpass, "getuser", lambda: "operator-a")
+    monkeypatch.setattr(slurm_chain.getpass, "getuser", lambda: "operator-a")
     job = _staged(tmp_path, [[_kept()]])
     _accounting(slurm_bin)
     assert inspect_recovery(*_handle(job)).decision.action.value == "stop"
