@@ -8,6 +8,8 @@ position: 2
 
 A JSONL dataset for reinforcement learning (RL) training runs through an **Environment Server**, which orders each episode: it drives an **Agent Server** (runs the agent harness) and seeds and verifies on a **Resources Server** (provides tools and computes rewards). On the `legacy_agent` path the Agent Server runs the whole episode itself.
 
+JSONL rows fit many tasks that share one verifier and toolset, such as math, instruction following or tool calling. See [Two kinds of task formats](/main/data#two-kinds-of-task-formats) to compare them with Harbor task folders.
+
 ## Prerequisites
 
 - **NeMo Gym installed**: See [Installation](/get-started/installation)
@@ -211,42 +213,6 @@ Fetch datasets from HuggingFace Hub.
 YAML-based prompt templates applied at rollout time.
 
 <Badge minimal outlined>prompts</Badge>
-</Card>
-
-<Card title="Author Task Folders" href="/main/data/task-folders/harbor-tasks">
-Write a task folder, validate it with the oracle and run an agent on it.
-
-<Badge minimal outlined>task-folders</Badge>
-</Card>
-
-<Card title="Task Folder Format" href="/main/data/task-folders/task-folder-format">
-Every `task.toml` and `dataset.toml` setting Gym reads.
-
-<Badge minimal outlined>task-folders</Badge>
-</Card>
-
-<Card title="Task Folder Verifiers" href="/main/data/task-folders/task-folder-verifiers">
-Reward files, Python verifiers and reference answers.
-
-<Badge minimal outlined>task-folders</Badge>
-</Card>
-
-<Card title="Multi-Step Task Folders" href="/main/data/task-folders/multi-step-tasks">
-Tasks with several instructions, each checked in turn.
-
-<Badge minimal outlined>task-folders</Badge>
-</Card>
-
-<Card title="Multi-Container Tasks" href="/main/data/task-folders/compose-tasks">
-Tasks whose environment is a Compose group with sidecars.
-
-<Badge minimal outlined>task-folders</Badge>
-</Card>
-
-<Card title="Task Folder Patterns" href="/main/data/task-folders/task-folder-patterns">
-Parameterized tasks, typed fields, task MCP tools and shared verifier code.
-
-<Badge minimal outlined>task-folders</Badge>
 </Card>
 
 </Cards>

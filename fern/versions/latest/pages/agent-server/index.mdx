@@ -3,7 +3,7 @@ title: "Configure Agents"
 description: ""
 position: 1
 ---
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself; it is orchestration code that delegates all text generation to the Model server.
+The Agent Server hosts the agent harness, which calls the model and routes tool calls. It does not run an LLM itself; it is orchestration code, and the harness uses a Model Server or calls an inference endpoint directly. Support for multiple tool calls per turn and for multi-turn conversations depends on the harness, its Gym integration, and the Environment Server. An Environment Server either orders the episode's calls or relays the whole episode to the agent, as in the pseudocode below.
 
 ## Rollout Lifecycle
 

@@ -14,11 +14,11 @@ position: 2.5
 
 ## How NeMo Gym Implements Environments
 
-NeMo Gym implements environments as composable FastAPI servers that communicate over async HTTP:
+NeMo Gym implements environments as composable FastAPI servers that communicate over async HTTP. The server composition depends on the integration:
 
 | Concept | NeMo Gym Component Implementation |
 |---------|---------------|
-| Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve |
+| Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve. Rows can be supplied directly or generated from Harbor-format task folders. |
 | Agent Harness | FastAPI Agent Server |
 | Verifier + State | FastAPI Resources Server, or a task folder's own verifier, run by the `harbor` Environment Server |
 | Model | FastAPI Model Server or managed by your own agent harness |
@@ -99,7 +99,7 @@ Manages environment-specific tools, per-task state isolation, and verification f
 Tools exist on a spectrum — some belong to the agent and can be used with any environment, some belong to the environment and can be used with any agent:
 
 - **Agent-specific tools** are part of the agent harness. They're capabilities the agent brings regardless of which environment it runs in (e.g., OpenHands brings file editing and terminal tools).
-- **Environment-specific tools** are part of the Resources Server. They're capabilities the environment provides to any agent that connects (e.g., a `run_tests` endpoint, a database query tool, a sandbox execution API).
+- **Environment-specific tools** can be provided by the Resources Server. They're capabilities the environment provides to any agent that connects (e.g., a `run_tests` endpoint, a database query tool, a sandbox execution API).
 
 An agent can use both simultaneously — its own tools and the environment's tools in the same task. NeMo Gym's server split reflects this: agent-specific logic in the harness, environment-specific logic in the Resources Server.
 

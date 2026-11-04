@@ -9,11 +9,18 @@ position: 3
 A task folder holds one task in the [Harbor](https://github.com/harbor-framework/harbor) format: `task.toml`, and
 usually `instruction.md`, `environment/`, `tests/` and `solution/`. The task carries its own environment and verifier,
 and the `harbor` Environment Server runs it, so no Resources Server takes part. See
-[Two kinds of tasks](/main/data#two-kinds-of-tasks) to decide whether task folders fit your tasks.
+[Two kinds of task formats](/main/data#two-kinds-of-task-formats) to decide whether task folders fit your tasks.
+
+## Start here
+
+[Author Task Folders](/main/data/task-folders/harbor-tasks) takes you from an empty folder to a working task: scaffold
+a dataset, write a task, validate it with the oracle and run an agent. If you already use Harbor, start at
+[Coming from Harbor](/main/data/task-folders/harbor-tasks#coming-from-harbor).
+
+## Guides and reference
 
 | Page | Read it when |
 | --- | --- |
-| [Author Task Folders](/main/data/task-folders/harbor-tasks) | You are starting out: scaffold a dataset, write a task, validate it with the oracle and run an agent. Harbor users start at [Coming from Harbor](/main/data/task-folders/harbor-tasks#coming-from-harbor). |
 | [Task Folder Format](/main/data/task-folders/task-folder-format) | You need a file or a setting: the folder layout, `task.toml`, `dataset.toml` and Dockerfile modes. |
 | [Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers) | You are writing `tests/`: reward files, Python verifiers, and shared or separate verification. |
 | [Multi-Step Task Folders](/main/data/task-folders/multi-step-tasks) | A task runs several steps in one sandbox. |

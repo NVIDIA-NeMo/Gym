@@ -57,11 +57,11 @@ Every Environment Server built on `BaseEnvironmentServer` takes the same limits 
 
 ## Choose an Environment Server
 
-Start from how your tasks are defined (see [Two kinds of tasks](/main/data#two-kinds-of-tasks)). Tasks written as
-JSONL rows with a Resources Server run on `single_agent_turn` when the agent and Resources Server implement sessions
-and the dataset declares a `taskset`. When such a pairing is still collected from flat rows, as most shipped
-`simple_agent` configurations are, it runs on `single_agent_turn_legacy`. Other pairings run on `legacy_agent`.
-Tasks written as task folders run on `harbor`.
+Start from how your tasks are defined (see [Two kinds of task formats](/main/data#two-kinds-of-task-formats)). For a single agent,
+tasks written as JSONL rows with a Resources Server run on `single_agent_turn` when the agent and Resources Server
+implement sessions and the dataset declares a `taskset`. When such a pairing is still collected from flat rows, as
+most shipped `simple_agent` configurations are, it runs on `single_agent_turn_legacy`. Other pairings run on
+`legacy_agent`. Tasks written as task folders run on `harbor`.
 
 | Environment Server | What it does | Use it when |
 | --- | --- | --- |

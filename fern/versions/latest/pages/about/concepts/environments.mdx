@@ -67,7 +67,7 @@ NeMo Gym accepts tasks in two shapes. Both produce rollouts with rewards; they d
 | Verifier and state | A Resources Server: Python `verify()`, environment tools and per-task sessions | The task's `tests/` (or the dataset's shared `verifier.py`), run in the task's sandbox, or in a fresh one for separate verification |
 | Runs on | An Environment Server that pairs an agent with the Resources Server | The `harbor` Environment Server, with a harness that runs agent sessions in the sandbox the server hands it, such as `opencode_agent` |
 
-Use JSONL rows when tasks share one environment or need no sandbox, as in math or tool-calling benchmarks. Use task folders when each task brings its own software environment and its verifier checks what the agent left in it, as in Terminal-Bench. To build the Resources Server path, see [Build Environments](/main/environment-tutorials). To write task folders, see [Author Task Folders](/main/data/task-folders/harbor-tasks). [Prepare Tasks](/main/data#two-kinds-of-tasks) compares the two in more detail.
+Use JSONL rows when tasks share one environment or need no sandbox, as in math or tool-calling benchmarks. Use task folders when each task brings its own software environment and its verifier checks what the agent left in it, as in Terminal-Bench. To build the Resources Server path, see [Build Environments](/main/environment-tutorials). To write task folders, see [Author Task Folders](/main/data/task-folders/harbor-tasks). [Prepare Tasks](/main/data#two-kinds-of-task-formats) compares the two in more detail.
 
 
 ## Environments Unify Agent Improvement
