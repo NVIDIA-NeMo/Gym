@@ -55,20 +55,22 @@ Every Environment Server built on `BaseEnvironmentServer` takes the same limits 
 
 ## Choose an Environment Server
 
-Start from how your tasks are defined (see [Two kinds of task formats](/main/data#two-kinds-of-task-formats)). For a single agent,
-tasks written as JSONL rows with a Resources Server run on `single_agent_turn` when the agent and Resources Server
-implement sessions and the dataset declares a `taskset`. When such a pairing is still collected from flat rows, as
-most shipped `simple_agent` configurations are, it runs on `single_agent_turn_legacy`. Other pairings run on
-`legacy_agent`. Tasks written as task folders run on `harbor`.
+Start from how your tasks are defined (see [Two kinds of task formats](/main/data#two-kinds-of-task-formats)), then
+pick the interaction you want.
 
 | Environment Server | What it does | Use it when |
 | --- | --- | --- |
-| `legacy_agent` | Relays `/run` to the agent unchanged. The agent runs the whole episode, including the Resources Server's `seed_session` and `verify` calls. Gym generates one, with a deprecation warning, for any agent that no Environment Server names. With `error_on_agent_without_environment_server: true`, Gym raises a config error instead. | The agent or its Resources Server does not implement sessions. |
-| `single_agent_turn` | Seeds a Resources Server session and an agent session, grants the agent the Resources Server's tools over `resources_tool_transports` (none by default) and any sandbox it returned, activates the agent once, closes the agent session, verifies, then closes the Resources Server session. | One agent turn produces the response that the Resources Server verifies. |
-| `single_agent_turn_legacy` | Runs the `single_agent_turn` episode behind the flat `/run` contract: it accepts a flat row and returns a flat result row. | The agent and Resources Server implement sessions, but the dataset is still collected from flat rows. |
-| `nemo_user_sim` | Runs a multi-turn conversation between a simulated user and the assistant, each through its own Agent Server, with judge, summary and tool-simulation calls through Model Servers and embedding calls to an embeddings endpoint. The `nemo_user_sim` Resources Server checks the row first and scores the episode. | You evaluate an assistant against NeMo User Sim scenarios. |
-| `swe_together` | Runs the SWE-Together benchmark: an OpenCode candidate, a user-simulator model, and a separate agentic judge in a fresh grading sandbox. It owns the task and grading sandboxes. | You run SWE-Together. The server is specific to that benchmark. |
-| `harbor` | Runs a task folder: starts the task's sandbox, runs an agent session in it, then runs the task's own verifier in that sandbox or, in separate mode, a fresh one. No Resources Server takes part. | Your tasks are task folders in the Harbor format. See [Harbor Environment Server](/main/agent-interactions/harbor). |
+| `single_agent_turn` | Gives your agent one turn at a task, then has your Resources Server score the result. | Your tasks are JSONL rows with a Resources Server, and your agent supports agent sessions (see [Integrate Existing Agents](/main/agent-server/integrate-existing-agents)). |
+| `nemo_user_sim` | Runs a multi-turn conversation between your assistant and a simulated user, then scores the conversation. | You want to test an assistant across a conversation, using NeMo User Sim scenarios. It uses its own Resources Server for scoring. See [Run Multi-Turn User Simulation with NeMo User Sim](/main/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection). |
+| `harbor` | Starts each task folder's own container, lets your agent work in it, then runs the task's tests to score the attempt. | Your tasks are task folders. See [Harbor Environment Server](/main/agent-interactions/harbor). |
+
+You may also see two other Environment Servers in shipped configurations. You don't need to choose either for new
+work. `legacy_agent` runs agents that don't support agent sessions: the agent runs the whole episode itself. Gym adds
+one, with a deprecation warning, for any agent that no Environment Server names. `single_agent_turn_legacy` runs a
+`single_agent_turn` episode for datasets still collected as flat rows.
+
+Some benchmarks ship their own Environment Server under `environment_servers/<name>/`, such as `swe_together`. The
+benchmark's configuration sets it and its README documents it.
 
 An Environment Server is a configuration block like any other server. The top-level key names the instance, and
 the key under `environment_servers` names the implementation folder, `environment_servers/<name>/`. This block
@@ -92,8 +94,6 @@ my_benchmark_environment:
 `single_agent_turn` grants no Resources Server tools unless you list `direct_http`, `mcp`, or both in
 `resources_tool_transports`. Each server's other settings are fields of its config class in
 `environment_servers/<name>/app.py`.
-For a simulated user, follow
-[Run Multi-Turn User Simulation with NeMo User Sim](/main/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection).
 
 ## Write your own Environment Server
 
