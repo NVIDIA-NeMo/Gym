@@ -27,7 +27,10 @@ if TYPE_CHECKING:
         AgentOutcome,
         AgentOutcomePolicyConfig,
         OutcomeAction,
+        OutcomePolicyConfig,
         agent_outcome_policy,
+        confirmed_policy_response_timeout,
+        failure_outcome_policy,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -54,7 +57,10 @@ if TYPE_CHECKING:
         assert_model_url_reachable_from_sandbox,
     )
     from nemo_gym.agents.skills import stage_skills
-    from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime
+    from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
+    from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+    from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -73,8 +79,9 @@ if TYPE_CHECKING:
         SUPERVISOR_FILE,
         SUPERVISOR_SCRIPT,
         CleanupReceipt,
-        HarnessTerminationError,
         exec_timeout,
+        harness_termination_failure,
+        is_harness_termination_failure,
         parse_cleanup_receipt,
     )
     from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
@@ -108,9 +115,9 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_FAILED": "utils.sandbox_session",
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
-    "HarnessTerminationError": "utils.supervisor_client",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OutcomeAction": "agent_outcome",
+    "OutcomePolicyConfig": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RUNNER_FILE": "utils.sandbox_session",
     "RolloutStopRequest": "base_responses_api_agent",
@@ -118,14 +125,20 @@ _PUBLIC_API = {
     "SUPERVISOR_FILE": "utils.supervisor_client",
     "SUPERVISOR_SCRIPT": "utils.supervisor_client",
     "SandboxCommand": "utils.sandbox_session",
-    "SandboxPlatform": "utils.sandbox_python",
     "SandboxPythonRuntime": "utils.sandbox_python",
     "SandboxSession": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
+    "check_agent_seed_rejected": "testing.agent_session_conformance",
+    "confirmed_policy_response_timeout": "agent_outcome",
     "exec_timeout": "utils.supervisor_client",
+    "failure_outcome_policy": "agent_outcome",
+    "harness_termination_failure": "utils.supervisor_client",
+    "is_harness_termination_failure": "utils.supervisor_client",
+    "lifecycle_observation": "utils.sandbox_observation",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_timeout": "utils.task_timeout",
     "restricted_network_policy": "agent_tools",
     "sandbox_server_url": "agent_tools",

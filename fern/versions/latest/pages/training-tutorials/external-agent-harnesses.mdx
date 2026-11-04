@@ -307,7 +307,7 @@ token_id_capture:
   rebuild_response: false
 ```
 
-The sink receives completed call records from each model-server worker. The lineage resolver lets any worker find a previously committed call from the same rollout. The framework creates a source in its rollout-consumer or trainer process to freeze and read the same records. The source implements the `TokenSource` protocol from `nemo_gym.models.token_capture.protocols`.
+The sink receives completed call records from each model-server worker. The lineage resolver lets any worker find a previously committed call from the same rollout. The framework creates a source in its rollout-consumer or trainer process to freeze and read the same records. The source implements the `TokenSource` protocol from `nemo_gym.models.token_capture`.
 
 <Warning>
 Configure sink and lineage classes by import path so Gym constructs them inside every model-server worker. Installing an object only in the launcher process does not configure separately spawned workers.
@@ -327,11 +327,11 @@ The following function performs these steps for one result. The framework suppli
 from collections.abc import Awaitable, Callable
 
 from nemo_gym.core import maybe_rollout_id_from_run_body
-from nemo_gym.models.token_capture.delivery import (
+from nemo_gym.models.token_capture import (
+    TokenSource,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
-from nemo_gym.models import TokenSource
 
 
 async def deliver_rollout(
@@ -363,14 +363,14 @@ Exclude any result with `mask_sample: true` from the loss. Call `retire_rollout_
 
 ### Check a custom transport
 
-Run `run_conformance` from `nemo_gym.models.token_capture.conformance` before using a custom transport for training. It takes factories rather than instances, because several checks need a fresh client. Each factory call must return a new client connected to the backend. The function is async, returns the names of the checks that passed, and raises `ConformanceError` on the first failure:
+Run `run_conformance` from `nemo_gym.models.token_capture` before using a custom transport for training. It takes factories rather than instances, because several checks need a fresh client. Each factory call must return a new client connected to the backend. The function is async, returns the names of the checks that passed, and raises `ConformanceError` on the first failure:
 
 ```python
 import asyncio
 import os
 
 from my_package.capture import CaptureLineageStore, CaptureSink, CaptureSource
-from nemo_gym.models import run_conformance
+from nemo_gym.models.token_capture import run_conformance
 
 
 async def main() -> None:

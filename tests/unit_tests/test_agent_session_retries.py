@@ -19,7 +19,7 @@ from nemo_gym.agents.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode import current_rollout_id, rollout_context
+from nemo_gym.core.episode_context import current_rollout_id, rollout_context
 from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 

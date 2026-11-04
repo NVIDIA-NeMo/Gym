@@ -162,10 +162,19 @@ def test_the_runtime_directory_is_keyed_by_its_inputs(monkeypatch) -> None:
 
     assert runtime.directory.startswith("/tmp/nemo-gym-hermes-runtime-")
     assert runtime.python == f"{runtime.directory}/python/bin/python3"
-    assert runtime.directory == SandboxPythonRuntime("hermes", ("hermes-agent==1",), "import x").directory
-    assert runtime.directory != SandboxPythonRuntime("hermes", ("hermes-agent==2",), "import x").directory
+    assert (
+        runtime.directory
+        == SandboxPythonRuntime(harness="hermes", requirements=("hermes-agent==1",), import_check="import x").directory
+    )
+    assert (
+        runtime.directory
+        != SandboxPythonRuntime(harness="hermes", requirements=("hermes-agent==2",), import_check="import x").directory
+    )
     monkeypatch.setattr(sandbox_python, "_agent_environment_pins", lambda: ("openai==9.9.9",))
-    assert runtime.directory != SandboxPythonRuntime("hermes", ("hermes-agent==1",), "import x").directory
+    assert (
+        runtime.directory
+        != SandboxPythonRuntime(harness="hermes", requirements=("hermes-agent==1",), import_check="import x").directory
+    )
 
 
 @pytest.fixture
@@ -247,7 +256,12 @@ async def test_the_adapter_overrides_reach_the_host_install(host) -> None:
     await runtime._site_packages_archive(SandboxPlatform("x86_64", "gnu", 35))
 
     assert host.installs[0].overrides == "pillow==12.3.0\n"
-    assert runtime.directory != SandboxPythonRuntime("stirrup", ("stirrup==0.1.12",), "import x").directory
+    assert (
+        runtime.directory
+        != SandboxPythonRuntime(
+            harness="stirrup", requirements=("stirrup==0.1.12",), import_check="import x"
+        ).directory
+    )
 
 
 async def test_the_host_build_requires_uv(host, monkeypatch) -> None:
@@ -285,7 +299,9 @@ async def test_the_host_cache_is_rebuilt_when_the_runtime_inputs_change(host, mo
     platform = SandboxPlatform("x86_64", "gnu", 35)
 
     def runtime(requirement: str = "stirrup==0.1.12", overrides: tuple[str, ...] = ()) -> SandboxPythonRuntime:
-        return SandboxPythonRuntime("stirrup", (requirement,), "import x", overrides)
+        return SandboxPythonRuntime(
+            harness="stirrup", requirements=(requirement,), import_check="import x", overrides=overrides
+        )
 
     first = await runtime()._site_packages_archive(platform)
     assert await runtime()._site_packages_archive(platform) == first
@@ -403,6 +419,18 @@ async def test_the_python_build_comes_through_the_hosts_proxy_and_mirror(python_
         "cpython-3.13.14%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
     ]
     assert python_build.requests[0]["proxy"] == "http://proxy.internal:3128"
+
+
+async def test_the_python_build_bypasses_the_proxy_for_no_proxy_hosts(python_build, monkeypatch) -> None:
+    for name in ("no_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+    monkeypatch.setenv("NO_PROXY", "mirror.internal")
+    monkeypatch.setenv("UV_PYTHON_INSTALL_MIRROR", "https://mirror.internal/python-build-standalone/")
+
+    await sandbox_python._python_archive(SandboxPlatform("x86_64", "gnu", 35))
+
+    assert python_build.requests[0]["proxy"] is None
 
 
 def _add(tar: tarfile.TarFile, name: str, text: str = "", mode: int = 0o644) -> None:
@@ -611,6 +639,31 @@ async def test_a_runtime_another_seed_accepted_is_never_set_aside(task) -> None:
 
 
 @pytest.mark.sandbox
+async def test_a_failed_setup_mkdir_is_cleaned_up_before_retry(task, monkeypatch) -> None:
+    runtime = _runtime(task)
+    execute = task.sandbox.exec
+    upload = AsyncMock(wraps=task.sandbox.upload)
+
+    async def failed(command: str, **kwargs) -> SandboxExecResult:
+        # mkdir may have created part of the path before reporting failure.
+        result = await execute(command, **kwargs)
+        if shlex.split(command)[0] == "mkdir":
+            return SandboxExecResult(stdout="", stderr="setup mkdir failed", return_code=1)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(task.sandbox, "exec", failed)
+        patch.setattr(task.sandbox, "upload", upload)
+        with pytest.raises(RuntimeError, match="setup mkdir failed"):
+            await runtime.install(task.sandbox, timeout_s=60)
+
+    upload.assert_not_awaited()
+    assert os.listdir(runtime.directory) == []
+    await runtime.install(task.sandbox, timeout_s=60)
+    assert await runtime.is_installed(task.sandbox)
+
+
+@pytest.mark.sandbox
 async def test_a_failed_upload_leaves_no_setup_directory_and_the_next_seed_installs(task, monkeypatch) -> None:
     runtime = _runtime(task)
     upload = task.sandbox.upload
@@ -695,7 +748,42 @@ async def test_an_interrupted_local_installer_removes_its_setup_and_preserves_th
 
 
 @pytest.mark.sandbox
-async def test_a_remote_installer_keeps_its_setup_when_the_caller_times_out(task, monkeypatch) -> None:
+@pytest.mark.parametrize("return_code", [127, 2])
+async def test_a_failed_remote_installer_removes_setup_and_preserves_the_runtime(
+    task, monkeypatch, return_code
+) -> None:
+    runtime = _runtime(task)
+    await runtime.install(task.sandbox, timeout_s=60)
+    accepted = Path(runtime.directory) / "python/ACCEPTED"
+    accepted.touch()
+    workdir, home = _tree(task.workdir), _tree(task.home)
+    monkeypatch.setattr(task.sandbox._provider, "name", "docker")
+    execute = task.sandbox.exec
+
+    async def failed(command: str, **kwargs) -> SandboxExecResult:
+        if shlex.split(command)[0] == "bash":
+            (setup,) = Path(runtime.directory).glob(".setup-*")
+            assert sorted(os.listdir(setup)) == ["install_python_runtime.sh", "python.tar.gz", "site-packages.tar.gz"]
+            return SandboxExecResult(stdout="", stderr="installer did not start", return_code=return_code)
+        return await execute(command, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(task.sandbox, "exec", failed)
+        with pytest.raises(RuntimeError, match=f"failed with {return_code}: installer did not start"):
+            await runtime.install(task.sandbox, timeout_s=60)
+
+    assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
+    assert accepted.exists()
+    assert (_tree(task.workdir), _tree(task.home)) == (workdir, home)
+    await runtime.install(task.sandbox, timeout_s=60)
+    assert await runtime.is_installed(task.sandbox)
+    assert accepted.exists()
+    assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("error_type", [None, "timeout", "sandbox"])
+async def test_a_remote_installer_keeps_its_setup_when_exec_outcome_is_unknown(task, monkeypatch, error_type) -> None:
     # Model Docker's contract: cancelling the waiter does not terminate the command in the sandbox.
     monkeypatch.setattr(task.sandbox._provider, "name", "docker")
     execute = task.sandbox.exec
@@ -705,6 +793,11 @@ async def test_a_remote_installer_keeps_its_setup_when_the_caller_times_out(task
         nonlocal remote
         if shlex.split(command)[0] == "bash":
             remote = asyncio.create_task(execute(command, **{**kwargs, "timeout_s": 60}))
+            if error_type is not None:
+                await _until(checking.exists)
+                return SandboxExecResult(
+                    stdout="", stderr="exec outcome unknown", return_code=125, error_type=error_type
+                )
             return await asyncio.shield(remote)
         return await execute(command, **kwargs)
 
@@ -720,8 +813,12 @@ async def test_a_remote_installer_keeps_its_setup_when_the_caller_times_out(task
     install = asyncio.create_task(runtime.install(task.sandbox, timeout_s=60))
     try:
         await _until(checking.exists)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(install, timeout=0.1)
+        if error_type is None:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(install, timeout=0.1)
+        else:
+            with pytest.raises(RuntimeError, match=f"failed with {error_type}"):
+                await install
         assert checking.exists()
         assert remote is not None and not remote.done()
         (setup,) = Path(runtime.directory).glob(".setup-*")

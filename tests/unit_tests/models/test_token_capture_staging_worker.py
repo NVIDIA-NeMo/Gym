@@ -23,14 +23,6 @@ from nemo_gym.models.token_capture.sink import (
     reset_token_sink,
     set_token_sink,
 )
-from nemo_gym.models.token_capture.staging import (
-    CaptureAdmission,
-    GenerationCutContinuation,
-    StagedCallRecord,
-    StageResult,
-    compute_chain_hash,
-    hash_token_ids,
-)
 from nemo_gym.models.token_capture.staging import records as staging_records
 from nemo_gym.models.token_capture.staging.capture import (
     CaptureError,
@@ -38,6 +30,13 @@ from nemo_gym.models.token_capture.staging.capture import (
     RolloutTokenCapture,
     StreamingUnsupportedError,
     install_capture,
+)
+from nemo_gym.models.token_capture.staging.digest import compute_chain_hash, hash_token_ids
+from nemo_gym.models.token_capture.staging.records import (
+    CaptureAdmission,
+    GenerationCutContinuation,
+    StagedCallRecord,
+    StageResult,
 )
 
 

@@ -58,7 +58,8 @@ _PYTHON_SHA256 = {
     "x86_64/musl": "c6b77767b2c97ce77c21496909396b6e056b96220b2cda45f2c93b654376dd93",  # pragma: allowlist secret
     "aarch64/musl": "960738ebde53abeceb5452b71c2217d50452023e3baf2439dc57290d07930637",  # pragma: allowlist secret
 }
-# uv's UV_PYTHON_INSTALL_MIRROR replaces this base, as it does for uv's own Python downloads; the pins still apply.
+# UV_PYTHON_INSTALL_MIRROR replaces this base for HTTP(S) mirrors; file:// mirrors are not supported here.
+# Offline hosts can prepopulate cache_dir/sandbox_python with the pinned archive; checksums still apply.
 _PYTHON_DOWNLOADS = "https://github.com/astral-sh/python-build-standalone/releases/download"
 _PYTHON_FILE = "cpython-{version}%2B{release}-{arch}-unknown-linux-{libc}-install_only_stripped.tar.gz"
 _SITE_PACKAGES = f"python/lib/python{PYTHON_VERSION.rsplit('.', 1)[0]}/site-packages"
@@ -252,7 +253,7 @@ def _write_archive(source: Path, archive: Path) -> None:
         tar.add(source, arcname="python")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class SandboxPythonRuntime:
     """A harness's private Python in the sandbox: the pinned CPython with ``requirements`` installed.
 
@@ -329,13 +330,18 @@ class SandboxPythonRuntime:
                     await _discard(sandbox, setup)
                     raise
                 command = shlex.join(["bash", f"{setup}/{_INSTALLER.name}", self.directory, setup, self.import_check])
+                result = None
                 try:
                     result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
                 finally:
                     # LocalProvider kills the process group on timeout/cancellation, so the installer's EXIT
                     # trap cannot run. Once exec unwinds, no installer remains to use this setup directory.
-                    # Other providers may leave a remote exec running; its EXIT trap still owns the directory.
-                    if sandbox.provider_name == "local":
+                    # A returned command failure is also safe to clean up on any provider, even if the installer
+                    # exited before setting its trap (for example, missing bash). Remote timeouts and provider
+                    # errors can leave exec running, so those retain the installer's ownership of the directory.
+                    if sandbox.provider_name == "local" or (
+                        result is not None and result.error_type is None and result.return_code != 0
+                    ):
                         await _discard(sandbox, setup)
         except TimeoutError as error:
             raise TimeoutError(

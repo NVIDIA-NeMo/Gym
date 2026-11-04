@@ -16,3 +16,8 @@ inherited its marker; processes that had left the harness before the stop, and d
 processes after a natural exit, remain for the sandbox owner to stop. Core sandbox APIs
 and providers live in :mod:`nemo_gym.sandbox`.
 """
+
+from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+
+
+__all__ = ["lifecycle_observation"]

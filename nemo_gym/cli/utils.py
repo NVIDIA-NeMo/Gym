@@ -147,7 +147,7 @@ def exit_cleanly_on_config_error(fn):
         from rich.markup import escape
 
         from nemo_gym.config.config_types import ConfigError
-        from nemo_gym.rollout_recovery import IncompleteEvaluationError
+        from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
         try:
             return fn(*args, **kwargs)

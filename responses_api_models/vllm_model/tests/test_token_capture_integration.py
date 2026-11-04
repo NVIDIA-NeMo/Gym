@@ -10,30 +10,27 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
-from nemo_gym.models import (
+from nemo_gym.models import AnthropicConverter, VLLMWorkerCaptureHandler
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.models.token_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
     UNCOMMITTED_CALL_REASON,
-    AnthropicConverter,
-    CaptureAdmission,
     CaptureContext,
     FileLineageStore,
     InMemoryLineageStore,
     LineageResolver,
     ParentResolutionStatus,
-    RolloutTokenCapture,
-    StageResult,
     TokenCaptureSnapshot,
     TokenCaptureStore,
     TokenEntry,
     TokenSink,
     TokenSource,
-    VLLMWorkerCaptureHandler,
     reset_token_sink,
     set_token_sink,
     trajectories_from_source,
 )
-from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.models.token_capture.staging import CaptureAdmission, RolloutTokenCapture, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
