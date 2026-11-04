@@ -20,9 +20,8 @@ from pydantic import ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.server_runtime import ResourcesSeedSessionRequest
-from nemo_gym.server_utils import refuse_unsupported_num_workers
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.hle_web_tools import app as module
 from resources_servers.hle_web_tools.app import (
     UPSTREAM_BLOCKLIST_SHA256,
