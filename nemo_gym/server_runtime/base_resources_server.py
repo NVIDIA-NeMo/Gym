@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import (
@@ -292,6 +293,17 @@ class ResourcesSeedSessionResponse(BaseModel):
         return result
 
 
+def reject_typed_resources_seed(value: object) -> object:
+    """Keep a malformed typed seed from falling through to a permissive legacy request model.
+
+    Use as a Pydantic ``BeforeValidator`` on the legacy arm of a seed request union. A body containing any
+    typed-session field must validate as ``ResourcesSeedSessionRequest`` instead of creating a cookie session.
+    """
+    if isinstance(value, dict) and ResourcesSeedSessionRequest.model_fields.keys() & value.keys():
+        raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
+    return value
+
+
 VerificationInputT = TypeVar("VerificationInputT")
 
 
@@ -486,6 +498,61 @@ class ResourcesSessionFence:
         """Refuse a seed for a closed session with 409, which the Environment Server does not retry."""
         if self.closed_episode(resources_session_id) is not None:
             raise ResourcesSessionConflictError(f"Resources session is already closed: {resources_session_id}")
+
+    def legacy_seed_session_id(
+        self,
+        session_id: str,
+        *,
+        identity: tuple[EpisodeId, TaskId] | None,
+        verified: bool,
+    ) -> str:
+        """Check a legacy seed and rotate a completed cookie without invalidating its verification retries.
+
+        Call while holding ``locked(session_id)``. Pass the active or retained verification identity, if any.
+        Bind the returned ID to the request cookie only after creating the new state successfully.
+        """
+        self.raise_if_closed(session_id)
+        if identity is not None:
+            raise ResourcesSessionConflictError("A legacy seed cannot replace a typed session")
+        return str(uuid4()) if verified else session_id
+
+    def check_typed_seed(
+        self,
+        body: ResourcesSeedSessionRequest,
+        *,
+        identity: tuple[EpisodeId, TaskId] | None,
+        has_state: bool,
+        verified: bool,
+    ) -> bool:
+        """Validate a typed seed; return whether the caller must initialize state.
+
+        Call under ``locked(body.resources_session_id)`` with the active identity and live-state presence.
+        An open session with the same episode and task is reused; verified and closed sessions cannot reopen.
+        The caller validates task data, constructs state, and records the identity only after success.
+        """
+        self.raise_if_closed(body.resources_session_id)
+        if verified:
+            raise ResourcesSessionConflictError("resources session has already been verified")
+        if identity is None:
+            if has_state:
+                raise ResourcesSessionConflictError("A typed seed cannot replace a legacy session")
+            return True
+        if identity != (body.episode_id, body.task_id):
+            raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+        return False
+
+    def check_close(self, body: ResourcesCloseSessionRequest, *, identity: tuple[EpisodeId, TaskId] | None) -> None:
+        """Check close ownership against the active, verified, or already-closed session.
+
+        Call under ``locked(body.resources_session_id)`` with the active or retained verification identity.
+        Unknown sessions and retries by the same episode are allowed. This does not record a close: release
+        the environment's resources first, then call ``mark_closed`` so a failed cleanup remains retryable.
+        """
+        closed_episode = self.closed_episode(body.resources_session_id)
+        if closed_episode is not None and closed_episode != body.episode_id:
+            raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+        if identity is not None and identity[0] != body.episode_id:
+            raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
 
     def mark_closed(self, resources_session_id: str, episode_id: EpisodeId) -> None:
         """Record ``resources_session_id`` as closed; call it only after its state was released.
