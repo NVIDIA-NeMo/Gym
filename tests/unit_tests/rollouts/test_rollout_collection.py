@@ -5786,7 +5786,6 @@ class TestRolloutCollection:
             ignored_checks=[],
             limits=RunHealthLimits(),
             run_coverage=[nemo_gym.rollouts.rollout_collection.RolloutStore.read(output_fpath).coverage()],
-            selected_projection=None,
             model_call_capture_dirs=[],
         )
         format_health_report.assert_called_once_with(health_result)
