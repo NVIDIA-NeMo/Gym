@@ -377,7 +377,10 @@ def _index_jsonl(
         store = histories[path] if histories is not None else RolloutStore.read(path, import_legacy=False)
         if store is not None:
             for record in store.selected_records("success").values():
-                assert record.file_identity is not None  # Captured by the store's index scan.
+                if record.file_identity is None:
+                    raise ValueError(
+                        f"Selected rollout record has no file identity: {record.path}:{record.line_number}"
+                    )
                 slices.append(
                     _LineSlice(
                         path=str(record.path),
@@ -1043,6 +1046,7 @@ def run_health_checks(
     Workers read selected byte ranges from the original histories, which own selection and identity.
     Aggregation supplies its scoring snapshots so health cannot select a later attempt while retaining older
     coverage counts. Standalone calls load the current histories; explicit None entries denote loose inputs.
+    History-map keys accept the same relative paths and aliases as rollout_paths.
     Loose JSONL and explicit failure sidecars retain their line-by-line behavior.
     """
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
@@ -1053,11 +1057,19 @@ def run_health_checks(
     source_digests = _health_artifact_digests(paths)
     # Freeze each run once so worker selection, budgets and timeout failures refer
     # to the same reservations even if a collector appends while the report runs.
-    histories = (
-        {path: RolloutStore.read(path, import_legacy=False) for path in paths}
-        if source_histories is None
-        else {path: source_histories[path] for path in paths}
-    )
+    if source_histories is None:
+        histories = {path: RolloutStore.read(path, import_legacy=False) for path in paths}
+    else:
+        histories = {}
+        for source_path, history in source_histories.items():
+            resolved = resolve_rollout_path(source_path, read_only=True)
+            if resolved in histories and histories[resolved] is not history:
+                raise ValueError(f"Conflicting source histories supplied for rollout JSONL: {resolved}")
+            histories[resolved] = history
+        for path in paths:
+            if path not in histories:
+                raise ValueError(f"No source history supplied for rollout JSONL: {path}")
+        histories = {path: histories[path] for path in paths}
     if run_coverage is None:
         run_coverage = [histories[path].coverage() if histories[path] is not None else None for path in paths]
     lines = _index_jsonl(paths, histories=histories)
