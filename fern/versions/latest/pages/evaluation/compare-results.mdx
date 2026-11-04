@@ -292,9 +292,15 @@ gym eval compare-suite \
 
 Gym checks each rollout JSONL referenced by the suite, together with its own failure and materialized-input siblings. The check covers **all agents in each file**, even when the comparison selects one agent. It scans the saved records afresh rather than reading an existing `quality_summary.json`. `--health-check-workers` must be a positive integer; by default Gym uses up to eight available CPUs.
 
+Gym validates the full comparison and checks that the configured health output directory is writable before starting any health scans.
+
+Suite health checks set both final and retryable failure thresholds to **zero**: any recorded failure that has no later saved result makes the run unhealthy and appears in the warning. Zero failures pass. Evaluating these thresholds requires the rollout file's materialized-input sibling to establish the expected rollout count; without that inventory, failure-fraction checks are unobserved, but known failures still appear in warnings. These suite-specific thresholds replace any saved failure limits.
+
 During checking, the terminal shows each file when its scan starts, phase changes, record-progress updates approximately every 30 seconds, and final health counts and elapsed time. These progress messages are enabled by default; no `--verbose` flag is needed.
 
 The report's **Warnings** section and terminal output show one summary line per affected source. A source with detected findings is **unhealthy**; missing evidence is **unobserved**, which does not establish that the trajectories are unhealthy. If a source cannot be checked, for example because its rollout file is missing or unreadable, the warning reports health as unavailable. The comparison JSON retains health counts and issue summaries.
+
+`healthy`, `unhealthy`, and `unobserved` count saved records; `failed` counts rollouts without a saved result (`null` when unavailable). Therefore, `failed.total > 0` can coexist with `unhealthy = 0`.
 
 Health findings are advisory: they do not change comparison scores, weights, or confidence intervals. Without `--check-health`, comparison continues to read aggregate metrics without opening the rollout JSONL. The separate `gym eval compare` command is unchanged.
 

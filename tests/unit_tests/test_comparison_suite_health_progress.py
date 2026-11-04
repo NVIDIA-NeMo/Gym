@@ -42,12 +42,40 @@ def test_file_health_logs_start_and_completed_counts(tmp_path: Path, caplog: pyt
 
     assert summary.record_count == 2
     assert summary.unobserved == 2
+    assert summary.failed is None
     records = [record for record in caplog.records if record.name == health.__name__]
     messages = [record.getMessage() for record in records]
     assert messages[0] == f"Checking rollout file health: {path}"
     assert any(f"Rollout file health progress: {path}: checking records (0/2 records;" in note for note in messages)
     assert messages[-1].startswith(f"Completed rollout file health: {path} (")
-    assert "seconds elapsed): 0 healthy, 0 unhealthy, 2 unobserved of 2 records" in messages[-1]
+    assert "seconds elapsed): 0 healthy, 0 unhealthy, 2 unobserved of 2 saved records" in messages[-1]
+    assert messages[-1].endswith("failed (no saved result): unknown")
+
+
+@pytest.mark.parametrize("failure_count", [0, 2])
+def test_completion_log_separates_saved_record_health_from_failed_rollouts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, failure_count: int
+) -> None:
+    path = tmp_path / "rollouts.jsonl"
+    _write_rollouts(path, 2)
+    failures_path_for(path).write_bytes(
+        b"".join(
+            orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": repeat + 2}) + b"\n"
+            for repeat in range(failure_count)
+        )
+    )
+
+    with caplog.at_level(logging.INFO, logger=health.__name__):
+        summary = health.check_rollout_file_health(path, workers=1)
+
+    assert summary.failed.total == failure_count
+    completion = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == health.__name__ and record.getMessage().startswith("Completed rollout file health:")
+    )
+    assert "0 healthy, 0 unhealthy, 2 unobserved of 2 saved records" in completion
+    assert completion.endswith(f"failed (no saved result): {failure_count}")
 
 
 def test_file_health_logs_unavailable_source(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

@@ -124,6 +124,15 @@ class SuiteCoverage(_SuiteModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class SuiteFailureCounts(_SuiteModel):
+    """Unresolved failed rollouts with no saved result, grouped by retry eligibility and failure class."""
+
+    total: int = Field(ge=0)
+    final: int = Field(ge=0)
+    not_final: int = Field(ge=0)
+    by_class: dict[str, int] = Field(default_factory=dict)
+
+
 class SuiteHealthSummary(_SuiteModel):
     """Fresh health findings for the entire rollout file, including all agents."""
 
@@ -131,6 +140,7 @@ class SuiteHealthSummary(_SuiteModel):
     healthy: int = Field(default=0, ge=0)
     unhealthy: int = Field(default=0, ge=0)
     unobserved: int = Field(default=0, ge=0)
+    failed: SuiteFailureCounts | None = None
     issues: dict[str, int] = Field(default_factory=dict)
     run_healthy: bool | None = None
     run_unhealthy_reasons: list[str] = Field(default_factory=list)

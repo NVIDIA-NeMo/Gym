@@ -20,6 +20,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryFile
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides
@@ -33,7 +34,15 @@ from nemo_gym.eval.comparison.suite.schema import (
     SuiteMetricResult,
 )
 from nemo_gym.package_info import __version__
-from nemo_gym.utils.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
+from nemo_gym.utils.path_utils import (
+    aggregate_metrics_path_for,
+    attempt_extension_path_for,
+    failures_path_for,
+    materialized_path_for,
+    rerun_masked_journal_path_for,
+    resolved_config_path_for,
+    resubmit_offset_path_for,
+)
 
 
 def invoked_command() -> str:
@@ -44,10 +53,12 @@ def invoked_command() -> str:
 def _health_report_directories(
     manifest: SuiteManifest, *, manifest_path: Path, output_root: str | None
 ) -> dict[Path, Path]:
-    """Plan distinct persistent report directories, rejecting source collisions before any check writes."""
+    """Validate report destinations and prepare a writable output root before scans."""
     if output_root is None:
         return {}
     from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
+    from nemo_gym.rollouts.rollout_records import coverage_path_for, journal_path_for
+    from nemo_gym.rollouts.rollout_recovery import manifest_path_for
 
     sources = {manifest_path}
     rollouts = set()
@@ -65,7 +76,15 @@ def _health_report_directories(
                         (manifest_path.parent / run.materialized_inputs).resolve()
                         if run.materialized_inputs is not None
                         else materialized_path_for(path).resolve(),
+                        materialized_path_for(path).resolve(),
                         failures_path_for(path).resolve(),
+                        manifest_path_for(path).resolve(),
+                        journal_path_for(path).resolve(),
+                        coverage_path_for(path).resolve(),
+                        attempt_extension_path_for(path).resolve(),
+                        rerun_masked_journal_path_for(path).resolve(),
+                        resubmit_offset_path_for(path).resolve(),
+                        resolved_config_path_for(path).resolve(),
                         (path.parent / QUALITY_SUMMARY_FILENAME).resolve(),
                         (path.parent / ROLLOUT_VERDICTS_FILENAME).resolve(),
                     )
@@ -92,7 +111,37 @@ def _health_report_directories(
             )
         directories[path] = directory
         planned_targets.update(targets)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with TemporaryFile(dir=root):
+            pass
+    except OSError as error:
+        raise ConfigError(f"Cannot write to --health-check-output-dir '{root}': {error}") from error
     return directories
+
+
+def _check_suite_health(
+    result: SuiteComparisonResult,
+    manifest: SuiteManifest,
+    *,
+    workers: int | None,
+    output_root: str | None,
+) -> None:
+    """Attach file health only after the complete numerical comparison has passed validation."""
+    directories = _health_report_directories(manifest, manifest_path=result.suite_fpath, output_root=output_root)
+    from nemo_gym.eval.comparison.suite.health import check_rollout_file_health, rollout_health_warning
+
+    health_by_path: dict[Path, SuiteHealthSummary] = {}
+    for cell in result.cells:
+        for role, run in (("baseline", cell.baseline), ("candidate", cell.candidate)):
+            if run.rollouts not in health_by_path:
+                health_by_path[run.rollouts] = check_rollout_file_health(
+                    run.rollouts, workers=workers, output_dir=directories.get(run.rollouts)
+                )
+            run.health = health_by_path[run.rollouts]
+            warning = rollout_health_warning(run.health)
+            if warning is not None:
+                result.warnings.append(f"{cell.model}/{cell.benchmark} {role}: {warning}")
 
 
 def build_suite_comparison(
@@ -104,11 +153,6 @@ def build_suite_comparison(
     """Build typed results, optionally resolving catalog reward scales through the supplied callback."""
     path = Path(config.suite_fpath).resolve()
     manifest = load_suite_manifest(path)
-    health_directories = (
-        _health_report_directories(manifest, manifest_path=path, output_root=config.health_check_output_dirpath)
-        if config.check_health
-        else {}
-    )
     definitions = {
         benchmark: resolve_metric_definitions(benchmark, definition, reward_metric_resolver=reward_metric_resolver)
         for benchmark, definition in manifest.benchmarks.items()
@@ -117,7 +161,6 @@ def build_suite_comparison(
     warnings = []
     per_model = []
     observed_sources: dict[tuple[str, Path, str], str] = {}
-    health_by_path: dict[Path, SuiteHealthSummary] = {}
     for model, benchmarks in manifest.models.items():
         model_cells = []
         for benchmark, sources in benchmarks.items():
@@ -146,19 +189,6 @@ def build_suite_comparison(
                 warnings.append(f"{model}/{benchmark}: {cell.exclusion_reason}")
             for role, run in (("baseline", cell.baseline), ("candidate", cell.candidate)):
                 warnings.extend(f"{model}/{benchmark} {role}: {note}" for note in run.coverage.notes)
-                if config.check_health:
-                    from nemo_gym.eval.comparison.suite.health import check_rollout_file_health, rollout_health_warning
-
-                    if run.rollouts not in health_by_path:
-                        health_by_path[run.rollouts] = check_rollout_file_health(
-                            run.rollouts,
-                            workers=config.health_check_workers,
-                            output_dir=health_directories.get(run.rollouts),
-                        )
-                    run.health = health_by_path[run.rollouts]
-                    warning = rollout_health_warning(run.health)
-                    if warning is not None:
-                        warnings.append(f"{model}/{benchmark} {role}: {warning}")
         eligible = [cell for cell in model_cells if cell.eligible]
         for cell in eligible:
             cell.model_weight = 1 / len(eligible)
@@ -169,7 +199,7 @@ def build_suite_comparison(
         raise ConfigError("No eligible model-benchmark comparisons remain. " + " ".join(warnings))
     for cell in eligible:
         cell.overall_weight = 1 / len(eligible)
-    return SuiteComparisonResult(
+    result = SuiteComparisonResult(
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         nemo_gym_version=__version__,
         command=command,
@@ -181,3 +211,11 @@ def build_suite_comparison(
         overall=aggregate_suite_cells("overall", cells, confidence_level=config.confidence_level),
         warnings=warnings,
     )
+    if config.check_health:
+        _check_suite_health(
+            result,
+            manifest,
+            workers=config.health_check_workers,
+            output_root=config.health_check_output_dirpath,
+        )
+    return result
