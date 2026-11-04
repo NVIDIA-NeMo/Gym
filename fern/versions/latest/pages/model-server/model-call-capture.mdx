@@ -405,7 +405,8 @@ times in a rollout record.
 
 Set `strip_duplicate_token_metadata: true` to keep it only on `response.output`. A copy is stripped
 only when `response.output` holds an item with the same `id` that carries the three required token
-fields and every field the copy has, so metadata is never removed without a complete canonical copy.
+fields and the same values for every token-metadata field the copy has. If any value differs, the
+copy keeps its entire group; matching item IDs alone are not enough.
 A copy loses its whole group, including a null `routed_experts` placeholder, or none of it. Item ids
 stay, so a copy still joins to its canonical item.
 A raw response string that could not be parsed keeps whatever it contains.

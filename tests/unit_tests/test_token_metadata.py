@@ -209,3 +209,16 @@ def test_routed_experts_only_on_the_copy_keep_its_whole_group_so_it_still_valida
     assert copy_["routed_experts"] == experts
     assert {field: copy_[field] for field in IDS} == IDS
     _stripped_trajectory_still_validates(result)
+
+
+@pytest.mark.parametrize("field", sorted(IDS))
+def test_same_item_id_with_different_token_values_keeps_the_entire_group(field):
+    result = _result()
+    copy_item = result["ng_trajectory"]["turns"][0]["answer"][0]
+    copy_item[field] = [999]
+    before = copy.deepcopy(copy_item)
+
+    strip_duplicate_token_metadata(result)
+
+    assert copy_item == before
+    assert result["response"]["output"][0] == _item(**IDS)
