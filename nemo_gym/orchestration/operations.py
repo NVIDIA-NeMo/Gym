@@ -86,7 +86,8 @@ def status(
             return {}
         try:
             return executor.query_states(refs)
-        except Exception as error:  # deliberate: one unreachable scheduler must not hide the others
+        except Exception as error:  # deliberate: one unreachable connection must not hide the others
+            # The query is one batched call per connection, so a failure leaves every job of this group UNKNOWN.
             logger.warning("Could not query the scheduler for %d job(s): %s", len(refs), error)
             reason = f"{type(error).__name__}: {error}"
             return {ref.key: ObservedStatus(state=JobState.UNKNOWN, detail=reason) for ref in refs}
