@@ -14773,7 +14773,6 @@ class TestRunRecordWriter:
 
     async def test_run_examples_writes_each_enriched_record_to_its_shard(self, tmp_path: Path) -> None:
         capture_dir = tmp_path / "capture"
-        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "c1", "first")
         global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
         row = TestEnrichRunResult._row()
 
@@ -14782,6 +14781,10 @@ class TestRunRecordWriter:
                 return SimpleNamespace(global_config_dict=global_config)
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                # The model server captures each call under the key of the request that made it.
+                TestEnrichRunResult._store_call(
+                    capture_dir, maybe_rollout_id_from_run_body(examples[0]), "c1", "first"
+                )
                 future = Future()
                 future.set_result(
                     _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
@@ -14834,15 +14837,18 @@ class TestRunRecordWriter:
 
     async def test_the_written_record_joins_the_capture_its_row_names(self, tmp_path: Path) -> None:
         capture_dir = tmp_path / "capture"
-        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "mine", "first")
+        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "earlier", "a capture under the row's own key")
         TestEnrichRunResult._store_call(capture_dir, "someone-else", "theirs", "other")
         global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        keys: list[str] = []
 
         class Helper(RolloutCollectionHelper):
             def setup_server_client(self, head_server_config=None):
                 return SimpleNamespace(global_config_dict=global_config)
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                keys.append(maybe_rollout_id_from_run_body(examples[0]))
+                TestEnrichRunResult._store_call(capture_dir, keys[0], "mine", "first")
                 future = Future()
                 reply = {"reward": 1.0, ROLLOUT_ID_KEY_NAME: "someone-else"}
                 future.set_result(_CompletedRollout(row=examples[0], result=reply, rollout_latency_ms=1.0))
@@ -14855,7 +14861,8 @@ class TestRunRecordWriter:
         await completion
 
         [written] = self._lines(run_dir / "rollouts-s.jsonl")
-        assert written[ROLLOUT_ID_KEY_NAME] == "g1_g0_a0"
+        # The shard's own key: the row's id within the shard's run, never the reply's or the bare id.
+        assert written[ROLLOUT_ID_KEY_NAME] == keys[0] == f"{written['_ng_run_id']}.g1_g0_a0"
         assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["mine"]
 
     def test_a_call_refused_by_dispatch_validation_keeps_the_existing_shard(self, tmp_path: Path) -> None:
@@ -14957,7 +14964,7 @@ class TestRunRecordWriter:
         assert store.manifest.run_id == run_id
         # A verified manifest with every attempt reserved, so resume and recovery accept the shard like a run.
         assert store.manifest.legacy_import is False
-        assert store.manifest.next_attempt == {"g1_g0_a0": 1, "g2_g0_a0": 1}
+        assert store.manifest.next_attempt == {f"{run_id}.g1_g0_a0": 1, f"{run_id}.g2_g0_a0": 1}
         from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, validate_resume
 
         shard = run_dir / "rollouts-step_1.jsonl"
@@ -14969,6 +14976,21 @@ class TestRunRecordWriter:
         [failed] = store.failures()
         assert failed[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
         assert [row[TASK_INDEX_KEY_NAME] for row in store.pending()] == [4]
+
+    def test_a_shard_without_a_configuration_identity_is_recorded_and_says_it_will_not_resume(
+        self, tmp_path: Path
+    ) -> None:
+        from nemo_gym.rollouts.rollout_collection import RolloutStore, _RunRecordWriter
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        # The running configuration does not name the rows' agent, so there is no identity a resume could match.
+        with pytest.warns(UserWarning, match="will not resume"):
+            writer = _RunRecordWriter(tmp_path, "step_1", rows=rows, global_config={})
+        assert writer.manifest.config_digest == "unrecorded"
+        assert writer.manifest.next_attempt == {"0-0": 1}
+        writer.write({**rows[0], "_ng_run_id": writer.run_id, "reward": 1.0})
+        store = RolloutStore.read(writer.rollouts_fpath)
+        assert store is not None and len(store.selected_records("success")) == 1
 
     def test_every_reopening_invalidates_earlier_writers_even_when_inodes_recur(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
@@ -15042,6 +15064,15 @@ class TestRunRecordWriter:
         writer.write({**rows[2], "reward": 1.0})
         assert completed() == 3  # the last expected record is always written
 
+        # The last expected row may be an omitted row the shard does not keep: the status still ends current.
+        writer = _RunRecordWriter(tmp_path, "step_2", rows=rows, status_rows=[dict(row) for row in rows])
+        writer.write({**rows[0], "reward": 1.0})
+        writer.write({**rows[1], "reward": 1.0})
+        assert completed() == 1
+        assert writer.write({**rows[2], NG_FAILURE_CLASS_KEY: "cancelled", NG_NO_PERSIST_KEY: True}) is None
+        member = orjson.loads(writer.status_fpath.read_bytes())["members"]["a"]
+        assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (2, 1)
+
     async def test_a_reused_row_is_recorded_under_the_shard_run(self, tmp_path: Path, monkeypatch) -> None:
         """A row that carries an earlier run's id is dispatched and saved under the shard's run, so the Store reads it."""
         from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY, RolloutStore, _failure_diagnostics
@@ -15080,6 +15111,66 @@ class TestRunRecordWriter:
         )
         assert [failed[NG_FAILURE_CLASS_KEY] for failed in store.failures()] == ["agent_request_failed"]
         assert row[RUN_ID_KEY] == "an-earlier-run"  # the caller's row is untouched
+
+    @pytest.mark.parametrize("other", ["0", "1"], ids=["same rollout", "distinct rollout"])
+    def test_rows_that_would_share_a_rollout_in_the_shard_are_refused_before_dispatch(
+        self, tmp_path: Path, other: str
+    ) -> None:
+        from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY
+
+        earlier = "a" * 32
+        # A row an earlier shard returned, fed back beside a new row: `<earlier run>.0` and `0` both become
+        # `<this run>.0`.
+        fed_back = {**TestEnrichRunResult._row(f"{earlier}.0"), RUN_ID_KEY: earlier}
+        new = {**TestEnrichRunResult._row(other), TASK_INDEX_KEY_NAME: 9}
+        dispatched: list[dict] = []
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        existing = run_dir / "rollouts-step_2.jsonl"
+        existing.write_bytes(b'{"reward": 1.0}\n')
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched.extend(examples)
+                return iter([])
+
+        if other == "0":
+            with pytest.raises(ValueError, match=rf"rows 0 and 1 \(rollout ids '{earlier}\.0' and '0'\)"):
+                Helper().run_examples([fed_back, new], record_output_dir=run_dir, record_shard="step_2")
+            assert dispatched == [] and existing.read_bytes() == b'{"reward": 1.0}\n'
+        else:
+            Helper().run_examples([fed_back, new], record_output_dir=run_dir, record_shard="step_2")
+            run_id = dispatched[0][RUN_ID_KEY]
+            assert [row[ROLLOUT_ID_KEY_NAME] for row in dispatched] == [f"{run_id}.0", f"{run_id}.1"]
+
+    def test_a_rollout_id_too_long_for_its_capture_files_is_refused_before_dispatch(self, tmp_path: Path) -> None:
+        from nemo_gym.core.episode_context import MAX_ROLLOUT_ID_LENGTH
+
+        # With the 33-character run-id prefix, the longest id that fits and the next one up.
+        fits = TestEnrichRunResult._row("x" * (MAX_ROLLOUT_ID_LENGTH - 33))
+        too_long = TestEnrichRunResult._row("x" * (MAX_ROLLOUT_ID_LENGTH - 32))
+        dispatched: list[dict] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched.extend(examples)
+                return iter([])
+
+        with pytest.raises(
+            ValueError, match=rf"is {MAX_ROLLOUT_ID_LENGTH + 1} bytes, more than the {MAX_ROLLOUT_ID_LENGTH}"
+        ):
+            Helper().run_examples([too_long], record_output_dir=tmp_path, record_shard="s")
+        assert dispatched == [] and not (tmp_path / "rollouts-s.jsonl").exists()
+        Helper().run_examples([fits], record_output_dir=tmp_path, record_shard="s")
+        [row] = dispatched
+        # The capture files of its highest allowed attempt still fit a file name.
+        assert len(f"{row[ROLLOUT_ID_KEY_NAME]}-a9999.capture.incomplete") == 255
 
     def test_a_superseded_writer_leaves_the_newer_shard_status_alone(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
@@ -15429,3 +15520,164 @@ async def test_run_status_keeps_results_persisted_inside_the_throttle_when_the_r
 
     member = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())["members"]["a"]
     assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (2, 1)
+
+
+@pytest.mark.parametrize("fed_back", [True, False], ids=["returned row fed back", "indices numbered again"])
+async def test_a_shard_records_only_the_model_calls_of_its_own_dispatch(tmp_path: Path, fed_back: bool) -> None:
+    """Two shards that dispatch the same task and rollout keep their model calls apart."""
+    capture_dir = tmp_path / "capture"
+    global_config = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(capture_dir),
+        "agent": {"responses_api_agents": {"impl": {}}},
+    }
+    row = {
+        "responses_create_params": {"input": []},
+        AGENT_REF_KEY_NAME: {"name": "agent"},
+        TASK_INDEX_KEY_NAME: 0,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+    }
+    calls = iter(["step_1 call", "step_2 call"])
+
+    class Helper(RolloutCollectionHelper):
+        def setup_server_client(self, head_server_config=None):
+            return SimpleNamespace(global_config_dict=global_config)
+
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            # The model server stages each call under the capture key of the request that made it.
+            call = next(calls)
+            TestEnrichRunResult._store_call(capture_dir, maybe_rollout_id_from_run_body(examples[0]), call, call)
+            future = Future()
+            future.set_result(
+                _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+            )
+            return iter([future])
+
+    run_dir = tmp_path / "run"
+    [first] = list(Helper().run_examples([row], record_output_dir=run_dir, record_shard="step_1"))
+    returned_row, _ = await first
+    [second] = list(
+        Helper().run_examples(
+            [returned_row if fed_back else dict(row)], record_output_dir=run_dir, record_shard="step_2"
+        )
+    )
+    second_row, returned = await second
+    # A row fed back is renamed into the new shard, not nested under both.
+    assert second_row[ROLLOUT_ID_KEY_NAME] == f"{second_row['_ng_run_id']}.0-0"
+
+    for shard, call in (("step_1", "step_1 call"), ("step_2", "step_2 call")):
+        [written] = TestRunRecordWriter._lines(run_dir / f"rollouts-{shard}.jsonl")
+        assert [c["model_call_id"] for c in written["ng_model_call_capture"]["calls"]] == [call]
+    assert [c["model_call_id"] for c in returned["ng_model_call_capture"]["calls"]] == ["step_2 call"]
+
+
+async def test_a_recorded_shard_resumes_through_the_eval_entry_point(
+    tmp_path: Path, empty_global_config: MagicMock
+) -> None:
+    """``gym eval run`` with ``resume_from_cache`` on a recorded shard runs only what the shard still lacks."""
+    from nemo_gym.rollouts.rollout_collection import RolloutStore, _failure_diagnostics
+    from nemo_gym.rollouts.rollout_records import logical_rollout_id
+
+    rows = [
+        {
+            AGENT_REF_KEY_NAME: {"name": "a"},
+            "responses_create_params": {"input": [{"role": "user", "content": f"q{index}"}]},
+            TASK_INDEX_KEY_NAME: index,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+        for index in range(2)
+    ]
+    failure = {NG_FAILURE_CLASS_KEY: "agent_request_failed", "_ng_failure_message": "connection refused"}
+    dispatched: list[list[int]] = []
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            dispatched.append([row[TASK_INDEX_KEY_NAME] for row in examples])
+            futures = []
+            for row in examples:
+                future = Future()
+                if row[TASK_INDEX_KEY_NAME] == 1 and len(dispatched) == 1:
+                    outcome = _CompletedRollout(
+                        row=row,
+                        result=dict(failure),
+                        rollout_latency_ms=None,
+                        diagnostics=_failure_diagnostics(failure),
+                    )
+                else:
+                    outcome = _CompletedRollout(
+                        row=row, result={"response": {}, "reward": 1.0}, rollout_latency_ms=1.0
+                    )
+                future.set_result(outcome)
+                futures.append(future)
+            return iter(futures)
+
+    run_dir = tmp_path / "run"
+    for completion in Helper().run_examples(
+        rows, record_output_dir=run_dir, record_shard="step_1", route_failures_to_sidecar=True
+    ):
+        await completion
+
+    shard = run_dir / "rollouts-step_1.jsonl"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(run_dir / "rollouts-step_1_materialized_inputs.jsonl"),
+        output_jsonl_fpath=str(shard),
+        resume_from_cache=True,
+        disable_aggregation=True,
+        upload_rollouts=False,
+    )
+    await Helper().run_from_config(config)
+
+    assert dispatched == [[0, 1], [1]]
+    store = RolloutStore.read(shard)
+    assert sorted(identity for identity, _ in store.selected_records("success")) == sorted(
+        logical_rollout_id(row)
+        for row in TestRunRecordWriter._lines(run_dir / "rollouts-step_1_materialized_inputs.jsonl")
+    )
+
+
+@pytest.mark.parametrize("path", ["gym eval run", "run_examples with enrich_results"])
+async def test_a_run_that_is_not_a_shard_keeps_its_rollout_ids_and_capture_keys(
+    tmp_path: Path, empty_global_config: MagicMock, path: str
+) -> None:
+    """Only a recorded shard scopes its rollout ids: a plain run dispatches every row under its own id and key."""
+    rows = [
+        {AGENT_REF_KEY_NAME: {"name": "a"}, "responses_create_params": {"input": []}, "x": 0},
+        {AGENT_REF_KEY_NAME: {"name": "a"}, "responses_create_params": {"input": []}, ROLLOUT_ID_KEY_NAME: "task-7"},
+    ]
+    dispatched: list[dict] = []
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            dispatched.extend(examples)
+            futures = []
+            for row in examples:
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=row, result={"response": {}, "reward": 1.0}, rollout_latency_ms=1.0)
+                )
+                futures.append(future)
+            return iter(futures)
+
+    if path == "gym eval run":
+        source = tmp_path / "input.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        output = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+        await Helper().run_from_config(config)
+        saved = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+    else:
+        given = [{**row, TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0} for index, row in enumerate(rows)]
+        saved = [
+            result
+            for _, result in [await completion for completion in Helper().run_examples(given, enrich_results=True)]
+        ]
+
+    # The ids and capture keys are the ones Gym derived before shards existed: "<task>-<rollout>" or the row's own id.
+    assert sorted(maybe_rollout_id_from_run_body(row) for row in dispatched) == ["0-0", "task-7"]
+    assert sorted(row.get(ROLLOUT_ID_KEY_NAME) or "" for row in dispatched) == ["", "task-7"]
+    assert sorted(maybe_rollout_id_from_run_body(result) for result in saved) == ["0-0", "task-7"]

@@ -58,7 +58,13 @@ evidence with two opt-in options:
   worker) and Gym owns the file names, so `gym eval aggregate +input_glob='run/rollouts-*.jsonl'`, the run health
   check and the Store read a folder of shards like an eval run. Reopening a shard replaces it, so a replayed step does
   not duplicate rows. Rows need their task and rollout indices; `record_omitted_rollouts=True` also keeps an
-  omitted-rollout row for an interrupted or never-started try.
+  omitted-rollout row for an interrupted or never-started try. A shard dispatches each row under the row's own
+  rollout id (its `_ng_rollout_id`, or `<task>-<rollout>`) prefixed with the shard's run id, so its model calls are
+  captured under keys of its own even when a later shard dispatches the same task and rollout; read a capture's key
+  from the returned row. A shard whose rollouts did not all succeed resumes like a run:
+  `gym eval run +input_jsonl_fpath=runs/policy/rollouts-<shard>_materialized_inputs.jsonl
+  +output_jsonl_fpath=runs/policy/rollouts-<shard>.jsonl +resume_from_cache=true`, with the same servers, runs only
+  what the shard still lacks.
 
 ```python
 from nemo_gym.rollouts import RolloutCollectionHelper

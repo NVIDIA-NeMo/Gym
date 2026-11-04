@@ -17,7 +17,7 @@ Stirrup runs only in agent sessions, seeded by an environment server with these 
 
 The sandbox must be x86_64 or aarch64 Linux with glibc 2.28 or newer, `bash`, and `tar` with gzip. musl images, such as
 Alpine, and older glibc are not supported: `imageio-ffmpeg` publishes no musllinux wheel, and the Pillow version in
-`overrides.txt` publishes only manylinux_2_28 wheels. The agent's host builds the runtime with `uv` and caches it under
+`pyproject.toml` publishes only manylinux_2_28 wheels. The agent's host builds the runtime with `uv` and caches it under
 `sandbox_python` in Gym's `cache_dir`. Building needs the Python package index and the python-build-standalone
 releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python
 build can be given the file in that cache directory.
@@ -101,5 +101,5 @@ to vLLM.
 ## Licensing
 
 - **Code**: Apache License 2.0 (see repository `LICENSE`).
-- **Dependencies**: `stirrup` (Apache 2.0). See `requirements.txt` and the top-level `pyproject.toml` for full
+- **Dependencies**: `stirrup` (Apache 2.0). See `pyproject.toml` and the top-level `pyproject.toml` for full
   attribution.
