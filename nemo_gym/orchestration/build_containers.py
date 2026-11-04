@@ -774,6 +774,11 @@ class BuildContainerHelper(BaseModel):
             raise
 
     async def _run(self) -> None:
+        print(f"""Resolved fpaths:
+- Input container: {self.config.input_container_fpath}
+- Output container: {self.config.output_container_fpath}
+- Log file: {self.config.log_file}
+""")
         self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.config.log_file.unlink(missing_ok=True)
         self.config.output_container_fpath.parent.mkdir(parents=True, exist_ok=True)
@@ -965,11 +970,6 @@ def main() -> None:
 
     async def execute() -> None:
         if not bch.config.run_only:
-            print(f"""Resolved fpaths:
-- Input container: {bch.config.input_container_fpath}
-- Output container: {bch.config.output_container_fpath}
-- Log file: {bch.config.log_file}
-""")
             await bch.run()
         if bch.config.run_only or bch.config.run_after_build:
             await bch._run_container()
