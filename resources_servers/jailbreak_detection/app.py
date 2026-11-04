@@ -417,6 +417,15 @@ class JailbreakDetectionResourcesServer(SimpleResourcesServer):
             unclear_reward = tpl.get("rewards", {}).get("unclear", 0.0)
             return verifier_name, None, unclear_reward
 
+        # Outcome verifiers reserve the final line for one exact verdict. Earlier
+        # markers may appear in quoted responses or in the judge's assessment.
+        if "outcomes" in tpl:
+            final_line = text.strip().splitlines()[-1].strip() if text.strip() else ""
+            matches = [outcome for outcome in tpl["outcomes"].values() if outcome["marker"] == final_line]
+            if len(matches) == 1:
+                return verifier_name, final_line, matches[0]["reward"]
+            return verifier_name, None, tpl.get("rewards", {}).get("unclear", 0.0)
+
         labels = tpl.get("labels", {})
         pos_label = labels.get("positive", "")
         neg_label = labels.get("negative", "")

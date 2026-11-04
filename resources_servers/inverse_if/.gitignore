@@ -1,7 +1,0 @@
-# Ignore data files (datasets should not be committed)
-data/*.jsonl
-!data/example.jsonl
-!data/example_rollouts.jsonl
-*.json
-!data/example_metrics.json
-!configs/*.yaml

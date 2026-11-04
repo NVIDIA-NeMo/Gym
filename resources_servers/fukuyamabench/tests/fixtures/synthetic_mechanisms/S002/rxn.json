@@ -1,8 +1,0 @@
-{
-    "mechanism_rxn": [
-        {
-            "step": "1",
-            "rxn_smiles": "CCBr.[OH-]>>CCO.[Br-]"
-        }
-    ]
-}

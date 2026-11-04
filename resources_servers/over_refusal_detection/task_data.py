@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the over_refusal_detection server (XSTest-style over-refusal judging).
 
-Mirrors ``OverRefusalDetectionRunRequest`` (app.py): all four task fields are Optional with
-``None`` defaults and the wire model carries ``extra="allow"``. ``verify()`` reads only
-``safe_prompt``, and even that defensively — when it is missing or empty the judge prompt falls
+Mirrors ``OverRefusalDetectionRunRequest`` (app.py): task fields are Optional with
+``None`` defaults and the wire model carries ``extra="allow"``. ``response_policy_mapped`` selects the grading policy. ``verify()`` reads
+``safe_prompt`` defensively — when it is missing or empty the judge prompt falls
 back to the last user message in ``responses_create_params.input``. ``contrast_prompt`` and
 ``metadata`` are declared on the wire but absent from committed data and unread.
 """
@@ -17,6 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    response_policy_mapped: Optional[str] = Field(
+        default=None,
+        description="Judge policy: strict_no_refusal (default) or helpful_engagement; never a model instruction.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
     safe_prompt: Optional[str] = Field(
         default=None,
         description=(

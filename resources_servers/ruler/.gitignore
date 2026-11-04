@@ -1,6 +1,0 @@
-# Local run artifacts / scaffolding for RULER reward-profiling runs (not part of the repo).
-logs/
-profile/
-tools/
-scripts/
-configs/ruler_nano3_1m.yaml

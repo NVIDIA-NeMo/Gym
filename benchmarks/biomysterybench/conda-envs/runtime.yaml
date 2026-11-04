@@ -1,5 +1,0 @@
-channels:
-  - conda-forge
-dependencies:
-  - openjdk
-  - nodejs

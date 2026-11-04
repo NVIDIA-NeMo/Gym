@@ -1,5 +1,0 @@
-*.jsonl
-!example.jsonl
-*.json
-!example_metrics.json
-!example_rollouts.jsonl
