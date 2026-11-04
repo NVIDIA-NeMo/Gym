@@ -407,25 +407,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if tool_access is not None:
             assert_model_url_reachable_from_sandbox(str(tool_access.base_url), provider_name=provider_name)
         provider = create_provider(provider_config)
-        try:
-            if owns_sandbox:
-                sandbox = AsyncSandbox(provider)
-                spec = dict(self.config.sandbox_config)
-                spec["metadata"] = {
-                    **resolve_provider_metadata(provider_ref, get_global_config_dict()),
-                    **(spec.get("metadata") or {}),
-                    "agent_session_id": body.agent_session_id[:63],
-                }
-                spec.setdefault(
-                    "ttl_s",
-                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
-                )
-                await sandbox.start(SandboxSpec(**spec))
-            else:
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
                 sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-        except BaseException:
-            await provider.aclose()
-            raise
+            except BaseException:
+                await provider.aclose()
+                raise
         state = BrowsecompSandboxSession(
             request=body,
             session=SandboxSession(
@@ -439,6 +428,19 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             resources_cookies=dict(tool_access.cookies) if tool_access else {},
         )
         try:
+            if owns_sandbox:
+                spec = dict(self.config.sandbox_config)
+                spec["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, get_global_config_dict()),
+                    **(spec.get("metadata") or {}),
+                    "agent_session_id": body.agent_session_id[:63],
+                }
+                spec.setdefault(
+                    "ttl_s",
+                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
+                )
+                # Retain ownership before start: failed file delivery can also fail its automatic stop.
+                await sandbox.start(SandboxSpec(**spec))
             await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:

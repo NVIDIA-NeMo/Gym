@@ -230,3 +230,32 @@ async def test_close_stops_sandbox_before_cancelling_activation(monkeypatch: pyt
     await state.close(timeout=1)
     assert state.task.cancelled()
     state.session.close.assert_awaited_once()
+
+
+async def test_start_upload_failure_retains_owned_sandbox_for_cleanup_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    from nemo_gym.agents import AgentSessionSetupError, SandboxSession
+    from nemo_gym.sandbox import AsyncSandbox
+    from responses_api_agents.browsecomp_agent import app
+
+    # Restore the real sandbox/close after the transport-focused test factory patches them.
+    real_close = SandboxSession.close
+    client, _, _ = _agent([], monkeypatch, sandbox_config={"workdir": "/sandbox", "files": {"/task.txt": "task"}})
+    agent = next(route.endpoint.__self__ for route in client.app.routes if route.path == "/v1/browsecomp/token_count")
+    provider = MagicMock()
+    handle = MagicMock()
+    provider.create = AsyncMock(return_value=handle)
+    provider.upload_file = AsyncMock(side_effect=RuntimeError("file delivery failed"))
+    provider.close = AsyncMock(side_effect=[RuntimeError("stop failed"), RuntimeError("stop failed again"), None])
+    provider.aclose = AsyncMock()
+    monkeypatch.setattr(app, "create_provider", lambda *args: provider)
+    monkeypatch.setattr(app, "AsyncSandbox", AsyncSandbox)
+    monkeypatch.setattr(SandboxSession, "close", real_close)
+    with pytest.raises(AgentSessionSetupError) as error:
+        await agent._seed_agent_session_state(_seed())
+    assert provider.close.await_count == 2
+    assert error.value.state.session.sandbox._handle is handle
+    await agent._close_agent_session_state(error.value.state)
+    assert provider.close.await_count == 3
+    provider.aclose.assert_awaited()
