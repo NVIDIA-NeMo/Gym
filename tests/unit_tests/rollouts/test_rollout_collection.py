@@ -14448,6 +14448,46 @@ def test_historical_unrouted_diagnostic_does_not_erase_judge_zero(tmp_path):
     assert RolloutStore.read(output).coverage()["counted_failures"] == 1
 
 
+class TestCollectorTransportDeadline:
+    """Collection's own HTTP deadline for a /run leaves typed deadline evidence on the failure; a status or a refused
+    connection does not."""
+
+    async def test_an_expired_transport_deadline_is_a_typed_timeout_tied_to_the_dispatch_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=asyncio.TimeoutError()))
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+        [timeout] = result["timeouts"]
+        assert (timeout["limit"], timeout["enforcer"], timeout["evidence"]) == (
+            "collection.run",
+            "collection",
+            "internal",
+        )
+        timed_out = classify_timeout(result)
+        assert (timed_out.evidence, timed_out.limit, timed_out.enforcer) == ("typed", "collection.run", "collection")
+        # The named collection failure is preserved as before.
+        assert result["_ng_failure_type"] == "TimeoutError"
+
+    @pytest.mark.parametrize(
+        "post",
+        [
+            AsyncMock(return_value=FakeResponse(504)),
+            AsyncMock(side_effect=ClientConnectorError(MagicMock(), OSError("connection refused"))),
+        ],
+        ids=["gateway-timeout-status", "refused"],
+    )
+    async def test_a_status_or_a_refused_connection_is_not_a_collector_deadline(
+        self, monkeypatch: pytest.MonkeyPatch, post
+    ) -> None:
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        install_fake_server_client(monkeypatch, post)
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+        assert "timeouts" not in result and classify_timeout(result) is None
+
+
 class TestEnrichRunResult:
     """``enrich_run_result`` records what ``ng_collect_rollouts`` records, for ``run_examples`` callers."""
 

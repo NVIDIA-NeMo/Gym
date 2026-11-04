@@ -226,7 +226,12 @@ from nemo_gym.models.token_capture.delivery import (
 )
 from nemo_gym.models.token_capture.protocols import installed_token_source
 from nemo_gym.models.token_capture.store import TokenCaptureStore
-from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
+from nemo_gym.rollouts.health.timeouts import (
+    ELAPSED_S_KEY,
+    TimeoutEvent,
+    classify_timeout,
+    export_run_health_timeouts,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -767,7 +772,7 @@ class _CompletedRollout:
     run_error: Optional[BaseException] = None
 
 
-def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
+def _collection_failure_report(exc: BaseException, headers: Any) -> FailureReport:
     """Collection's own failure for a failed `/run` dispatch, caused by the dispatch error, with the report the
     reply forwarded. Routing classes remain outcome metadata; this diagnostic has a registered collection kind."""
     failure = NgFailureEvent(
@@ -5338,6 +5343,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
                     failure = _agent_request_failure_row(e, status)
+                    failure_report = _collection_failure_report(
+                        e, getattr(e, "headers", None) or getattr(res, "headers", None)
+                    )
+                    if isinstance(e, TimeoutError) and status is None:
+                        # Collection's own HTTP deadline for this /run expired: typed deadline evidence the timeout
+                        # reader counts, tied to Collection's dispatch failure.
+                        failure["timeouts"] = [
+                            TimeoutEvent(
+                                event_id=failure_report.failure_id,
+                                limit="collection.run",
+                                enforcer="collection",
+                                evidence="internal",
+                                elapsed_s=time.monotonic() - started,
+                            ).model_dump(mode="json", exclude_none=True)
+                        ]
                     if (
                         (typed_outcomes or validate_results)
                         and isinstance(e, (InvalidRolloutResult, orjson.JSONDecodeError))
@@ -5345,7 +5365,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     ):
                         failure[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure[NG_TERMINAL_KEY] = True
-                    failure_row = failure
                     failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes or unrouted else failure
                     if (
                         isinstance(failed_outcome, RolloutFailureRecord)
@@ -5364,11 +5383,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
-                        failure_report=_collection_failure_report(
-                            e,
-                            failure_row[NG_FAILURE_CLASS_KEY],
-                            getattr(e, "headers", None) or getattr(res, "headers", None),
-                        ),
+                        failure_report=failure_report,
                         run_error=None if route_failures_to_sidecar else e,
                     )
                 finally:
