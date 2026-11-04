@@ -688,6 +688,31 @@ class E2BProvider:
         headers["E2b-Sandbox-Port"] = str(port)
         return SandboxEndpoint(endpoint=base_url, headers=headers)
 
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause the sandbox through the E2B SDK without replaying failed requests."""
+        if await self._sandbox(handle).pause(**self._request_params()) is False:
+            # The SDK maps every 409 to False. AgentENV sends 409 during a snapshot or fork, which status
+            # reports as paused although the VM then runs again, so no 409 counts as paused.
+            raise RuntimeError(
+                f"e2b sandbox {handle.sandbox_id!r} refused pause with 409 Conflict (already paused or busy); "
+                "check status()"
+            )
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume the sandbox and replace its SDK handle only after success."""
+        sandbox = self._sandbox(handle)
+        e2b = _require_e2b_sdk()
+        params = self._api_params()
+        # Keep the request timeout the SDK retained from create (ready_timeout_s).
+        params.setdefault("request_timeout", sandbox.connection_config.request_timeout)
+        # Resume restarts the sandbox lifetime, which is the SDK's 300 s default without a timeout.
+        timeout_s = self._create.timeout_s
+        handle.raw = await e2b.AsyncSandbox.connect(
+            handle.sandbox_id,
+            timeout=max(1, math.ceil(timeout_s)) if timeout_s is not None else None,
+            **params,
+        )
+
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()
         sandbox = self._sandbox(handle)

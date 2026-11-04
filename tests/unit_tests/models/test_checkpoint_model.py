@@ -14,7 +14,8 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from nemo_gym.core.episode import EpisodeId, current_rollout_id
+from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
     ModelRecord,

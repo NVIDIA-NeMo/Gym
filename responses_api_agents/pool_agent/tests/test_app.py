@@ -671,8 +671,7 @@ async def test_shutdown_continues_after_failed_close_and_retains_retry_state():
 
 
 def test_harbor_materialized_request_passes_validation(tmp_path):
-    from nemo_gym.tasks.harbor.materialize import materialize_task
-    from nemo_gym.tasks.harbor.task import load_task
+    from nemo_gym.data.tasks.harbor import load_task, materialize_task
 
     (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 12.0\n")
     (tmp_path / "instruction.md").write_text("Inspect the repository.")

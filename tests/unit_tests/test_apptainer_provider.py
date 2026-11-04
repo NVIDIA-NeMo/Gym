@@ -1007,6 +1007,23 @@ async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str,
     assert out == "started"
 
 
+@pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
+async def test_run_returns_when_the_command_exits_despite_a_lingering_child(fake_binary: str, tmp_path: Path) -> None:
+    """Regression: an exec that leaves a process holding its stdout (`tmux new-session -d`) returns when it exits.
+
+    Reading pipes to EOF waited for the lingering process: Terminus 2's tmux start never returned under uvloop.
+    """
+    provider = apptainer_provider.ApptainerProvider()
+    release = tmp_path / "release"
+    lingering = f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done"
+    argv = [shutil.which("sh"), "-c", f"{lingering} & printf started; printf warn >&2"]
+    try:
+        code, out, err = await provider._run(argv, timeout_s=5)
+    finally:
+        release.touch()
+    assert (code, out, err) == (0, "started", "warn")
+
+
 async def test_create_uses_daemonize_for_instance_start(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
 from resources_servers.agentic_turn_simulation.harnesses.openclaw import (
     OPENCLAW_FILES,

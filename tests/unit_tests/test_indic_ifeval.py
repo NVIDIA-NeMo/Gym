@@ -10,8 +10,8 @@ from omegaconf import OmegaConf
 
 from benchmarks.indic.ifeval import prepare as module
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.data.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
-from nemo_gym.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
 
 
 def source_row(key=1, *, tags=None):
@@ -197,8 +197,8 @@ def _resolve_cli_config(flags):
 @pytest.mark.parametrize("override", [False, True])
 def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, override):
     from benchmarks.numb3rs.prepare import _format_row
-    from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--benchmark", "numb3rs"]
     if override:
@@ -235,7 +235,7 @@ def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, 
 
 
 def test_repeat_seeds_preserve_indic_sampling_and_source_metadata(tmp_path):
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     source = module.build_rows([source_row()], language="hi")[0]
     source["agent_ref"] = {"name": "indic_ifeval_instruction_following_simple_agent"}
