@@ -71,8 +71,8 @@ Core and sandbox suites use native Pants Python targets, one per test file. Comp
 targets within each resolve share pytest processes with `[test].batch_size = 128`.
 Pants uses stable hash boundaries, so this targets approximately 128 files per batch;
 a target does not imply a separate process. Batches run serially, and test result
-reuse remains disabled. The
-four core jobs retain Gym's duration-balanced file assignments; the sandbox job
+reuse remains disabled. The four core jobs retain Gym's duration-balanced file
+assignments; the sandbox job
 runs the complete sandbox selection. The adapter checks dependency parity against
 `uv.lock` and preserves each job's JUnit and raw coverage inputs.
 
@@ -90,10 +90,13 @@ or cross-run test-result savings from these measurements.
 The uv cache mirrors main's policy: one immutable OS/`uv.lock` key shared across
 jobs, with an OS-level restore prefix. Baseline and Pants use separate namespaces
 so one arm cannot warm the other. The `pants-full-v2-uv-` namespace starts cold
-for both arms and excludes earlier experiment caches. Pants engine caches remain separate per job and
-shard; their keys include the implementation/dependency contract and sampled
-source commit, allowing repeated measurements of that source to reuse an exact
-cache entry without uploading it again.
+for both arms and excludes earlier experiment caches. Pants engine caches are shared by shards of the same job type. Their keys include
+the implementation/dependency contract and sampled source commit. Immutable
+first-writer-wins storage avoids duplicate multi-gigabyte core archives; other
+shards can rebuild any missing content-addressed entries. The monitor bounds
+branch-scoped experiment caches to 5 GiB and removes obsolete experiment entries.
+Actual cache hits must be inspected: matching policies alone do not establish
+matching cache warmth.
 
 ## Evidence
 
@@ -114,3 +117,10 @@ Use fresh runs with the corrected cache policy for timing comparisons.
 The historical six-file/103-test benchmark is documented in [SUBSET.md](SUBSET.md).
 Its workflow is manual only and its measurements do not establish production CI
 performance.
+
+The [full native validation](https://github.com/NVIDIA-NeMo/Gym/actions/runs/41837880879)
+passed all workload pairs and both combined coverage gates at 95.20%. Core and
+sandbox used native Pants targets with forced execution; other jobs used workspace
+commands. Native workload execution was slower, and dependency-cache warmth
+differed between arms. This establishes full execution parity, not a causal
+speedup. That run predates the shared job-type engine-cache keys described above.

@@ -87,9 +87,9 @@ jobs:
             ~/.cache/pants/named_caches
             ~/.cache/pants/lmdb_store
             ~/.cache/scie-pants
-          key: pants-full-engine-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          key: pants-full-engine-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
           restore-keys: |
-            pants-full-engine-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+            pants-full-engine-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
       - name: Install system test dependencies
         if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
         working-directory: sample
@@ -192,9 +192,9 @@ jobs:
             ~/.cache/pants/named_caches
             ~/.cache/pants/lmdb_store
             ~/.cache/scie-pants
-          key: pants-full-engine-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          key: pants-full-engine-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
           restore-keys: |
-            pants-full-engine-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+            pants-full-engine-v2-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
       - name: Install system test dependencies
         if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
         working-directory: sample
