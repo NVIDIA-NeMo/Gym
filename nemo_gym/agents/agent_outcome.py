@@ -16,13 +16,13 @@ from nemo_gym.core.failure_kinds import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
 )
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
-from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureReport, ModelFailureDetails
 
 
 if TYPE_CHECKING:
     from nemo_gym.core.responses_api_types import NeMoGymResponse
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"

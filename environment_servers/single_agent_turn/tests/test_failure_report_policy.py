@@ -5,9 +5,9 @@
 import pytest
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
-from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-from tests.single_agent_turn_helpers import _agent_response, _environment_server, _request, _Response
+from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON
+from nemo_gym.core import MODEL_POLICY_RESPONSE_TIMEOUT
+from tests.helpers.single_agent_turn import _agent_response, _environment_server, _request, _Response
 
 
 @pytest.mark.parametrize(
