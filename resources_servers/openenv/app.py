@@ -35,7 +35,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     ResourcesSessionLostError,
-    StatefulResourcesServer,
+    SimpleResourcesServer,
     lost_session_verification,
 )
 
@@ -76,7 +76,7 @@ class SessionState(BaseModel):
     last_observation: Optional[dict] = None
 
 
-class OpenEnvResourcesServer(StatefulResourcesServer[float]):
+class OpenEnvResourcesServer(SimpleResourcesServer):
     """Generic adapter that wraps any OpenEnv environment as a NeMo-Gym resource server."""
 
     config: OpenEnvResourcesServerConfig
