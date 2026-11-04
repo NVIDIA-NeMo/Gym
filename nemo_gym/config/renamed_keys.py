@@ -28,6 +28,8 @@ from typing import Any, TypeVar
 
 from omegaconf import DictConfig, OmegaConf
 
+from nemo_gym.config.config_types import ConfigError
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,9 @@ RENAMED_SERVER_INSTANCE_KEYS: dict[str, dict[str, str]] = {}
 _Function = TypeVar("_Function", bound=Callable[..., Any])
 
 
-class ConflictingRenamedKeyError(ValueError):
+# A ConfigError, so the command line reports it without a traceback; a ValueError, so a Pydantic validator that raises
+# it reports a validation error.
+class ConflictingRenamedKeyError(ConfigError, ValueError):
     """A config sets a renamed key under both its old and its new name, to different values."""
 
 

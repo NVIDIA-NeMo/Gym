@@ -24,6 +24,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, model_validator
 
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.config.renamed_keys import (
     RENAMED_SERVER_INSTANCE_KEYS,
@@ -166,6 +167,13 @@ def test_a_config_that_refers_to_another_config_is_renamed_without_resolving(tmp
 def test_an_old_and_a_new_key_set_to_different_values_in_one_config_is_an_error(conflict: dict, source: str) -> None:
     with pytest.raises(ConflictingRenamedKeyError, match="keep only"):
         _parse(**{source: OmegaConf.to_container(OmegaConf.merge(OLD, conflict))})
+
+
+def test_a_conflict_on_the_command_line_is_reported_without_a_traceback(capsys: pytest.CaptureFixture) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        exit_cleanly_on_config_error(_parse)(cli={**OLD, "new_block": {**BLOCK, "enabled": False}})
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().out.startswith("Error: Config sets both 'old_block' and 'new_block'")
 
 
 def test_a_new_key_on_the_command_line_overrides_an_old_key_in_the_initial_config(expected: dict) -> None:
