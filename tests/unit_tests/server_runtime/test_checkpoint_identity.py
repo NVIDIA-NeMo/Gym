@@ -10,7 +10,8 @@ from pydantic import ValidationError
 import nemo_gym.server_runtime.base_server
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import EpisodeId, current_episode_id, rollout_context
+from nemo_gym.core.episode_context import current_episode_id, rollout_context
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 
 

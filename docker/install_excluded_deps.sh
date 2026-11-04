@@ -21,24 +21,28 @@
 #
 #   bash docker/install_excluded_deps.sh
 #
-# Safe to call multiple times — exits immediately if already installed.
-# Versions are pinned to match the container's uv.lock. Update these pins
-# manually when uv lock bumps them (e.g. after a vllm upgrade).
-# --no-config bypasses the project's sys_platform=='never' overrides.
+# This opt-in layer is independently locked and intentionally bypasses the
+# root project's exclusion policy. Preserve the existing codec versions; this
+# layer is not a dependency-upgrade mechanism.
 set -euo pipefail
 
-if python -c "import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio, pycountry" 2>/dev/null; then
-    echo "[excluded-deps] Already installed, skipping."
-    exit 0
-fi
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="${script_dir}/excluded_deps"
+for filename in pyproject.toml uv.lock; do
+    if [[ ! -r "${project_dir}/${filename}" ]]; then
+        echo "Missing locked codec project: ${project_dir}/${filename}" >&2
+        exit 2
+    fi
+done
 
-echo "[excluded-deps] Installing excluded packages..."
-uv pip install --no-config \
-    "opencv-python-headless==5.0.0.93" \
-    "pynvvideocodec==2.0.4" \
-    "torchcodec==0.16.0" \
-    "torchvision==0.26.0" \
-    "torchaudio==2.11.0" \
-    "pycountry==26.2.16"
-
+# Sync the environment selected by the caller's Python, not a second .venv in
+# docker/. Never let uv replace an OS-managed Python environment.
+python_executable="$(python -c 'import sys; print(sys.executable)')"
+venv_path="$(python -c 'import sys; print(sys.prefix) if sys.prefix != sys.base_prefix else sys.exit("Activate the Gym virtual environment before installing optional codecs.")')"
+# Refuse the known codec/model Torch conflict before uv can mutate the runtime.
+"${python_executable}" "${project_dir}/check_runtime.py" "${project_dir}/uv.lock"
+echo "[excluded-deps] Syncing locked opt-in packages..."
+UV_PROJECT_ENVIRONMENT="${venv_path}" uv sync --locked --inexact \
+    --project "${project_dir}" --python "${python_executable}" --no-dev
+"${python_executable}" -c 'import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio, pycountry'
 echo "[excluded-deps] Done."

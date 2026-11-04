@@ -22,10 +22,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 
 
 # Import the adapter before Tau2 so it can set TAU2_DATA_DIR before Tau2
@@ -298,11 +299,23 @@ class TestApp:
         validated = Tau2FailureResponse.model_validate(result)
         assert validated.reward == 0.0
         assert result[NG_FAILURE_CLASS_KEY] == expected_failure_class
+        # No model call failed: no caller is named and no kind is stamped.
+        assert "failure_caller" not in result and result.get("failure_kind") is None
+        assert result["response"]["output"] == []
         assert result["error"] != "stale"
         assert result["response"]["object"] == "response"
-        assert result["response"]["output"][0]["content"][0]["text"] == ""
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
+
+    def test_failure_placeholder_is_marked_as_no_generation(self) -> None:
+        """The empty assistant message the failure path returns is a placeholder, never a saved answer."""
+        _, server = self._dummy_server()
+        body = self._example_run_request()
+        failure = server._failure_response(body, server._sanitized_record(body), "infrastructure_error", "boom")
+        result = failure.model_dump(mode="json")
+        assert result["response"]["metadata"] == NG_NO_GENERATION_METADATA
+        assert not has_saved_generation(result)
+        assert not has_saved_generation({"_ng_failure_response": result["response"]})
 
     def test_sanity_query_input(self) -> None:
         example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
@@ -691,6 +704,10 @@ class TestApp:
         assert result[NG_FAILURE_CLASS_KEY] == TAU2_AGENT_FAILURE_CLASS
         # An empty record does not prove that no policy call finished, so usage is not reported as zero.
         assert result["response"]["usage"] is None
+        # The user simulator's call failed: an evaluation-side episode failure, named with its caller.
+        assert (result["failure_caller"], result["failure_kind"]) == ("user_simulator", "environment_episode_failed")
+        # No stand-in answer: the failure reply's response has no output.
+        assert result["response"]["output"] == []
 
     async def test_concurrent_runs_keep_their_own_policy_usage(self) -> None:
         config = Tau2Config(

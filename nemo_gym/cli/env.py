@@ -16,8 +16,10 @@
 import importlib.util
 import json
 import os
+import re
 import shlex
 import sys
+import traceback
 from functools import cache
 from glob import glob
 from pathlib import Path
@@ -25,10 +27,12 @@ from shutil import rmtree
 from subprocess import Popen
 from tempfile import TemporaryDirectory
 from time import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import rich
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import OmegaConfBaseException
+from omegaconf.resolvers.oc import env as _oc_env
 from pydantic import BaseModel, Field, ValidationError
 from rich.markup import escape
 from rich.table import Table
@@ -707,6 +711,67 @@ def _check_environment_server_configs(global_config_dict: DictConfig) -> List[st
     return unchecked
 
 
+class ServerConfigProblem(NamedTuple):
+    """A server block value that its server's config class rejects, or a block that could not be checked."""
+
+    path: str
+    """Dotted path in the merged config: the rejected field, else the block (or the unknown server type)."""
+    message: str
+    """The config class's message, or why the block's config class could not be loaded."""
+    config_class: Optional[str] = None
+    """The name of the config class that rejected the value; None when the block could not be checked."""
+    value: object = None
+    """The rejected input, as the config class received it."""
+
+
+def validate_server_configs(global_config_dict: DictConfig, server_types: Iterable[str]) -> List[ServerConfigProblem]:
+    """Validate each server block of the given server types against its own server's config class, starting nothing.
+
+    Each block is checked against the class its server validates it with at launch. This process imports the
+    entrypoint to find that class. A block whose entrypoint does not import here, for example because the server's
+    own venv has packages this one lacks, is one problem with ``config_class`` None, and its fields stay unchecked.
+    A server type that Gym does not define is such a problem too, at the type's name, so a caller written for
+    another Gym version still gets an answer. An empty list means every checked block is valid.
+    """
+    wanted = frozenset(server_types)
+    problems = [
+        ServerConfigProblem(name, f"Gym defines no server type '{name}'; it defines {', '.join(SERVER_TYPE_KEYS)}")
+        for name in sorted(wanted.difference(SERVER_TYPE_KEYS))
+    ]
+    for server in _configured_servers(global_config_dict):
+        if server.server_type not in wanted:
+            continue
+        block_path = f"{server.top_level_path}.{server.server_type}.{server.name}"
+        module_name = ".".join(
+            ["nemo_gym_server_config_check", server.server_type, server.name]
+            + list(server.entrypoint_fpath.with_suffix("").parts)
+        )
+        try:
+            config_class = _entrypoint_config_class(server.dir_path / server.entrypoint_fpath, module_name)
+        except Exception as error:  # Its own venv may have what this one lacks.
+            message = f"could not load {server.entrypoint_fpath}: {type(error).__name__}: {error}"
+            problems.append(ServerConfigProblem(block_path, message))
+            continue
+        try:
+            server_config = OmegaConf.to_container(server.config, resolve=True) | {"name": server.top_level_path}
+        except OmegaConfBaseException as error:
+            problems.append(ServerConfigProblem(block_path, f"could not resolve the block: {error}"))
+            continue
+        try:
+            config_class.model_validate(server_config)
+        except ValidationError as error:
+            problems.extend(
+                ServerConfigProblem(
+                    ".".join([block_path, *map(str, detail["loc"])]),
+                    detail["msg"],
+                    config_class.__name__,
+                    detail.get("input"),
+                )
+                for detail in error.errors()
+            )
+    return problems
+
+
 @exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
@@ -788,10 +853,119 @@ def _print_validation_report(report: EnvironmentValidationReport, *, json_output
         rich.print(f"[yellow]Warning:[/yellow] {warning}", file=sys.stderr)
 
 
+# Stands in for a value only the job supplies, under --allow-job-time-values.
+JOB_TIME_VALUE = "gym-job-time-value"
+# Each round of composition names at most three unset values, so this covers 48 of them.
+_JOB_TIME_VALUE_ROUNDS = 16
+
+
+_NO_DEFAULT = object()
+
+
+def _env_or_job_time_value(key: str, default: object = _NO_DEFAULT) -> Optional[str]:
+    """``oc.env`` that reads an unset variable without a default as a job-time value."""
+    if default is _NO_DEFAULT:
+        return os.environ.get(key, JOB_TIME_VALUE)
+    return _oc_env(key, default)
+
+
+def _compose_for_validation(*, allow_job_time_values: bool, supplied: List[str]) -> DictConfig:
+    """Compose the config as `gym eval run` does from the same run args; the job adds the policy model itself."""
+    for _ in range(_JOB_TIME_VALUE_ROUNDS):
+        try:
+            try:
+                return get_global_config_dict()
+            except ConfigError:
+                return get_global_config_dict(
+                    global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                        initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    ),
+                )
+        except ConfigError as error:
+            missing = [key for key in re.findall(r"\+\+([A-Za-z0-9_.]+)=<value>", str(error)) if key not in supplied]
+            if not allow_job_time_values or not missing:
+                raise
+            supplied.extend(missing)
+            sys.argv.extend(f"++{key}={JOB_TIME_VALUE}" for key in missing)
+    raise ConfigError(f"composition still needs values after {len(supplied)} job-time stand-ins")
+
+
+def _composition_failure(error: BaseException) -> Dict[str, str]:
+    """Why the config did not compose, and the key whose value did not resolve when the error names one.
+
+    A failing resolver (for example ``oc.decode`` given an int) is reported at its key with the resolver's own
+    message. Gym's own explanation, such as the override that supplies a missing key, is kept as it reads.
+    """
+    resolution = error if isinstance(error, OmegaConfBaseException) else error.__cause__
+    full_key = getattr(resolution, "full_key", None)
+    if not isinstance(resolution, OmegaConfBaseException) or not isinstance(full_key, str) or not full_key:
+        return {"why": f"{type(error).__name__}: {error}"}
+    # OmegaConf appends the key and the node type to its own message; the path field carries the key.
+    message = resolution.msg.split("\n    full_key:", 1)[0]
+    why = message if str(error) == str(resolution) else f"{type(error).__name__}: {error}"
+    return {"path": full_key, "why": why}
+
+
+def _validate_server_types(command_dict: DictConfig) -> int:
+    """`gym env validate --server-types`: print one finding per line; return 0, 1, 2, or 3 for a crash."""
+    # Importing entrypoints must write nothing into the checkout.
+    sys.dont_write_bytecode = True
+    allow_job_time_values = bool(command_dict.get("allow_job_time_values", False))
+    marks = [str(mark) for mark in command_dict.get("ignore_input_containing") or []]
+    marks += [JOB_TIME_VALUE] if allow_job_time_values else []
+    json_output = bool(command_dict.get(JSON_OUTPUT_KEY_NAME, False))
+
+    def emit(finding: dict) -> None:
+        if json_output:
+            print(json.dumps(finding), flush=True)
+        else:
+            print(" ".join(f"{key}={value}" for key, value in finding.items()), flush=True)
+
+    if allow_job_time_values:
+        OmegaConf.register_new_resolver("oc.env", _env_or_job_time_value, replace=True, use_cache=False)
+    try:
+        supplied: List[str] = []
+        # A block that fails Gym's generic server check is reported field by field below, not as a failed composition.
+        sys.argv.append("++error_on_almost_servers=false")
+        try:
+            global_config_dict = _compose_for_validation(
+                allow_job_time_values=allow_job_time_values, supplied=supplied
+            )
+        except (ConfigError, OmegaConfBaseException) as error:
+            emit({"kind": "uncomposed", **_composition_failure(error), "supplied": supplied})
+            return 2
+        invalid = 0
+        server_types = command_dict.server_types
+        server_types = [server_types] if isinstance(server_types, str) else list(server_types)
+        for problem in validate_server_configs(global_config_dict, server_types):
+            if problem.config_class is None:
+                emit({"kind": "unchecked", "path": problem.path, "why": problem.message})
+            elif not any(mark in repr(problem.value) for mark in marks):
+                invalid += 1
+                emit(
+                    {
+                        "kind": "invalid",
+                        "path": problem.path,
+                        "class": problem.config_class,
+                        "message": problem.message,
+                        "input": repr(problem.value)[:120],
+                    }
+                )
+        return 1 if invalid else 0
+    except Exception:  # A crash must not read as a finding: its exit code is neither 1 nor 2.
+        traceback.print_exc()
+        return 3
+    finally:
+        if allow_job_time_values:
+            OmegaConf.register_new_resolver("oc.env", _oc_env, replace=True, use_cache=False)
+
+
 @exit_cleanly_on_config_error
 def validate() -> None:
     """Validate a manifest-backed workload or a legacy Gym config without starting services."""
     command_dict = _command_overrides()
+    if command_dict.get("server_types") is not None:
+        sys.exit(_validate_server_types(command_dict))
     command_config = ManifestCommandConfig.model_validate(command_dict)
     entry = _manifest_entry(command_config)
     if command_config.manifest_path is not None or entry is not None:
