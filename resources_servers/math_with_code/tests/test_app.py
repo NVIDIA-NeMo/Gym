@@ -209,7 +209,7 @@ class TestResourcesSessions:
         server, _ = _session_server()
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
-        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
         stopped, release = asyncio.Event(), asyncio.Event()
         original_cleanup = PythonExecutorResourcesServer._cleanup_session
 
@@ -274,7 +274,10 @@ class TestResourcesSessions:
         # Default wait verification unbinds before the HTTP reply. A replacement may never send close.
         assert not server.checkpoint_participant.is_open("rs-1")
         assert server._session_episodes == {}
-        assert server._verified_sessions.get("rs-1") == (EPISODE_ID, TaskId.model_validate(_seed("rs-1")["task_id"]))
+        assert server._verified_sessions.get("rs-1")[0] == (
+            EPISODE_ID,
+            TaskId.model_validate(_seed("rs-1")["task_id"]),
+        )
         second = client.post(prefix + "/verify", json=VERIFY_BODY)
         assert second.status_code == 200 and second.json()["reward"] == 1.0
         assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 409
@@ -294,7 +297,7 @@ class TestResourcesSessions:
         server, _ = _session_server()
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
-        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
         handle = _UnstoppableHandle()
         server._sessions["rs-1"] = handle
         participant = ResourcesParticipant(server, "restart_only")
@@ -310,7 +313,7 @@ class TestResourcesSessions:
         server, _ = _session_server()
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
-        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
         stopped, finish_close = asyncio.Event(), asyncio.Event()
         real_cleanup = PythonExecutorResourcesServer._cleanup_session
 
@@ -518,3 +521,31 @@ class TestResourcesSessions:
         assert client.post("/execute_python", json={"code": "2 + 2"}).json()["result"] == "4"
         assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {}
+
+    def test_cookie_reseed_retries_failed_worker_release_before_reset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, app = _session_server()
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert client.post("/execute_python", json={"code": "value = 42"}).json()["success"]
+        [session_id] = server._sessions
+        worker = server._sessions[session_id]
+        close = worker.close
+
+        def fail_close() -> None:
+            raise RuntimeError("worker still alive")
+
+        monkeypatch.setattr(worker, "close", fail_close)
+        try:
+            assert client.post("/seed_session", json=VERIFY_BODY).status_code == 500
+            assert server._sessions[session_id] is worker and worker._proc.is_alive()
+            assert client.post("/execute_python", json={"code": "value"}).json()["result"] == "42"
+        finally:
+            monkeypatch.setattr(worker, "close", close)
+            assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert server._sessions == {} and not worker._proc.is_alive()
+        try:
+            response = client.post("/execute_python", json={"code": "value"}).json()
+            assert not response["success"] and "value" in response["error_message"]
+            assert list(server._sessions) == [session_id]
+        finally:
+            assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
