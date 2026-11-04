@@ -59,18 +59,26 @@ def rename_deprecated_keys(config: MutableMapping, renamed: Mapping[str, str], *
     """Move each old key in ``config`` to its new name in place, warning for each key moved.
 
     If ``config`` sets both names to equal values, the new key keeps its value; to different values, this raises
-    ``ConflictingRenamedKeyError``. ``where`` is the dotted path of ``config`` in the global config, used in messages.
+    ``ConflictingRenamedKeyError``. An OmegaConf key left unset (``???``) is a required value not given yet, so the
+    other name fills it, and an unset old key moves to the new name as unset. ``where`` is the dotted path of ``config`` in the global config, used in messages.
     """
     prefix = f"{where}." if where else ""
     for old, new in renamed.items():
-        if old not in config:
+        # keys(), because `in` on a DictConfig is False for a key left unset.
+        present = config.keys()
+        if old not in present:
             continue
         # Unresolved, so an interpolation moves as written and a reference to another source does not fail here.
         if isinstance(config, DictConfig):
             values = OmegaConf.to_container(OmegaConf.masked_copy(config, [old, new]), resolve=False)
         else:
             values = config
-        if new in config and values[new] != values[old]:
+        unset = {
+            key
+            for key in (old, new)
+            if key in present and isinstance(config, DictConfig) and OmegaConf.is_missing(config, key)
+        }
+        if new in present and not unset and values[new] != values[old]:
             raise ConflictingRenamedKeyError(
                 f"Config sets both '{prefix}{old}' and '{prefix}{new}' to different values. '{old}' was renamed "
                 f"'{new}'; remove '{prefix}{old}' and keep only '{prefix}{new}'."
@@ -82,7 +90,7 @@ def rename_deprecated_keys(config: MutableMapping, renamed: Mapping[str, str], *
         warnings.warn(message, DeprecationWarning, stacklevel=2)
         # Python hides DeprecationWarning outside __main__ by default, and a config author needs to see this one.
         logger.warning(message)
-        if new not in config:
+        if new not in present or new in unset:
             config[new] = values[old]
         del config[old]
 

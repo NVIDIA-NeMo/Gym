@@ -145,11 +145,23 @@ def test_an_old_key_overrides_the_new_key_it_inherits() -> None:
     assert agent["new_flag"] is True and "old_flag" not in agent
 
 
-def test_an_old_key_fills_a_new_key_a_config_leaves_unset(tmp_path: Path, expected: dict) -> None:
+def _required(block_key: str, agent_key: str) -> dict:
+    return {block_key: "???", "my_agent": {"responses_api_agents": {"simple_agent": {agent_key: "???"}}}}
+
+
+@pytest.mark.parametrize(
+    "required, supplied",
+    [(_required("new_block", "new_flag"), OLD), (_required("old_block", "old_flag"), NEW)],
+    ids=["old key fills new", "new key fills old"],
+)
+def test_either_name_fills_a_required_key_the_other_leaves_unset(
+    tmp_path: Path, expected: dict, required: dict, supplied: dict
+) -> None:
+    # A config marks the key required under one name, and the command line supplies it under the other.
     config_path = tmp_path / "required.yaml"
-    config_path.write_text(OmegaConf.to_yaml({"new_block": "???", **_servers("new_flag")}))
+    config_path.write_text(OmegaConf.to_yaml(required))
     with pytest.warns(DeprecationWarning):
-        parsed = _parse(config_paths=[str(config_path)], cli={"old_block": BLOCK})
+        parsed = _parse(config_paths=[str(config_path)], cli=supplied)
     parsed.pop("config_paths")
     expected.pop("config_paths")
     assert parsed == expected
