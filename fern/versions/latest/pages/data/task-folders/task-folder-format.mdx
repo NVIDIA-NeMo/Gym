@@ -52,7 +52,7 @@ Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy sp
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `docker_image` | none | A prebuilt image. Without it, Gym uses `environment/Dockerfile`; with neither, every episode fails at seed, even with a Compose file. Beside it, a pull-mode Dockerfile's settings apply and other Dockerfiles are ignored, unless `builds.force` builds the Dockerfile. |
+| `docker_image` | none | A prebuilt image. Without it, Gym uses `environment/Dockerfile`; with neither, every episode fails at seed, even with a Compose file. Beside it, a pull-mode Dockerfile's settings apply and other Dockerfiles are ignored, unless `builds.force` builds the Dockerfile. In a single-sandbox task, the image's `ENTRYPOINT` and `HEALTHCHECK` do not run, unless a pull-mode `environment/Dockerfile` sits beside it; then those of its `FROM` image run. In a Compose task they run. |
 | `build_timeout_sec` | `600` | The budget all overlay-mode `RUN` lines share. Builds at prepare have no time limit. |
 | `cpus`, `memory_mb`, `storage_mb` | none | Resource limits, sent with `storage_mb` rounded up to whole GiB. Providers differ in what they enforce (Docker ignores `storage_mb`), and the server's `sandbox_resources_override` replaces any it names. |
 | `gpus`, `gpu_types` | none | GPU count and allowed types. Only the first type is sent, and only when the server sets `request_gpu_type: true`. GPU tasks run on the server's `gpu_sandbox_provider` block when set. |
@@ -181,6 +181,9 @@ and trial runtime are not used. See [Harbor Environment Server](/main/agent-inte
 - Typed task fields and parameterized tasks.
 - [Sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs) for the verifier, with
   `[verifier].inputs`.
+- Protection against a planted reward: before a shared verifier runs, Gym clears `/tests` and `/logs/verifier`, apart
+  from the sidecar inputs. Ship verifier helpers in the task's `tests/` folder. See
+  [How the verifier runs](/main/data/task-folders/task-folder-verifiers#how-the-verifier-runs).
 
 `gym dataset publish --harbor` writes a copy that Harbor can run. The copy leaves out the `[gym]` table, and
 publishing refuses Python verifiers that read `response` or grade in separate mode, and tasks that share a
@@ -196,16 +199,6 @@ publishing refuses Python verifiers that read `response` or grade in separate mo
   with a `url` can be granted.
 - A multi-step task that seeds the agent with a transcript (`steps/<first step>/trajectory.json`) runs only with the
   oracle.
-
-### Behavior differences
-
-- Before a shared verifier runs, Gym clears `/tests` and `/logs/verifier`, apart from the files `[verifier].inputs`
-  names, so the agent cannot plant a reward. See
-  [How the verifier runs](/main/data/task-folders/task-folder-verifiers#how-the-verifier-runs).
-- In overlay mode, `RUN` lines run in the sandbox when it starts, not in an image build. See
-  [Dockerfile modes](#dockerfile-modes).
-- In a single-sandbox task, a prebuilt `docker_image`'s `ENTRYPOINT` and `HEALTHCHECK` do not run, unless a pull-mode
-  `environment/Dockerfile` sits beside it; then those of its `FROM` image run. In a Compose task they run.
 
 ## What the loader refuses
 
