@@ -32,6 +32,7 @@ sandbox:
       # tls_ca_path: /path/to/ca.pem
       # tls_cert_path: /path/to/client.pem
       # tls_key_path: /path/to/client-key.pem
+      # Per-RPC deadline for everything except deletes, which use operations.delete_rpc_timeout_s.
       request_timeout_s: 30
     create:
       # Provisioning can include an image pull on the gateway host.
@@ -65,7 +66,22 @@ sandbox:
       # Backoff between probe attempts against the remote gateway.
       stable_delay_s: 1.0
     operations:
-      # After delete, poll until the gateway reports the sandbox gone.
+      # close() hands the delete to a worker thread and returns. DeleteSandbox takes the ~31s pod grace
+      # period, so the worker uses a client with this deadline. A deadline does not cancel a delete the
+      # gateway has started: the worker waits for the sandbox to go and re-issues the delete (up to 3
+      # deadlines) only if it is still there. The worker outlives the event loop, so the delete finishes
+      # even when the process exits right after close().
+      delete_rpc_timeout_s: 120
+      # Delete workers, separate from exec.concurrency. Queued deletes drain at roughly this many per ~30s.
+      delete_concurrency: 32
+      # After delete, the worker polls until the gateway reports the sandbox gone (logged either way).
       close_wait_deleted: true
       close_timeout_s: 60
       poll_interval_s: 1.0
+    # Job attribution labels merged into every sandbox's metadata (explicit
+    # sandbox_spec.metadata and default_metadata keys win). Unset team/user/workload/run
+    # auto-detect from NEMO_GYM_* / Slurm env vars; `run` is generated per process.
+    attribution:
+      enabled: true
+      # Kubernetes prefixed-key namespace for the injected label keys; "" for bare keys.
+      key_prefix: nemo-gym.nvidia.com/

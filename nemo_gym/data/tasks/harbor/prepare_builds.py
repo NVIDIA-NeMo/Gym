@@ -8,7 +8,8 @@ adapter's field allow-list, and after the tasks load each task's resolved docume
 the same way, so a task the adapter would refuse at seed is refused at prepare with the same
 message. The build step plans the builds, drops refused contexts, reuses recorded images that
 fit, honours the builds table, constructs the ImageBuilder and collects per-task failure
-reasons. cli.py calls it from prepare_target.
+reasons.
+``prepare_target`` in ``nemo_gym.data.tasks.harbor.prepare`` calls it.
 """
 
 from pathlib import Path

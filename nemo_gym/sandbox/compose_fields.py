@@ -111,7 +111,7 @@ def unsupported_compose_fields(document: Any) -> list[str]:
 
     The key allow-list is the first step of :func:`check_compose_fields`, the one field check prepare and the
     adapter run (a refused key is an :class:`UnsupportedComposeFieldError` there). Pure and key-only, so prepare
-    also screens the raw file of a task about to be built with it (``nemo_gym.data.tasks.harbor.cli``), before
+    also screens the raw file of a task about to be built with it (``nemo_gym.data.tasks.harbor.prepare``), before
     interpolation gives the values their shapes.
     """
     return [message for _, message in _unsupported_fields(document)]

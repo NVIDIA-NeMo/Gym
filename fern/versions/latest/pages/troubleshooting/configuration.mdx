@@ -274,7 +274,14 @@ python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent pat
 
 Pass the configs that declare the relays yours inherit as well, such as the Resources Server configs a benchmark includes; run without paths to switch this repository's configs.
 
-Each relay is replaced by a `single_agent_turn_legacy` server of the same name, which binds the agent's Resources Server and grants the agent direct HTTP access to its tools, as the relay's `/run` used them.
+Each relay is replaced by a `single_agent_turn_legacy` server of the same name. The migration copies the agent's Resources Server reference into the Environment Server's `resources_server` field and grants the agent direct HTTP access to its tools, as the relay's `/run` used them. Inherited Environment Servers also receive their own explicit resources binding.
+
+The Environment Server owns this binding at runtime. Both `single_agent_turn` and `single_agent_turn_legacy` require `resources_server`; leaving it unset or setting it to `null` no longer reads the agent's configuration. Configs migrated by an earlier version of the script must add the reference to their Environment Server, including child configs that change the resources binding.
+
+Configuration resolution follows a top-level `_inherit_from` rename when the original Resources Server is removed and exactly one resources instance replaces it. For example, the shared math Environment Server follows `math_with_judge` to `indic_math_500_math_with_judge_resources_server` in `indic/math_500`. If several resources instances inherit the same source, a reference to the removed source is ambiguous and resolution reports the field to update.
+
+A `_copy` keeps the original resources instance, so its references stay unchanged. Set the child Environment Server's `resources_server` explicitly when it should use the copy, as `indic/ifeval` does. Likewise, changing an agent's resources setting does not change the Environment Server's binding. The migration script refuses a switch when an included config changes that pairing without a matching Environment Server override.
+
 A relay stays, and is listed with its reason, when:
 
 - the agent binds no Resources Server, or declares a required MCP tool access or another direct HTTP tool access, which `simple_agent` sessions reject;

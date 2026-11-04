@@ -27,7 +27,7 @@ from pytest import MonkeyPatch
 import nemo_gym.artifacts.exporters.isolated as isolated
 from nemo_gym.artifacts.exporters import load_run_exporter_class
 from nemo_gym.artifacts.exporters.base import ExportState
-from nemo_gym.artifacts.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter
+from nemo_gym.artifacts.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter, _without_resume_identity
 from nemo_gym.artifacts.exporters.isolated import ensure_exporter_environment
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 
@@ -203,6 +203,30 @@ class TestRunDirectory:
         assert {"quality_summary.json", "model-calls", "gpqa_rollouts_resolved_config.yaml"} <= set(call["files"])
         assert sorted(p.name for p in tmp_path.iterdir() if p.name != fake_sdk["log"].name) == before
 
+    def test_a_run_dir_above_the_rollouts_directory_is_uploaded_instead(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        artifacts = _make_run(artifacts_dir)
+        (tmp_path / "eval.exit").write_text("0")
+
+        _exporter(artifacts, tmp_path, run_dir=str(tmp_path)).export(artifacts)
+
+        call = _sdk_call(fake_sdk)
+        assert call["path"] == str(tmp_path.resolve())
+        assert {"artifacts", "eval.exit"} <= set(call["files"])
+
+    def test_a_run_dir_that_does_not_hold_the_rollouts_is_refused(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        result = _exporter(artifacts, tmp_path, run_dir=str(elsewhere)).export(artifacts)
+
+        assert result.state == "failed"
+        assert "does not contain the rollouts file" in result.error
+
     def test_a_relative_rollouts_path_is_uploaded_by_its_absolute_directory(
         self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
     ) -> None:
@@ -233,6 +257,58 @@ class TestRunDirectory:
         _exporter(linked, tmp_path).export(linked)
 
         assert _sdk_call(fake_sdk)["path"] == str(run_dir.resolve())
+
+    def test_the_resume_identity_beside_the_manifest_is_never_uploaded(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        identity = tmp_path / "gpqa_rollouts_manifest.identity.json"
+        (tmp_path / "gpqa_rollouts_manifest.json").write_text("{}")
+        identity.write_text('{"exa_api_key": "CANARY-SECRET-123"}')  # pragma: allowlist secret
+        (tmp_path / "model-calls").mkdir()
+        (tmp_path / "model-calls" / "0-0.capture.jsonl").write_text("{}")
+        expected = sorted(p.name for p in tmp_path.iterdir() if p != identity)
+
+        assert _exporter(artifacts, tmp_path).export(artifacts).state is ExportState.SUCCEEDED
+
+        call = _sdk_call(fake_sdk)
+        assert call["files"] == expected
+        assert Path(call["path"]).name == tmp_path.name
+        # The run directory itself is left as it was.
+        assert identity.exists() and not fake_sdk["log"].with_name("model-calls").is_symlink()
+
+    def test_a_resume_identity_anywhere_under_the_run_dir_is_left_out(self, tmp_path: Path) -> None:
+        # An identity can hold credentials: one in any directory under the upload is left out, not only the rollouts'.
+        run_dir = tmp_path / "bench"
+        nested = run_dir / "reverification" / "n1"
+        nested.mkdir(parents=True)
+        (run_dir / "gpqa_rollouts.jsonl").write_text("{}\n")
+        identity = nested / "gpqa_rollouts_manifest.identity.json"
+        identity.write_text('{"exa_api_key": "CANARY-SECRET-456"}')  # pragma: allowlist secret
+        (nested / "receipt.json").write_text("{}")
+
+        uploaded = _without_resume_identity(run_dir, tmp_path / "work")
+
+        assert uploaded != run_dir
+        assert (uploaded / "reverification" / "n1" / "receipt.json").exists()
+        assert not (uploaded / "reverification" / "n1" / identity.name).exists()
+        assert identity.exists()
+
+    def test_a_run_dir_above_the_rollouts_leaves_out_the_resume_identity_beside_them(self, tmp_path: Path) -> None:
+        # The upload is the benchmark directory; the identity sits beside the rollouts, one level down.
+        run_dir, artifacts_dir = tmp_path / "bench", tmp_path / "bench" / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+        (artifacts_dir / "gpqa_rollouts.jsonl").write_text("{}\n")
+        identity = artifacts_dir / "gpqa_rollouts_manifest.identity.json"
+        identity.write_text('{"exa_api_key": "CANARY-SECRET-123"}')  # pragma: allowlist secret
+        (run_dir / "eval.exit").write_text("0")
+
+        uploaded = _without_resume_identity(run_dir, tmp_path / "work")
+
+        assert uploaded != run_dir and uploaded.name == run_dir.name
+        assert (uploaded / "eval.exit").exists() and (uploaded / "artifacts" / "gpqa_rollouts.jsonl").exists()
+        assert not (uploaded / "artifacts" / identity.name).exists()
+        assert identity.exists()  # the run directory itself is left as it was
 
     @pytest.mark.parametrize("other", ["math_rollouts.jsonl", "rollouts.jsonl"])
     def test_a_directory_holding_another_runs_rollouts_is_refused_before_any_environment_is_built(

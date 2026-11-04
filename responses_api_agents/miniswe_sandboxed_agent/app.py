@@ -31,10 +31,14 @@ from nemo_gym.agents import (
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    FailureReportRow,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    agent_route_failure,
     current_rollout_id,
+    failure_report_for,
+    rebuild_failure,
     rollout_context,
 )
 from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
@@ -507,6 +511,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         else "infrastructure_error",
                         detail=f"{type(exc).__name__}: {exc}",
                     )
+                    if not isinstance(exc, TimeoutError):
+                        failure = agent_route_failure(
+                            exc, operation="harness.run", stage="agent" if agent_started else "seed"
+                        )
+                        failure.__cause__ = exc
+                        FailureReportRow.merged_into(extra, failure_report_for(failure))
                 finally:
                     if harness is not None and not agent_started:
                         try:
@@ -570,7 +580,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             detail = f"mini-SWE {'setup timeout' if setup_timeout else result.termination.reason}"
             if result.termination.detail:
                 detail += f": {result.termination.detail[:500]}"
-            raise HTTPException(503, detail)
+            error = HTTPException(503, detail)
+            # The harness's own typed failure, when it reported one, stays the cause of the 503's failure report.
+            cause = rebuild_failure(FailureReportRow.report(result.harness_metadata))
+            if cause is not None:
+                raise error from cause
+            raise error
         response = result.response
         metadata = dict(response.metadata or {})
         metadata["miniswe_termination"] = result.termination.reason
@@ -677,6 +692,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 reason="timeout" if isinstance(exc, TimeoutError) else "infrastructure_error",
                 detail=f"{type(exc).__name__}: {exc}",
             )
+            if not isinstance(exc, TimeoutError):
+                failure = agent_route_failure(exc, operation="harness.run")
+                failure.__cause__ = exc
+                FailureReportRow.merged_into(result.harness_metadata, failure_report_for(failure))
         finally:
             if state is not None and self._sessions.get(key) is state:
                 self._sessions.pop(key, None)
