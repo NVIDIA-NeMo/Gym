@@ -14,6 +14,7 @@
 # limitations under the License.
 """The rollout rows a run writes: the private keys that mark a row, and the row as it is exported."""
 
+from collections.abc import Mapping
 from typing import Any
 
 from nemo_gym.trajectory.trajectory_record import (
@@ -24,9 +25,21 @@ from nemo_gym.trajectory.trajectory_record import (
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
+# Response metadata an agent sets on the placeholder response it returns when no generation happened, for
+# example when its remote service or simulator failed before the model answered. Recovery never keeps such a
+# placeholder as an answer, while a model's own blank answer (no marker) stays one.
+NG_NO_GENERATION_METADATA = {"ng_no_generation": "true"}
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
+
+
+def is_no_generation_placeholder(response: Mapping[str, Any]) -> bool:
+    """Whether ``response`` carries the ``NG_NO_GENERATION_METADATA`` marker."""
+    metadata = response.get("metadata")
+    return isinstance(metadata, Mapping) and all(
+        metadata.get(key) == value for key, value in NG_NO_GENERATION_METADATA.items()
+    )
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:

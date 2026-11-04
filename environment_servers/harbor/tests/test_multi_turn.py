@@ -42,12 +42,15 @@ from environment_servers.harbor.tests.conftest import (
     write_image_config,
 )
 from environment_servers.harbor.verifier import COLLECT_HOOK_GRACE_S
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.data.tasks.harbor import (
+    BUILT_IMAGES_FILE,
+    STEP_METADATA_KEY,
+    context_digest,
+    load_task,
+    materialize_task,
+)
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.tasks.harbor import load_task
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, materialize_task
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 
 
 # The top-level instruction.md `write_task` writes: in a multi-step task it may hold what the agent must not see.
@@ -229,7 +232,7 @@ async def test_a_task_with_step_level_tests_alone_grades_each_turn_with_its_step
     server, task, sandbox, _ = multi_turn_server(
         tmp_path, monkeypatch, THREE_STEPS, {"plan": "P", "build": "B", "check": "C"}
     )
-    from nemo_gym.tasks.harbor import load_task
+    from nemo_gym.data.tasks.harbor import load_task
 
     (task.path / "tests" / "test.sh").unlink()
     (task.path / "tests").rmdir()
@@ -1059,6 +1062,11 @@ timeout_sec = 0.05
     failure = response.failure
     assert failure.stage == "agent" and failure.failure_kind == "harbor:task_deadline" and not failure.terminal
     assert "time budget of task 'hello'" in failure.failure_reason and "over 2 turn(s)" in failure.failure_reason
+    assert response.failure_report is not None
+    assert any(
+        event.foreign_error is not None and event.foreign_error.exception_type == "TimeoutError"
+        for event in response.failure_report.events.values()
+    )
     assert not any("test.sh" in call["command"] for call in sandbox.execs)
     # The final unwind still closed the agent session and stopped the sandbox.
     assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"

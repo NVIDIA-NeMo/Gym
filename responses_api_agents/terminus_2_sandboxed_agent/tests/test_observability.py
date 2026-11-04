@@ -11,13 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import TypeAdapter
 
-import nemo_gym.openai_utils as openai_utils
-from nemo_gym.base_responses_api_model import CaptureStore
+import nemo_gym.client.openai_client as openai_client
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import merge_model_call_capture_into_record, run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     Terminus2Agent,
@@ -153,7 +152,7 @@ def execution(monkeypatch):
             content=SimpleNamespace(read=AsyncMock(return_value=b"retry")),
         )
 
-    monkeypatch.setattr(openai_utils, "request", transport)
+    monkeypatch.setattr(openai_client, "request", transport)
 
     async def setup(agent, environment):
         agents.append(agent)
@@ -457,7 +456,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
     row loses the decision's model-call reference and its command-batch count: ``cancel_summary`` adds a context
     recovery call before the aborted summarization, which a rebuild from the captured calls counts as a decision.
     """
-    from nemo_gym.rollout_collection import _episode_record
+    from nemo_gym.rollouts.rollout_collection import _episode_record
     from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResponse
 
     execution.mode.value = mode
@@ -599,7 +598,7 @@ async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, mo
     accept that shape and grade the episode, not mask it (review fix)."""
     from nemo_gym.trajectory import transcript_to_atif
 
-    inner = openai_utils.request
+    inner = openai_client.request
     seen = {"calls": 0}
 
     async def cut_second_response(**kwargs):
@@ -613,7 +612,7 @@ async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, mo
             response.read = AsyncMock(return_value=json.dumps(payload).encode())
         return response
 
-    monkeypatch.setattr(openai_utils, "request", cut_second_response)
+    monkeypatch.setattr(openai_client, "request", cut_second_response)
     result = await execution.run(task_id="task-identity")
     output = result["response"]["output"]
     kinds = [(item.get("type"), item.get("role")) for item in output]

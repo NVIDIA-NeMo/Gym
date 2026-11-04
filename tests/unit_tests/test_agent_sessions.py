@@ -11,9 +11,8 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.agent_activation_types import AgentContinuationCapabilities
-from nemo_gym.agent_utils.sandbox_session import ExpiryUnsupportedError
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.agent_activation_types import AgentContinuationCapabilities
+from nemo_gym.agents.base_responses_api_agent import (
     ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
@@ -26,10 +25,11 @@ from nemo_gym.base_responses_api_agent import (
     RolloutStopResponse,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
+from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTurn
 
 
@@ -195,10 +195,10 @@ def test_a_refused_seed_logs_its_reason_once(caplog, agent_class, detail) -> Non
     """FastAPI answers the 422 inside the router, so the exception middleware never logs the refusal."""
     agent = agent_class.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
 
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
         check_agent_seed_rejected(agent.setup_webserver(), _seed_request(tool_accesses=_REQUIRED_GRANT))
 
-    [record] = [record for record in caplog.records if record.name == "nemo_gym.base_responses_api_agent"]
+    [record] = [record for record in caplog.records if record.name == "nemo_gym.agents.base_responses_api_agent"]
     assert record.levelno == logging.WARNING
     assert record.getMessage() == f"Refused agent session seed agent-session: {detail}"
 

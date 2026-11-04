@@ -40,7 +40,7 @@ import json
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
-from nemo_gym.vision_input import build_image_input
+from nemo_gym.data import build_image_input
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -186,7 +186,7 @@ def prepare(text_only: bool = False, limit: Optional[int] = None, prompt: str = 
 
     prompt_config = None
     if not text_only:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data import load_prompt_config
 
         prompt_config = load_prompt_config(str(PROMPT_CONFIGS[prompt]))
 
