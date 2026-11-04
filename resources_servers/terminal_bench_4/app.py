@@ -6,6 +6,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -19,9 +20,18 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
+from nemo_gym.agents import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.core import (
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    VERIFIER_ERROR,
+    EpisodeId,
+    FailureReportRow,
+    NeMoGymResponse,
+    rollout_context,
+)
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -32,6 +42,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
+    observe_verifier_sandbox,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
@@ -48,6 +59,9 @@ from resources_servers.terminal_bench_4.models import (
     VerifierTestCounts,
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
+
+
+logger = logging.getLogger(__name__)
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -367,8 +381,14 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         key = session.resources_request.resources_session_id
         await self._prepare_session(session)
         if session.seed_response.termination is not None:
-            # Provisioning failed and was cleaned up; the episode may be retried.
-            session.resources_error = (503, f"Task sandbox setup failed: {session.termination.detail}")
+            # Invalid execution limits are deterministic; preserve other setup retry behavior.
+            invalid_limits = (session.result.get("exception_info") or {}).get(
+                "exception_type"
+            ) == ExecLimitConfigurationError.__name__
+            session.resources_error = (
+                422 if invalid_limits else 503,
+                f"Task sandbox setup failed: {session.termination.detail}",
+            )
             self._remember_close(key, session)
             return
         with rollout_context(session.request.capture_rollout_id):
@@ -499,6 +519,28 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             await lifecycle.finalize_session(
                 session, grade=body.agent_started and session.seed_response.termination is None
             )
+            # The resource owner retains the actual handles after cleanup. Bind these
+            # facts to the verify invocation, independently of the agent's bundle.
+            for environment, role in ((session.environment, "agent"), (session.verifier_environment, "verifier")):
+                if environment is None:
+                    continue
+                try:
+                    sandboxes = (
+                        tuple(environment.compose.services.values())
+                        if environment.uses_compose
+                        else (environment.main,)
+                    )
+                except Exception:
+                    logger.warning("Sandbox owner handles unavailable for verification observation")
+                    continue
+                for sandbox in sandboxes:
+                    try:
+                        observation = lifecycle_observation(sandbox, role=role)
+                        if observation is not None:
+                            observe_verifier_sandbox(observation)
+                    except Exception:
+                        # Observability must not replace a calculated grade or its original failure.
+                        logger.warning("Sandbox lifecycle observation unavailable")
             session.verified_response = self._verified_response(session, body.harness_metadata)
             session.persist()
         if session.resources_request is not None:
@@ -532,6 +574,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
+        legacy = getattr(session, "resources_request", None) is None
+        ungraded_verifier = bool(failure) and not completed and session.termination.reason != "infrastructure_error"
+        legacy_failure = {}
+        if legacy and failure and not ungraded_verifier:
+            legacy_failure["_ng_failure_class"] = "infrastructure_error"
+            if failure_type:
+                legacy_failure["_ng_failure_type"] = failure_type
+            if failure_type == ExecLimitConfigurationError.__name__:
+                legacy_failure[NG_TERMINAL_KEY] = True
         return SandboxedVerifyResponse(
             **(
                 session.verify_body.model_dump(
@@ -548,15 +599,20 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             termination=session.termination,
             infrastructure_error=failure,
             failure_reason=failure or verifier_failure,
-            failure_kind=VERIFIER_ERROR if verifier_failure else None,
+            failure_kind=(
+                VERIFIER_ERROR
+                if verifier_failure or ungraded_verifier
+                else _selected_failure_kind(extra)
+                if failure
+                else None
+            ),
+            mask_sample=bool(failure) and (not legacy or ungraded_verifier),
             artifacts={"trial": str(session.directory)},
             timings={
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
             },
-            **({"_ng_failure_class": "infrastructure_error"} if failure else {}),
-            **({"_ng_failure_type": failure_type} if failure_type else {}),
-            # A retry would fail the same way: only a configuration change can fix it.
-            **({NG_TERMINAL_KEY: True} if failure_type == ExecLimitConfigurationError.__name__ else {}),
+            verifier_diagnostics=list(session.diagnostics),
+            **legacy_failure,
         )
 
     def _session(self, request, session_id):
@@ -742,6 +798,13 @@ def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
             return AgentTermination(reason="nonzero_exit", detail="The final model call hit max_output_tokens")
         return AgentTermination(reason="timeout", detail="The agent stopped at its time limit")
     return AgentTermination(reason="nonzero_exit", detail=f"Agent response status: {response.status}")
+
+
+def _selected_failure_kind(harness_metadata: dict) -> str | None:
+    """The kind of the failure the agent's harness selected for its result, if it reported one."""
+    report = FailureReportRow.report(harness_metadata)
+    selected = report.events.get(report.failure_id) if report.failure_id is not None else None
+    return selected.failure_kind if selected is not None else None
 
 
 if __name__ == "__main__":

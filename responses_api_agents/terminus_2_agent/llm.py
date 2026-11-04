@@ -290,7 +290,7 @@ class NemoGymLLM(BaseLLM):
         if not responses_create_params:
             return {}
 
-        from nemo_gym.responses_converter import VLLMConverter
+        from nemo_gym.models import VLLMConverter
 
         params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
         params_for_conversion["input"] = []

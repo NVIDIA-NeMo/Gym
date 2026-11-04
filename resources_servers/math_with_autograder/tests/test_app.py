@@ -33,8 +33,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.verification import JudgeError
+from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_autograder.app import (
     MathWithAutograderResourcesServer,
     MathWithAutograderResourcesServerConfig,
@@ -198,7 +199,7 @@ class TestGenerateJudgeEvaluation:
         assert "2" in rendered
 
     async def test_non_text_content_yields_false(self, server: MathWithAutograderResourcesServer) -> None:
-        from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
+        from nemo_gym.core import NeMoGymResponseOutputRefusal
 
         refusal_response = NeMoGymResponse(
             id="r",
@@ -310,7 +311,7 @@ class TestJudgeFailureInheritance:
         self, server: MathWithAutograderResourcesServer
     ) -> None:
         # Covered transitively: the inherited math_with_judge judge call goes through
-        # call_judge, so a transport failure surfaces as JudgeError (routed to the
+        # call_judge, so a transport failure surfaces as a judge failure (routed to the
         # failures sidecar), not a raw 500.
         server.server_client.post = AsyncMock(side_effect=RuntimeError("judge down"))
         request = LibraryJudgeMathVerifyRequest(
@@ -319,5 +320,6 @@ class TestJudgeFailureInheritance:
             question="What is 2+2?",
             expected_answer="4",
         )
-        with raises(JudgeError, match="judge down"):
+        with raises(NgFailureEvent, match="judge down") as failure:
             await server.verify(request)
+        assert is_judge_failure(failure.value)

@@ -21,14 +21,81 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
-    from nemo_gym.models._checkpoint import note_generation_backend, note_generation_request
+    from nemo_gym.models._checkpoint import (
+        PolicyModelParticipant,
+        generation_cut_requester,
+        note_generation_backend,
+        note_generation_request,
+    )
+    from nemo_gym.models.anthropic_converter import AnthropicConverter
+    from nemo_gym.models.base_responses_api_model import (
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+        BaseResponsesAPIModelConfig,
+        Body,
+        SimpleResponsesAPIModel,
+        context_overflow_error_fields,
+        is_propagated_refusal,
+    )
+    from nemo_gym.models.chat_completions_converter import (
+        ResponsesConverter,
+        VLLMConverter,
+        VLLMConverterResponsesToChatCompletionsState,
+        chat_completion_usage_to_response_usage,
+        split_responses_input_output_items,
+    )
+    from nemo_gym.models.chat_streaming import synthesize_chat_completion_sse
+    from nemo_gym.models.model_call_capture import (
+        CaptureStore,
+        ModelCallCaptureConfig,
+        install_model_call_capture,
+        start_model_execution,
+    )
+    from nemo_gym.models.responses_streaming import (
+        flatten_namespace_tools,
+        is_responses_lifecycle_chunk,
+        restore_namespace_tool_calls,
+        synthesize_responses_sse,
+    )
+    from nemo_gym.models.token_capture.external_capture import (
+        ExternalCaptureHandler,
+        VLLMWorkerCaptureHandler,
+        make_external_capture_handler,
+        validate_framework_context_options,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "AnthropicConverter": "anthropic_converter",
+    "BaseResponsesAPIModelConfig": "base_responses_api_model",
+    "Body": "base_responses_api_model",
+    "CaptureStore": "model_call_capture",
+    "ExternalCaptureHandler": "token_capture.external_capture",
+    "ModelCallCaptureConfig": "model_call_capture",
+    "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
+    "PolicyModelParticipant": "_checkpoint",
+    "ResponsesConverter": "chat_completions_converter",
+    "SimpleResponsesAPIModel": "base_responses_api_model",
+    "VLLMConverter": "chat_completions_converter",
+    "VLLMConverterResponsesToChatCompletionsState": "chat_completions_converter",
+    "VLLMWorkerCaptureHandler": "token_capture.external_capture",
+    "chat_completion_usage_to_response_usage": "chat_completions_converter",
+    "context_overflow_error_fields": "base_responses_api_model",
+    "flatten_namespace_tools": "responses_streaming",
+    "generation_cut_requester": "_checkpoint",
+    "install_model_call_capture": "model_call_capture",
+    "is_propagated_refusal": "base_responses_api_model",
+    "is_responses_lifecycle_chunk": "responses_streaming",
+    "make_external_capture_handler": "token_capture.external_capture",
     "note_generation_backend": "_checkpoint",
     "note_generation_request": "_checkpoint",
+    "restore_namespace_tool_calls": "responses_streaming",
+    "split_responses_input_output_items": "chat_completions_converter",
+    "start_model_execution": "model_call_capture",
+    "synthesize_chat_completion_sse": "chat_streaming",
+    "synthesize_responses_sse": "responses_streaming",
+    "validate_framework_context_options": "token_capture.external_capture",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

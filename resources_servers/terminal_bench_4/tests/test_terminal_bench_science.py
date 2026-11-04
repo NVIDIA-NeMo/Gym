@@ -17,9 +17,14 @@ from benchmarks.terminal_bench_science import prepare as preparation
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, global_config
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.sandbox import AsyncSandboxCompose, SandboxExecResult, create_provider, resolve_provider_config
-from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.data import TaskDataValidator, load_task_data_schema
+from nemo_gym.sandbox import (
+    AsyncSandboxCompose,
+    OpenSandboxProvider,
+    SandboxExecResult,
+    create_provider,
+    resolve_provider_config,
+)
 from resources_servers.terminal_bench_4 import environment as environment_module
 from resources_servers.terminal_bench_4 import shared_logs as shared_logs_module
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
@@ -824,7 +829,7 @@ def test_codex_rows_embed_the_official_instruction(tmp_path, monkeypatch, timeou
 def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_missing(tmp_path, monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
     from nemo_gym import PARENT_DIR
-    from nemo_gym.cli import setup_command
+    from nemo_gym.orchestration import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.chdir(tmp_path)
@@ -854,7 +859,7 @@ def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_miss
 
 def test_codex_rows_fail_when_the_server_environment_run_fails(monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
-    from nemo_gym.cli import setup_command
+    from nemo_gym.orchestration import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.setattr(setup_command, "run_command", lambda *args, **kwargs: SimpleNamespace(wait=lambda: 3))

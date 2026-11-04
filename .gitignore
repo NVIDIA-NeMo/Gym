@@ -248,7 +248,7 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 # fetch, or keep the old folder for every pull with NEMO_GYM_DATASETS_DIR=datasets.
 datasets/
 
-# Pulled Harbor datasets (nemo_gym/tasks/harbor/hub.py) land in environments/harbor/<dataset>/ next to the
+# Pulled Harbor datasets (nemo_gym/data/tasks/harbor/hub.py) land in environments/harbor/<dataset>/ next to the
 # committed per-dataset entries, which keep only their README, YAML files and dataset.toml (whose [gym] source
 # names the dataset `gym dataset pull <entry>` fetches into the entry's folder). The three names are kept in every
 # folder here, a pulled hub folder included: a dataset.toml written into one by hand shows as untracked, on purpose.

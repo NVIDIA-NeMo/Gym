@@ -42,7 +42,7 @@ valid reward or misses its `min_reward`.
 describes the usual split: an Environment Server orders the episode, and for JSONL rows a Resources Server holds the
 tools and the verifier. Task folders are the second way to define a task: the folder is the whole task, verifier
 included, so this server seeds the sandbox from the folder and runs the task's own verifier itself. `gym eval run`
-and `gym dataset validate` load the folders with `nemo_gym.tasks.harbor`, write one row per task and a run
+and `gym dataset validate` load the folders with `nemo_gym.data.tasks.harbor`, write one row per task and a run
 configuration with a per-taskset instance of this server, and bind it to a harness: the one `gym eval run` names
 with `--agent`, or `harbor_oracle_agent` for `gym dataset validate`. The harness must accept a sandbox in its
 session seed and leave the sandbox to the server when the session closes. A task with a `skills_dir`, or with MCP
@@ -95,7 +95,7 @@ pytest tests/unit_tests/test_harbor_*.py tests/unit_tests/test_tb4_harbor_sandbo
 ```
 
 Both lines need Jinja2. The first needs the server's [`requirements.txt`](requirements.txt) installed
-(`nemo-gym[dev,sandbox]` and Jinja2). The second covers `nemo_gym/tasks/harbor/` and runs with the rest of
+(`nemo-gym[dev,sandbox]` and Jinja2). The second covers `nemo_gym/data/tasks/harbor/` and runs with the rest of
 `tests/unit_tests/`; its Compose overlay prompt-template tests fail without Jinja2, which comes with the `ray` extra
 (`uv sync --extra dev --extra ray`, as CI installs). To run the server's suite in its own venv, as the CI server
 suite does:
@@ -126,11 +126,12 @@ Unit tests are not enough for a behavior change: also run
 | `configs/harbor.yaml` | The shipped server block |
 | `data/` | The example tasks and their recorded rows, rollouts and metrics |
 
-`nemo_gym/tasks/harbor/` (loading, prepare and the CLI):
+`nemo_gym/data/tasks/harbor/` (loading and prepare; `gym eval run` and `gym dataset validate` on a task target
+live in `nemo_gym/cli/eval.py`):
 
 | Module | Role |
 | --- | --- |
-| `cli.py` | `gym eval run`, `gym dataset validate` and `gym dataset pull` on a task target |
+| `prepare.py` | Find, pull (`gym dataset pull`) and prepare a taskset, and build its run config |
 | `task.py` | Load one task folder, or a folder of task folders |
 | `models.py` | Pydantic mirror of Harbor's `task.toml` |
 | `harbor_compat.py` | Environment hashing and image naming vendored from Harbor v0.22.0 |

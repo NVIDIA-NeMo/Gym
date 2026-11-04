@@ -70,7 +70,7 @@ import json
 import sys
 from omegaconf import OmegaConf
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import RolloutCollectionConfig
+from nemo_gym.rollouts import RolloutCollectionConfig
 
 paths, overrides = [], []
 args = iter(sys.argv[1:])

@@ -22,6 +22,7 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.trajectory.atif_export import AtifExportError, encode_atif_trajectory, transcript_to_atif
+    from nemo_gym.trajectory.model_call_record import ModelCallRecord, build_model_call_record
     from nemo_gym.trajectory.trajectory_record import (
         NG_AGENT_OBSERVATIONS_KEY,
         NG_TRAJECTORY_KEY,
@@ -41,7 +42,10 @@ if TYPE_CHECKING:
         TrajectoryToolCall,
         TrajectoryTurn,
         VerifierInvocation,
+        failure_observations,
+        grading_result_binding,
         join_agent_model_calls,
+        join_assistant_message_calls,
     )
 
 
@@ -53,6 +57,7 @@ _PUBLIC_API = {
     "AgentObservationBundle": "trajectory_record",
     "AtifExportError": "atif_export",
     "ContextCompactionObservation": "trajectory_record",
+    "ModelCallRecord": "model_call_record",
     "ModelCallRef": "trajectory_record",
     "NG_AGENT_OBSERVATIONS_KEY": "trajectory_record",
     "NG_TRAJECTORY_KEY": "trajectory_record",
@@ -67,8 +72,12 @@ _PUBLIC_API = {
     "TrajectoryToolCall": "trajectory_record",
     "TrajectoryTurn": "trajectory_record",
     "VerifierInvocation": "trajectory_record",
+    "build_model_call_record": "model_call_record",
     "encode_atif_trajectory": "atif_export",
+    "failure_observations": "trajectory_record",
+    "grading_result_binding": "trajectory_record",
     "join_agent_model_calls": "trajectory_record",
+    "join_assistant_message_calls": "trajectory_record",
     "transcript_to_atif": "atif_export",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
