@@ -207,8 +207,9 @@ async def test_same_environment_all_rubrics(setup, name):
     assert json.loads(Path(result.artifacts["result"]).read_text())["reward"] == pytest.approx(0.64)
 
 
+# Failure routing has two implementations: dataset rubrics and the generic rubric.
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", get_args(RubricName))
+@pytest.mark.parametrize("name", ["ChartQA", "generic"])
 @pytest.mark.parametrize("status", ["code_error", "timeout", "missing_output", "invalid_output"])
 @pytest.mark.parametrize("blend", [False, True])
 async def test_policy_failure_is_unmasked_zero(setup, status, name, blend):

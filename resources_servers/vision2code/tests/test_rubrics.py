@@ -81,7 +81,8 @@ def test_sparse_is_diagnostic_and_blank_is_capped(tmp_path):
         )
 
 
-@pytest.mark.parametrize("name", get_args(evaluation.RubricName))
+# Exercise both scorers; dataset-specific weights and caps are covered by the golden cases.
+@pytest.mark.parametrize("name", ["ChartQA", "generic"])
 @pytest.mark.parametrize("score", [True, "NaN", "Infinity", -1, 5.1, None])
 def test_invalid_scores(name, score):
     definition = generic_rubric.GENERIC_RUBRIC if name == "generic" else rubrics.DATASET_RUBRICS[name]
