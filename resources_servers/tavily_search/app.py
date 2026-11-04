@@ -323,7 +323,12 @@ def select_provider_domains(
 
 
 def _reject_typed_seed(value: object) -> object:
-    if isinstance(value, dict) and any(field in value for field in ResourcesSeedSessionRequest.model_fields):
+    # A body that names a resources_session_id, or carries typed episode_id and task_id objects, is a malformed typed
+    # seed and must not create a /run session. A dataset row's own scalar task_id does not make a body typed.
+    if isinstance(value, dict) and (
+        "resources_session_id" in value
+        or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
+    ):
         raise ValueError("A resources session seed must satisfy ResourcesSeedSessionRequest")
     return value
 
