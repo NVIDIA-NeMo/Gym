@@ -84,7 +84,7 @@ _VALID_BENCHMARK_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 # whitespace-delimited token is checked against this, not the whole line.
 _JOB_ID_RE = re.compile(r"^\d+(;\S+)?$")
 
-# Held by `gym eval resubmit` from its scheduler check to its sbatch, so two resubmits cannot both queue a job.
+# Held by `gym job resubmit` from its scheduler check to its sbatch, so two resubmits cannot both queue a job.
 _RESUBMIT_LOCK = ".gym_resubmit.lock"
 
 

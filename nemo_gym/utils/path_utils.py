@@ -20,7 +20,7 @@ def failures_path_for(output_fpath: Path) -> Path:
 
 
 def resubmit_offset_path_for(output_fpath: Path) -> Path:
-    """Where `gym eval resubmit` records the failures sidecar's line count; failures before it no longer count."""
+    """Where `gym job resubmit` records the failures sidecar's line count; failures before it no longer count."""
     return output_fpath.with_name(output_fpath.stem + "_resubmit_offset")
 
 
