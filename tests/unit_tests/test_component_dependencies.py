@@ -5,6 +5,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+import pytest
 from packaging.requirements import Requirement
 from scripts.component_locks import POLICY_KEYS, expected_policy, managed_projects, uses_gym
 
@@ -61,14 +62,13 @@ def test_component_uv_policy_matches_root_with_declared_exceptions() -> None:
 
 
 def test_locks_satisfy_shared_security_floors() -> None:
-    """Check actual locked versions rather than only dependency declarations."""
-    baseline = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["uv"]
-    requirements = [Requirement(value) for value in baseline["constraint-dependencies"]]
-    floors = {requirement.name: requirement.specifier for requirement in requirements}
+    """Check locked versions against the shared floors and explicit component exceptions."""
     failures = []
     for project in managed_projects():
         if project != ROOT and not uses_gym(project):
             continue
+        requirements = [Requirement(value) for value in expected_policy(project)["constraint-dependencies"]]
+        floors = {requirement.name: requirement.specifier for requirement in requirements}
         lock = tomllib.loads((project / "uv.lock").read_text())
         for package in lock["package"]:
             if package["name"] in floors and not floors[package["name"]].contains(
@@ -76,6 +76,17 @@ def test_locks_satisfy_shared_security_floors() -> None:
             ):
                 failures.append(f"{project}: {package['name']}=={package['version']}")
     assert not failures, "Locked versions below shared floors:\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize("component", ["wmt_translation", "longmt_eval"])
+def test_comet_locks_respect_encoder_dependency_limits(component: str) -> None:
+    """Keep COMET 2.2.7 within the supported Transformers and Hub API ranges."""
+    lock = tomllib.loads((ROOT / "resources_servers" / component / "uv.lock").read_text())
+    versions = {package["name"]: package["version"] for package in lock["package"] if "version" in package}
+    assert versions["unbabel-comet"] == "2.2.7"
+    for value in ("transformers>=4.17,<5", "huggingface-hub>=0.19.3,<1"):
+        requirement = Requirement(value)
+        assert requirement.specifier.contains(versions[requirement.name]), f"{component}: {requirement}"
 
 
 def test_codec_lock_preserves_the_model_torch_runtime() -> None:
