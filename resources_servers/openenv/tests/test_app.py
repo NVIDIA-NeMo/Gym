@@ -1073,21 +1073,18 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert len(server._verified_sessions) == 0
 
 
-def test_next_legacy_run_gets_new_cookie_and_old_verify_remains_retryable() -> None:
+def test_next_legacy_run_keeps_its_cookie_and_starts_a_new_environment() -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={}).status_code == 200
-        old_cookies = dict(client.cookies)
-        old_id = next(iter(server._sessions))
-        first = client.post("/verify", json=VERIFY_BODY).json()
-        assert client.post("/seed_session", json={}).status_code == 200
-        new_id = next(iter(server._sessions))
-        assert new_id != old_id
+        session_id = next(iter(server._sessions))
         assert client.post("/verify", json=VERIFY_BODY).json()["mask_sample"] is False
-        client.cookies.clear()
-        client.cookies.update(old_cookies)
-        retry = client.post("/verify", json=VERIFY_BODY).json()
-        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+        assert server._sessions == {}
+
+        # The next /run on the same cookie replaces the finished run's environment under the same ID.
+        assert client.post("/seed_session", json={}).status_code == 200
+        assert list(server._sessions) == [session_id]
+        assert client.post("/verify", json=VERIFY_BODY).json()["mask_sample"] is False
 
 
 @pytest.mark.parametrize("typed", [False, True])

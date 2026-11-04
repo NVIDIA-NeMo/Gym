@@ -228,8 +228,9 @@ reward and optional typed identity for `session_close_retry_window_seconds`, so 
 keeping an environment alive. `/close_session` fences that record and releases any still-active or incomplete
 instance. If `env.close()` raises, ownership is retained and close or checkpoint retirement can retry. An instance
 whose reset and cleanup both failed remains owned until cleanup succeeds. Checkpoint retirement also releases live
-instances. Seeds cannot reopen typed, verified or closed IDs; a new legacy `/run` reusing a verified legacy cookie
-receives a fresh session cookie while the old verification remains retryable.
+instances. A typed seed cannot reopen a verified or closed ID, and a legacy seed cannot replace a typed or closed
+session; a new legacy `/run` reusing a verified legacy cookie replaces the finished run's environment under the
+same session ID.
 
 A tool call (`/step` or `/<tool_name>`) for a session the server no longer holds fails with 404
 (`failure_kind: session_lost`), and `/verify` for it returns a masked sample (`mask_sample: true`) instead of a
