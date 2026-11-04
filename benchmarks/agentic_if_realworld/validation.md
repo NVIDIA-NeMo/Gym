@@ -245,7 +245,7 @@ benchmark result, training authorization or certification.
 
 ## November 4 evidence-ID transport
 
-New-run configuration uses `evidence_ids_v1`: instruction quote IDs and exact
+The initial November 4 configuration selected `evidence_ids_v1`: instruction quote IDs and exact
 response span IDs are resolved before unchanged strict-v2.2 validation. The
 full rubric and evaluation payload remain present. Historical quote transport
 and its cached grades remain available under `quotes`; transport variants use
@@ -262,3 +262,16 @@ different request identities and must retain their provenance.
 - Frozen policy, source manifest, private inputs and prior grades are unchanged.
   No real benchmark examples were sent by these checks. Synthetic plumbing
   evidence does not establish agreement with Astra or a benchmark accuracy gain.
+
+### Reviewer requirement retained
+
+The shipped default is restored to `quotes`; `evidence_ids_v1` remains opt-in.
+[Yu's request](https://github.com/NVIDIA-NeMo/Gym/pull/5013#discussion_r4407413874)
+requires bounded real-task evidence through the judge request being shipped.
+The earlier 50-task run validates the quote transport, not the new evidence-ID
+request. Before promoting evidence IDs, record a bounded adaptive run with the
+approved policy and judge, including revision, cohort, scored/pass/fail/masked
+counts, mask reasons and judge HTTP status counts, and request reviewer confirmation.
+Earlier validation receipts remain bound to their original revisions and modes.
+The default-restoration check passes all 258 component/model tests. No model
+calls or real benchmark rows were needed to restore this reviewed transport.

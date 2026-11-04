@@ -69,8 +69,18 @@ gym env test +entrypoint=responses_api_models/agentic_if_text +should_validate_d
 
 ### Evidence-ID judge transport
 
-The shipped profile selects `judge_evidence_transport: evidence_ids_v1`.
-Judges select instruction IDs and exact response-span IDs instead of copying
+The shipped profile selects `judge_evidence_transport: quotes`, the transport
+used by the reviewed bounded real-task run. The experimental `evidence_ids_v1`
+transport is opt-in through a private configuration file:
+
+```yaml
+agentic_if_realworld_resources:
+  resources_servers:
+    agentic_if_realworld:
+      judge_evidence_transport: evidence_ids_v1
+```
+
+In this mode, judges select instruction IDs and exact response-span IDs instead of copying
 quotes. The adapter restores the original text and runs the unchanged strict-v2.2
 validator. IDs establish location, not correctness: the judge must still justify
 compliance or violation against the full input and response. Reasoning and history
@@ -81,6 +91,13 @@ resolution hashes are retained in private receipts. The rubric, dataset, policy
 hashes, model reasoning settings and unscored semantics are unchanged.
 
 This is a versioned transport with a distinct cache identity. Resume historical
-quote-based runs with `judge_evidence_transport: quotes` and their original config;
+quote-based runs with `judge_evidence_transport: quotes`, their original runtime
+revision and configuration;
 valid old grades remain valid and must not be regenerated. Use a new run directory
 for the new transport. Results from different transports must retain that provenance.
+
+Before making evidence IDs the default, run a bounded real-task evaluation through
+the adaptive profile with this transport and the approved policy and judge. Record
+the revision, cohort, scored/pass/fail/masked counts, mask reasons and judge HTTP
+status counts, then request reviewer confirmation. Synthetic tests and historical
+quote-based runs do not satisfy this requirement or establish an accuracy gain.
