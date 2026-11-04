@@ -1,18 +1,21 @@
-use_absolute_ip: true
-config_paths:
-- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Qwen Code borrows SandboxAccess from the Environment Server. The run configuration binds the
+# independent benchmark and agent; this config selects only the harness and model.
 qwen_code_agent:
   responses_api_agents:
     qwen_code_agent:
       entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: ???
+      num_workers: 1
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
+      qwen_version: 0.25.1
       concurrency: 32
+      # Seconds per activation, children included, enforced by the sandbox's process supervisor.
       timeout: 3600
       # Swarm knobs (see README): subagents false is the solo control.
       subagents: true
@@ -22,22 +25,15 @@ qwen_code_agent:
       max_parallel_agents: null
       agent_team: false
       max_session_turns: null
+      max_tool_calls: null
       approval_mode: yolo
-      qwen_version: 0.25.1
-      runtime_archive: ${oc.env:QWEN_CODE_RUNTIME_ARCHIVE,null}
-      execution_failure_reward_zero: true
-      artifacts_dir: ${oc.env:QWEN_CODE_ARTIFACTS_DIR,results/qwen_code}
-      sandbox_provider: sandbox
-      network_access: model_only
-      sandbox_config:
-        image: python:3.12-slim
-        ttl_s: 7200
-        ready_timeout_s: 1200
-        # Must exist in the image.
-        workdir: /root
-        entrypoint: [sleep, infinity]
-        resources:
-          cpu: 2
-          memory_mib: 4096
-        env:
-          EXECD_API_GRACE_SHUTDOWN: 50ms
+      system_prompt: null
+      exclude_tools: []
+      settings: {}
+      # Agent-server archive from build_runtime.sh, for sandboxes without internet access.
+      runtime_archive: null
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 60
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}

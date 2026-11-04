@@ -1,36 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""Qwen Code agent sessions: output conversion, settings, seed refusals, and real supervised runs of a fake CLI."""
 
+import asyncio
 import io
 import json
+import shlex
+import shutil
+import sys
 import tarfile
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.server_utils import ServerClient
-from responses_api_agents.qwen_code_agent import app
-from responses_api_agents.qwen_code_agent.app import (
-    QwenCodeAgent,
-    QwenCodeAgentConfig,
-    QwenCodeAgentRunRequest,
-    parse_stream,
-    summarize_subagents,
-)
+from nemo_gym.agents import AgentSeedSessionRequest, SandboxSession, check_agent_seed_rejected
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents.base_responses_api_agent import ModelEndpoint
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxExecResult
+from responses_api_agents.qwen_code_agent.app import QwenCodeAgent, QwenCodeAgentConfig
+from responses_api_agents.qwen_code_agent.conversion import parse_stream, summarize_subagents
+from responses_api_agents.qwen_code_agent.sandbox import CLI, QWEN_VERSION, QwenSession
 
 
 ROOT_EVENTS = [
@@ -55,11 +48,7 @@ ROOT_EVENTS = [
         },
     },
     # Child events stay out of the root trajectory.
-    {
-        "type": "assistant",
-        "parent_tool_use_id": "call-1",
-        "message": {"content": [{"type": "text", "text": "child work"}]},
-    },
+    {"type": "assistant", "parent_tool_use_id": "call-1", "message": {"content": [{"type": "text", "text": "child"}]}},
     {
         "type": "user",
         "parent_tool_use_id": None,
@@ -74,266 +63,314 @@ ROOT_EVENTS = [
 ]
 
 
-def subagent_archive(path, metas):
-    """Write a sessions archive shaped like Qwen Code's ~/.qwen/projects export."""
-    with tarfile.open(path, "w:gz") as archive:
-        for name, data in [
-            (f"projects/p/subagents/s1/agent-{i}.meta.json", json.dumps(meta)) for i, meta in enumerate(metas)
-        ] + [
-            (
-                "projects/p/subagents/s1/agent-0.jsonl",
-                json.dumps({"usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 4}}),
-            ),
-            ("projects/p/chats/s1.jsonl", json.dumps({"usageMetadata": {"promptTokenCount": 999}})),
-        ]:
+def archive(files: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, data in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(data.encode())
-            archive.addfile(info, io.BytesIO(data.encode()))
+            tar.addfile(info, io.BytesIO(data.encode()))
+    return buffer.getvalue()
 
 
-def make_config(**overrides):
-    return QwenCodeAgentConfig(
-        name="qwen",
-        host="127.0.0.1",
-        port=9000,
-        entrypoint="app.py",
-        resources_server={"type": "resources_servers", "name": "grader"},
-        model_server={"type": "responses_api_models", "name": "policy_model"},
-        model="root-model",
-        sandbox_provider="sandbox",
-        sandbox_config={"image": "python:3.12-slim"},
-        **overrides,
-    )
+FAKE_QWEN = r"""
+import json, os, subprocess, sys, time
+from pathlib import Path
+args = sys.argv[2:]
+if args == ["--version"]:
+    print("__VERSION__")
+    sys.exit(0)
+home = Path(os.environ["QWEN_HOME"])
+mode = os.environ.get("TEST_MODE", "normal")
+(home / "seen.json").write_text(json.dumps({
+    "cli": sys.argv[1], "args": args, "prompt": sys.stdin.read(), "cwd": os.getcwd(),
+    "settings": json.loads((home / "settings.json").read_text()),
+    "env": {k: v for k, v in os.environ.items() if k.startswith(("QWEN_", "NEMO_GYM_"))},
+}))
+subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
+meta = home / "projects" / "p" / "subagents" / "s1" / "agent-0.meta.json"
+meta.parent.mkdir(parents=True, exist_ok=True)
+meta.write_text(json.dumps({"depth": 0}))
+events = __EVENTS__
+if mode == "silent":
+    events = [e for e in events if not (e["type"] == "assistant" and "answer" in json.dumps(e))]
+for event in events[:-1]:
+    print(json.dumps(event), flush=True)
+if mode == "sleep":
+    time.sleep(60)
+result = dict(events[-1], is_error=mode == "error", subtype="error_during_execution" if mode == "error" else "success")
+print(json.dumps(result))
+""".replace("__VERSION__", QWEN_VERSION).replace("__EVENTS__", repr(ROOT_EVENTS).replace("None", "None"))
 
 
-@pytest.fixture
-def agent(tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
-    monkeypatch.setattr(app, "sandbox_server_url", lambda name, **kwargs: f"http://{name}.example:8000")
-    client = MagicMock(spec=ServerClient)
+class LocalSandbox:
+    """Run every sandbox command on this host, except the installer, which writes the fake runtime."""
 
-    async def post(**kwargs):
-        if kwargs["url_path"] != "/verify":
-            return SimpleNamespace(cookies={}, ok=True, read=AsyncMock(return_value=b"{}"))
-        reward = float(any(item["type"] == "message" for item in kwargs["json"]["response"]["output"]))
-        body = json.dumps(kwargs["json"] | {"reward": reward})
-        return SimpleNamespace(cookies={}, ok=True, read=AsyncMock(return_value=body))
+    def __init__(self):
+        self.disconnected = False
 
-    client.post = AsyncMock(side_effect=post)
-    server = QwenCodeAgent(
-        config=make_config(
-            artifacts_dir=str(tmp_path / "artifacts"),
-            subagent_model="worker",
-            subagent_model_server={"type": "responses_api_models", "name": "worker_model"},
-            max_subagent_depth=2,
-            execution_failure_reward_zero=True,
+    async def upload(self, source, destination):
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    async def download(self, source, destination):
+        shutil.copyfile(source, destination)
+
+    async def exec(self, command, *, cwd=None, timeout_s=30, env=None):
+        argv = shlex.split(command)
+        if len(argv) > 1 and argv[1].endswith("/install_qwen_runtime.sh"):
+            assert argv[3] == QWEN_VERSION
+            node = Path(argv[2]) / "bin" / "node"
+            node.parent.mkdir(parents=True, exist_ok=True)
+            node.write_text(f"#!{sys.executable}\n" + FAKE_QWEN)
+            node.chmod(0o755)
+            return SandboxExecResult("", "", 0)
+        process = await asyncio.create_subprocess_exec(
+            "sh", "-c", command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        return SandboxExecResult(stdout.decode(errors="replace"), stderr.decode(errors="replace"), process.returncode)
+
+    async def disconnect(self):
+        self.disconnected = True
+
+    async def stop(self):
+        pytest.fail("A borrowed sandbox must not be stopped")
+
+
+def agent(**kwargs) -> QwenCodeAgent:
+    return QwenCodeAgent(
+        config=QwenCodeAgentConfig(
+            host="localhost",
+            port=8080,
+            name="qwen_code_agent",
+            entrypoint="app.py",
+            model="policy",
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+            **kwargs,
         ),
-        server_client=client,
+        server_client=MagicMock(spec=ServerClient),
     )
-    monkeypatch.setattr(server, "_capture_correlation_enabled", lambda: True)
 
-    staged = {}
 
-    async def upload(local, remote):
-        staged[remote] = local.read_text()
-
-    async def exec_(command, **kwargs):
-        if "--version" in command:
-            return SimpleNamespace(return_code=0, error_type=None, stdout="tar: warning\n0.25.1\n", stderr="")
-        return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
-
-    async def download(remote, local):
-        if remote.endswith("stdout.jsonl"):
-            local.write_text("\n".join(json.dumps(event) for event in ROOT_EVENTS))
-        elif remote.endswith("sessions.tar.gz"):
-            subagent_archive(local, [{"depth": 0, "isBackgrounded": True}, {"depth": 1}])
-        else:
-            local.write_text("")
-
-    sandbox = SimpleNamespace(
-        upload=AsyncMock(side_effect=upload),
-        exec=AsyncMock(side_effect=exec_),
-        download=AsyncMock(side_effect=download),
-        stop=AsyncMock(),
+def seed(*, workdir="/repo", tools=None, user=None, borrowed=True) -> AgentSeedSessionRequest:
+    access = {
+        "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {"id": "task"}},
+        "workdir": workdir,
+    }
+    if user is not None:
+        access["user"] = user
+    return AgentSeedSessionRequest(
+        agent_session_id="session-1",
+        episode_id={"rollout_id": "rollout-1"},
+        task_id={"taskset": "test", "task_id": "task"},
+        tool_accesses=tools or [],
+        sandbox_access=access if borrowed else None,
     )
-    server._start_sandbox = AsyncMock(return_value=sandbox)
-    return server, sandbox, staged
 
 
-def request_body():
-    return QwenCodeAgentRunRequest.model_validate(
-        {
-            "_ng_rollout_id": "r1",
-            "responses_create_params": {
-                "input": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Compute 6*7"}]
-            },
-        }
+def body(**fields) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Compute 6*7"}], **fields
     )
 
 
 def test_parse_stream_keeps_root_trajectory_and_result():
     output, result = parse_stream("\n".join(json.dumps(e) for e in ROOT_EVENTS) + "\nnot json")
-    types = [item.type for item in output]
-    assert types == ["reasoning", "function_call", "function_call_output", "reasoning", "message"]
-    assert output[0].summary[0].text == "plan" and output[3].summary[0].text == "check"
+    assert [item.type for item in output] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "message",
+    ]
     assert output[1].name == "agent" and json.loads(output[1].arguments) == {"prompt": "x"}
     assert output[2].call_id == "call-1" and output[2].output == "42"
     assert output[4].content[0].text == "answer 42"
     assert result["usage"]["input_tokens"] == 100
 
 
-def test_summarize_subagents_counts_children_depth_and_tokens(tmp_path):
-    subagent_archive(tmp_path / "s.tgz", [{"depth": 0, "isBackgrounded": True}, {"depth": 2}, {"depth": 0}])
-    assert summarize_subagents(tmp_path / "s.tgz") == {
-        "qwen_subagents": 3,
-        "qwen_subagents_background": 1,
-        "qwen_subagent_max_depth": 3,
-        "qwen_subagent_input_tokens": 30,
-        "qwen_subagent_output_tokens": 4,
-    }
-
-
-def test_summarize_subagents_skips_truncated_and_corrupt_files(tmp_path):
-    # A child killed mid-write leaves a partial last transcript line or a cut meta file.
+def test_summarize_subagents_skips_truncated_and_corrupt_files():
     good = json.dumps({"usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 4}})
     files = {
-        "projects/p/subagents/s1/agent-0.meta.json": json.dumps({"depth": 0}),
+        "projects/p/subagents/s1/agent-0.meta.json": json.dumps({"depth": 0, "isBackgrounded": True}),
         "projects/p/subagents/s1/agent-1.meta.json": '{"depth": 1, "isBackgr',
-        "projects/p/subagents/s1/agent-0.jsonl": good + "\n" + '{"usageMetadata": {"promptTok' + "\n[1, 2]",
+        "projects/p/subagents/s1/agent-0.jsonl": good + "\n" + '{"usageMetadata": {"promptTok',
+        "projects/p/chats/s1.jsonl": json.dumps({"usageMetadata": {"promptTokenCount": 999}}),
     }
-    with tarfile.open(tmp_path / "s.tgz", "w:gz") as archive:
-        for name, data in files.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(data.encode())
-            archive.addfile(info, io.BytesIO(data.encode()))
-    assert summarize_subagents(tmp_path / "s.tgz") == {
+    assert summarize_subagents(archive(files)) == {
         "qwen_subagents": 1,
-        "qwen_subagents_background": 0,
+        "qwen_subagents_background": 1,
         "qwen_subagent_max_depth": 1,
         "qwen_subagent_input_tokens": 30,
         "qwen_subagent_output_tokens": 4,
     }
 
 
-async def test_run_configures_routes_subagents_and_verifies(agent):
-    server, sandbox, staged = agent
-    result = await server.run(SimpleNamespace(cookies={}), request_body())
-
-    assert result.reward == 1 and not result.qwen_failed
-    assert result.qwen_subagents == 2 and result.qwen_subagent_max_depth == 2
-    assert result.qwen_subagents_background == 1
-    assert result.response.usage.input_tokens == 100
-
-    settings = next(json.loads(v) for p, v in staged.items() if p.endswith("settings.json"))
-    assert settings["modelProviders"]["openai"] == [
-        {
-            "id": "root-model",
-            "baseUrl": "http://policy_model.example:8000/ng-rollout/r1/v1",
-            "envKey": app.API_KEY_ENV,
-        },
-        {"id": "worker", "baseUrl": "http://worker_model.example:8000/ng-rollout/r1/v1", "envKey": app.API_KEY_ENV},
-    ]
-    assert settings["memory"] == {"enableManagedAutoMemory": False}
-    override = next(v for p, v in staged.items() if p.endswith("agents/general-purpose.md"))
-    assert "\nmodel: worker\n" in override
-    assert next(v for p, v in staged.items() if p.endswith("prompt.txt")) == "Compute 6*7"
-
-    command = next(c.kwargs["command"] for c in sandbox.exec.await_args_list if "stream-json" in c.kwargs["command"])
-    assert "--max-subagent-depth 2" in command and "--exclude-tools" not in command
-    assert "--append-system-prompt 'Be terse.'" in command and "prompt.txt > " in command
-    sandbox.stop.assert_awaited_once()
-    generation = json.loads((app.Path(result.qwen_results_dir) / "generation.json").read_text())
-    assert generation["qwen_subagents"] == 2 and generation["response"]["output"]
-
-
-async def test_failed_run_is_scored_as_empty_response(agent):
-    server, sandbox, _ = agent
-    run_exec = sandbox.exec.side_effect
-
-    async def failing(command, **kwargs):
-        if "stream-json" in command:
-            return SimpleNamespace(return_code=55, error_type=None, stdout="", stderr="")
-        return await run_exec(command, **kwargs)
-
-    sandbox.exec.side_effect = failing
-    result = await server.run(SimpleNamespace(cookies={}), request_body())
-    assert result.qwen_failed and result.qwen_exit_code == 55 and result.reward == 0
-    assert server.server_client.post.await_args.kwargs["json"]["response"]["output"] == []
-    assert result.response.output  # The generation is retained for inspection.
-
-
-async def test_version_mismatch_is_a_setup_error(agent):
-    server, sandbox, _ = agent
-    sandbox.exec.side_effect = AsyncMock(return_value=SimpleNamespace(return_code=0, error_type=None, stdout="0.1\n"))
-    with pytest.raises(RuntimeError, match="does not match qwen_version"):
-        await server.run(SimpleNamespace(cookies={}), request_body())
-    sandbox.stop.assert_awaited_once()
-
-
-def test_solo_and_team_settings():
-    solo = QwenCodeAgent(
-        config=make_config(subagents=False, max_session_turns=30), server_client=MagicMock(spec=ServerClient)
-    )
-    command = solo._build_command(None)
-    assert command[command.index("--max-session-turns") + 1] == "30"
-    assert [command[i + 1] for i, arg in enumerate(command) if arg == "--exclude-tools"] == app.SUBAGENT_TOOLS
-
-    team = QwenCodeAgent(
-        config=make_config(agent_team=True, max_parallel_agents=64, settings={"model": {"maxSessionTurns": 9}}),
-        server_client=MagicMock(spec=ServerClient),
-    )
-    team._model_url = lambda server, body: "http://m/v1"
-    mcp = {"tools": {"url": "http://t/mcp", "headers": {"X-Token": "t"}, "enabled": True, "timeout": 5}}
-    settings = team._build_settings(request_body(), mcp)
-    assert settings["experimental"] == {"agentTeam": True} and settings["agents"] == {"maxParallelAgents": 64}
-    assert settings["model"] == {"name": "root-model", "maxSessionTurns": 9}
-    assert settings["mcpServers"] == {
-        "tools": {"httpUrl": "http://t/mcp", "headers": {"X-Token": "t"}, "timeout": 5, "trust": True}
-    }
-
-
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"subagents": False, "subagent_model": "w"},
         {"subagents": False, "agent_team": True},
-        {"subagent_model": "root-model"},
+        {"subagent_model_server": {"type": "responses_api_models", "name": "w"}},
+        {"subagent_model": "policy"},
     ],
 )
 def test_invalid_subagent_settings(overrides):
     with pytest.raises(ValueError):
-        make_config(**overrides)
+        agent(**overrides)
 
 
-def test_request_controls_reach_qwen():
-    agent = QwenCodeAgent(config=make_config(max_tool_calls=50), server_client=MagicMock(spec=ServerClient))
-    agent._model_url = lambda server, body: "http://m/v1"
-    body = request_body()
-    body.responses_create_params.temperature = 0.3
-    body.responses_create_params.top_p = 0.9
-    body.responses_create_params.max_output_tokens = 1000
-    settings = agent._build_settings(body, {})
-    assert settings["model"]["generationConfig"] == {
-        "samplingParams": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 1000}
-    }
-    command = agent._build_command(None, max_tool_calls=7)
-    assert command[command.index("--max-tool-calls") + 1] == "7"
-    command = agent._build_command(None)
-    assert command[command.index("--max-tool-calls") + 1] == "50"
+def test_settings_route_every_model_through_the_rollout():
+    server = agent(
+        subagent_model="worker",
+        subagent_model_server={"type": "responses_api_models", "name": "worker_model"},
+        settings={"modelProviders": {"openai": []}, "ui": {"theme": "x"}},
+    )
+    state = MagicMock(request=seed())
+
+    def endpoint(*, model_server, rollout_id):
+        return ModelEndpoint(base_url=f"http://{model_server.name}/ng-rollout/{rollout_id}/v1")
+
+    with patch.object(QwenCodeAgent, "model_endpoint", side_effect=endpoint):
+        settings = server.qwen_settings(state, body(temperature=0.0, top_p=0.9))
+    assert [route["baseUrl"] for route in settings["modelProviders"]["openai"]] == [
+        "http://policy_model/ng-rollout/rollout-1/v1",
+        "http://worker_model/ng-rollout/rollout-1/v1",
+    ]
+    assert settings["model"]["generationConfig"] == {"samplingParams": {"temperature": 0.0, "top_p": 0.9}}
+    assert settings["ui"] == {"theme": "x"}
 
 
 @pytest.mark.parametrize(
-    "item, message",
+    ("request_seed", "reason"),
     [
-        ({"role": "assistant", "content": "earlier answer"}, "not conversation history"),
-        ({"type": "function_call_output", "call_id": "c1", "output": "x"}, "not conversation history"),
-        ({"role": "user", "content": [{"type": "input_image", "image_url": "data:,"}]}, "only supports text input"),
+        (
+            seed(
+                tools=[
+                    {
+                        "kind": "mcp",
+                        "name": "task_tools",
+                        "required": True,
+                        "connection": {"transport": "streamable_http", "url": "http://r/mcp"},
+                    }
+                ]
+            ),
+            "Qwen Code sessions use Qwen Code's own tools; required tool grants are unsupported",
+        ),
+        (seed(user="nobody"), "Qwen Code does not support a SandboxAccess user override"),
+        (seed(workdir="/tmp"), "Qwen Code task workdir must be absolute and separate from its session storage"),
+        (seed(borrowed=False), "Qwen Code requires sandbox_access or a configured sandbox_provider"),
     ],
 )
-def test_history_and_non_text_input_are_rejected(item, message):
-    params = request_body().responses_create_params.model_copy(
-        update={"input": [{"role": "user", "content": "Go"}, item]}
+def test_unsupported_seeds_are_final_refusals(request_seed, reason):
+    server = agent()
+    assert check_agent_seed_rejected(server.setup_webserver(), request_seed) == reason
+    assert not server._session_records
+
+
+def test_request_mapping_and_refusals():
+    server = agent(system_prompt="Show work.")
+    assert server._conversation(body(instructions="Use tools.")) == (
+        "Compute 6*7",
+        "Show work.\n\nUse tools.\n\nBe terse.",
     )
-    with pytest.raises(HTTPException, match=message) as error:
-        QwenCodeAgent._instruction(params)
-    assert error.value.status_code == 422
+    for fields in (
+        {"max_output_tokens": 10},
+        {"model": "other"},
+        {"tools": [{"type": "function", "name": "f", "parameters": {}, "strict": True}]},
+    ):
+        with pytest.raises(HTTPException) as error:
+            server._conversation(body(**fields))
+        assert error.value.status_code == 422
+    with pytest.raises(HTTPException, match="one user message"):
+        server._conversation(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+            )
+        )
+
+
+async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
+    workdir = tmp_path / "task repo"
+    workdir.mkdir()
+    request = seed(workdir=str(workdir))
+    request.sandbox_access.env = {
+        "TEST_MODE": mode,
+        "TASK_TEST": "task-value",
+        "HOME": str(tmp_path / "task-home"),
+        "QWEN_HOME": "must-not-inherit",
+    }
+    sandbox = LocalSandbox()
+    state = QwenSession(
+        request=request,
+        provider_name="local",
+        sandbox_id="task",
+        runtime=str(tmp_path / "runtime"),
+        session=SandboxSession(
+            sandbox=sandbox, session_dir=str(tmp_path / "qwen session"), workdir=str(workdir), harness="Qwen Code"
+        ),
+    )
+    server = agent(timeout=timeout, subagents=False, max_session_turns=50)
+    node = tmp_path / "node.tar.gz"
+    node.write_bytes(b"node")
+    # The agent server downloads Node.js; the fake installer stands in for the runtime.
+    with patch(
+        "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=node)
+    ) as download:
+        await state.install(runtime_archive=None, timeout=10)
+    assert download.await_args.args[0].startswith("https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-")
+    state.activation_request = body(max_tool_calls=30)
+    endpoint = ModelEndpoint(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
+    with patch.object(QwenCodeAgent, "model_endpoint", return_value=endpoint):
+        response = await asyncio.wait_for(server._activate(state, state.activation_request), timeout=60)
+    seen = json.loads((Path(state.qwen_home) / "seen.json").read_text())
+    close = await asyncio.wait_for(server._close_agent_session_state(state), timeout=60)
+    return response, close, seen, state, sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_real_run_maps_output_usage_and_keeps_the_task_environment(tmp_path):
+    response, close, seen, state, sandbox = await activate(tmp_path, "normal")
+    assert response.status == "completed"
+    assert response.output[-1].content[0].text == "answer 42"
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (100, 7)
+    assert response.metadata["qwen_subagents"] == "1"
+    assert seen["cli"] == f"{state.runtime}/{CLI}"
+    assert seen["prompt"] == "Compute 6*7" and seen["cwd"] == state.session.workdir
+    args = seen["args"]
+    assert args[args.index("--append-system-prompt") + 1] == "Be terse."
+    assert args[args.index("--max-tool-calls") + 1] == "30" and args[args.index("--max-session-turns") + 1] == "50"
+    assert {"agent", "list_agents"} <= {args[i + 1] for i, arg in enumerate(args) if arg == "--exclude-tools"}
+    assert seen["settings"]["modelProviders"]["openai"][0]["baseUrl"] == "http://model.invalid/ng-rollout/rollout-1/v1"
+    assert seen["env"]["QWEN_HOME"] == state.qwen_home
+    assert (Path(state.session.workdir) / "proof.txt").read_text().splitlines() == [
+        str(tmp_path / "task-home"),
+        "task-value",
+    ]
+    assert "usage_unavailable" not in {gap.code for gap in close.agent_observations.gaps}
+    assert close.cleanup_confirmed and sandbox.disconnected and not Path(state.session.session_dir).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+@pytest.mark.parametrize(("mode", "failure_kind"), [("error", "unknown"), ("silent", "agent_invalid_output")])
+async def test_failed_runs_report_an_outcome(tmp_path, mode, failure_kind):
+    response, close, _, _, _ = await activate(tmp_path, mode)
+    assert response.status == "failed"
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == failure_kind
+    assert close.cleanup_confirmed
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_timeout_keeps_partial_work_as_incomplete(tmp_path):
+    response, close, _, state, _ = await activate(tmp_path, "sleep", timeout=3)
+    assert state.session.cleanup["timed_out"] and response.status == "incomplete"
+    assert response.usage is None
+    assert close.agent_observations.records[1].outcome == "timeout"
