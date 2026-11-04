@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from nemo_gym.environment.agent_registry import discover_agents
     from nemo_gym.environment.benchmarks import BENCHMARKS_DIR, BenchmarkConfig
     from nemo_gym.environment.deliverables import IGNORE_FILES, is_deliverable
+    from nemo_gym.environment.in_process import PlannedBenchmark, TaskResult, TaskRunner, plan_benchmark
     from nemo_gym.environment.manifest import EnvironmentManifest, load_manifest, resolve_manifest_config_path
     from nemo_gym.environment.registry import discover_environment_catalog
 
@@ -23,10 +24,14 @@ _PUBLIC_API = {
     "BenchmarkConfig": "benchmarks",
     "EnvironmentManifest": "manifest",
     "IGNORE_FILES": "deliverables",
+    "PlannedBenchmark": "in_process",
+    "TaskResult": "in_process",
+    "TaskRunner": "in_process",
     "discover_agents": "agent_registry",
     "discover_environment_catalog": "registry",
     "is_deliverable": "deliverables",
     "load_manifest": "manifest",
+    "plan_benchmark": "in_process",
     "resolve_manifest_config_path": "manifest",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
