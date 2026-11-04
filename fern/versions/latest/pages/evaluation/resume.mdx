@@ -199,12 +199,11 @@ are removed; a rejected resume leaves them untouched. For runs with a manifest, 
 selected history as coverage and exporters. Intentional omissions do not trip failure-rate limits, and exhausted
 failures count as final.
 
-Every newly collected run has recovery history, including its first collection. Health checks work when all rows
-in the file being checked still represent selected attempts. A superseded failure in the separate failure sidecar
-does not prevent checking successful retries in the main file. If the checked file contains superseded outcomes, automatic checks print a skip
-message and standalone checks explain how to export a merged selected-result projection with `gym eval aggregate`.
-Collection and scoring still finish. Direct health reports for those histories remain a follow-up; they must not
-count old attempts as extra samples.
+Health checks read the selected completed attempts directly from each run's original files, even when those files
+also contain superseded outcomes. An older success does not reappear after a newer failure or interrupted execution.
+Automatic checks, standalone checks and shard aggregation use the same selection. Failure budgets, final-failure
+counts and timeout history still come from the complete source history. Loose JSONL files and explicitly supplied
+failure sidecars retain their line-by-line diagnostic behavior.
 
 Known runtime connection references (for example `${policy_base_url}` and `${policy_api_key}` inside agent client
 settings) do not change experiment identity when their values change. Model names and task parameters still do.
@@ -354,7 +353,7 @@ same rollout file. Readers also accept older runs whose companions exist only be
 has a manifest or journal. Competing companion sets remain an error. Rollout collection and its resume require companions
 beside the resolved output: back up and move an older run's files together before writing it. Legacy reverification
 `--resume` and `--append` may keep an unambiguous set of companions beside the alias; they do not split or migrate it.
-Health and reverification preserve the same checks against superseded history through aliases. Reverification protects
+Health selection and reverification history protections also apply through aliases. Reverification protects
 a manifest- or journal-backed source run's supporting files and main output, even when the supplied source is its
 `_failures` sidecar. Protection includes aliases and the `unsafe_` output prefix. For a merged output
 symlink, aggregation replaces the target file and preserves the symlink. It refuses to replace an input or an established

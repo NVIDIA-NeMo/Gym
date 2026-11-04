@@ -1067,13 +1067,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if self.config.workspace == "per_session":
             self._validate_shell_config()
         if not isinstance(body, ResourcesSeedSessionRequest):
-            # An agent's /run seeds with its row; /verify owns its eventual cleanup.
+            # An agent's /run seeds with its row; /verify owns its eventual cleanup. Such an agent can end a run
+            # without /verify (after a timeout, for example), so its sandbox starts with the first bash_command: only
+            # a run that used the shell can leave one behind, and a failed start cannot strand this seed's workspace.
             sid = request.session[SESSION_ID_KEY]
             async with self._fence.locked(sid):
                 if self.config.workspace == "per_session":
                     await self._release_session(sid)
                     self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
-                    await self._ensure_shell(sid)
             return BaseSeedSessionResponse()
 
         sid = body.resources_session_id
@@ -1235,12 +1236,21 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 out = await self._run_bash_readonly(command, duration, str(page_writer.workspace))
             else:
                 async with self._bash_semaphore:
-                    out = await shell.execute(
-                        command=command,
-                        duration=duration,
-                        workspace=page_writer.workspace,
-                        close_timeout=self.config.sandbox_close_timeout_seconds,
-                    )
+                    try:
+                        out = await shell.execute(
+                            command=command,
+                            duration=duration,
+                            workspace=page_writer.workspace,
+                            close_timeout=self.config.sandbox_close_timeout_seconds,
+                        )
+                    except TimeoutError:
+                        # The supervisor deadline passed without output: answer as the host interpreter did.
+                        LOG.warning("BrowseComp shell command timed out in session %s: %r", sid, command[:160])
+                        out = f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
+                    except Exception:
+                        # The model gets the usual error envelope; the provider's detail stays in the server log.
+                        LOG.exception("BrowseComp shell command failed in session %s", sid)
+                        out = "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
             return BashCommandResponse(results_string=out)
 
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:

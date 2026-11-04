@@ -239,6 +239,44 @@ async def test_bash_uses_sandbox_and_retains_guard_output(sandboxed, monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (TimeoutError("supervisor deadline"), "[command timed out after 10s]\n[exit_code=-1]"),
+        (
+            RuntimeError("exec failed: provider detail"),
+            "[bash error: the sandbox could not run the command]\n[exit_code=-2]",
+        ),
+    ],
+)
+async def test_sandbox_failures_answer_with_the_host_error_envelope(sandboxed, error, expected) -> None:
+    server, _ = sandboxed
+    await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
+    server._shell_sessions["resources-session"].execute = AsyncMock(side_effect=error)
+    output = await server.bash_command(_request(), BashCommandRequest(keystrokes="cat pages/0001.txt"))
+    assert output.results_string == expected
+    await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+
+
+@pytest.mark.asyncio
+async def test_run_seed_starts_the_sandbox_with_the_first_shell_command(
+    sandboxed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A /run agent can skip /verify, so only a run that used the shell may hold a sandbox.
+    server, containers = sandboxed
+    monkeypatch.setattr(shell_module.BrowsecompShellSandbox, "execute", AsyncMock(return_value="text\n[exit_code=0]"))
+    await server.seed_session(_request(), harness.BaseSeedSessionRequest())
+    assert not containers and "resources-session" in server._session_workspaces
+    output = await server.bash_command(_request(), BashCommandRequest(keystrokes="cat pages/0001.txt"))
+    assert output.results_string == "text\n[exit_code=0]"
+    containers[0].start.assert_awaited_once()
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    assert (await server.verify(_request(), body)).reward == 1
+    containers[0].stop.assert_awaited_once()
+    assert not server._shell_sessions and not server._session_workspaces
+
+
+@pytest.mark.asyncio
 async def test_setup_failure_retains_failed_cleanup_for_retry(sandboxed, monkeypatch: pytest.MonkeyPatch) -> None:
     server, containers = sandboxed
 
