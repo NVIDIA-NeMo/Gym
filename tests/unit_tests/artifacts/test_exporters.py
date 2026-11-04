@@ -174,7 +174,7 @@ class FakeMlflowClient:
     def log_dict(self, run_id: str, dictionary: dict[str, Any], artifact_file: str) -> None:
         self.artifacts[artifact_file] = deepcopy(dictionary)
 
-    def log_batch(self, run_id: str, params: tuple = ()) -> None:
+    def log_batch(self, run_id: str, params: tuple = (), synchronous: bool | None = None) -> None:
         for param in params:
             if self.params.get(param.key, param.value) != param.value:
                 raise MlflowException(
@@ -540,6 +540,13 @@ class TestFlattenConfig:
 
 
 class TestSanitizeKey:
+    def test_health_preflight_uses_the_installed_sdk_key_limit(self) -> None:
+        from nemo_gym.artifacts.exporters.metrics import _canonical_mlflow_key
+
+        raw = "health/" + "x" * (MAX_ENTITY_KEY_LENGTH + 10) + "/passed"
+        assert len(_canonical_mlflow_key(raw)) == MAX_ENTITY_KEY_LENGTH
+        assert _canonical_mlflow_key(raw) == _sanitize_key(raw)
+
     @pytest.mark.parametrize(
         "raw, expected",
         [
@@ -1237,3 +1244,33 @@ def test_cli_collection_failure_status(
     status = mlflow_module.MlflowClient(tracking_uri=mlflow_store["mlflow_tracking_uri"]).get_run(run_id).info.status
     tolerated_partial = outcome.startswith("partial_") and not require_complete
     assert status == ("FINISHED" if outcome == "success" or tolerated_partial else "FAILED")
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_saved_mlflow_run_lookup_only_treats_missing_resource_as_inactive(monkeypatch, mlflow_config, missing):
+    from mlflow.protos.databricks_pb2 import INTERNAL_ERROR, RESOURCE_DOES_NOT_EXIST
+
+    exporter, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+    client.reset_mock()
+    error = MlflowException("lookup failed", error_code=RESOURCE_DOES_NOT_EXIST if missing else INTERNAL_ERROR)
+    client.get_run.side_effect = error
+    if missing:
+        assert exporter._is_active("saved") is False
+    else:
+        with pytest.raises(MlflowException) as raised:
+            exporter._is_active("saved")
+        assert raised.value is error
+    client.get_run.assert_called_once_with("saved")
+    client.create_run.assert_not_called()
+    client.update_run.assert_not_called()
+
+
+def test_mlflow_experiment_creation_race_uses_the_winning_experiment(monkeypatch, mlflow_config):
+    exporter, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+    client.reset_mock()
+    client.get_experiment_by_name.side_effect = [None, SimpleNamespace(experiment_id="winner")]
+    client.create_experiment.side_effect = MlflowException("already exists")
+    assert exporter._experiment_id("shared") == "winner"
+    assert client.get_experiment_by_name.call_args_list == [call("shared"), call("shared")]
+    client.create_experiment.assert_called_once_with("shared")
+    client.create_run.assert_not_called()

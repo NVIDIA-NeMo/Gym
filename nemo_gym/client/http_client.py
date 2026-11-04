@@ -44,10 +44,11 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
-from nemo_gym.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -60,7 +61,6 @@ from nemo_gym.telemetry.connection_pool import (
 from nemo_gym.telemetry.observer import request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.utils.server_process import (
     get_nemo_gym_fastapi_num_workers,
     is_nemo_gym_fastapi_worker,
@@ -160,7 +160,18 @@ def get_global_aiohttp_client(
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
-        return _GLOBAL_AIOHTTP_CLIENT
+        # aiohttp binds a session to the loop it was made on (its own `_loop`), so a later `asyncio.run` in this
+        # process (such as the end-of-run re-judge after collection) must not get it: it is closed, and the running
+        # loop gets a new client.
+        owner_loop = getattr(_GLOBAL_AIOHTTP_CLIENT, "_loop", None)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        # Outside a running loop no new client can be made, so the cached one is returned as before.
+        if not isinstance(owner_loop, asyncio.AbstractEventLoop) or running_loop in (None, owner_loop):
+            return _GLOBAL_AIOHTTP_CLIENT
+        _close_detached_clients(owner_loop, _detach_global_aiohttp_clients())
 
     # Read only a config this process already has, cached or injected through NEMO_GYM_CONFIG_DICT; never parse
     # its argv here, which in a Ray task worker exits the process. A process with neither gets the default client
@@ -292,6 +303,27 @@ def _detach_global_aiohttp_clients() -> list[ClientSession]:
     _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
     _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
     return clients
+
+
+_CLOSING_DETACHED_CLIENTS: set[asyncio.Task] = set()
+
+
+def _close_detached_clients(owner_loop: asyncio.AbstractEventLoop, clients: list[ClientSession]) -> None:
+    """Close clients detached from a loop other than the running one, on their owner loop while it still runs."""
+
+    async def close_clients() -> None:
+        for client in clients:
+            await client.close()
+
+    if not clients:
+        return
+    if owner_loop.is_running():
+        asyncio.run_coroutine_threadsafe(close_clients(), owner_loop)
+        return
+    # The owner loop has stopped: no owner-loop work is left, and the close only marks the sessions closed.
+    task = asyncio.get_running_loop().create_task(close_clients())
+    _CLOSING_DETACHED_CLIENTS.add(task)
+    task.add_done_callback(_CLOSING_DETACHED_CLIENTS.discard)
 
 
 def global_aiohttp_client_exit():  # pragma: no cover

@@ -3,6 +3,7 @@
 """Terminal-Bench-Science on the pinned Harbor-package runtime shared with TB4."""
 
 import json
+import shlex
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -852,7 +853,14 @@ def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_miss
         f" && {python} -m benchmarks.terminal_bench_science.prepare_codex --task-names {' '.join(in_manifest_order)} "
         f"--task-download-dir {tmp_path / 'packages'}"
     )
-    assert "uv pip install" in command  # sets up the server's environment as `gym env start` does
+    _, setup_command, _ = command.split(" && ", 2)
+    setup_args = shlex.split(setup_command)
+    assert Path(setup_args[1]).name == "venv_setup.py"
+    assert setup_args[setup_args.index("--venv") + 1] == str(python.parent.parent)
+    install_args = shlex.split(setup_args[setup_args.index("--command") + 1])
+    assert Path(install_args[1]).name == "_locked_env.py"
+    assert install_args[install_args.index("--project") + 1] == str(prepare_codex.SERVER_DIR)
+    assert install_args[install_args.index("--venv") + 1] == str(python.parent.parent)
     assert (working_dir, kwargs["project_root"]) == (prepare_codex.SERVER_DIR, PARENT_DIR)
     assert kwargs["extra_env"] == {prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR: "1"}
 

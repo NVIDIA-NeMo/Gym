@@ -91,6 +91,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
+        id="rollout_tool_call_failed",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY}),
+    ),
+    CheckSpec(
         id="task_consistently_unhealthy",
         evaluation_scope=CheckScope.TASK,
         subject=CheckSubject.TASK,
@@ -290,6 +296,8 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "finish_reason": metadata.get("finish_reason"),
                 "error_category": metadata.get("error_category"),
                 "upstream_attempted": metadata.get("upstream_attempted"),
+                "failure_report": metadata.get("failure_report"),
+                "model_operations": metadata.get("model_operations"),
                 "upstream_status_code": metadata.get("upstream_status_code"),
                 "local_response_reason": metadata.get("local_response_reason"),
                 "tokens_in": tokens.get("prompt_tokens"),
@@ -491,6 +499,24 @@ def _call_locator(call: dict[str, Any], fallback: int) -> dict[str, int | str]:
     return {"call_id": str(call.get("model_call_id") or call.get("response_id") or fallback)}
 
 
+def _chat_has_usable_tool_call(calls: Any) -> bool:
+    if not isinstance(calls, list):
+        return False
+    for call in calls:
+        if not isinstance(call, dict) or call.get("type") not in ("function", "custom"):
+            continue
+        payload = call.get(call["type"])
+        if (
+            isinstance(call.get("id"), str)
+            and call["id"].strip()
+            and isinstance(payload, dict)
+            and isinstance(payload.get("name"), str)
+            and payload["name"].strip()
+        ):
+            return True
+    return False
+
+
 def _response_has_usable_output(response: Any) -> bool:
     """Whether a saved response holds something the agent can act on: answer text, a refusal or a tool call, in the
     Responses, Chat Completions or Messages shape. Reasoning alone, a summary of it included, is not usable."""
@@ -498,8 +524,19 @@ def _response_has_usable_output(response: Any) -> bool:
         return False
     if _nonempty(response.get("output_text")):
         return True
-    for item in response.get("output") or []:
-        if not isinstance(item, dict) or item.get("type") == "reasoning":
+    output = response.get("output")
+    for item in output if isinstance(output, list) else []:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("type"), str)
+            or not item["type"].strip()
+            or item["type"] == "reasoning"
+        ):
+            continue
+        if item["type"] == "function_call":
+            # Empty required strings pass response-schema validation but cannot identify an executable call.
+            if all(isinstance(item.get(key), str) and item[key].strip() for key in ("name", "call_id")):
+                return True
             continue
         # Any other output item is a tool call of some kind.
         if item.get("type") != "message" or _nonempty(item.get("content")):
@@ -512,11 +549,17 @@ def _response_has_usable_output(response: Any) -> bool:
             block.get("type") == "tool_use" or (block.get("type") == "text" and _nonempty(block.get("text")))
         ):
             return True
-    for choice in response.get("choices") or []:
+    choices = response.get("choices")
+    for choice in choices if isinstance(choices, list) else []:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-        if _nonempty(choice.get("text")) or _nonempty(message.get("content")) or message.get("tool_calls"):
+        if (
+            _nonempty(choice.get("text"))
+            or _nonempty(message.get("content"))
+            or _nonempty(message.get("refusal"))
+            or _chat_has_usable_tool_call(message.get("tool_calls"))
+        ):
             return True
     return False
 
@@ -544,17 +587,20 @@ def _transcript_tokens(record: dict[str, Any]) -> tuple[int, int, bool]:
     return prompt or 0, completion or 0, prompt is not None and completion is not None
 
 
-def _rollout_missing_agent_turns(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _rollout_missing_agent_turns(
+    record: dict[str, Any], trajectory: dict[str, Any], subject: dict[str, int | str]
+) -> list[Finding]:
     steps = _agent_steps(trajectory)
     if any(step.has_model_activity for step in steps):
         return []
-    return [
-        Finding(
-            check="rollout_missing_agent_turns",
-            subject=subject,
-            detail={"reason": "no agent turn with model activity"},
-        )
-    ]
+    detail: dict[str, Any] = {"reason": "no agent turn with model activity"}
+    # A sandbox the provider ended for exceeding a resource limit explains the missing turns. The finding stays: the
+    # detail only says the absence was expected.
+    limit = record.get("sandbox_resource_limit")
+    resource = limit.get("resource") if isinstance(limit, dict) else None
+    if isinstance(resource, str) and resource:
+        detail["expected_absence"] = f"sandbox_resource_limit:{resource}"
+    return [Finding(check="rollout_missing_agent_turns", subject=subject, detail=detail)]
 
 
 def _agent_turn_hollow(
@@ -861,6 +907,51 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
     ]
 
 
+# Prefixes of the text a harness returns to the model in place of a tool's result when the tool itself could not
+# run, lower-case. A tool that ran and reported an error of its own is not listed. Add a prefix here once a harness
+# is known to return one.
+# Each marker with the tools that return it: OpenCode's built-in grep and glob return this text when they cannot
+# run ripgrep.
+_TOOL_FAILURE_MARKERS: dict[str, frozenset[str]] = {"ripgrep execution failed": frozenset({"grep", "glob"})}
+
+
+def _tool_output_text(output: Any) -> str | None:
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        for key in ("output", "text"):
+            if isinstance(output.get(key), str):
+                return output[key]
+    return None
+
+
+def _rollout_tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+    """One finding per rollout, counting the tool outputs that open with a harness tool-failure marker.
+
+    A marker counts only from a tool that returns it (``_TOOL_FAILURE_MARKERS``), and a call recorded as ``completed``
+    is not counted: a command that succeeded can print the same text, for example when it reads a log."""
+    failed = 0
+    for call in trajectory.get("tool_calls") or []:
+        if not isinstance(call, dict) or call.get("status") == "completed":
+            continue
+        text = _tool_output_text(call.get("output"))
+        opening = text.lstrip().lower() if text is not None else ""
+        if any(
+            opening.startswith(marker) and call.get("tool_name") in tools
+            for marker, tools in _TOOL_FAILURE_MARKERS.items()
+        ):
+            failed += 1
+    if not failed:
+        return []
+    return [
+        Finding(
+            check="rollout_tool_call_failed",
+            subject=subject,
+            detail={"reason": "tool output reports that the harness tool could not run", "count": failed},
+        )
+    ]
+
+
 _ROLLOUT_CHECKS: dict[
     str,
     Callable[
@@ -872,7 +963,7 @@ _ROLLOUT_CHECKS: dict[
     "record_unreadable": lambda record, trajectory, bindings, subject: [],
     "rollout_duplicate_identity": lambda record, trajectory, bindings, subject: [],
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
-        trajectory, subject
+        record, trajectory, subject
     ),
     "rollout_ended_on_failed_model_call": lambda record, trajectory, bindings, subject: (
         _rollout_ended_on_failed_model_call(trajectory, subject)
@@ -894,5 +985,8 @@ _ROLLOUT_CHECKS: dict[
     ),
     "model_call_runaway_generation": lambda record, trajectory, bindings, subject: _model_call_runaway_generation(
         bindings, subject
+    ),
+    "rollout_tool_call_failed": lambda record, trajectory, bindings, subject: _rollout_tool_call_failed(
+        trajectory, subject
     ),
 }

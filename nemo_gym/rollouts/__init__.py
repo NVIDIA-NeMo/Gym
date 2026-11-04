@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         merge_model_call_capture_into_record,
         model_call_capture_dirs_from_config,
         observability_enabled_from_config,
+        read_available_model_call_records,
         read_model_call_records,
     )
     from nemo_gym.rollouts.rollout_collection import (
@@ -86,6 +87,7 @@ _PUBLIC_API = {
     "model_call_capture_dirs_from_config": "model_calls",
     "observability_enabled_from_config": "model_calls",
     "observed_elapsed": "rollout_recovery",
+    "read_available_model_call_records": "model_calls",
     "read_model_call_records": "model_calls",
     "read_rollout_timing": "health.timeouts",
     "record_resubmit_offset": "rollout_recovery",
