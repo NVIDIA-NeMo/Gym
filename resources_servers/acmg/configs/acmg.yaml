@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+acmg:
+  resources_servers:
+    acmg:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: ACMG/AMP variant classification from curated evidence packets, with and without the gene's ClinGen rule document
+      value: Measure clinical variant interpretation with the dataset's deterministic label, criteria and self-consistency scorer
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/acmg/data/example.jsonl
+        num_repeats: 1
+acmg_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: acmg
+      model_server:
+        type: responses_api_models
+        name: policy_model
+acmg_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: acmg
+      agent_server:
+        type: responses_api_agents
+        name: acmg_simple_agent
+      resources_tool_transports:
+      - direct_http

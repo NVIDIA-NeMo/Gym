@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- resources_servers/acmg/configs/acmg.yaml
+acmg_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      max_steps: 1
+acmg:
+  resources_servers:
+    acmg:
+      datasets:
+      # Rows carry a fully built responses_create_params.input (system prompt, optional rule document, packet),
+      # so no prompt template is applied. 4 repeats match the team's seeds 0-3 held-out protocol.
+      - name: acmg
+        type: benchmark
+        jsonl_fpath: benchmarks/acmg/data/acmg_benchmark.jsonl
+        prepare_script: benchmarks/acmg/prepare.py
+        num_repeats: 4

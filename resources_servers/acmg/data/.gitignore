@@ -1,0 +1,5 @@
+*rollouts*.jsonl
+*metrics*.json
+!example_metrics.json
+!example_rollouts.jsonl
+*_prepare.jsonl

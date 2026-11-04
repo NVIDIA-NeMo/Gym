@@ -811,6 +811,8 @@ extend-exclude = [
     "*.ipynb",
     # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
     "resources_servers/toolsandbox/tool_sandbox",
+    # Vendored ACMG dataset scorer — kept verbatim so its pinned checksum holds (see its header).
+    "resources_servers/acmg/official_reward.py",
 ]
 [tool.ruff.lint]
 # Configure linting rules
