@@ -26,8 +26,11 @@ from omegaconf import DictConfig
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import CHECKPOINT_CLOSE_FOLLOWS_HEADER, ResourcesSeedSessionRequest
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.indirect_prompt_injection.app import IPIResourcesServer, IPIResourcesServerConfig
 
 
@@ -279,6 +282,15 @@ def test_a_malformed_typed_seed_cannot_fall_back_to_a_run_seed(field: str) -> No
     # An extra top-level environment also must not let a malformed typed seed use the /run arm.
     body["environment"] = {}
     assert client.post("/seed_session", json=body).status_code == 422
+    assert server._typed_sessions == {}
+
+
+def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
+    # A dataset row's scalar task_id is a row field, not a typed seed's TaskId.
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=ROW | {"task_id": "ipi-0001"}).status_code == 200
+    assert client.post("/send_message", json=MESSAGE).status_code == 200
     assert server._typed_sessions == {}
 
 
