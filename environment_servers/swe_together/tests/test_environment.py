@@ -249,6 +249,7 @@ async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(
             patch="patch",
             workdir="/workspace",
             episode=req.episode_id,
+            activation_path=f"/ng-rollout/{req.episode_id.capture_key}/ng-agent-instance/judge/v1/responses",
             task_id=req.task.task_id,
             timeout=100,
             cookies={},
@@ -258,6 +259,12 @@ async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(
     read.assert_awaited_once()
     seed = client.post.await_args_list[0].kwargs["json"]
     assert seed.sandbox_access.workdir == "/tmp/judge_inputs"
+    # The judge runs in the episode itself, as its agent instance ``judge``.
+    assert (seed.episode_id, seed.agent_instance) == (req.episode_id, "judge")
+    assert client.post.await_args_list[1].args[1] == (
+        f"/ng-rollout/{req.episode_id.capture_key}/ng-agent-instance/judge/v1/responses"
+    )
+    assert client.post.await_args_list[-1].kwargs["json"].episode_id == req.episode_id
     assert evidence["judge_close"]["agent_observations"]["source"] == "claude_code"
     assert evidence["judge_close"]["cleanup_confirmed"] is True
     assert evidence["judge_outcome"]["metadata"] == ({"stop_reason": "refusal"} if has_structured_error else None)
@@ -306,6 +313,7 @@ async def run_closed_judge(
         patch="patch",
         workdir="/workspace",
         episode=req.episode_id,
+        activation_path=f"/ng-rollout/{req.episode_id.capture_key}/ng-agent-instance/judge/v1/responses",
         task_id=req.task.task_id,
         timeout=100,
         cookies={},
@@ -389,7 +397,7 @@ async def test_verify_keeps_judge_failure_cause_apart_from_valid_zero(tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_path", ["/v1/agent_sessions", "/ng-rollout/one-judge-test/v1/responses"])
+@pytest.mark.parametrize("failed_path", ["/v1/agent_sessions", "/ng-rollout/one/ng-agent-instance/judge/v1/responses"])
 @pytest.mark.parametrize("close_failure", [None, "unconfirmed", "request_error"])
 async def test_verify_preserves_primary_judge_error_and_transport_classification(
     tmp_path, monkeypatch, failed_path, close_failure
@@ -407,7 +415,7 @@ async def test_verify_preserves_primary_judge_error_and_transport_classification
     value, _ = state(tmp_path, [])
     value.snapshots = SimpleNamespace(capture=AsyncMock(), final_patch="x" * 100, baseline=[])
     environment = server(tmp_path)
-    environment.server_client = SimpleNamespace()
+    environment.server_client = SimpleNamespace(global_config_dict={})
     primary = http_error(500)
     value.task_metadata = {"judge_timeout": 100}
     failures = {failed_path: primary}
@@ -494,6 +502,7 @@ async def test_saved_judge_verdict_survives_lost_response(tmp_path, monkeypatch,
         patch="patch",
         workdir="/workspace",
         episode=req.episode_id,
+        activation_path=f"/ng-rollout/{req.episode_id.capture_key}/ng-agent-instance/judge/v1/responses",
         task_id=req.task.task_id,
         timeout=100,
         cookies={},
@@ -681,7 +690,9 @@ async def test_local_lifecycle_closes_candidate_before_verification(
     monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
     monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
     monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
-    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(
+        SWETEnvironmentServer, "_activation_path", lambda self, req, agent_name, agent_instance: "/v1/responses"
+    )
     monkeypatch.setattr(
         SWETEnvironmentServer, "_next_user_turn", AsyncMock(return_value=UserTurn(activation_id=0, kind="stop"))
     )
@@ -832,7 +843,9 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
     monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
     monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
     monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
-    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(
+        SWETEnvironmentServer, "_activation_path", lambda self, req, agent_name, agent_instance: "/v1/responses"
+    )
     simulator = AsyncMock()
     monkeypatch.setattr(SWETEnvironmentServer, "_next_user_turn", simulator)
     monkeypatch.setattr(app, "raise_for_status", AsyncMock())
@@ -880,3 +893,26 @@ async def test_wrapped_simulator_failure_keeps_upstream_status_in_failure(tmp_pa
     assert saved == result.failure.dependency_error
     assert saved["status_code"] == 408 and "Timeout passed=360.0" in saved["body"]
     assert saved["cause"].startswith("ClientResponseError: 408")
+
+
+@pytest.mark.parametrize(
+    "training_agent_instances, judge_tag",
+    [(None, ""), (["assistant", "judge"], "/training-token-capture")],
+)
+def test_activation_paths_name_the_assistant_and_tag_the_judge_only_when_selected(
+    tmp_path, monkeypatch, training_agent_instances, judge_tag
+):
+    environment = server(tmp_path)
+    capture = {"enabled": True, "all_agents": True, "dir": "/capture"}
+    if training_agent_instances is not None:
+        capture["training_agent_instances"] = training_agent_instances
+    environment.server_client = SimpleNamespace(global_config_dict={"token_id_capture": capture})
+    monkeypatch.setattr(app, "get_first_server_config_dict", lambda _config, _name: {})
+    req = request()
+    key = req.episode_id.capture_key
+
+    assistant = environment._activation_path(req, "agent", app.ASSISTANT_AGENT_INSTANCE)
+    judge = environment._activation_path(req, "judge", app.JUDGE_AGENT_INSTANCE)
+
+    assert assistant == f"/ng-rollout/{key}/ng-agent-instance/assistant/training-token-capture/v1/responses"
+    assert judge == f"/ng-rollout/{key}/ng-agent-instance/judge{judge_tag}/v1/responses"

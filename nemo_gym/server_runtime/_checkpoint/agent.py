@@ -39,6 +39,8 @@ from typing import Any, Literal, Optional, Protocol
 
 from pydantic import JsonValue
 
+from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.core.correlation import CorrelationPathError, resolve
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
@@ -57,7 +59,6 @@ from nemo_gym.server_runtime._checkpoint.errors import (
     StaleAttemptError,
 )
 from nemo_gym.server_runtime._checkpoint.steps import Boundary, EpisodeSteps, StepType
-from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
 
 BoundarySnapshot = Callable[[], dict[str, JsonValue]]
@@ -918,12 +919,16 @@ class RestartOnlyTrackingMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
-        prefix = RolloutContextMiddleware._PREFIX.match(path)
-        route = prefix.group("rest") if prefix is not None else path
+        try:
+            resolved = resolve(scope)
+        except CorrelationPathError:
+            # The outermost middleware already answered a malformed prefix; route it unchanged.
+            resolved = None
+        capture_key = resolved[0].capture_key if resolved is not None else None
+        route = resolved[1] if capture_key is not None else path
         if route != "/run" and not route.endswith("/v1/responses"):
             await self.app(scope, receive, send)
             return
-        capture_key = prefix.group("rollout_id") if prefix is not None else None
         if capture_key is None and route == "/run":
             capture_key, receive = await _run_body_rollout_id(receive)
         try:
@@ -958,3 +963,7 @@ async def _run_body_rollout_id(receive: Any) -> tuple[Optional[str], Any]:
         # A malformed body or rollout ID; the request is refused as one without a rollout.
         capture_key = None
     return capture_key, replay
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

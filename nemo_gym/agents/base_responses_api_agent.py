@@ -29,7 +29,7 @@ from typing import Any, Awaitable, Callable, ClassVar, Optional
 from urllib.parse import urlsplit
 from warnings import warn
 
-from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -55,7 +55,18 @@ from nemo_gym.config.global_config import (
     TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.core.correlation import (
+    AGENT_INSTANCE_PATH_SEGMENT,
+    CorrelationPathError,
+    resolve,
+    validate_agent_instance,
+)
+from nemo_gym.core.episode_context import (
+    agent_instance_context,
+    current_agent_instance,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+)
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
 from nemo_gym.core.failure_records import FailureBoundary
@@ -155,6 +166,19 @@ class AgentSeedSessionRequest(BaseModel):
     # The task's own time budget for the harness's work, in seconds (Harbor's ``[agent].timeout_sec``).
     # The environment server enforces it; a harness that reads it can stop cleanly and return a partial turn.
     agent_timeout_sec: float | None = Field(default=None, gt=0)
+    agent_instance: str | None = Field(
+        default=None,
+        description=(
+            "The agent instance this session is in its episode (``assistant``, ``user``, ``debater.1``). "
+            "Every activation must name it in its path, and the session's model calls carry it. "
+            "Omitted for the unnamed agent of a single-agent episode."
+        ),
+    )
+
+    @field_validator("agent_instance")
+    @classmethod
+    def validate_agent_instance_name(cls, agent_instance: str | None) -> str | None:
+        return validate_agent_instance(agent_instance) if agent_instance is not None else None
 
     @field_validator("tool_accesses")
     @classmethod
@@ -170,6 +194,8 @@ class AgentSeedSessionRequest(BaseModel):
         result = handler(self)
         if self.continuation is None:
             result.pop("continuation", None)
+        if self.agent_instance is None:
+            result.pop("agent_instance", None)
         return result
 
 
@@ -412,6 +438,8 @@ class _AgentSessionRecord:
     state: AgentSessionState | None = None
     closing: bool = False
     episode_id: EpisodeId | None = None
+    # The seeded agent instance, set with ``episode_id`` before the seed awaits, so a concurrent seed sees the binding.
+    agent_instance: str | None = None
     close_response: AgentCloseSessionResponse | None = None
     expires_at: float = float("inf")
     activations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
@@ -740,12 +768,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             app=app,
             operation="agent.responses",
         )
-        app.post("/v1/responses")(traced_responses)
+        # Every activation is checked against its session's agent instance and runs as that agent instance.
+        activation = [Depends(self._activate_as_agent_instance)]
+        app.post("/v1/responses", dependencies=activation)(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
-        # The same handler serves prefixed and unprefixed calls.
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(traced_responses)
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(traced_responses)
+        # The same handler serves prefixed and unprefixed calls, named or not.
+        for named in ("", f"/{AGENT_INSTANCE_PATH_SEGMENT}/{{agent_instance}}"):
+            prefix = f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}{named}"
+            app.post(f"{prefix}/v1/responses", dependencies=activation)(traced_responses)
+            app.post(f"{prefix}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses", dependencies=activation)(traced_responses)
 
         # Traced *inside* rollout_context, not outside it. The span reads
         # `current_rollout_id()` when it starts, so wrapping the other way round would
@@ -806,6 +838,42 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 # Let cooperative cancellation settle without extending the drain with an unbounded gather.
                 await asyncio.sleep(0)
 
+    async def _activate_as_agent_instance(self, request: Request) -> AsyncIterator[None]:
+        """Check an activation's agent instance against its session's, and run it as that agent instance.
+
+        The path must name the agent instance the session was seeded with, and an unnamed path must reach an
+        unnamed session; a mismatch is refused with 409. A request without a session runs unnamed.
+        """
+        try:
+            resolved = resolve(request.scope)
+        except CorrelationPathError as error:
+            raise HTTPException(400, str(error)) from error
+        named = resolved[0].agent_instance if resolved is not None else None
+        session_id = self._agent_session_id_from_request(request)
+        state = self._session_state(session_id) if session_id is not None else None
+        seeded = state.request.agent_instance if state is not None else None
+        if state is not None and named != seeded:
+            raise HTTPException(
+                409, f"Activation names agent instance {named!r}, but the session was seeded as {seeded!r}"
+            )
+        with agent_instance_context(seeded if state is not None else named):
+            yield
+
+    def _agent_instance_conflict(self, body: AgentSeedSessionRequest) -> str | None:
+        """The open session of the same episode already bound to the seed's agent instance, if any."""
+        if body.agent_instance is None:
+            return None
+        for session_id, record in self._session_records.items():
+            if (
+                session_id != body.agent_session_id
+                and record.close_response is None
+                and not record.closing
+                and record.episode_id == body.episode_id
+                and record.agent_instance == body.agent_instance
+            ):
+                return session_id
+        return None
+
     async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
         """Declare the session capabilities a seed would confirm, without seeding: the task-tool context and the
         multi-turn continuation this adapter supports (``None`` for one-activation adapters and for agents that
@@ -854,11 +922,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             if record.state is None:
                 if current is not None:
                     raise HTTPException(409, "Agent session cookie has expired")
+                if self._agent_instance_conflict(body) is not None:
+                    # One open session per agent instance of an episode; the binding is released when it closes.
+                    raise HTTPException(
+                        409, f"Agent instance {body.agent_instance!r} already has an open session in this episode"
+                    )
                 record.episode_id = body.episode_id
+                record.agent_instance = body.agent_instance
                 # Before setup, so a stop that arrives during it reaches this worker's seeding record.
                 self._claim_rollout(body.episode_id)
                 try:
-                    record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
+                    # Setting it here covers harnesses that receive their model URL when the session starts.
+                    with agent_instance_context(body.agent_instance):
+                        record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
                 except AgentSessionSetupError as error:
                     record.state = error.state
                     self._keep_failed_seed(body.agent_session_id, record)
@@ -1219,7 +1295,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             base_url,
             self.rollout_id_from_run(body),
             token_capture=self._token_id_capture_enabled() if token_capture is None else token_capture,
-            agent_instance=agent_instance,
+            agent_instance=agent_instance if agent_instance is not None else current_agent_instance(),
         )
 
     def training_tag_for(self, agent_instance: Optional[str]) -> bool:
@@ -1243,7 +1319,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         request_path = getattr(getattr(request, "url", None), "path", "")
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
-        return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
+        # The agent instance of a named session's activation, set while the activation runs.
+        agent_instance = current_agent_instance()
+        return (
+            f"{rollout_path_prefix(rollout_id, token_capture=token_capture, agent_instance=agent_instance)}{url_path}"
+        )
 
     def resolve_model_base_url(
         self,
@@ -1266,7 +1346,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             rollout_id,
             token_capture=self._token_id_capture_enabled() if token_capture is None else token_capture,
             trace_context=trace_context,
-            agent_instance=agent_instance,
+            agent_instance=agent_instance if agent_instance is not None else current_agent_instance(),
         )
         return f"{prefixed}/v1"
 

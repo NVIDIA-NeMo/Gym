@@ -748,6 +748,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
+    "nemo_gym._checkpoint.agent": {
+        # _checkpoint.agent imported this and it stays importable through it.
+        **_names("nemo_gym.server_runtime.request_handling.rollout_context", "0.8.0", "RolloutContextMiddleware"),
+    },
 }
 
 # Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that

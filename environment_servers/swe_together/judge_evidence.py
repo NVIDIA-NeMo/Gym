@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Preserve separately captured judge exchanges using the judge's own close evidence."""
+"""Preserve the judge's captured exchanges using the judge's own close evidence."""
 
 import json
 import shutil
 from collections import defaultdict
 from pathlib import Path
+
+import orjson
 
 from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.models import CaptureStore
@@ -159,12 +161,29 @@ def aggregate_judge_evidence(
     return result, provenance
 
 
+def _copy_agent_instance_lines(source: Path, target: Path, agent_instance: str) -> None:
+    """Copy, byte for byte, the capture lines one agent instance's calls wrote; lines that do not parse name no one."""
+    with source.open("rb") as reader, target.open("wb") as writer:
+        for line in reader:
+            try:
+                exchange = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                continue
+            if isinstance(exchange, dict) and exchange.get("agent_instance") == agent_instance:
+                writer.write(line)
+
+
 async def collect_judge_evidence(
     trajectory: TrajectoryRecord | None, verification: dict, global_config: dict, artifact_dir: Path
 ) -> TrajectoryRecord | None:
-    """Read the explicitly recorded judge episode; retain raw capture and collection failures."""
+    """Read the judge's calls from the recorded capture episode; retain raw capture and collection failures.
+
+    The judge shares the episode's capture key as the agent instance ``judge_agent_instance``, so only that
+    instance's exchanges are judge evidence. A record without the name reads the whole capture episode.
+    """
     directories = model_call_capture_dirs_from_config(global_config)
     episode = verification.get("judge_capture_episode")
+    agent_instance = verification.get("judge_agent_instance")
     if not directories or not episode:
         return trajectory
     if trajectory is None:
@@ -175,9 +194,17 @@ async def collect_judge_evidence(
         store = CaptureStore(directories[0], create=False)
         if not store.path_for(episode).is_file():
             raise FileNotFoundError("Judge capture is unavailable")
-        shutil.copyfile(store.path_for(episode), artifact_dir / "judge-model-calls.capture.jsonl")
+        raw_capture = artifact_dir / "judge-model-calls.capture.jsonl"
+        if agent_instance is None:
+            shutil.copyfile(store.path_for(episode), raw_capture)
+        else:
+            _copy_agent_instance_lines(store.path_for(episode), raw_capture, agent_instance)
         entries, invalid_count = store.read_available(episode)
-        exchanges = [exchange for _, exchange in entries]
+        exchanges = [
+            exchange
+            for _, exchange in entries
+            if agent_instance is None or exchange.get("agent_instance") == agent_instance
+        ]
         (artifact_dir / "judge-model-calls.json").write_text(json.dumps(exchanges, indent=2))
         raw_close = verification.get("judge_close")
         close = AgentCloseSessionResponse.model_validate(raw_close) if raw_close is not None else None

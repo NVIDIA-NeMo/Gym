@@ -63,6 +63,7 @@ if TYPE_CHECKING:
         is_handled_episode_failure,
         is_retryable_dependency_error,
         is_retryable_dependency_status,
+        require_distinct_agent_instances,
     )
     from nemo_gym.server_runtime.base_resources_server import (
         NEMO_GYM_MCP_METADATA_KEY,
@@ -199,6 +200,7 @@ _PUBLIC_API = {
     "next_attempt": "_checkpoint.control",
     "observe_llm_judge_grading": "verifier_observability",
     "observe_programmatic_grading": "verifier_observability",
+    "require_distinct_agent_instances": "base_environment_server",
     "observe_verifier": "verifier_observability",
     "observe_verifier_sandbox": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
