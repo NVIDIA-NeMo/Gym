@@ -18,8 +18,8 @@ import orjson
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.verification.judge import (
     JudgeError,
     _judge_retry_wait_s,
@@ -162,8 +162,8 @@ class TestJudgeFailsafe:
 
 
 async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
     original = NgFailureEvent(
         boundary=FailureBoundary.MODEL,
@@ -197,8 +197,8 @@ async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
 
 
 async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary():
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
     original = NgFailureEvent(
         boundary=FailureBoundary.RESOURCES_SERVER,
@@ -226,7 +226,7 @@ async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary(
 
 
 def test_judge_selector_does_not_swallow_other_canonical_failures():
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
     from nemo_gym.verification.judge import is_judge_failure
 
     for boundary, kind in [
@@ -239,7 +239,7 @@ def test_judge_selector_does_not_swallow_other_canonical_failures():
 
 @pytest.mark.asyncio
 async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
-    from nemo_gym.core.episode import verifier_invocation_context
+    from nemo_gym.core.episode_context import verifier_invocation_context
     from nemo_gym.verification.judge import is_judge_failure
 
     client = _client(status=200, body=b'{"verdict":"CORRECT"}')
@@ -264,7 +264,7 @@ async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
 
 async def test_a_judge_failure_a_caller_retries_past_stays_an_observation():
     """A consumer that retries after a judge failure and then succeeds still reports that failure, once."""
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core.failure_transport import RequestFailureLog
     from nemo_gym.verification.judge import reraise_judge_errors
 
     async def unreachable():
@@ -289,8 +289,8 @@ async def test_a_judge_failure_a_caller_retries_past_stays_an_observation():
 
 async def test_a_recovered_judge_failure_keeps_its_model_cause_in_the_success_report():
     """MODEL -> JUDGE: the observation a successful retry leaves names the model failure as the judge's cause."""
-    from nemo_gym.failure_transport import RequestFailureLog
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.failure_transport import RequestFailureLog
     from nemo_gym.verification.judge import reraise_judge_errors
 
     model = NgFailureEvent(
@@ -314,7 +314,7 @@ async def test_a_recovered_judge_failure_keeps_its_model_cause_in_the_success_re
 
 
 async def test_a_parser_judge_error_is_not_observed():
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core.failure_transport import RequestFailureLog
     from nemo_gym.verification.judge import reraise_judge_errors
 
     with RequestFailureLog.capture() as log:
@@ -392,7 +392,7 @@ def _graded_verify(client):
 
 
 async def test_a_judge_that_answers_after_two_503s_scores_the_row_and_keeps_both_failed_attempts(judge_backoffs):
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core.failure_transport import RequestFailureLog
 
     client = _judge(_http_reply(503), _http_reply(503), _http_reply(200, b'{"verdict": "CORRECT"}'))
     with RequestFailureLog.capture() as log:
@@ -412,7 +412,7 @@ async def test_a_judge_that_answers_after_two_503s_scores_the_row_and_keeps_both
 
 
 async def test_three_503s_mask_the_row_and_journal_all_three_attempts(judge_backoffs):
-    from nemo_gym.failure_transport import FailureReportRow, RequestFailureLog
+    from nemo_gym.core.failure_transport import FailureReportRow, RequestFailureLog
 
     client = _judge(_http_reply(503), _http_reply(503), _http_reply(503))
     with RequestFailureLog.capture() as log:
@@ -433,7 +433,7 @@ async def test_three_503s_mask_the_row_and_journal_all_three_attempts(judge_back
 
 
 async def test_a_400_masks_the_row_after_one_attempt(judge_backoffs):
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core.failure_transport import RequestFailureLog
 
     client = _judge(_http_reply(400), _http_reply(200, b'{"verdict": "CORRECT"}'))
     with RequestFailureLog.capture() as log:

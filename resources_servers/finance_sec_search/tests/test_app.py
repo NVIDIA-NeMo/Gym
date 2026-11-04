@@ -28,9 +28,9 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.verification.judge import is_judge_failure
+from nemo_gym.verification import is_judge_failure
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,

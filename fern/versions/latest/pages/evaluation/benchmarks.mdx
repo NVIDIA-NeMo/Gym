@@ -89,6 +89,26 @@ IFEval, IFBench, inverse instruction following, VerifIF, jailbreak resistance, o
 **Other**
 ASR (LibriSpeech, WER), machine translation (WMT, FLORES-200), VLM benchmarks, Arena Hard pairwise judging, and speculative-decoding throughput.
 
+## Benchmarks Whose Data You Stage
+
+A few benchmarks declare a protocol over a dataset that cannot ship with Gym. Their `prepare_script` copies a file you stage yourself and fails when you have not given it one, so a run never scores a partial or stale set.
+
+**AgentArena** (`benchmarks/agent_arena`) is one. It runs the 433-turn Arena validation split at four repeats over the [`agentic_turn_simulation`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/agentic_turn_simulation) environment, which scores a whole agent turn against simulated tools. The rows carry the agent harness's own system prompt and conversation history, so the benchmark sets no `prompt_config` of its own. The split is held out from the Arena RL training rows, is NVIDIA internal use only and is not redistributable: obtain it from the dataset's owners. Its row format is the environment's own, described in [the environment's data guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/agentic_turn_simulation/docs/data.md).
+
+Stage the file, then prepare and run. The simulator and the judge are the environment's judge model server, so every run names it:
+
+```bash
+AGENT_ARENA_TURNS_JSONL=/path/to/arena_turns.jsonl \
+  gym eval prepare --benchmark agent_arena
+
+gym eval run --benchmark agent_arena \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --output results/agent_arena/rollouts.jsonl \
+  ++judge_base_url="$JUDGE_URL" ++judge_api_key="$JUDGE_KEY" ++judge_model_name="$JUDGE_MODEL"
+```
+
+`++judge_base_url` takes one URL or a list of replicas. `++prepare_script_args.source_jsonl=<path>` names the staged file instead of the environment variable, and `++prepare_script_args.limit=<n>` prepares only the first `n` turns for a smoke run. A subset is not the benchmark's score: the protocol is all 433 turns at four repeats.
+
 ## Interpreting Results
 
 A score is only meaningful relative to a fixed comparison: same dataset split, same model, same harness, same sampling config. It is also only as reliable as the verifier behind it — before trusting a score, confirm the reward function actually measures the behavior you care about.
