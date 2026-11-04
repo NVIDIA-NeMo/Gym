@@ -32,11 +32,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      PANTS_BIN: ${{ runner.temp }}/pants-bin/pants
-      RESULT_DIR: ${{ runner.temp }}/pants-pilot-results
       REPEATS: ${{ inputs.repeats || '1' }}
       MAX_SAMPLES: ${{ inputs.max_samples || '3' }}
     steps:
+      - name: Set benchmark paths
+        shell: bash
+        run: |
+          echo "PANTS_BIN=$RUNNER_TEMP/pants-bin/pants" >> "$GITHUB_ENV"
+          echo "RESULT_DIR=$RUNNER_TEMP/pants-pilot-results" >> "$GITHUB_ENV"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
