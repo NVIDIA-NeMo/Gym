@@ -15,7 +15,9 @@ from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
+from nemo_gym.core.failure_records import EpisodeFailure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -24,13 +26,7 @@ from nemo_gym.server_runtime.base_environment_server import (
     is_retryable_dependency_error,
     is_retryable_dependency_status,
 )
-from nemo_gym.server_runtime.episode_types import (
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
-    EpisodeFailure,
-    MaterializedTask,
-)
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.telemetry import concurrency
 
 
 class _TaskInput(BaseModel):
@@ -436,6 +432,7 @@ def test_failure_metadata_survives_the_environment_http_boundary(classified: boo
 
 def test_admission_timeout_reports_its_stage_before_running_the_episode() -> None:
     server = _environment_server(max_concurrent_episodes=1, queue_timeout_seconds=0.01)
+    timeouts_before = sum(concurrency._ADMISSION_TIMEOUTS.values())
 
     async def run() -> _Response:
         async with server._admission:
@@ -446,6 +443,13 @@ def test_admission_timeout_reports_its_stage_before_running_the_episode() -> Non
     assert response.failure.failure_reason == "Episode admission timed out"
     assert response.failure.stage == "admission"
     assert response.failure.terminal is False
+    assert server._admission.attributes == {
+        "nemo.gym.concurrency.component": "environment_server",
+        "nemo.gym.concurrency.limit_name": "episodes",
+        "nemo.gym.server.name": "environment",
+    }
+    assert sum(concurrency._ADMISSION_TIMEOUTS.values()) - timeouts_before == 1, "the admission limit counts it once"
+    assert (server._admission.active, server._admission.queued) == (0, 0)
 
 
 @pytest.mark.parametrize("records_boundaries", [False, True])
