@@ -1103,6 +1103,21 @@ def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
             result[key] = record[key]
 
 
+def _shard_rollout_id(row: Mapping[str, Any], run_id: str) -> str:
+    """The rollout id a recorded shard dispatches ``row`` under: the row's own id, prefixed with the shard's run id.
+
+    Model calls are captured under the capture key, which is this id with the attempt suffix, and capture files are
+    kept by default. Without the prefix, two shards that dispatch the same task and rollout (a returned row fed back,
+    or indices numbered again each step) share a key, and the later shard's records carry the earlier shard's calls.
+    A row an earlier shard returned carries that shard's prefix, which is replaced rather than nested.
+    """
+    own = logical_rollout_id(dict(row))
+    earlier = row.get(RUN_ID_KEY)
+    if isinstance(earlier, str) and own.startswith(f"{earlier}."):
+        own = own[len(earlier) + 1 :]
+    return f"{run_id}.{own}"
+
+
 _SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs", "_attempts")
 
@@ -5471,6 +5486,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         implies ``enrich_results``, dispatches as collection does (typed
         failure records under ``route_failures_to_sidecar``, validated results) on copies of the rows that name the
         shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
+        Each copy's rollout id is the row's own id (its ``_ng_rollout_id``, or ``<task>-<rollout>``) prefixed with the
+        shard's run id, so the shard's model calls are captured under keys of its own; a caller that looks a capture up
+        reads its key from the returned row (``maybe_rollout_id_from_run_body``).
         """
         if record_output_dir is not None and not record_shard:
             raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
@@ -5527,6 +5545,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dict(row, **{RUN_ID_KEY: run_id, ATTEMPT_INDEX_KEY_NAME: row.get(ATTEMPT_INDEX_KEY_NAME, 0)})
                 for row in examples
             ]
+            if record_output_dir is not None:
+                # A recorded shard names its rollouts within its run, so its capture keys are its own.
+                for row, copy in zip(examples, dispatched):
+                    copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
         completions = self._run_examples_with_metadata(
             dispatched,
             head_server_config=head_server_config,

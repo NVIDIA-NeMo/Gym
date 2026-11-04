@@ -14774,7 +14774,6 @@ class TestRunRecordWriter:
 
     async def test_run_examples_writes_each_enriched_record_to_its_shard(self, tmp_path: Path) -> None:
         capture_dir = tmp_path / "capture"
-        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "c1", "first")
         global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
         row = TestEnrichRunResult._row()
 
@@ -14783,6 +14782,10 @@ class TestRunRecordWriter:
                 return SimpleNamespace(global_config_dict=global_config)
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                # The model server captures each call under the key of the request that made it.
+                TestEnrichRunResult._store_call(
+                    capture_dir, maybe_rollout_id_from_run_body(examples[0]), "c1", "first"
+                )
                 future = Future()
                 future.set_result(
                     _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
@@ -14835,15 +14838,18 @@ class TestRunRecordWriter:
 
     async def test_the_written_record_joins_the_capture_its_row_names(self, tmp_path: Path) -> None:
         capture_dir = tmp_path / "capture"
-        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "mine", "first")
+        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "earlier", "a capture under the row's own key")
         TestEnrichRunResult._store_call(capture_dir, "someone-else", "theirs", "other")
         global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        keys: list[str] = []
 
         class Helper(RolloutCollectionHelper):
             def setup_server_client(self, head_server_config=None):
                 return SimpleNamespace(global_config_dict=global_config)
 
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                keys.append(maybe_rollout_id_from_run_body(examples[0]))
+                TestEnrichRunResult._store_call(capture_dir, keys[0], "mine", "first")
                 future = Future()
                 reply = {"reward": 1.0, ROLLOUT_ID_KEY_NAME: "someone-else"}
                 future.set_result(_CompletedRollout(row=examples[0], result=reply, rollout_latency_ms=1.0))
@@ -14856,7 +14862,8 @@ class TestRunRecordWriter:
         await completion
 
         [written] = self._lines(run_dir / "rollouts-s.jsonl")
-        assert written[ROLLOUT_ID_KEY_NAME] == "g1_g0_a0"
+        # The shard's own key: the row's id within the shard's run, never the reply's or the bare id.
+        assert written[ROLLOUT_ID_KEY_NAME] == keys[0] == f"{written['_ng_run_id']}.g1_g0_a0"
         assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["mine"]
 
     def test_a_call_refused_by_dispatch_validation_keeps_the_existing_shard(self, tmp_path: Path) -> None:
@@ -14958,7 +14965,7 @@ class TestRunRecordWriter:
         assert store.manifest.run_id == run_id
         # A verified manifest with every attempt reserved, so resume and recovery accept the shard like a run.
         assert store.manifest.legacy_import is False
-        assert store.manifest.next_attempt == {"g1_g0_a0": 1, "g2_g0_a0": 1}
+        assert store.manifest.next_attempt == {f"{run_id}.g1_g0_a0": 1, f"{run_id}.g2_g0_a0": 1}
         from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, validate_resume
 
         shard = run_dir / "rollouts-step_1.jsonl"
@@ -15430,3 +15437,52 @@ async def test_run_status_keeps_results_persisted_inside_the_throttle_when_the_r
 
     member = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())["members"]["a"]
     assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (2, 1)
+
+
+@pytest.mark.parametrize("fed_back", [True, False], ids=["returned row fed back", "indices numbered again"])
+async def test_a_shard_records_only_the_model_calls_of_its_own_dispatch(tmp_path: Path, fed_back: bool) -> None:
+    """Two shards that dispatch the same task and rollout keep their model calls apart."""
+    capture_dir = tmp_path / "capture"
+    global_config = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(capture_dir),
+        "agent": {"responses_api_agents": {"impl": {}}},
+    }
+    row = {
+        "responses_create_params": {"input": []},
+        AGENT_REF_KEY_NAME: {"name": "agent"},
+        TASK_INDEX_KEY_NAME: 0,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+    }
+    calls = iter(["step_1 call", "step_2 call"])
+
+    class Helper(RolloutCollectionHelper):
+        def setup_server_client(self, head_server_config=None):
+            return SimpleNamespace(global_config_dict=global_config)
+
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            # The model server stages each call under the capture key of the request that made it.
+            call = next(calls)
+            TestEnrichRunResult._store_call(capture_dir, maybe_rollout_id_from_run_body(examples[0]), call, call)
+            future = Future()
+            future.set_result(
+                _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+            )
+            return iter([future])
+
+    run_dir = tmp_path / "run"
+    [first] = list(Helper().run_examples([row], record_output_dir=run_dir, record_shard="step_1"))
+    returned_row, _ = await first
+    [second] = list(
+        Helper().run_examples(
+            [returned_row if fed_back else dict(row)], record_output_dir=run_dir, record_shard="step_2"
+        )
+    )
+    second_row, returned = await second
+    # A row fed back is renamed into the new shard, not nested under both.
+    assert second_row[ROLLOUT_ID_KEY_NAME] == f"{second_row['_ng_run_id']}.0-0"
+
+    for shard, call in (("step_1", "step_1 call"), ("step_2", "step_2 call")):
+        [written] = TestRunRecordWriter._lines(run_dir / f"rollouts-{shard}.jsonl")
+        assert [c["model_call_id"] for c in written["ng_model_call_capture"]["calls"]] == [call]
+    assert [c["model_call_id"] for c in returned["ng_model_call_capture"]["calls"]] == ["step_2 call"]
