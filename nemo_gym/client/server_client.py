@@ -54,6 +54,7 @@ from nemo_gym.core.episode_context import (
     current_rollout_id,
     current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
+    note_verifier_model_request,
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.telemetry.setup import is_trace_exporter_active
@@ -219,6 +220,8 @@ class ServerClient(BaseModel):
             self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
         )
         server_entry = self.global_config_dict.get(server_name)
+        if server_entry is not None and "responses_api_models" in server_entry:
+            note_verifier_model_request(server_name)
         rollout_id = current_rollout_id()
         if attribute_rollout and server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":

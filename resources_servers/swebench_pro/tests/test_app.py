@@ -1449,7 +1449,7 @@ def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
     server = make_server(golden=False)
     client = TestClient(server.setup_webserver())
 
-    # Legacy callers that seeded through /run close with an empty body.
+    # Callers that seeded through /run close with an empty body.
     cookie_close = client.post("/close_session", json={})
     typed_close = client.post(
         "/close_session",

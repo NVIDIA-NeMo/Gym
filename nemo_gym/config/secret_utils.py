@@ -36,6 +36,28 @@ _SECRET_KEY_SUBSTRINGS = (
 )
 
 
+# Noncredential controls from TokenIdCaptureSettings. Unknown/custom children stay private; adding a
+# capture setting must not accidentally make arbitrary backend credentials visible in run artifacts.
+_CAPTURE_PUBLIC_FIELDS = frozenset(
+    {
+        "enabled",
+        "all_agents",
+        "dir",
+        "sink",
+        "lineage_store",
+        "rebuild_response",
+        "parent_resolution",
+        "allow_unresolved_continuations",
+        "delta_records",
+        "mask_incomplete_when_attributed",
+        "max_mask_fraction",
+        "mask_fraction_min_samples",
+        "external_staging",
+        "external_staging_backend",
+    }
+)
+
+
 # The password in a URL's user info (`user:PASSWORD@host` after the scheme). `${...}` stays whole inside the user name,
 # so an interpolation is never cut in two.
 # The password runs to the last `@` of the authority, because passwords are often pasted without percent-encoding.
@@ -126,30 +148,31 @@ def recursively_hide_secrets(dict_config: DictConfig) -> None:
 
 
 def hide_secrets_in_container(data: Any) -> Any:
-    """Copy of a plain dict/list tree with every secret-shaped leaf masked.
+    """Return the credential-safe config projection shared by saved artifacts and exporters.
 
-    Unlike `recursively_hide_secrets` this never touches OmegaConf, so an unresolved `${...}`
-    interpolation (e.g. `${oc.env:API_KEY}`) is neither evaluated nor required to be resolvable.
+    Preserve unresolved interpolations without evaluating them. Secret ancestry masks every value,
+    including arbitrary names in a ``secrets`` mapping. The root ``token_id_capture`` mapping is a
+    settings namespace, not a credential; its own secret-shaped children still undergo masking.
+    Custom sink/resolver kwargs can contain credentials under arbitrary names, so their values stay masked.
     """
-    if isinstance(data, dict):
-        masked = {}
-        for key, value in data.items():
-            if isinstance(value, dict):
-                # A header map's names are arbitrary (`X-Auth`, `Api-Gateway-Token`), so its values are masked
-                # whatever the name looks like; the names stay for inspection.
-                if "header" in str(key).lower():
+
+    def hide(node: Any, secret: bool = False, *, root: bool = False, capture: bool = False) -> Any:
+        if isinstance(node, dict):
+            masked = {}
+            for key, value in node.items():
+                if not secret and "header" in str(key).lower() and isinstance(value, dict):
+                    # Header names are arbitrary. Never retain any header value, even a container.
                     masked[key] = {name: MASKED_VALUE for name in value}
-                else:
-                    masked[key] = hide_secrets_in_container(value)
-            elif isinstance(value, list):
-                masked[key] = (
-                    [MASKED_VALUE] * len(value) if looks_like_secret_key(key) else hide_secrets_in_container(value)
-                )
-            else:
-                masked[key] = MASKED_VALUE if looks_like_secret_key(key) else hide_secrets_in_container(value)
-        return masked
-    if isinstance(data, list):
-        return [hide_secrets_in_container(item) for item in data]
-    if isinstance(data, str):
-        return mask_url_passwords(data)
-    return data
+                    continue
+                capture_settings = root and key == "token_id_capture" and isinstance(value, dict)
+                credential_options = capture and key not in _CAPTURE_PUBLIC_FIELDS
+                child_secret = secret or credential_options or (looks_like_secret_key(key) and not capture_settings)
+                masked[key] = hide(value, child_secret, capture=capture_settings)
+            return masked
+        if isinstance(node, list):
+            return [MASKED_VALUE] * len(node) if secret else [hide(item) for item in node]
+        if secret:
+            return MASKED_VALUE
+        return mask_url_passwords(node) if isinstance(node, str) else node
+
+    return hide(data, root=True)
