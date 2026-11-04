@@ -68,7 +68,7 @@ The mirrored Gym CICD and Fern workflows run automatically for verified commits 
 
 ### Reapprove After Conflict Resolution
 
-After conflict resolution dismisses a human approval, eligible maintainers with repository write permission can comment `/review-reapprove` for a PR or `/review-reapprove scope=stack` for its entire linear stack.
+After conflict resolution dismisses a human approval, members of a team listed in `approval.eligible_teams` in `.github/autobot/review-config.yml` who also have repository write permission can comment `/review-reapprove` for a PR or `/review-reapprove scope=stack` for its entire linear stack.
 The review bot checks that changes are limited to conflict resolutions that preserve approved behavior and declines uncertain cases, using Codex by default or Claude with `model=claude`.
 Each PR receives its own review outcome; required checks and human or CODEOWNER requirements still apply.
 
