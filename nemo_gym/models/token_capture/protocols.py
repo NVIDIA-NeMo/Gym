@@ -362,7 +362,7 @@ class TokenSource(Protocol):
         """
         ...
 
-    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and keep a fence, whatever their state.
 
         This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
@@ -372,7 +372,7 @@ class TokenSource(Protocol):
         """
         ...
 
-    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and fences.
 
         Delete retired rollouts once nothing of those attempts can still write, or a rollout ID before

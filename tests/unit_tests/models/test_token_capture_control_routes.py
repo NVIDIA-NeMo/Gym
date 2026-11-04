@@ -173,7 +173,7 @@ async def test_client_rejects_a_bare_rollout_id_before_sending_anything(client, 
     control = _client_over(client, monkeypatch)
 
     # A string is a sequence of one-character IDs: "rollout-abc" would remove rollouts "r", "o", "l", ...
-    with pytest.raises(TypeError, match="sequence of rollout ids"):
+    with pytest.raises(TypeError, match="sequence of capture keys"):
         await getattr(control, action)("rollout-abc")
     assert await ledger.has_rows("r")
 

@@ -737,7 +737,7 @@ async def test_file_store_delete_removes_every_ledger_and_fence_file(tmp_path):
 async def test_a_bare_rollout_id_string_is_rejected(store, method):
     """A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts."""
     await _record_call_1(store)
-    with pytest.raises(TypeError, match="sequence of rollout ids"):
+    with pytest.raises(TypeError, match="sequence of capture keys"):
         await getattr(store, method)("r1")
     assert await store.has_rows("r1")
 

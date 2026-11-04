@@ -67,7 +67,7 @@ def validate_capture_keys(capture_keys: Sequence[str]) -> list[str]:
     A bare string is rejected: it is a sequence of one-character capture keys.
     """
     if isinstance(capture_keys, str):
-        raise TypeError(f"expected a sequence of rollout ids, got the string {capture_keys!r}")
+        raise TypeError(f"expected a sequence of capture keys, got the string {capture_keys!r}")
     return list(dict.fromkeys(validate_rollout_id(capture_key) for capture_key in capture_keys))
 
 
@@ -463,7 +463,7 @@ class TokenCaptureStore:
         ):
             path.unlink(missing_ok=True)
 
-    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and keep a fence, whatever their state.
 
         This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
@@ -472,9 +472,9 @@ class TokenCaptureStore:
         rollout fail, including writes from a duplicate execution of the same rollout. Retiring again
         is a no-op.
         """
-        return await asyncio.to_thread(self.retire_now, rollout_ids)
+        return await asyncio.to_thread(self.retire_now, capture_keys)
 
-    def retire_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    def retire_now(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Synchronous ``retire``.
 
         Two phases, each ending in one directory sync: write every missing fence, then remove the records. The
@@ -485,7 +485,7 @@ class TokenCaptureStore:
         removed, absent, to_clear = [], [], []
         unsynced = False
         try:
-            for rollout_id in validate_capture_keys(rollout_ids):
+            for rollout_id in validate_capture_keys(capture_keys):
                 with self._locked(rollout_id):
                     had_records = self._has_records(rollout_id)
                     state = self._read_state(rollout_id)
@@ -524,16 +524,16 @@ class TokenCaptureStore:
         except OSError:
             logger.warning("Could not sync capture directory %s after a failed batch.", self._root, exc_info=True)
 
-    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Remove rollouts' records and fences.
 
         Delete retired rollouts once nothing of those attempts can still write, for example at the end
         of the run, which removes their fences. Delete a rollout ID before reusing it, so the new
         execution starts empty. Deleting again is a no-op.
         """
-        return await asyncio.to_thread(self.delete_now, rollout_ids)
+        return await asyncio.to_thread(self.delete_now, capture_keys)
 
-    def delete_now(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    def delete_now(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Synchronous ``delete``.
 
         Every non-empty batch syncs the directory before returning, even when it found nothing to remove: an
@@ -541,11 +541,11 @@ class TokenCaptureStore:
         ID after this returns must not see the old fence or records come back after a crash.
         """
         removed, absent = [], []
-        rollout_ids = validate_capture_keys(rollout_ids)
-        if not rollout_ids:
+        capture_keys = validate_capture_keys(capture_keys)
+        if not capture_keys:
             return {"removed": removed, "absent": absent}
         try:
-            for rollout_id in rollout_ids:
+            for rollout_id in capture_keys:
                 with self._locked(rollout_id):
                     (removed if self._has_records(rollout_id) else absent).append(rollout_id)
                     self._remove_record_files(rollout_id)

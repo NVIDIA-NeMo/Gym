@@ -934,7 +934,7 @@ def test_token_store_rejects_a_bare_rollout_id_and_invalid_batches(tmp_path, met
     store = TokenCaptureStore(tmp_path)
     _store_entry(store, "r1")
     # A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts.
-    with pytest.raises(TypeError, match="sequence of rollout ids"):
+    with pytest.raises(TypeError, match="sequence of capture keys"):
         getattr(store, method)("r1")
     with pytest.raises(ValueError, match="Invalid rollout id"):
         getattr(store, method)(["r1", "../escape"])

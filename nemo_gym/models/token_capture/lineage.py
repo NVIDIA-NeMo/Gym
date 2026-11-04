@@ -642,9 +642,9 @@ class InMemoryLineageStore:
         self._retired.difference_update(capture_keys)
         return self._remove(capture_keys)
 
-    def _remove(self, rollout_ids: list[str]) -> RolloutRemovalPayload:
+    def _remove(self, capture_keys: list[str]) -> RolloutRemovalPayload:
         removed, absent = [], []
-        for rollout_id in rollout_ids:
+        for rollout_id in capture_keys:
             (removed if self._ledgers.pop(rollout_id, None) is not None else absent).append(rollout_id)
             self._started.discard(rollout_id)
             self.index.drop(rollout_id)
@@ -655,11 +655,11 @@ class InMemoryLineageStore:
         if rollout_id not in self._retired:
             self._started.add(rollout_id)
 
-    async def delete_unstarted(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def delete_unstarted(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Delete the rollouts no ``mark_started`` names; see ``FileLineageStore.delete_unstarted``."""
         from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        return await self.delete([key for key in validate_capture_keys(rollout_ids) if key not in self._started])
+        return await self.delete([key for key in validate_capture_keys(capture_keys) if key not in self._started])
 
     async def close(self) -> None:
         self.index.clear()
@@ -1275,25 +1275,25 @@ class FileLineageStore(IncrementalLineageStore):
             except FileExistsError:
                 return
 
-    async def delete_unstarted(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def delete_unstarted(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Delete, as ``delete`` does, the rollouts that no server has marked started.
 
         The check and the removal hold the rollout's lock, so a concurrent ``mark_started`` either comes first,
         and the ledger stays, or comes after the ledger is gone.
         """
-        return await asyncio.to_thread(self._delete_unstarted, rollout_ids)
+        return await asyncio.to_thread(self._delete_unstarted, capture_keys)
 
-    def _delete_unstarted(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    def _delete_unstarted(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.models.token_capture.store import validate_capture_keys
 
-        return self._remove(validate_capture_keys(rollout_ids), unretire=True, unless_started=True)
+        return self._remove(validate_capture_keys(capture_keys), unretire=True, unless_started=True)
 
     def _remove(
-        self, rollout_ids: list[str], *, unretire: bool = False, unless_started: bool = False
+        self, capture_keys: list[str], *, unretire: bool = False, unless_started: bool = False
     ) -> RolloutRemovalPayload:
         removed, absent = [], []
         changed = False
-        for rollout_id in rollout_ids:
+        for rollout_id in capture_keys:
             with self._locked(rollout_id):
                 if not unretire and not self._retired_path(rollout_id).exists():
                     # A delete cleared the fence after this retire wrote it, and the rollout ID may already be
@@ -1324,7 +1324,7 @@ class FileLineageStore(IncrementalLineageStore):
         # A retire with nothing left to remove has already synced its fences. A delete always syncs a non-empty
         # batch: an overlapping delete may have removed the files without syncing yet, and a caller that reuses
         # the rollout ID must not see the old fence or ledger come back after a crash.
-        if changed or (unretire and rollout_ids):
+        if changed or (unretire and capture_keys):
             self._fsync_ledger_root()
         return {"removed": removed, "absent": absent}
 
