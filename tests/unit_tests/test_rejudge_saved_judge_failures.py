@@ -384,6 +384,75 @@ async def test_a_failed_pass_records_what_it_settled_and_is_not_counted_as_settl
     assert failed_judge_jobs_blocking([nothing | {"job_id": "1"}, nothing | {"job_id": "2"}]) == ["1", "2"]
 
 
+def _settling_pass(helper, output: Path, tmp_path: Path):
+    """A settling judge-only pass over ``output``, and a reader of the counts its failed receipt records."""
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, write_settle_receipt
+
+    config = RolloutReverificationConfig.model_validate(
+        {
+            "rollouts_jsonl_fpath": str(output),
+            "materialized_inputs_jsonl_fpath": str(materialized_path_for(output)),
+            "output_jsonl_fpath": str(output.parent / "reverification" / "failed-pass" / output.name),
+            "judge_failed_only": True,
+            "settle_into_source": True,
+            "skip_spent_judge_failures": True,
+            "disable_aggregation": True,
+        }
+    )
+    return config, lambda: {
+        name: value
+        for name, value in write_settle_receipt(
+            tmp_path / "receipt.json",
+            state="failed",
+            source=str(output),
+            job_id="1",
+            settlement=helper.settlement,
+            started_at="2026-01-01T00:00:00Z",
+        ).items()
+        if name in ("selected", "judged", "settled", "withdrawn")
+    }
+
+
+async def test_a_grade_saved_before_the_coverage_write_failed_counts_as_settled(tmp_path, monkeypatch):
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper
+    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
+
+    _, output, identities = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        return json | {"reward": 1.0}
+
+    _verifier(monkeypatch, reply)
+    # One exit-time coverage write fails, after the pass has fsynced its grades and closed their admissions.
+    record_rejudgment, write_coverage = RolloutStore.record_rejudgment, RolloutStore.write_coverage
+    state = {"graded": False, "failed": False}
+
+    def recording(self, failure, result):
+        state["graded"] = True
+        return record_rejudgment(self, failure, result)
+
+    def failing_once(self, *args, **kwargs):
+        if state["graded"] and not state["failed"] and self._results_file is None:  # the exit-time write
+            state["failed"] = True
+            raise OSError("disk full")
+        return write_coverage(self, *args, **kwargs)
+
+    monkeypatch.setattr(RolloutStore, "record_rejudgment", recording)
+    monkeypatch.setattr(RolloutStore, "write_coverage", failing_once)
+    helper = RolloutReverificationHelper()
+    config, receipt = _settling_pass(helper, output, tmp_path)
+    with pytest.raises(OSError, match="disk full"):
+        await helper.run_from_config(config)
+
+    scored, failed, pending = _state(output)
+    assert {identity: scored[identity] for identity in identities} == {identity: 1.0 for identity in identities}
+    assert failed == [] and pending == {}  # the new grades stay selected and their admissions closed
+    assert receipt() == {"selected": 2, "judged": 2, "settled": 2, "withdrawn": 0}
+    # Two such failed jobs made progress: recovery is not stopped for settling nothing.
+    failed_job = {"state": "failed", "settled": 2}
+    assert failed_judge_jobs_blocking([failed_job | {"job_id": "1"}, failed_job | {"job_id": "2"}]) is None
+
+
 @pytest.mark.parametrize(
     "masked",
     [

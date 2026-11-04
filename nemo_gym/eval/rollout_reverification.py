@@ -1422,15 +1422,32 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
     failure that is no longer the selected outcome is refused. A bound saved result replaces its grade only with a
     result that binds the same saved answer and attempt (``is_rejudgment_of``); one whose re-verification answered
     without a grade keeps its saved row, and its admission is withdrawn.
+
+    Each settlement is recorded in ``binding["settled_operations"]`` (this pass's admission operation ids) as soon as
+    it is fsynced, so a pass that raises afterwards, for example on the Store's exit-time coverage write, still
+    counts it. Settling again after such an error (the failed pass's exit callback) skips what this pass already
+    settled, closes a settled admission that is still open, and expects only the pass's other admissions to be open.
     """
     store = RolloutStore.open_for_rejudgment(source)
-    own = store.manifest.pending_rejudge  # must equal this run's admissions exactly
+    settled_operations = binding.setdefault("settled_operations", set())
+    done = settled_operations
+    admitted = binding.get("admitted", {})
+    open_now = store.manifest.pending_rejudge
+    # A settlement whose admission was not closed before an error: its outcome is saved, so it is closed below.
+    unclosed = {
+        identity: pending
+        for identity, pending in open_now.items()
+        if admitted.get(identity) == pending and pending.operation_id in settled_operations
+    }
+    own = {identity: pending for identity, pending in open_now.items() if identity not in unclosed}
+    # Must equal this pass's admissions that it has not settled yet, exactly.
+    expected = {identity: pending for identity, pending in admitted.items() if pending.operation_id not in done}
     if (
         store.manifest.model_copy(update={"pending_rejudge": {}}).model_dump_json()
         != RunManifest.model_validate_json(binding["manifest"])
         .model_copy(update={"pending_rejudge": {}})
         .model_dump_json()
-        or own != binding.get("admitted", {})
+        or own != expected
         or materialized_path_for(store.output).read_bytes() != binding["materialized"]
     ):
         raise ConfigError(f"{source} changed between re-judgment and settlement; nothing was settled.")
@@ -1447,6 +1464,8 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         failure = binding["failures"].get(identity)
         if failure is None:
             raise ConfigError(f"Re-judged rollout {identity!r} is not a bound judge failure of {source}.")
+        if binding["admitted"][identity].operation_id in done:
+            continue  # this pass settled it before an error
         if _ungraded_reverification(result) and (
             identity in saved_results or result.get(NG_FAILURE_CLASS_KEY) != "judge_failed"
         ):
@@ -1481,9 +1500,14 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         store.check_rejudgment(failure, result)
     settled = 0
     with store:
+        for identity, pending in unclosed.items():
+            store.close_rejudgment(identity, pending.operation_id)
         for failure, result in planned:
-            settled += store.record_rejudgment(failure, result)
-            store.close_rejudgment(logical_rollout_id(result), result["_ng_rejudge_operation_id"])
+            operation_id = result["_ng_rejudge_operation_id"]
+            if store.record_rejudgment(failure, result):
+                settled += 1
+                settled_operations.add(operation_id)  # fsynced: it counts even if a later write raises
+            store.close_rejudgment(logical_rollout_id(result), operation_id)
         for identity, operation_id in withdrawn:
             store.withdraw_rejudgment(identity, operation_id, unsaved_judge_failure=identity not in saved_results)
     if withdrawn:
@@ -1522,10 +1546,9 @@ def _settle_what_a_failed_pass_judged(
     def settle(exc_type, exc, traceback) -> bool:
         if exc_type is None or not issubclass(exc_type, Exception):
             return False
-        settled = 0
         if judged:
             try:
-                settled = settle_rejudgments(source, judged, binding)
+                settle_rejudgments(source, judged, binding)
             except Exception as error:  # what cannot be settled is withdrawn below; a settled row is never touched
                 print(f"Re-judged results of a failed pass were not settled: {type(error).__name__}: {error}")
         withdrawn = 0
@@ -1550,7 +1573,8 @@ def _settle_what_a_failed_pass_judged(
                 "selected": len(binding["failures"]) + len(unsupported),
                 "unsupported": len(unsupported),
                 "judged": len(judged),
-                "settled": settled,
+                # Every settlement this pass fsynced, including those saved before the error.
+                "settled": len(binding.get("settled_operations", ())),
                 "withdrawn": len(binding.get("withdrawn", [])) + withdrawn,
             }
         )
@@ -1944,7 +1968,7 @@ class RolloutReverificationHelper(BaseModel):
                 "selected": len(settle_binding["failures"]) + len(unsupported),
                 "unsupported": len(unsupported),
                 "judged": len(payloads_to_reverify),
-                "settled": settled,
+                "settled": len(settle_binding["settled_operations"]),
                 "withdrawn": len(settle_binding.get("withdrawn", [])),
             }
 
