@@ -19,6 +19,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -140,16 +141,21 @@ def server_types() -> tuple[str, ...]:
 
 
 def source_snapshot() -> tuple[list[str], str]:
-    """Fingerprint every tracked file; missing inputs must never disappear silently."""
+    """Fingerprint Git entries, including directory and dangling symbolic links."""
     sources = sorted(path for path in git("ls-files", "--recurse-submodules", "-z").split("\0") if path)
     digest = hashlib.sha256()
     for path in sources:
         file = Path(path)
-        if not file.is_file():
+        mode = file.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            # Git tracks the link text, not its referent. Tracked referents are
+            # fingerprinted separately, including every file in linked directories.
+            content = b"symlink\0" + os.fsencode(os.readlink(file))
+        elif stat.S_ISREG(mode):
+            content = b"file\0" + hashlib.sha256(file.read_bytes()).digest()
+        else:
             raise FileNotFoundError(f"Tracked CI input is missing or unreadable: {path}")
-        content_digest = hashlib.sha256(file.read_bytes()).digest()
-        target = os.readlink(file) if file.is_symlink() else ""
-        digest.update(path.encode() + b"\0" + target.encode() + b"\0" + content_digest)
+        digest.update(path.encode() + b"\0" + content + b"\0")
     return sources, digest.hexdigest()
 
 
@@ -245,7 +251,9 @@ def run_pants(*, script: Path, output: Path, env: dict[str, str], sources: list[
     template = (HERE / "full_ci.BUILD").read_text()
     substitutions = {
         "__COMMAND__": repr(shell_command),
-        "__SOURCES__": repr(sources),
+        # Pants globs resolve symlinks, and reject dangling links. Their exact
+        # Git identity is carried by GYM_PANTS_INPUT_DIGEST instead.
+        "__SOURCES__": repr([path for path in sources if not Path(path).is_symlink()]),
         "__ENVIRONMENT__": repr(sorted(env)),
     }
     for token, value in substitutions.items():
@@ -350,6 +358,7 @@ def main() -> int:
     env = {name: value for name, value in os.environ.items() if name in ENVIRONMENT or name.startswith("JAVA_HOME_")}
     # The controller branch is infrastructure, not the revision under test.
     env["GITHUB_SHA"] = source_sha
+    env["GYM_PANTS_INPUT_DIGEST"] = source_digest
     started_at = timestamp()
     start = time.monotonic()
     code = 1

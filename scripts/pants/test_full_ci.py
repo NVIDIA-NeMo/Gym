@@ -175,6 +175,30 @@ def test_manifest_covers_configuration_and_rejects_missing_tracked_input(tmp_pat
         full_ci.source_snapshot()
 
 
+def test_git_directory_file_and_dangling_symlinks_are_fingerprinted(tmp_path, monkeypatch):
+    repository(tmp_path, monkeypatch)
+    target = Path(".agents/skills/example")
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text("tracked skill contents")
+    links = Path(".claude/skills")
+    links.mkdir(parents=True)
+    (links / "example").symlink_to("../../.agents/skills/example", target_is_directory=True)
+    Path("file-link").symlink_to("tracked.yaml")
+    Path("broken-link").symlink_to("missing-target")
+    subprocess.run(["git", "add", "."], check=True)
+    sources, digest = full_ci.source_snapshot()
+    assert str(links / "example") in sources
+    assert "broken-link" in sources
+    assert "file-link" in sources
+    assert str(target / "SKILL.md") in sources
+    (target / "SKILL.md").write_text("updated tracked referent")
+    assert full_ci.source_snapshot()[1] != digest
+    _, updated = full_ci.source_snapshot()
+    Path("broken-link").unlink()
+    Path("broken-link").symlink_to("different-missing-target")
+    assert full_ci.source_snapshot()[1] != updated
+
+
 @pytest.mark.parametrize("existing_config", [False, True])
 def test_pants_failure_preserves_status_environment_and_cleans_only_owned_files(
     tmp_path, monkeypatch, existing_config

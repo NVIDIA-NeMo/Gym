@@ -102,9 +102,14 @@ jobs:
       - name: Install Pants launcher
         if: inputs.engine == 'pants'
         run: |
-          python3 -m venv "$RUNNER_TEMP/pants-launcher"
-          "$RUNNER_TEMP/pants-launcher/bin/pip" install --disable-pip-version-check scie-pants==0.13.4
-          echo "PANTS_BIN=$RUNNER_TEMP/pants-launcher/bin/pants" >> "$GITHUB_ENV"
+          pants_bin="$RUNNER_TEMP/pants-launcher/pants"
+          mkdir -p "$(dirname "$pants_bin")"
+          curl --fail --location --retry 3 \
+            https://github.com/pantsbuild/scie-pants/releases/download/v0.13.4/scie-pants-linux-x86_64 \
+            --output "$pants_bin"
+          echo "2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0  $pants_bin" | sha256sum --check
+          chmod +x "$pants_bin"
+          echo "PANTS_BIN=$pants_bin" >> "$GITHUB_ENV"
       - name: Run identical routed workload
         working-directory: sample
         env:
@@ -189,9 +194,14 @@ jobs:
       - name: Install Pants launcher
         if: inputs.engine == 'pants'
         run: |
-          python3 -m venv "$RUNNER_TEMP/pants-launcher"
-          "$RUNNER_TEMP/pants-launcher/bin/pip" install --disable-pip-version-check scie-pants==0.13.4
-          echo "PANTS_BIN=$RUNNER_TEMP/pants-launcher/bin/pants" >> "$GITHUB_ENV"
+          pants_bin="$RUNNER_TEMP/pants-launcher/pants"
+          mkdir -p "$(dirname "$pants_bin")"
+          curl --fail --location --retry 3 \
+            https://github.com/pantsbuild/scie-pants/releases/download/v0.13.4/scie-pants-linux-x86_64 \
+            --output "$pants_bin"
+          echo "2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0  $pants_bin" | sha256sum --check
+          chmod +x "$pants_bin"
+          echo "PANTS_BIN=$pants_bin" >> "$GITHUB_ENV"
       - name: Run identical routed workload
         working-directory: sample
         env:

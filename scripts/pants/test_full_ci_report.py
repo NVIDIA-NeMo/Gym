@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 from full_ci_report import routing, timing
 
 
@@ -114,11 +115,11 @@ def test_timing_includes_queue_gaps_and_keeps_failures():
     assert not result["successful"]
 
 
-def test_report_fails_closed_when_job_disappears(tmp_path):
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_report_fails_closed_when_job_disappears(tmp_path, attempt):
     import argparse
     import json
 
-    import pytest
     from full_ci_report import report
 
     route = tmp_path / "routing.json"
@@ -138,13 +139,16 @@ def test_report_fails_closed_when_job_disappears(tmp_path):
     jobs = tmp_path / "jobs.json"
     jobs.write_text(json.dumps({"jobs": []}))
     run = tmp_path / "run.json"
-    run.write_text(json.dumps({"id": 42, "run_attempt": 1, "created_at": "2026-11-04T10:00:00Z"}))
+    run.write_text(json.dumps({"id": 42, "run_attempt": attempt, "created_at": "2026-11-04T10:00:00Z"}))
     output = tmp_path / "summary"
     with pytest.raises(SystemExit):
         report(argparse.Namespace(route=route, jobs=jobs, run=run, artifacts=tmp_path, output=output))
     results = json.loads((output / "results.json").read_text())
     assert results["run"]["created_at"] == "2026-11-04T10:00:00Z"
     assert not results["valid"]
+    assert any("Rerun attempts" in error for error in results["errors"]) == (attempt > 1)
+    if attempt > 1:
+        assert all(value["feedback_seconds"] is None for value in results["timing"].values())
     assert any("Missing execution metadata" in error for error in results["errors"])
     assert any("Missing or additional measured jobs" in error for error in results["errors"])
 

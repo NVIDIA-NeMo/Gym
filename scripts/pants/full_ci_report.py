@@ -166,9 +166,16 @@ def report(args: argparse.Namespace) -> None:
     result = {
         "routing": route,
         "run": {key: run.get(key) for key in ("id", "run_attempt", "created_at", "html_url", "head_sha")},
-        "timing": {engine: timing(jobs, engine, run.get("created_at")) for engine in ("baseline", "pants")},
+        "timing": {
+            engine: timing(jobs, engine, run.get("created_at") if run.get("run_attempt", 1) == 1 else None)
+            for engine in ("baseline", "pants")
+        },
     }
     errors = []
+    if run.get("run_attempt", 1) != 1:
+        errors.append(
+            "Rerun attempts are not comparable: dispatch a fresh workflow so feedback time has a shared creation timestamp."
+        )
     for item in route["matrix"]["include"]:
         directory = args.artifacts / f"full-ci-{item['engine']}-{item['job']}-{item['shard']}"
         metadata = directory / "metadata.json"
