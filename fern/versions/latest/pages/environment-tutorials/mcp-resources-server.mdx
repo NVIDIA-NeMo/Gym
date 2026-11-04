@@ -84,12 +84,27 @@ async def get_weather(
 
 ### Wiring the agent (Claude Code)
 
-For the configuration above, the round-trip is:
+The Gym agent seeds the weather session and starts the Claude Code CLI with the generated MCP config:
 
-1. The agent calls `/seed_session`. Gym adds `mcp` connection metadata to the reply, including a signed `X-NeMo-Gym-Session-Token` for this session.
-2. The agent writes that metadata to a per-rollout MCP config and passes it to Claude Code with `--mcp-config`.
-3. Claude Code discovers and calls `get_weather` through `/mcp`, carrying the token. Gym resolves it to the same session the agent seeded.
-4. The agent submits the final response to `/verify`, using the session cookie from seed.
+```mermaid
+sequenceDiagram
+    participant Agent as Gym agent
+    participant CLI as Claude Code CLI
+    participant Weather as Weather server
+
+    Agent->>Weather: POST /seed_session
+    Weather-->>Agent: Session cookie + MCP metadata
+    Note over Agent: Generate MCP config<br/>with server URL and token
+    Agent->>CLI: Start with --mcp-config
+    CLI->>Weather: POST /mcp: tools/call<br/>get_weather(city) + token
+    Note over Weather: Record tool call<br/>in the seeded session
+    Weather-->>CLI: Weather sentence
+    CLI-->>Agent: Final answer
+    Agent->>Weather: POST /verify<br/>Final response + cookie
+    Weather-->>Agent: Reward
+```
+
+The Gym agent and Claude Code CLI are separate processes. All three weather endpoints run in the same Resources Server. The MCP config carries a signed `X-NeMo-Gym-Session-Token`; it identifies the same resources session as the cookie used for verification.
 
 The generated MCP config uses the weather server's name and address; you do not need to write it yourself.
 
