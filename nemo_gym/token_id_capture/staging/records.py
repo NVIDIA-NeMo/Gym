@@ -19,7 +19,16 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, ValidationInfo, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    ValidationInfo,
+    model_validator,
+)
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
@@ -32,6 +41,7 @@ from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
     STAGING_SCHEMA_VERSION,
+    _all_exact_type,
     compute_extras_digest,
     compute_staging_digest,
 )
@@ -46,6 +56,7 @@ DigestHex = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 
 # Only the explicit local builder supplies this identity; it is never a wire field.
 _BUILD_STAGING_DIGEST = object()
+_BUILD_WITH_DERIVED_EXTRAS = object()
 
 
 def staging_key(rollout_id: str, model_call_id: str) -> str:
@@ -210,15 +221,16 @@ class StagedCallBaseSnapshot(_DigestWireModel):
             raise ValueError("a child staged call must use token_in mode")
         if self.delta_len == 0:
             raise ValueError("a staged call delta must contain at least one token")
-        if any(token_id < 0 for token_id in self.token_ids_delta):
-            raise ValueError("token_ids_delta must be non-negative")
-        if any(mask not in (0.0, 1.0) for mask in self.token_mask_delta):
-            raise ValueError("token_mask_delta must contain only 0.0 or 1.0")
-        if any(
-            mask == 0.0 and log_prob != 0.0
-            for mask, log_prob in zip(self.token_mask_delta, self.generation_log_probs_delta)
-        ):
-            raise ValueError("prompt-carry log probabilities must be 0.0")
+        # compute_staging_digest below validates the exact token bounds,
+        # mask domain and prompt-carry log probabilities while hashing. Avoid
+        # repeating those full-column scans in this validator.
+        if info.context is _BUILD_WITH_DERIVED_EXTRAS:
+            # Only from_components(extras_digest=None) issues this capability.
+            # Hash the already field-validated extras, then cover that hash in
+            # the staged digest below. Wire constructors still verify supplied hashes.
+            if not isinstance(self, StagedCallRecord):
+                raise ValueError("Deriving extras requires a local staged record")
+            self.extras_digest = compute_extras_digest(self.extras)
         actual_digest = compute_staging_digest(
             schema_version=self.schema_version,
             digest_version=self.digest_version,
@@ -238,7 +250,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
             chain_hash=self.chain_hash,
             cumulative_hash=self.cumulative_hash,
         )
-        if info.context is _BUILD_STAGING_DIGEST:
+        if info.context is _BUILD_STAGING_DIGEST or info.context is _BUILD_WITH_DERIVED_EXTRAS:
             # Construction-time assignment requires a mutable model without validate_assignment.
             self.digest = actual_digest
         elif self.digest != actual_digest:
@@ -267,12 +279,14 @@ class StagedCallRecord(StagedCallBaseSnapshot):
         token_mask_delta: list[float],
         generation_log_probs_delta: list[float],
         extras: dict[str, Any] | None,
-        extras_digest: str,
+        extras_digest: str | None,
         chain_hash: str,
         cumulative_hash: str,
     ) -> Self:
         """Validate local components and compute their digest exactly once.
 
+        Passing extras_digest=None derives the extras digest once from the
+        field-validated payload. A supplied digest is still checked against extras.
         Runs normal field, integrity, and extras validators. Wire constructors
         still require a supplied digest and verify it against the contents.
 
@@ -286,7 +300,7 @@ class StagedCallRecord(StagedCallBaseSnapshot):
             ("token_mask_delta", token_mask_delta),
             ("generation_log_probs_delta", generation_log_probs_delta),
         ):
-            if any(type(value) is not float for value in values):
+            if not _all_exact_type(values, float):
                 raise ValueError(f"{name} values must be Python floats")
         return cls.model_validate(
             {
@@ -302,17 +316,20 @@ class StagedCallRecord(StagedCallBaseSnapshot):
                 "token_mask_delta": token_mask_delta,
                 "generation_log_probs_delta": generation_log_probs_delta,
                 "extras": extras,
-                "extras_digest": extras_digest,
+                "extras_digest": extras_digest if extras_digest is not None else EMPTY_EXTRAS_DIGEST,
                 "chain_hash": chain_hash,
                 "cumulative_hash": cumulative_hash,
                 # Replaced by the integrity validator, after field validation.
                 "digest": "0" * 64,
             },
-            context=_BUILD_STAGING_DIGEST,
+            context=_BUILD_STAGING_DIGEST if extras_digest is not None else _BUILD_WITH_DERIVED_EXTRAS,
         )
 
     @model_validator(mode="after")
-    def _validate_extras_integrity(self) -> Self:
+    def _validate_extras_integrity(self, info: ValidationInfo) -> Self:
+        if info.context is _BUILD_WITH_DERIVED_EXTRAS:
+            # The base validator just derived this value from these same fields.
+            return self
         actual_extras_digest = compute_extras_digest(self.extras)
         if self.extras_digest != actual_extras_digest:
             raise ValueError("extras_digest does not match extras")

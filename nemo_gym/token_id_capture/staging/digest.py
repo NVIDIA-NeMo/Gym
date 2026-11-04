@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+import operator
 import struct
 from collections.abc import Iterator, Mapping, Sequence
+from itertools import compress, repeat
 from typing import Any
 
 from nemo_gym.token_id_capture import capture_metrics
@@ -86,12 +88,19 @@ def _encode_present_digest(value: str, *, field: str) -> bytes:
     return b"\x01" + bytes.fromhex(value)
 
 
+def _all_exact_type(values: Sequence[object], expected: type) -> bool:
+    """Run exact-type identity checks through C iterators, without coercion."""
+    return all(map(operator.is_, map(type, values), repeat(expected)))
+
+
 def encode_token_ids(token_ids: Sequence[int]) -> bytes:
     """Encode token IDs as a length followed by unsigned big-endian values."""
     length = _encode_uint(len(token_ids), field="token_ids length")
-    for token_id in token_ids:
-        if type(token_id) is not int or not 0 <= token_id <= (2**64 - 1):
-            raise ValueError(f"token_id must be an unsigned 64-bit integer, got {token_id!r}")
+    if not _all_exact_type(token_ids, int):
+        for token_id in token_ids:
+            if type(token_id) is not int:
+                raise ValueError(f"token_id must be an unsigned 64-bit integer, got {token_id!r}")
+    # struct.pack checks every uint64 bound in C after exact-type validation.
     # Pack the column in C rather than allocating and extending once per token.
     # Explicit big-endian widths preserve the v2 wire bytes on every host.
     try:
@@ -136,9 +145,10 @@ def compute_chain_hash(parent_chain_hash: str | None, token_ids_delta: Sequence[
 
 def _encode_float32_values(values: Sequence[float], *, field: str) -> bytes:
     length = _encode_uint(len(values), field=f"{field} length")
-    for value in values:
-        if type(value) is not float or not math.isfinite(value):
-            raise ValueError(f"{field} values must be finite Python floats, got {value!r}")
+    if not _all_exact_type(values, float) or not all(map(math.isfinite, values)):
+        for value in values:
+            if type(value) is not float or not math.isfinite(value):
+                raise ValueError(f"{field} values must be finite Python floats, got {value!r}")
     format_string = f">{len(values)}f"
     try:
         packed = struct.pack(format_string, *values)
@@ -282,10 +292,20 @@ def compute_staging_digest(
         raise ValueError(f"delta_len {delta_len} does not match {len(token_ids_delta)} token IDs")
     if not (len(token_ids_delta) == len(token_mask_delta) == len(generation_log_probs_delta)):
         raise ValueError("token IDs, masks, and log probabilities must have equal lengths")
-    if any(mask not in (0.0, 1.0) for mask in token_mask_delta):
+    # list/tuple count runs in C. Most local chunks contain only generated
+    # tokens, so no prompt logprob scan is needed once the mask is checked.
+    prompt_count = token_mask_delta.count(0.0)
+    if prompt_count + token_mask_delta.count(1.0) != len(token_mask_delta):
         raise ValueError("token_mask_delta must contain only 0.0 or 1.0")
-    if any(mask == 0.0 and log_prob != 0.0 for mask, log_prob in zip(token_mask_delta, generation_log_probs_delta)):
-        raise ValueError("prompt-carry log probabilities must be 0.0")
+    if prompt_count:
+        # Prefix builders put prompt carry before generation. Keep supporting
+        # arbitrary wire masks through the general selector below.
+        if token_mask_delta[:prompt_count].count(0.0) == prompt_count:
+            invalid_prompt_logprobs = any(generation_log_probs_delta[:prompt_count])
+        else:
+            invalid_prompt_logprobs = any(compress(generation_log_probs_delta, map(operator.not_, token_mask_delta)))
+        if invalid_prompt_logprobs:
+            raise ValueError("prompt-carry log probabilities must be 0.0")
     if cum_len != prev_len + delta_len:
         raise ValueError(f"cum_len {cum_len} does not equal prev_len + delta_len ({prev_len + delta_len})")
     _validate_digest(extras_digest, field="extras_digest")
