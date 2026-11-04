@@ -17,9 +17,9 @@ from environment_servers.single_agent_turn.app import (
 from nemo_gym.agents.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.core.episode import EpisodeId, TaskId, current_rollout_id
+from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.core.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_runtime.episode_types import MaterializedTask
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 

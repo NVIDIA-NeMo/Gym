@@ -31,7 +31,7 @@ from nemo_gym.client.openai_client import (
     _error_body_is_permanent_auth,
     _error_body_is_permanent_quota,
 )
-from nemo_gym.core.episode import rollout_context
+from nemo_gym.core.episode_context import rollout_context
 
 
 @pytest.fixture(autouse=True)
@@ -648,8 +648,8 @@ class TestExhaustedAttemptCause:
 
     async def test_the_last_attempt_becomes_the_explicit_cause(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from nemo_gym.client import openai_client as openai_utils
-        from nemo_gym.server_runtime.episode_types import FailureBoundary
-        from nemo_gym.typed_exceptions import NgFailureEvent
+        from nemo_gym.core.failure_records import FailureBoundary
+        from nemo_gym.core.typed_exceptions import NgFailureEvent
 
         error = self._http_error()
         monkeypatch.setattr(openai_utils, "raise_for_status", AsyncMock(side_effect=error))
@@ -711,9 +711,9 @@ async def test_a_forwarded_permanent_failure_is_the_cause_of_only_the_call_it_en
     from aiohttp import web
 
     from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI, PermanentEndpointError
-    from nemo_gym.failure_transport import FailureHeader
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
     remote = NgFailureEvent(
         boundary=FailureBoundary.MODEL,

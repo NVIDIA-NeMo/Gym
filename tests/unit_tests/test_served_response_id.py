@@ -176,7 +176,7 @@ def test_newer_record_is_rejected():
         TokenEntry.model_validate(
             {
                 "schema_version": 99,
-                "rollout_id": "r",
+                "capture_key": "r",
                 "model_call_id": "c",
                 "prompt_token_ids": [1],
                 "generation_token_ids": [2],

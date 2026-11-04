@@ -7,13 +7,10 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime.base_resources_server import BaseVerifyResponse
-from nemo_gym.server_runtime.episode_types import (
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
-    EpisodeFailure,
-)
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
 
 

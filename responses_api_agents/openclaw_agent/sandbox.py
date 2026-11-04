@@ -17,10 +17,9 @@ from nemo_gym.agents import (
     is_harness_termination_failure,
     shell_assignments,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
-from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 LOG = logging.getLogger(__name__)

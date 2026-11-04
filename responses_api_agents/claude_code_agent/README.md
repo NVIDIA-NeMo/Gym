@@ -227,6 +227,9 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   final usage reports no uncached input: Claude Code then keeps the prompt total it was sent when
   the call started and adds the cache reads and writes to it. With DeepSeek V4.1 Flash that is
   about 1 call in 135, or 0.7% extra input.
+- Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
+  command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
+  exits, so a backgrounded command would hold the run open after the final answer.
 
 ## Sandbox execution
 
