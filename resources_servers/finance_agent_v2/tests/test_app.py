@@ -46,9 +46,9 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ReverifyMode,
+    check_resources_session_contract,
 )
 from nemo_gym.server_runtime.request_handling.session_routing import ResourcesSessionLifetimes
-from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.finance_agent_v2.app import (
     FinanceAgentV2ResourcesServer,
     FinanceAgentV2ResourcesServerConfig,
