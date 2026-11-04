@@ -8,16 +8,129 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from xml.etree import ElementTree
 
 from collect import targets
-from prepare import requirement_pins, snapshot_git, validate_lock
+from prepare import requirement_pins, snapshot_git, validate_lock, write_build_configuration
 from run import combine_junit
+from runtime import expose_editable_to_children, restore_symlinks
 
 
 class NativeCoreTest(unittest.TestCase):
+    def test_child_python_outside_checkout_uses_relocated_editable_and_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            root = base / "sandbox"
+            package = root / "native_fixture/cli"
+            package.mkdir(parents=True)
+            (root / "native_fixture/__init__.py").touch()
+            (package / "__init__.py").touch()
+            (package / "main.py").write_text("def main():\n    return 'sampled entrypoint'\n")
+            installed = root / "native_fixture-1.2.dist-info"
+            installed.mkdir()
+            (installed / "METADATA").write_text("Name: native-fixture\nVersion: 1.2\n")
+            (installed / "entry_points.txt").write_text("[console_scripts]\ngym = native_fixture.cli.main:main\n")
+            distribution = base / "declared-distribution"
+            distribution.mkdir()
+            original = str(base / "unavailable-source")
+            (distribution / "editable.json").write_text(
+                json.dumps({"source_root": original, "hook": "editable.pth", "finder": "fixture_finder.py"})
+            )
+            (distribution / "editable.pth").write_text("import fixture_finder; fixture_finder.install()\n")
+            (distribution / "fixture_finder.py").write_text(
+                "import sys\nfrom importlib.util import spec_from_file_location\n"
+                f"MAPPING = {{'native_fixture': {original + '/native_fixture'!r}}}\n"
+                "class Finder:\n"
+                "    @classmethod\n"
+                "    def find_spec(cls, fullname, path=None, target=None):\n"
+                "        if fullname in MAPPING:\n"
+                "            return spec_from_file_location(fullname, MAPPING[fullname] + '/__init__.py')\n"
+                "def install():\n    sys.meta_path.append(Finder)\n"
+            )
+            extra = base / "existing-pythonpath"
+            extra.mkdir()
+            (extra / "preserved_module.py").write_text("value = 42\n")
+            with patch.dict(os.environ, {"PYTHONPATH": str(extra)}):
+                expose_editable_to_children(root, distribution, installed)
+                self.assertEqual(
+                    os.environ["PYTHONPATH"].split(os.pathsep), [str(root / ".native-child-site"), str(extra)]
+                )
+                result = subprocess.check_output(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from native_fixture.cli.main import main; from importlib.metadata import distribution; "
+                        "import preserved_module; d = distribution('native-fixture'); "
+                        "assert d.version == '1.2'; assert next(iter(d.entry_points)).load()() == main(); "
+                        "assert preserved_module.value == 42; print(main())",
+                    ],
+                    cwd=base,
+                    text=True,
+                )
+            self.assertEqual(result.strip(), "sampled entrypoint")
+            self.assertNotIn(original, (root / ".native-child-site/fixture_finder.py").read_text())
+
+    def test_directory_and_dangling_symlinks_retain_their_git_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = root / ".agents/skills/example"
+            canonical.mkdir(parents=True)
+            (canonical / "data.txt").write_text("fixture")
+            links = {".claude/skills/example": "../../.agents/skills/example", "dangling": "missing-target"}
+            restore_symlinks(root, links)
+            self.assertEqual((root / ".claude/skills/example").resolve(), canonical.resolve())
+            self.assertEqual((root / ".claude/skills/example/data.txt").read_text(), "fixture")
+            self.assertTrue((root / "dangling").is_symlink())
+            self.assertFalse((root / "dangling").exists())
+            self.assertEqual((root / "dangling").readlink(), Path("missing-target"))
+
+    def test_batching_keeps_complete_target_scope_and_separate_resolves(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "scripts/pants/native_core").mkdir(parents=True)
+            (root / "tests").mkdir()
+            files = ["tests/test_a.py", "tests/test_b.py", "library.py"]
+            for name in files:
+                (root / name).touch()
+            (root / "alias").symlink_to("tests", target_is_directory=True)
+            (root / "dangling").symlink_to("missing-target")
+            files.extend(["alias", "dangling"])
+            (root / ".python-version").write_text("3.13.14")
+            (root / "pyproject.toml").write_text('[tool.uv]\n[tool.coverage.run]\ndata_file = "results/.coverage"\n')
+
+            def git_output(command, **kwargs):
+                return "a" * 40 if kwargs.get("text") else "\0".join(files).encode()
+
+            with (
+                patch("prepare.snapshot_git"),
+                patch("prepare.environment_names", return_value=["PATH"]),
+                patch("prepare.subprocess.check_output", side_effect=git_output),
+            ):
+                write_build_configuration(root)
+            tests = []
+            exec(
+                compile((root / "BUILD.native").read_text(), "BUILD.native", "exec"),
+                {
+                    "python_tests": lambda **values: tests.append(values),
+                    "python_sources": lambda **values: None,
+                    "files": lambda **values: None,
+                },
+            )
+            self.assertEqual(len(tests), 2)
+            self.assertEqual({item["resolve"] for item in tests}, {"core", "sandbox"})
+            self.assertEqual(len({item["batch_compatibility_tag"] for item in tests}), 2)
+            for item in tests:
+                self.assertEqual(item["sources"], files[:2])
+            self.assertEqual(tomllib.loads((root / "pants.native.toml").read_text())["test"]["batch_size"], 128)
+            self.assertEqual(
+                json.loads((root / "scripts/pants/native_core/symlinks.json").read_text()),
+                {"alias": "tests", "dangling": "missing-target"},
+            )
+
     def test_real_collection_skip_is_preserved_once_in_each_shard(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

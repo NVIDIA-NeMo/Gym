@@ -17,7 +17,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from collect import targets
-from prepare import requirement_pins, snapshot_distribution, validate_lock, write_build_configuration
+from prepare import BATCH_SIZE, requirement_pins, snapshot_distribution, validate_lock, write_build_configuration
 
 
 def verify_inputs(repo: Path, assets: Path) -> None:
@@ -85,6 +85,12 @@ def run(args: argparse.Namespace) -> int:
         "command_exit_code": None,
         "prototype": True,
         "pants_result_cache": "forced-native-tests",
+        "batching": {
+            "compatibility": "per-resolve",
+            "target_files": BATCH_SIZE,
+            "partition": "stable-hash",
+            "local_parallelism": 1,
+        },
     }
     try:
         verify_inputs(source, assets)

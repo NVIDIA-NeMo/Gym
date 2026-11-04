@@ -67,7 +67,11 @@ controller assets before dispatch; stale locks fail the comparison explicitly.
 
 ## What Pants does in this phase
 
-Core and sandbox suites use native Pants Python targets, one per test file. The
+Core and sandbox suites use native Pants Python targets, one per test file. Compatible
+targets within each resolve share pytest processes with `[test].batch_size = 128`.
+Pants uses stable hash boundaries, so this targets approximately 128 files per batch;
+a target does not imply a separate process. Batches run serially, and test result
+reuse remains disabled. The
 four core jobs retain Gym's duration-balanced file assignments; the sandbox job
 runs the complete sandbox selection. The adapter checks dependency parity against
 `uv.lock` and preserves each job's JUnit and raw coverage inputs.

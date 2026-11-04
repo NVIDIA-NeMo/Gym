@@ -6,6 +6,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ EXTRAS = {
     "core": ["dev", "ray", "telemetry", "mlflow", "wandb"],
     "sandbox": ["dev", "ray", "sandbox", "openshell", "mlflow", "wandb"],
 }
+BATCH_SIZE = 128
 HEADER = "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n"
 
 
@@ -67,6 +69,21 @@ def snapshot_distribution(repo: Path) -> None:
         raise ValueError("Collected Gym distribution is not the sampled editable checkout")
     destination = repo / "scripts/pants/native_core/distribution" / metadata.name
     shutil.copytree(metadata, destination, dirs_exist_ok=True)
+    hooks = list(metadata.parent.glob("__editable__*nemo_gym*.pth"))
+    if len(hooks) != 1:
+        raise ValueError("Expected the sampled Gym setuptools editable finder hook")
+    hook = hooks[0]
+    match = re.fullmatch(r"import ([A-Za-z0-9_]+); \1\.install\(\)\s*", hook.read_text())
+    if not match:
+        raise ValueError("Unsupported sampled Gym editable installation hook")
+    finder = metadata.parent / (match[1] + ".py")
+    if not finder.is_file():
+        raise ValueError("Sampled Gym editable finder is missing")
+    shutil.copy2(hook, destination.parent / hook.name)
+    shutil.copy2(finder, destination.parent / finder.name)
+    (destination.parent / "editable.json").write_text(
+        json.dumps({"source_root": str(repo.resolve()), "hook": hook.name, "finder": finder.name}) + "\n"
+    )
 
 
 def require_uv_version(uv: str) -> None:
@@ -145,7 +162,15 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
     native = repo / "scripts/pants/native_core"
     snapshot_git(repo)
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=repo).decode().split("\0")
-    tracked = sorted(path for path in tracked if path and (repo / path).is_file())
+    links = {}
+    for path in filter(None, tracked):
+        if (repo / path).is_symlink():
+            target = os.readlink(repo / path)
+            if Path(target).is_absolute() or not (repo / path).resolve().is_relative_to(repo.resolve()):
+                raise ValueError(f"Tracked symlink needs explicit external input support: {path}")
+            links[path] = target
+    (native / "symlinks.json").write_text(json.dumps(links, indent=2) + "\n")
+    tracked = sorted(path for path in tracked if path and path not in links and (repo / path).is_file())
     tests = [
         path
         for path in tracked
@@ -163,7 +188,8 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
         lines.append(f"python_sources(name={resolve + '-sources'!r}, sources={sources!r}, resolve={resolve!r})\n")
         lines.append(
             f"python_tests(name={resolve + '-tests'!r}, sources={tests!r}, resolve={resolve!r}, "
-            f"dependencies=[':assets'], tags=['native-core-{resolve}'])\n"
+            f"dependencies=[':assets'], tags=['native-core-{resolve}'], "
+            f"batch_compatibility_tag={'native-' + resolve!r})\n"
         )
     # Several core tests inspect source files as fixtures (for example every agent
     # app's session declaration). Imports do not describe those reads. Start with
@@ -173,6 +199,7 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
         str(path.relative_to(repo)) for path in (native / "distribution").rglob("*") if path.is_file()
     )
     runtime_assets.append("scripts/pants/native_core/runtime.py")
+    runtime_assets.append("scripts/pants/native_core/symlinks.json")
     lines.append(f"files(name='assets', sources={sorted(set(assets + sources + tests + runtime_assets))!r})\n")
     (repo / "BUILD.native").write_text("".join(lines))
     (native / "BUILD.native").write_text(
@@ -217,6 +244,7 @@ requirements = ["pytest", "pytest-asyncio", "pytest-cov", "pytest-xdist", "reque
 junit_family = "xunit1"
 [test]
 extra_env_vars = {json.dumps(environment_names())}
+batch_size = {BATCH_SIZE}
 [coverage-py]
 report = ["raw"]
 config = "scripts/pants/native_core/coverage.toml"
