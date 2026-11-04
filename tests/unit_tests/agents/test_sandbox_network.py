@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
+from nemo_gym.agents.base_responses_api_agent import AgentSeedRejectedError
 from nemo_gym.agents.utils.sandbox_network import restrict_sandbox_network
 from nemo_gym.sandbox.providers.base import SandboxSpec
 
@@ -41,14 +42,29 @@ def test_restricted_access_denies_all_egress_but_the_allowed_hosts(network_acces
 
 def test_restricted_access_rejects_an_explicit_network_policy() -> None:
     spec = SandboxSpec(image="task", provider_options={"network_policy": {"defaultAction": "allow"}})
-    with pytest.raises(ValueError, match="not both"):
+    with pytest.raises(AgentSeedRejectedError, match="not both") as refused:
         restrict_sandbox_network(
             spec, network_access="model_only", provider_name="opensandbox", model_base_url=MODEL_URL
         )
+    # A configuration error: the seed fails once with HTTP 422 instead of being retried.
+    assert refused.value.status_code == 422
 
 
 def test_restricted_access_fails_closed_on_a_provider_without_network_policies() -> None:
-    with pytest.raises(ValueError, match="requires the OpenSandbox"):
+    with pytest.raises(AgentSeedRejectedError, match="requires the OpenSandbox") as refused:
         restrict_sandbox_network(
             SandboxSpec(image="task"), network_access="model_only", provider_name="docker", model_base_url=MODEL_URL
         )
+    assert refused.value.status_code == 422
+
+
+@pytest.mark.parametrize("model_base_url", ["http://127.0.0.1:8000/v1", "http://localhost:8000/v1"])
+def test_restricted_access_refuses_an_endpoint_the_sandbox_cannot_reach(model_base_url: str) -> None:
+    with pytest.raises(AgentSeedRejectedError, match="sandbox-reachable host") as refused:
+        restrict_sandbox_network(
+            SandboxSpec(image="task"),
+            network_access="model_only",
+            provider_name="opensandbox",
+            model_base_url=model_base_url,
+        )
+    assert refused.value.status_code == 422
