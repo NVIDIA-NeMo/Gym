@@ -14,6 +14,8 @@ Status rules take precedence over kind rules, then `default_action`. The adapter
 
 `final_on_model_timeout: true` remains a compatibility alias for the rule above; explicit false selects `retry`. The alias is resolved once into `outcome_policy` and excluded from the serialized resolved configuration. An explicitly conflicting timeout rule or default is rejected. Prefer `outcome_policy` in new configurations.
 
+A resources server can end the episode once its task is over, whichever tool call ended it: it sets `X-NeMo-Gym-Episode-Done: true` (`NEMO_GYM_EPISODE_DONE_HEADER` from `nemo_gym.server_runtime`) on that call's response. Simple Agent then runs nothing more: each later call of that turn gets a "Not run" output, so every call in the transcript keeps its output, and no model call follows. Servers that never set the header are unaffected.
+
 
 # Licensing information
 Code: Apache 2.0

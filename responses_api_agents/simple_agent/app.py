@@ -86,6 +86,7 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    NEMO_GYM_EPISODE_DONE_HEADER,
     SESSION_OWNER_HEADER,
     Activation,
     ActivationOutOfOrderError,
@@ -740,7 +741,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 await commit_boundary()
 
             all_fn_calls = [o for o in model_response.output if o.type == "function_call"]
-            for output_function_call in all_fn_calls:
+            episode_done = False
+            for index, output_function_call in enumerate(all_fn_calls):
                 if collect_trajectory:
                     started_at = time()
                     started_monotonic = perf_counter()
@@ -784,6 +786,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     tool_output = (await api_response.content.read()).decode()
                     resources_server_cookies = dict(resources_server_cookies or {})
                     resources_server_cookies.update(_cookies(api_response))
+                    episode_done = api_response.headers.get(NEMO_GYM_EPISODE_DONE_HEADER) == "true"
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
                         tool_status = "completed" if completed else "failed"
@@ -812,10 +815,24 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         output=tool_output,
                     )
                 )
+                if episode_done:
+                    break
+
+            if episode_done:
+                # The resources server ended the episode: the turn's later calls do not run, and each gets an output
+                # saying so, so every call in the transcript keeps its output.
+                not_run = json.dumps({"error": "Not run: an earlier call in this turn ended the episode."})
+                for skipped in all_fn_calls[index + 1 :]:
+                    new_outputs.append(
+                        NeMoGymFunctionCallOutput(type="function_call_output", call_id=skipped.call_id, output=not_run)
+                    )
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
             pending_tools = False
+
+            if episode_done:
+                break
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:

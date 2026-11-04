@@ -65,6 +65,7 @@ if TYPE_CHECKING:
         is_retryable_dependency_status,
     )
     from nemo_gym.server_runtime.base_resources_server import (
+        NEMO_GYM_EPISODE_DONE_HEADER,
         NEMO_GYM_MCP_METADATA_KEY,
         NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
         BaseMultiRewardVerifyResponse,
@@ -162,6 +163,7 @@ _PUBLIC_API = {
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
     "MCPToolAccess": "tool_access",
+    "NEMO_GYM_EPISODE_DONE_HEADER": "base_resources_server",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
     "ParticipantControlPlane": "_checkpoint.control",

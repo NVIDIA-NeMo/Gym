@@ -77,6 +77,9 @@ logger = logging.getLogger(__name__)
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
+# A resources server sets this header to "true" on a tool response once the episode is over (the task ended in its
+# state, whichever tool reached it); simple_agent runs nothing after that call.
+NEMO_GYM_EPISODE_DONE_HEADER = "X-NeMo-Gym-Episode-Done"
 # The MCP session token claim that names the attempt whose seed minted the token, by its capture key.
 # Only a server with checkpointing on adds it.
 MCP_TOKEN_EPISODE_CLAIM = "episode"

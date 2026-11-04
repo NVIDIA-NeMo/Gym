@@ -75,6 +75,7 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    NEMO_GYM_EPISODE_DONE_HEADER,
     AgentSessionParticipant,
     AgentSessionRecord,
     BaseResourcesServerConfig,
@@ -1231,6 +1232,58 @@ class TestApp:
         # The exception type must be visible to the model — repr(e) on a
         # JSONDecodeError starts with the class name.
         assert "JSONDecodeError" in error_payload["error"]
+
+    @pytest.mark.parametrize("episode_done", [True, False])
+    async def test_responses_stops_when_the_resources_server_ends_the_episode(self, episode_done: bool) -> None:
+        server, server_client = _make_agent(False)
+        client = TestClient(server.setup_webserver())
+        response_base = {
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        calls = [
+            {"id": f"fc-{n}", "call_id": f"call-{n}", "name": name, "arguments": "{}", "type": "function_call"}
+            for n, name in ((1, "complete_task"), (2, "send_message"))
+        ]
+        final = {
+            "id": "msg-1",
+            "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+        model_payloads = iter(
+            (response_base | {"id": "resp-1", "output": calls}, response_base | {"id": "resp-2", "output": [final]})
+        )
+
+        async def post(*, server_name, url_path, **kwargs):
+            if server_name == "model":
+                return _mock_response(next(model_payloads))
+            tool_response = _mock_response(content=json.dumps({"ran": url_path}))
+            tool_response.headers = {NEMO_GYM_EPISODE_DONE_HEADER: "true"} if episode_done else {}
+            return tool_response
+
+        server_client.post = AsyncMock(side_effect=post)
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "question"}]})
+        assert res.status_code == 200, res.text
+        output = res.json()["output"]
+
+        paths = [c.kwargs["url_path"] for c in server_client.post.await_args_list]
+        outputs = {o["call_id"]: json.loads(o["output"]) for o in output if o["type"] == "function_call_output"}
+        assert outputs["call-1"] == {"ran": "/complete_task"}
+        if episode_done:
+            # nothing runs after the call that ended the episode, but every call keeps an output
+            assert paths == ["/v1/responses", "/complete_task"]
+            assert "an earlier call in this turn ended the episode" in outputs["call-2"]["error"]
+            assert output[-1]["type"] == "function_call_output"
+        else:
+            assert paths == ["/v1/responses", "/complete_task", "/send_message", "/v1/responses"]
+            assert outputs["call-2"] == {"ran": "/send_message"}
+            assert output[-1]["type"] == "message"
 
     @pytest.mark.parametrize("empty_output", [False, True])
     async def test_responses_stops_without_message_or_tool_calls(self, caplog, empty_output) -> None:
