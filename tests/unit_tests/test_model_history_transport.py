@@ -4,8 +4,10 @@
 
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from copy import deepcopy
+from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -160,6 +162,82 @@ def test_full_delta_edit_and_lost_base_preserve_http_requests(post_model, model_
     ]
     assert model_server.wire[1][0][field] == [assistant]
     assert all(received_headers["x-session-id"] == "unchanged" for _, received_headers in model_server.wire)
+
+
+@pytest.mark.parametrize("identity_header", ["thread-id", "x-session-affinity", "x-opencode-session", "x-session-id"])
+def test_subagent_histories_remain_independent_on_one_connection(post_model, model_server, identity_header):
+    parent = {"role": "user", "content": "parent task"}
+    child = {"role": "user", "content": "child task"}
+    parent_answer = {"role": "assistant", "content": "parent answer"}
+    child_answer = {"role": "assistant", "content": "child answer"}
+    # Codex/OpenCode identities must take precedence over a shared Gym invocation.
+    parent_headers = {"x-session-id": "shared-invocation", identity_header: "parent"}
+    child_headers = {"x-session-id": "shared-invocation", identity_header: "child"}
+
+    first_parent = post_model(endpoint="responses", json={"input": [parent]}, headers=parent_headers)
+    first_child = post_model(endpoint="responses", json={"input": [child]}, headers=child_headers)
+    next_parent = post_model(endpoint="responses", json={"input": [parent, parent_answer]}, headers=parent_headers)
+    next_child = post_model(endpoint="responses", json={"input": [child, child_answer]}, headers=child_headers)
+
+    assert [first_parent.status_code, first_child.status_code, next_parent.status_code, next_child.status_code] == [
+        200,
+        200,
+        200,
+        200,
+    ]
+    parent_full, child_full, parent_delta, child_delta = [body for body, _ in model_server.wire]
+    assert parent_full["_gym_history"]["conversation_id"] != child_full["_gym_history"]["conversation_id"]
+    assert parent_delta["_gym_history"]["conversation_id"] == parent_full["_gym_history"]["conversation_id"]
+    assert child_delta["_gym_history"]["conversation_id"] == child_full["_gym_history"]["conversation_id"]
+    assert parent_delta["_gym_history"]["mode"] == child_delta["_gym_history"]["mode"] == "append"
+    assert parent_delta["input"] == [parent_answer]
+    assert child_delta["input"] == [child_answer]
+    assert model_server.restored == [
+        {"input": [parent]},
+        {"input": [child]},
+        {"input": [parent, parent_answer]},
+        {"input": [child, child_answer]},
+    ]
+    assert len(model_server.upstream_clients) == 1
+
+
+def test_evicted_subagent_state_sends_full_history_without_a_failed_request(post_model, model_server, monkeypatch):
+    monkeypatch.setattr("nemo_gym.agents.utils.model_history_transport._MAX_HISTORY_STATES", 1)
+    parent = {"role": "user", "content": "parent task"}
+    child = {"role": "user", "content": "child task"}
+    answer = {"role": "assistant", "content": "parent answer"}
+
+    first_parent = post_model(endpoint="responses", json={"input": [parent]}, headers={"thread-id": "parent"})
+    first_child = post_model(endpoint="responses", json={"input": [child]}, headers={"thread-id": "child"})
+    next_parent = post_model(endpoint="responses", json={"input": [parent, answer]}, headers={"thread-id": "parent"})
+
+    assert first_parent.status_code == first_child.status_code == next_parent.status_code == 200
+    parent_full, child_full, resumed_parent = [body for body, _ in model_server.wire]
+    assert [body["_gym_history"]["mode"] for body in [parent_full, child_full, resumed_parent]] == [
+        "full",
+        "full",
+        "full",
+    ]
+    assert resumed_parent["_gym_history"]["conversation_id"] != parent_full["_gym_history"]["conversation_id"]
+    assert resumed_parent["_gym_history"]["base_version"] is None
+    assert resumed_parent["input"] == [parent, answer]
+    assert model_server.restored == [{"input": [parent]}, {"input": [child]}, {"input": [parent, answer]}]
+
+
+def test_history_state_cache_evicts_the_least_recently_used_id(monkeypatch):
+    monkeypatch.setattr("nemo_gym.agents.utils.model_history_transport._MAX_HISTORY_STATES", 2)
+    transport = HistoryTransport("http://127.0.0.1/v1", timeout=5)
+    with transport:
+        parent = transport._history_state("/v1/responses", {"thread-id": "parent"})
+        child = transport._history_state("/v1/responses", {"thread-id": "child"})
+        assert transport._history_state("/v1/responses", {"thread-id": "parent"}) is parent
+
+        transport._history_state("/v1/responses", {"thread-id": "another-child"})
+
+        assert len(transport._states) == 2
+        assert transport._history_state("/v1/responses", {"thread-id": "parent"}) is parent
+        assert transport._history_state("/v1/responses", {"thread-id": "child"}) is not child
+        assert len(transport._states) == 2
 
 
 def test_model_errors_are_not_retried(post_model, model_server):
@@ -445,3 +523,384 @@ def test_codex_configuration_redirects_launcher_proxy_without_changing_cli_argum
         assert local_url.startswith("http://127.0.0.1:")
         assert rewritten == {**launcher, "model_base_url": local_url}
         assert params["command"] == ["node", "sandbox_launcher.mjs", str(path)]
+
+
+@pytest.fixture
+def overlapping_model_server():
+    """Hold the root response open while a child uses the same model endpoint."""
+    model = SimpleNamespace(
+        buffer=HistoryBuffer(),
+        lock=threading.Lock(),
+        wire=[],
+        first_ready=threading.Event(),
+        release_first=threading.Event(),
+        disconnect_child=False,
+        upstream_clients=set(),
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            session = self.headers["x-session-id"]
+            with model.lock:
+                model.upstream_clients.add(self.client_address)
+                model.wire.append((session, deepcopy(body)))
+                if session == "child" and model.disconnect_child:
+                    self.disconnect_without_response()
+                    return
+                try:
+                    # Gym reconstructs synchronously on one worker's event loop.
+                    restored = model.buffer.reconstruct("rollout", body, history_field="input")
+                except HistoryResync:
+                    self.send_history_resync()
+                    return
+            data = json.dumps({"session": session, "input": restored["input"]}).encode()
+            if body.get("stream", False):
+                self.send_streamed_response(session, data)
+            else:
+                self.send_buffered_response(session, data)
+
+        def disconnect_without_response(self):
+            self.close_connection = True
+
+        def send_history_resync(self):
+            error = b'{"error":{"code":"gym_history_resync"}}'
+            self.send_response(409)
+            self.send_header("Content-Length", str(len(error)))
+            self.end_headers()
+            self.wfile.write(error)
+
+        def wait_for_root_release(self):
+            model.first_ready.set()
+            if model.release_first.wait(10):
+                return True
+            self.close_connection = True
+            return False
+
+        def send_buffered_response(self, session, data):
+            # Hold the entire root response; child/replacement replies are immediate.
+            if session == "root" and not self.wait_for_root_release():
+                return
+            self.send_response(200)
+            self.send_header("x-session-id", session)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def send_streamed_response(self, session, data):
+            self.send_response(200)
+            self.send_header("x-session-id", session)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            chunk = b"data: " + data + b"\n\n"
+            self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+            self.wfile.flush()
+            # Hold the root stream after its first event, before the terminal event.
+            if session == "root" and not self.wait_for_root_release():
+                return
+            final = b"data: [DONE]\n\n"
+            self.wfile.write(f"{len(final):x}\r\n".encode() + final + b"\r\n0\r\n\r\n")
+            self.wfile.flush()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    model.url = f"http://127.0.0.1:{server.server_port}/ng-rollout/test/v1"
+    try:
+        yield model
+    finally:
+        model.release_first.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streamed"])
+def test_overlapping_model_requests_receive_complete_separate_responses(overlapping_model_server, stream):
+    model = overlapping_model_server
+    root_request = {"input": [{"role": "user", "content": "root task"}], "stream": stream}
+    child_request = {"input": [{"role": "user", "content": "child task"}], "stream": stream}
+    with (
+        HistoryTransport(model.url, timeout=5) as url,
+        requests.Session() as root_client,
+        requests.Session() as child_client,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        root_client.trust_env = child_client.trust_env = False
+        root_result = executor.submit(
+            root_client.post, f"{url}/responses", json=root_request, headers={"x-session-id": "root"}, timeout=10
+        )
+        try:
+            assert model.first_ready.wait(5), "Root request did not reach the upstream server"
+            child_response = child_client.post(
+                f"{url}/responses", json=child_request, headers={"x-session-id": "child"}, timeout=5
+            )
+            assert child_response.status_code == 200
+            assert child_response.headers["x-session-id"] == "child"
+            assert not root_result.done(), "Root response must remain blocked while the child completes"
+        finally:
+            model.release_first.set()
+        root_response = root_result.result(timeout=5)
+
+    assert root_response.status_code == 200
+    assert root_response.headers["x-session-id"] == "root"
+    if stream:
+        root_lines = root_response.content.splitlines()
+        child_lines = child_response.content.splitlines()
+        assert root_lines[0].startswith(b"data: ")
+        assert child_lines[0].startswith(b"data: ")
+        assert root_lines[1:] == [b"", b"data: [DONE]", b""]
+        assert child_lines[1:] == [b"", b"data: [DONE]", b""]
+        root_payload = json.loads(root_lines[0].removeprefix(b"data: "))
+        child_payload = json.loads(child_lines[0].removeprefix(b"data: "))
+    else:
+        root_payload = root_response.json()
+        child_payload = child_response.json()
+    assert root_payload == {"session": "root", "input": root_request["input"]}
+    assert child_payload == {"session": "child", "input": child_request["input"]}
+    assert [session for session, _ in model.wire] == ["root", "child"]
+
+
+def test_failed_exchange_releases_capacity_without_interrupting_other_responses(overlapping_model_server):
+    model = overlapping_model_server
+    model.disconnect_child = True
+    root_request = {"input": [{"role": "user", "content": "root task"}]}
+    child_request = {"input": [{"role": "user", "content": "child task"}]}
+    replacement_request = {"input": [{"role": "user", "content": "replacement task"}]}
+    with (
+        HistoryTransport(model.url, timeout=5, max_connections=2) as url,
+        requests.Session() as root_client,
+        requests.Session() as child_client,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        root_client.trust_env = child_client.trust_env = False
+        root_result = executor.submit(
+            root_client.post, f"{url}/responses", json=root_request, headers={"x-session-id": "root"}, timeout=10
+        )
+        try:
+            assert model.first_ready.wait(5), "Root request did not reach the upstream server"
+            child_response = child_client.post(
+                f"{url}/responses", json=child_request, headers={"x-session-id": "child"}, timeout=5
+            )
+            assert child_response.status_code == 502
+            assert not root_result.done(), "Child failure must not interrupt the root response"
+            replacement_response = child_client.post(
+                f"{url}/responses", json=replacement_request, headers={"x-session-id": "replacement"}, timeout=5
+            )
+            assert replacement_response.status_code == 200
+            assert replacement_response.json() == {"session": "replacement", "input": replacement_request["input"]}
+        finally:
+            model.release_first.set()
+        root_response = root_result.result(timeout=5)
+
+    assert root_response.status_code == 200
+    assert root_response.json() == {"session": "root", "input": root_request["input"]}
+    assert [session for session, _ in model.wire] == ["root", "child", "replacement"]  # Failed child was not retried.
+
+
+def test_sequential_cli_connections_reuse_one_upstream_connection(model_server):
+    user = {"role": "user", "content": "task"}
+    assistant = {"role": "assistant", "content": "answer"}
+    first_request = {"input": [user]}
+    appended_request = {"input": [user, assistant]}
+    with HistoryTransport(model_server.url, timeout=5) as url:
+        with requests.Session() as first_client:
+            first_client.trust_env = False
+            first_response = first_client.post(f"{url}/responses", json=first_request, timeout=5)
+        with requests.Session() as next_client:
+            next_client.trust_env = False
+            appended_response = next_client.post(f"{url}/responses", json=appended_request, timeout=5)
+
+    assert first_response.status_code == 200
+    assert appended_response.status_code == 200
+    assert model_server.restored == [first_request, appended_request]
+    assert model_server.wire[1][0]["input"] == [assistant]
+    assert len(model_server.upstream_clients) == 1
+
+
+@pytest.mark.parametrize("max_connections", [0, -1, 1.5, True])
+def test_pool_capacity_must_be_a_positive_integer(max_connections):
+    with pytest.raises(ValueError, match="max_connections must be a positive integer"):
+        HistoryTransport("http://127.0.0.1/v1", timeout=5, max_connections=max_connections)
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streamed"])
+def test_exhausted_pool_waits_for_the_active_response(overlapping_model_server, monkeypatch, stream):
+    model = overlapping_model_server
+    transport = HistoryTransport(model.url, timeout=5, max_connections=1)
+    waiting = threading.Event()
+    original_wait = transport._connection_available.wait
+
+    def observe_wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(transport._connection_available, "wait", observe_wait)
+    root_request = {"input": [{"role": "user", "content": "root task"}], "stream": stream}
+    child_request = {"input": [{"role": "user", "content": "child task"}], "stream": stream}
+    with (
+        transport as url,
+        requests.Session() as root_client,
+        requests.Session() as child_client,
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        root_client.trust_env = child_client.trust_env = False
+        root_result = executor.submit(
+            root_client.post, f"{url}/responses", json=root_request, headers={"x-session-id": "root"}, timeout=10
+        )
+        try:
+            assert model.first_ready.wait(5), "Root request did not reach the upstream server"
+            child_result = executor.submit(
+                child_client.post, f"{url}/responses", json=child_request, headers={"x-session-id": "child"}, timeout=10
+            )
+            assert waiting.wait(5), "Child request did not wait for the occupied connection"
+            assert not child_result.done()
+            assert [session for session, _ in model.wire] == ["root"]
+        finally:
+            model.release_first.set()
+        root_response = root_result.result(timeout=5)
+        child_response = child_result.result(timeout=5)
+
+    assert root_response.status_code == 200
+    assert child_response.status_code == 200
+    assert root_response.headers["x-session-id"] == "root"
+    assert child_response.headers["x-session-id"] == "child"
+    assert [session for session, _ in model.wire] == ["root", "child"]
+    assert len(model.upstream_clients) == 1
+
+
+def test_waiting_for_an_exhausted_pool_uses_the_transport_timeout():
+    transport = HistoryTransport("http://127.0.0.1/v1", timeout=0.01, max_connections=1)
+    with transport, transport._upstream_connection():
+        with pytest.raises(TimeoutError, match="Timed out waiting for a history transport connection"):
+            with transport._upstream_connection():
+                pytest.fail("An occupied pool must not allocate a second connection")
+
+
+def test_parallel_bursts_reuse_all_cached_connections(overlapping_model_server):
+    model = overlapping_model_server
+    root_request = {"input": [{"role": "user", "content": "root task"}]}
+    child_request = {"input": [{"role": "user", "content": "child task"}]}
+    with (
+        HistoryTransport(model.url, timeout=5, max_connections=2) as url,
+        requests.Session() as root_client,
+        requests.Session() as child_client,
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        root_client.trust_env = child_client.trust_env = False
+        first_root = executor.submit(
+            root_client.post, f"{url}/responses", json=root_request, headers={"x-session-id": "root"}, timeout=10
+        )
+        try:
+            assert model.first_ready.wait(5)
+            first_child = child_client.post(
+                f"{url}/responses", json=child_request, headers={"x-session-id": "child"}, timeout=5
+            )
+            assert first_child.status_code == 200
+        finally:
+            model.release_first.set()
+        assert first_root.result(timeout=5).status_code == 200
+        assert len(model.upstream_clients) == 2
+
+        model.first_ready.clear()
+        model.release_first.clear()
+        next_root = executor.submit(
+            root_client.post, f"{url}/responses", json=root_request, headers={"x-session-id": "root"}, timeout=10
+        )
+        try:
+            assert model.first_ready.wait(5)
+            next_child = child_client.post(
+                f"{url}/responses", json=child_request, headers={"x-session-id": "child"}, timeout=5
+            )
+            assert next_child.status_code == 200
+        finally:
+            model.release_first.set()
+        assert next_root.result(timeout=5).status_code == 200
+
+    assert [session for session, _ in model.wire] == ["root", "child", "root", "child"]
+    assert len(model.upstream_clients) == 2  # Both warm connections survived the first burst.
+
+
+def test_shutdown_aborts_active_requests_and_rejects_waiting_leases(overlapping_model_server, monkeypatch):
+    model = overlapping_model_server
+    transport = HistoryTransport(model.url, timeout=30, max_connections=1)
+    waiting = threading.Event()
+    original_wait = transport._connection_available.wait
+
+    def observe_wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(transport._connection_available, "wait", observe_wait)
+
+    def acquire_connection():
+        with transport._upstream_connection():
+            pytest.fail("Shutdown must reject the queued lease")
+
+    with ThreadPoolExecutor(max_workers=2) as executor, ExitStack() as stack:
+        url = stack.enter_context(transport)
+        client = stack.enter_context(requests.Session())
+        client.trust_env = False
+        active_request = executor.submit(
+            client.post,
+            f"{url}/responses",
+            json={"input": [{"role": "user", "content": "root task"}]},
+            headers={"x-session-id": "root"},
+            timeout=30,
+        )
+        assert model.first_ready.wait(5), "Root request did not reach the upstream server"
+        queued_lease = executor.submit(acquire_connection)
+        assert waiting.wait(5), "The second lease did not wait for capacity"
+
+        stack.close()
+
+        with pytest.raises(OSError, match="History transport is closing"):
+            queued_lease.result(timeout=5)
+        with pytest.raises(requests.RequestException):
+            active_request.result(timeout=5)
+        with pytest.raises(OSError, match="History transport is closing"):
+            with transport._upstream_connection():
+                pytest.fail("A closed transport must reject new leases")
+
+    assert [session for session, _ in model.wire] == ["root"]
+    assert not model.release_first.is_set()  # Shutdown did not wait for the model response.
+
+
+def test_connection_finishing_setup_after_shutdown_cannot_send(model_server, monkeypatch):
+    connecting = threading.Event()
+    finish_connecting = threading.Event()
+    original_connect = HTTPConnection.connect
+    transport = HistoryTransport(model_server.url, timeout=5)
+
+    def delayed_connect(connection):
+        connecting.set()
+        if not finish_connecting.wait(5):
+            raise TimeoutError("Test did not release connection setup")
+        original_connect(connection)
+
+    monkeypatch.setattr(HTTPConnection, "connect", delayed_connect)
+
+    def send_request():
+        with transport._upstream_connection() as connection:
+            connection.request("POST", transport.target.path + "/responses", body=b"{}")
+
+    with ThreadPoolExecutor(max_workers=1) as executor, ExitStack() as stack:
+        stack.enter_context(transport)
+        request = executor.submit(send_request)
+        try:
+            assert connecting.wait(5), "Request did not enter connection setup"
+            stack.close()
+        finally:
+            finish_connecting.set()
+        with pytest.raises(OSError, match="History transport is closing"):
+            request.result(timeout=5)
+
+    assert model_server.wire == []
+    assert transport._connections == set()
