@@ -405,7 +405,6 @@ class FlashInferBuilder(BaseBuilder):
             "container-image": str(container_config.output_container_fpath),
             "no-container-mount-home": True,
             "container-save": str(container_config.output_container_fpath),
-            "export": "ALL",
         }
 
 
@@ -513,7 +512,6 @@ class VLLMBuilder(BaseBuilder):
             "container-image": str(container_config.output_container_fpath),
             "no-container-mount-home": True,
             "container-save": str(container_config.output_container_fpath),
-            "export": "ALL",
         }
 
 
@@ -637,7 +635,6 @@ class VLLMRouterBuilder(BaseBuilder):
             "container-image": str(container_config.output_container_fpath),
             "no-container-mount-home": True,
             "container-save": str(container_config.output_container_fpath),
-            "export": "ALL",
         }
 
 
@@ -746,7 +743,6 @@ class MooncakeBuilder(BaseBuilder):
             "container-image": str(container_config.output_container_fpath),
             "no-container-mount-home": True,
             "container-save": str(container_config.output_container_fpath),
-            "export": "ALL",
         }
 
 
@@ -929,6 +925,9 @@ class BuildContainerHelper(BaseModel):
     ) -> CommandOutput:
         env_vars = builder_env_vars.copy()
         srun_slurm_vars = self.config.slurm | builder_srun_slurm_vars
+        # Export names only: values stay shell-quoted in srun's environment,
+        # including values containing commas. Do not inherit the host virtualenv.
+        srun_slurm_vars["export"] = ",".join(env_vars) or "NONE"
         # A unique name identifies even a pending allocation, before a job ID
         # or remote task is available. Never cancel unrelated builds by name.
         job_name = f"{srun_slurm_vars.get('job-name', 'build-container')}-{uuid4().hex}"

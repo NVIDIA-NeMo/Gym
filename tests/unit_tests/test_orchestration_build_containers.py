@@ -43,6 +43,42 @@ ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK = Path("benchmarks/nemotron_3.5_super")
 
 
+@pytest.mark.parametrize("with_env", [True, False])
+async def test_srun_exports_only_builder_env(container_config, tmp_path, monkeypatch, with_env):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    srun = bin_dir / "srun"
+    srun.write_text(
+        f"#!{sys.executable}\n"
+        + """import json, os, subprocess, sys
+args = sys.argv[1:]
+exports = [arg.split('=', 1)[1] for arg in args if arg.startswith('--export=')]
+assert len(exports) == 1
+print(json.dumps(exports[0]), flush=True)
+names = [] if exports[0] == 'NONE' else exports[0].split(',')
+env = {name: os.environ[name] for name in names}
+while args[0].startswith('--'):
+    args.pop(0)
+sys.exit(subprocess.run(args, env=env).returncode)
+"""
+    )
+    srun.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("VIRTUAL_ENV", "/host/.venv")
+    monkeypatch.setenv("PYO3_PYTHON", "/host/.venv/bin/python")
+    env = {"BUILD_REPO": "repo with spaces ' $(touch INJECTED)", "BUILD_MODULES": "one,two"} if with_env else {}
+    container_config.slurm["export"] = "ALL"
+    helper = BuildContainerHelper(config=container_config)
+    keys = ["BUILD_REPO", "BUILD_MODULES", "VIRTUAL_ENV", "PYO3_PYTHON"]
+    command = shlex.join(
+        [sys.executable, "-c", f"import json, os; print(json.dumps({{k: os.environ.get(k) for k in {keys!r}}}))"]
+    )
+    result = await helper._run_single_srun(command, env, {"export": "ALL"})
+    assert result.returncode == 0
+    assert json.loads(result.output_lines[0]) == ("BUILD_REPO,BUILD_MODULES" if with_env else "NONE")
+    assert json.loads(result.output_lines[1]) == {key: env.get(key) for key in keys}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_status", [0, 1])
 async def test_interrupt_cancels_owned_srun_before_removing_image(tmp_path, monkeypatch, cancel_status):
@@ -649,8 +685,8 @@ def test_router_build_install_and_guards(tmp_path, container_config, failure):
     resources = builder.get_srun_slurm_vars(container_config)
     assert resources["container-image"] == resources["container-save"] == str(container_config.output_container_fpath)
     assert resources["cpus-per-task"] == "16"
-    assert resources["gpus-per-node"] == "0"
-    assert resources["gres"] == "none"
+    assert "gpus-per-node" not in resources
+    assert "gres" not in resources
     assert resources["time"] == "00:15:00"
     argv = shlex.split(builder.get_srun_command_str())
     subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
