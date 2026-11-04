@@ -1556,6 +1556,8 @@ class TestBenchmarkLifecycle:
         config.preinstalled_opencode = True
         config.report_agent_sandbox_oom = True
         config.execution_failure_reward_zero = True
+        verify = AsyncMock(wraps=app_module.verify_agent_response)
+        monkeypatch.setattr(app_module, "verify_agent_response", verify)
         config.opencode_version = "test"
         ripgrep = tmp_path / "rg"
         ripgrep.write_text("#!/bin/sh\necho rg test\n")
@@ -1633,6 +1635,8 @@ class TestBenchmarkLifecycle:
             result = await server.run(request, body)
 
         assert result.reward == verifier_reward
+        verify.assert_awaited_once()
+        assert verify.await_args.kwargs["force_zero_reward"] is False
         assert result.mask_sample is False
         assert result.failure_kind == PROVIDER_OOM_KILLED
         assert "OOM-killed" in (result.failure_reason or "")
@@ -1921,7 +1925,7 @@ async def test_export_failure_raises_without_a_scored_response(tmp_path, failure
                 raise OSError("session listing unavailable")
             return SimpleNamespace(
                 stdout="[]" if failure == "list_empty" else '[{"id":"session"}]',
-                stderr="",
+                stderr="list diagnostic",
                 return_code=1 if failure == "list_command" else 0,
                 error_type="timeout" if failure == "list_status" else None,
             )
@@ -1929,8 +1933,8 @@ async def test_export_failure_raises_without_a_scored_response(tmp_path, failure
             if failure == "exception":
                 raise OSError("export unavailable")
             return SimpleNamespace(
-                stdout="",
-                stderr="",
+                stdout="export output",
+                stderr="export diagnostic",
                 return_code=1 if failure == "command" else 0,
                 error_type="timeout" if failure == "export_status" else None,
             )
@@ -1978,6 +1982,13 @@ async def test_export_failure_raises_without_a_scored_response(tmp_path, failure
         else "opencode.capture"
     )
     assert caught.value.operation == expected_operation
+    if failure in {"list_command", "list_status", "command", "export_status"}:
+        reason = caught.value.failure_reason
+        assert f"return_code={1 if failure in {'list_command', 'command'} else 0}" in reason
+        assert f"error_type={'timeout' if failure.endswith('status') else 'None'}" in reason
+        assert ("list diagnostic" if failure.startswith("list_") else "export diagnostic") in reason
+        if not failure.startswith("list_"):
+            assert "export output" in reason
     if failure in {"list_exception", "exception", "download", "list_empty", "invalid_json"}:
         assert caught.value.__cause__ is not None
     assert server._sandbox_id_to_run_result == {}
@@ -2380,7 +2391,10 @@ async def test_agent_preflight_failure_is_typed_and_cannot_reach_agent_or_gradin
     sandbox.exec = AsyncMock(
         side_effect=foreign if failure == "foreign" else None,
         return_value=SimpleNamespace(
-            return_code=1 if failure == "exit" else -1, error_type="timeout" if failure == "timeout" else None
+            return_code=1 if failure == "exit" else -1,
+            error_type="timeout" if failure == "timeout" else None,
+            stdout="setup output",
+            stderr="setup diagnostic",
         ),
     )
     server._sandbox_id_to_sandbox = {"session": sandbox}
@@ -2396,6 +2410,11 @@ async def test_agent_preflight_failure_is_typed_and_cannot_reach_agent_or_gradin
     assert caught.value.failure_kind == "agent_route_failed"
     assert caught.value.operation == "opencode.setup"
     assert caught.value.__cause__ is (foreign if failure == "foreign" else None)
+    if failure != "foreign":
+        assert f"return_code={1 if failure == 'exit' else -1}" in caught.value.failure_reason
+        assert f"error_type={'timeout' if failure == 'timeout' else 'None'}" in caught.value.failure_reason
+        assert "setup output" in caught.value.failure_reason
+        assert "setup diagnostic" in caught.value.failure_reason
     sandbox.exec.assert_awaited_once()
     assert "opencode run" not in sandbox.exec.await_args.kwargs["command"]
     sandbox.download.assert_not_awaited()
