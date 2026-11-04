@@ -81,7 +81,7 @@ def inputs(name, **kwargs):
 @pytest.mark.parametrize("name", SERVERS)
 def test_grading_applies_the_start_state_exactly_before_the_agent_patch(name):
     script = verification(name).build_eval_script(inputs(name, setup_patch="setup\n"))
-    setup_line = f"git apply {start_state.SETUP_PATCH_PATH} || exit {start_state.SETUP_PATCH_FAILED_EXIT}"
+    setup_line = start_state.apply_setup_patch_command("setup\n")
     assert script.index("cd /w") < script.index(setup_line) < script.index("/tmp/nemo_gym_patch.diff")
     if name == "scale_swe":
         assert script.index("git checkout -q abc") < script.index(setup_line)
@@ -98,10 +98,41 @@ def test_grading_applies_the_start_state_exactly_before_the_agent_patch(name):
 async def test_a_start_state_that_does_not_apply_is_incomplete_not_a_zero(name):
     class Failing:
         async def exec(self, command, timeout_s=None):
-            return SimpleNamespace(stdout="", stderr="patch failed", return_code=start_state.SETUP_PATCH_FAILED_EXIT)
+            return SimpleNamespace(
+                stdout=start_state.SETUP_PATCH_FAILED_MARK + "\n",
+                stderr="patch failed",
+                return_code=start_state.SETUP_PATCH_FAILED_EXIT,
+            )
 
     result = await verification(name).run_verification(Failing(), inputs(name, setup_patch="s\n"))
-    assert result.completed is False and "setup patch" in result.error
+    assert result.completed is False and result.error == start_state.SETUP_PATCH_FAILED_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setup_patch", ["", "s\n"])
+@pytest.mark.parametrize("name", SERVERS)
+async def test_a_test_command_exiting_96_keeps_the_normal_verdict(name, setup_patch):
+    """Grading scripts exit with the test command's code; only the setup step prints the mark, so
+    a test exit of 96 must grade exactly like any other failing exit code."""
+
+    class TestsExit:
+        def __init__(self, code):
+            self.code = code
+
+        async def exec(self, command, timeout_s=None):
+            return SimpleNamespace(stdout="FAILED some_test\n", stderr="", return_code=self.code)
+
+    def verdict(result):
+        fields = dict(vars(result))
+        if isinstance(fields.get("test_results"), dict):
+            fields["test_results"] = {k: v for k, v in fields["test_results"].items() if k != "test_exit_code"}
+        return fields
+
+    run = verification(name).run_verification
+    at_96 = await run(TestsExit(start_state.SETUP_PATCH_FAILED_EXIT), inputs(name, setup_patch=setup_patch))
+    at_1 = await run(TestsExit(1), inputs(name, setup_patch=setup_patch))
+    assert at_96.error != start_state.SETUP_PATCH_FAILED_ERROR
+    assert verdict(at_96) == verdict(at_1)
 
 
 @pytest.mark.asyncio

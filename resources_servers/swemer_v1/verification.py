@@ -33,9 +33,9 @@ from typing import Any, Iterable, Sequence
 
 from resources_servers.swebench.start_state import (
     SETUP_PATCH_FAILED_ERROR,
-    SETUP_PATCH_FAILED_EXIT,
     apply_setup_patch_command,
     setup_files,
+    setup_patch_failed,
 )
 from responses_api_agents.swe_agents.swe_bench_ext.frameworks import (
     get_framework_config,
@@ -340,7 +340,7 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
-    if result.return_code == SETUP_PATCH_FAILED_EXIT:
+    if setup_patch_failed(inputs.setup_patch, result.return_code, output):
         return VerificationResult(
             completed=False,
             resolved=False,

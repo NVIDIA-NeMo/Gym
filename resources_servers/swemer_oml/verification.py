@@ -36,9 +36,9 @@ from typing import Any, Sequence
 
 from resources_servers.swebench.start_state import (
     SETUP_PATCH_FAILED_ERROR,
-    SETUP_PATCH_FAILED_EXIT,
     apply_setup_patch_command,
     setup_files,
+    setup_patch_failed,
 )
 from resources_servers.swemer_v1.verification import mirror_files
 from resources_servers.swemer_v2.verification import drop_patch_sections, drop_test_patch_files
@@ -212,7 +212,7 @@ def parse_verification_output(output: str, return_code: int, inputs: Verificatio
             test_output=output,
             error=f"workdir {inputs.workdir} not present in the image",
         )
-    if return_code == SETUP_PATCH_FAILED_EXIT:
+    if setup_patch_failed(inputs.setup_patch, return_code, output):
         return VerificationResult(
             completed=False,
             resolved=False,

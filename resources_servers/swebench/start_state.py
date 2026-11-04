@@ -158,6 +158,9 @@ async def seed_start_state(
 
 SETUP_PATCH_FAILED_EXIT = 96
 SETUP_PATCH_FAILED_ERROR = "start-state setup patch did not apply"
+# Grading scripts exit with the test command's own code, which may also be 96 (Mocha exits with
+# the failure count), so the exit code alone cannot identify a setup failure.
+SETUP_PATCH_FAILED_MARK = "___NEMO_GYM_SETUP_PATCH_FAILED___"
 
 
 def apply_setup_patch_command(setup_patch: str) -> str:
@@ -167,4 +170,14 @@ def apply_setup_patch_command(setup_patch: str) -> str:
     """
     if not setup_patch.strip():
         return ""
-    return f"git apply {SETUP_PATCH_PATH} || exit {SETUP_PATCH_FAILED_EXIT}"
+    return f"git apply {SETUP_PATCH_PATH} || {{ echo {SETUP_PATCH_FAILED_MARK}; exit {SETUP_PATCH_FAILED_EXIT}; }}"
+
+
+def setup_patch_failed(setup_patch: str, return_code: int, output: str) -> bool:
+    """Whether a grading run stopped at ``apply_setup_patch_command``, before the agent's patch
+    and the tests."""
+    return (
+        bool(setup_patch.strip())
+        and return_code == SETUP_PATCH_FAILED_EXIT
+        and SETUP_PATCH_FAILED_MARK in output.splitlines()
+    )

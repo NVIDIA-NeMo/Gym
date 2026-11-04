@@ -133,7 +133,7 @@ def test_grading_applies_the_start_state_exactly_before_the_agent_patch():
         instance_id="toy", repo="o/r", base_commit="abc", patch="agent\n", setup_patch="setup\n"
     )
     script = build_eval_script(inputs)
-    setup_line = f"git apply {start_state.SETUP_PATCH_PATH} || exit {start_state.SETUP_PATCH_FAILED_EXIT}"
+    setup_line = start_state.apply_setup_patch_command("setup\n")
     assert setup_line in script
     assert script.index(setup_line) < script.index("/tmp/nemo_gym_patch.diff")
     assert verification_files(inputs)[start_state.SETUP_PATCH_PATH] == "setup\n"
@@ -146,11 +146,89 @@ def test_grading_applies_the_start_state_exactly_before_the_agent_patch():
 async def test_a_start_state_that_does_not_apply_is_incomplete_not_a_zero():
     class Failing:
         async def exec(self, command, timeout_s=None):
-            return SimpleNamespace(stdout="", stderr="patch failed", return_code=start_state.SETUP_PATCH_FAILED_EXIT)
+            return SimpleNamespace(
+                stdout=start_state.SETUP_PATCH_FAILED_MARK + "\n",
+                stderr="patch failed",
+                return_code=start_state.SETUP_PATCH_FAILED_EXIT,
+            )
 
     inputs = VerificationInputs(instance_id="toy", repo="o/r", base_commit="abc", patch="", setup_patch="s\n")
     result = await run_verification(Failing(), inputs, parser=lambda log: {})
-    assert result.completed is False and "setup patch" in result.error
+    assert result.completed is False and result.error == start_state.SETUP_PATCH_FAILED_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setup_patch", ["", "s\n"])
+async def test_a_test_command_exiting_96_keeps_the_normal_verdict(setup_patch):
+    class TestsExit:
+        def __init__(self, code):
+            self.code = code
+
+        async def exec(self, command, timeout_s=None):
+            return SimpleNamespace(stdout="FAILED some_test\n", stderr="", return_code=self.code)
+
+    inputs = VerificationInputs(
+        instance_id="toy",
+        repo="o/r",
+        base_commit="abc",
+        patch="",
+        setup_patch=setup_patch,
+        fail_to_pass=["some_test"],
+    )
+    parser = lambda log: {"some_test": "FAILED"}  # noqa: E731
+    at_96 = await run_verification(TestsExit(start_state.SETUP_PATCH_FAILED_EXIT), inputs, parser=parser)
+    at_1 = await run_verification(TestsExit(1), inputs, parser=parser)
+    assert at_96.error != start_state.SETUP_PATCH_FAILED_ERROR
+    assert vars(at_96) == vars(at_1)
+    assert at_96.completed and not at_96.resolved
+
+
+@pytest.mark.asyncio
+async def test_the_real_grading_script_stops_at_a_setup_patch_that_does_not_apply(repo, monkeypatch):
+    from resources_servers.swe_rebench import verification
+
+    monkeypatch.setattr(verification, "repo_directory", lambda _: str(repo))
+    exits = []
+
+    class RunsTheScript:
+        """Runs the eval script exactly as verification_files ships it, on the local repository."""
+
+        def __init__(self, inputs):
+            self.files = verification.verification_files(inputs)
+
+        async def exec(self, command, timeout_s=None):
+            for path, content in self.files.items():
+                if path == start_state.SETUP_PATCH_PATH:
+                    Path(path).write_text(content)
+            proc = subprocess.run(
+                ["bash", "-c", self.files["/tmp/nemo_gym_eval.sh"]], cwd=repo, capture_output=True, text=True
+            )
+            exits.append(proc.returncode)
+            return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, return_code=proc.returncode)
+
+    def inputs(setup_patch):
+        return VerificationInputs(
+            instance_id="toy",
+            repo="o/r",
+            base_commit=git(repo, "rev-parse", "HEAD").strip(),
+            patch="",
+            setup_patch=setup_patch,
+            test_cmd=["echo TESTS_RAN"],
+        )
+
+    applies = Path(start_state.SETUP_PATCH_PATH).read_text()
+    stale = "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-nope\n+x\n"
+    failed = await run_verification(RunsTheScript(inputs(stale)), inputs(stale), parser=lambda log: {})
+    assert exits[-1] == start_state.SETUP_PATCH_FAILED_EXIT
+    assert start_state.SETUP_PATCH_FAILED_MARK in failed.test_output
+    assert "TESTS_RAN" not in failed.test_output
+    assert failed.completed is False and failed.error == start_state.SETUP_PATCH_FAILED_ERROR
+
+    # Control: the same script with a setup patch that applies reaches the tests and grades.
+    graded = await run_verification(RunsTheScript(inputs(applies)), inputs(applies), parser=lambda log: {})
+    assert exits[-1] == 0 and "TESTS_RAN" in graded.test_output
+    assert graded.completed is True and graded.error is None
+    assert (repo / "b.py").read_text() == "def f():\n    return 2\n"
 
 
 @pytest.mark.asyncio
