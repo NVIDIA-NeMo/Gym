@@ -1,46 +1,19 @@
 ---
 title: "MCP Resources Server"
-description: "Run a weather tool over MCP, then expose your own Resources Server's HTTP tools with one config flag"
+description: "Expose MCP tools through typed resources sessions managed by an Environment Server"
 position: 6
 ---
 import { NavButton } from "../../../../components/NavButton";
 
 # MCP Resources Server
 
-Expose a Resources Server's HTTP tools over the **Model Context Protocol (MCP)** with `expose_tools_over_mcp: true`. This tutorial runs the shipped weather example with Claude Code, then shows how MCP calls reach the same handlers and session state as HTTP calls.
+Expose a Resources Server's HTTP tools over the **Model Context Protocol (MCP)** with `expose_tools_over_mcp: true`. Use an Environment Server with typed resources and agent sessions for new integrations. This tutorial uses the weather tool to explain MCP grants, tool calls, verification, and cleanup on that path.
 
 <NavButton href="/main/environment-tutorials/stateful-environment" label="Stateful Environment" direction="prev" />
 
-## Run the weather example
+## Turn it on
 
 The weather server has one tool, `get_weather(city)`. A successful episode calls it for the requested city and includes the returned weather sentence in the final answer.
-
-Start with a working Gym installation from the [quickstart](/main/get-started/quickstart). Add your Anthropic API key to the repository-root `env.yaml`:
-
-```yaml
-anthropic_api_key: sk-ant-...
-```
-
-The [shipped configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml) enables MCP and runs `claude_code_agent` through its `/run` endpoint under the `legacy_agent` Environment Server. Claude Code is installed automatically on its first local invocation; see the [agent README](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) for other model endpoints.
-
-Start the servers:
-
-```bash
-gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
-```
-
-In another terminal, collect the example rollouts:
-
-```bash
-gym eval run --no-serve \
-    --agent example_mcp_weather_claude_code_agent \
-    --input resources_servers/example_mcp_weather/data/example.jsonl \
-    --output results/weather_rollouts.jsonl
-```
-
-In `results/weather_rollouts.jsonl`, a successful episode contains a call to `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`. For Paris, the expected answer contains `The weather in Paris is sunny and 72 F.` The verifier checks that the tool was actually called in that episode's session, as well as checking the answer.
-
-## Turn it on
 
 For a Resources Server that already has HTTP tool routes, enable MCP in its configuration. The weather example already includes this setting:
 
@@ -54,73 +27,30 @@ example_mcp_weather:
 
 At startup, Gym mounts a Streamable-HTTP `/mcp` endpoint on the same app. Each eligible `POST` route becomes an MCP tool named after its path: `/get_weather` becomes `get_weather`. The request model supplies the input schema and the handler's docstring supplies the description. Session and verification routes remain control endpoints.
 
-## How MCP reaches the tool
-
-The weather server extends `SimpleResourcesServer`, which supplies the common session lifecycle. The example implements its state hooks, tool, and verifier. These are excerpts from [the weather server's `app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/app.py); use that file for the complete class and request models.
-
-```python
-# Methods of ExampleMCPWeatherResourcesServer.
-def setup_webserver(self) -> FastAPI:
-    app = super().setup_webserver()
-    app.post("/get_weather")(self.get_weather)
-    return app
-
-
-async def get_weather(
-    self,
-    request: Request,
-    body: ExampleMCPWeatherGetWeatherRequest,
-) -> ExampleMCPWeatherGetWeatherResponse:
-    """Get a deterministic weather report for a city."""
-    state = self.session_id_to_state.get(request.session[SESSION_ID_KEY])
-    if state is None:
-        raise ResourcesSessionLostError("No open example_mcp_weather session for this request")
-    weather = _weather_sentence(body.city)
-    state["weather_calls"].append({"city": body.city, "weather": weather})
-    return ExampleMCPWeatherGetWeatherResponse(weather=weather)
-```
-
-`ExampleMCPWeatherGetWeatherRequest` declares `city: str`. The handler records the call in the current session and returns the deterministic weather sentence. Gym invokes this same handler for both HTTP and MCP calls; it supplies the MCP call's session on `request.session`. Tool failures surface to the MCP client with the HTTP handler's status and error text.
-
-### Wiring the agent (Claude Code)
-
-The Gym agent seeds the weather session and starts the Claude Code CLI with the generated MCP config:
-
-```mermaid
-sequenceDiagram
-    participant Agent as Gym agent
-    participant CLI as Claude Code CLI
-    participant Weather as Weather server
-
-    Agent->>Weather: POST /seed_session
-    Weather-->>Agent: Session cookie + MCP metadata
-    Note over Agent: Generate MCP config<br/>with server URL and token
-    Agent->>CLI: Start with --mcp-config
-    CLI->>Weather: POST /mcp: tools/call<br/>get_weather(city) + token
-    Note over Weather: Record tool call<br/>in the seeded session
-    Weather-->>CLI: Weather sentence
-    CLI-->>Agent: Final answer
-    Agent->>Weather: POST /verify<br/>Final response + cookie
-    Weather-->>Agent: Reward
-```
-
-The Gym agent and Claude Code CLI are separate processes. All three weather endpoints run in the same Resources Server. The MCP config carries a signed `X-NeMo-Gym-Session-Token`; it identifies the same resources session as the cookie used for verification.
-
-The generated MCP config uses the weather server's name and address; you do not need to write it yourself.
-
-### Verification and cleanup
-
-The weather verifier rewards a response only when the session recorded a call for the expected city and the final answer contains the expected weather sentence, compared case-insensitively.
-
-`/verify` releases the full weather-call history and any active typed-session binding. It keeps only the unique called cities and optional typed identity for `session_close_retry_window_seconds`, allowing verification retries during that window. Without live state or unexpired retry evidence, verification returns a masked sample (`failure_kind: session_lost`). An explicit `/close_session` also refuses verification retries and releases any remaining live state if verify was never reached. See the [full implementation](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/app.py) for the cleanup and retry handling.
-
-<Tip>
-To inspect the protocol without an LLM, see the [weather README's MCP round-trip example](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather#inspect-the-mcp-round-trip-without-an-llm).
-</Tip>
-
 ## Sessions under an Environment Server
 
-An Environment Server such as `single_agent_turn` can own seed, verification, and close directly. This requires an agent that accepts per-session MCP tool grants. The Claude Code agent's session path does not consume those grants yet, so the runnable configuration above uses its `/run` path.
+**Recommended for new integrations:** use an Environment Server such as `single_agent_turn` to own seed, verification, and close. Select an agent that accepts per-session MCP tool grants.
+
+Add this Environment Server block alongside your resources and agent definitions. `my_mcp_agent` is a placeholder for your configured compatible agent; this block alone is not a complete runnable configuration.
+
+```yaml
+config_paths:
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+weather_environment:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server: { type: resources_servers, name: example_mcp_weather }
+      agent_server: { type: responses_api_agents, name: my_mcp_agent }
+      resources_tool_transports: [mcp]
+```
+
+See [Run an integrated agent on a benchmark](/main/agent-server/integrate-existing-agents#run-an-integrated-agent-on-a-benchmark) for pairing and execution setup.
+
+<Note>
+The Claude Code adapter's session path does not yet consume per-session MCP grants. The shipped weather YAML still uses the legacy agent `/run` path; it is retained only for compatibility and is not a typed-session pairing. Its commands and wiring are in the legacy section below.
+</Note>
 
 With a compatible agent and `resources_tool_transports: [mcp]`, the successful episode follows this sequence. The agent lifeline groups the Agent Server and its harness runtime; model calls are omitted.
 
@@ -160,11 +90,47 @@ The [weather README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_serv
 
 [`SimpleResourcesServer`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/base_resources_server.py) owns the seed, close, and checkpoint-retirement flow, including request validation, identity checks, cookie rotation, and retry bookkeeping. Stateless servers keep the default no-op lifecycle. A stateful environment supplies three hooks: `has_session_state`, `initialize_session_state`, and `release_session_state`, and sets `seed_request_model` to the model that validates a typed seed's `task_data` (invalid data receives `422`; without it any task data is accepted). Cleanup must succeed before the base class drops the identity or marks the session closed. A verifier that frees its state at `/verify`, as the weather example does, also masks a closed session and retains the identity and result that a retried verification needs; see its `verify` for the exact steps.
 
-The cookie-based seed path is deprecated and logs a migration warning once per server instance. The runnable Claude Code example still uses this compatibility path; migrating it requires per-session MCP tool-grant support in the agent.
-
 <Accordion title="Why the implementation uses both Field and PrivateAttr">
 `session_id_to_state` retains the original example's public Pydantic `Field`. `SimpleResourcesServer` keeps `_session_episodes`, `_verified_sessions`, and `_fence` as internal `PrivateAttr` state. Pydantic excludes those attributes from model-field validation and serialization.
 </Accordion>
+
+## How MCP reaches the tool
+
+The weather server extends `SimpleResourcesServer`, which supplies the common session lifecycle. The example implements its state hooks, tool, and verifier. These are excerpts from [the weather server's `app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/app.py); use that file for the complete class and request models.
+
+```python
+# Methods of ExampleMCPWeatherResourcesServer.
+def setup_webserver(self) -> FastAPI:
+    app = super().setup_webserver()
+    app.post("/get_weather")(self.get_weather)
+    return app
+
+
+async def get_weather(
+    self,
+    request: Request,
+    body: ExampleMCPWeatherGetWeatherRequest,
+) -> ExampleMCPWeatherGetWeatherResponse:
+    """Get a deterministic weather report for a city."""
+    state = self.session_id_to_state.get(request.session[SESSION_ID_KEY])
+    if state is None:
+        raise ResourcesSessionLostError("No open example_mcp_weather session for this request")
+    weather = _weather_sentence(body.city)
+    state["weather_calls"].append({"city": body.city, "weather": weather})
+    return ExampleMCPWeatherGetWeatherResponse(weather=weather)
+```
+
+`ExampleMCPWeatherGetWeatherRequest` declares `city: str`. The handler records the call in the current session and returns the deterministic weather sentence. Gym invokes this same handler for both HTTP and MCP calls; it supplies the MCP call's session on `request.session`. Tool failures surface to the MCP client with the HTTP handler's status and error text.
+
+## Verification and cleanup
+
+The weather verifier rewards a response only when the session recorded a call for the expected city and the final answer contains the expected weather sentence, compared case-insensitively.
+
+`/verify` releases the full weather-call history and any active typed-session binding. It keeps only the unique called cities and optional typed identity for `session_close_retry_window_seconds`, allowing verification retries during that window. Without live state or unexpired retry evidence, verification returns a masked sample (`failure_kind: session_lost`). An explicit `/close_session` also refuses verification retries and releases any remaining live state if verify was never reached. See the [full implementation](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/app.py) for the cleanup and retry handling.
+
+<Tip>
+To inspect the protocol without an LLM, see the [weather README's MCP round-trip example](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather#inspect-the-mcp-round-trip-without-an-llm).
+</Tip>
 
 ## Which handler shapes are supported
 
@@ -205,13 +171,76 @@ def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
 
 The names are signed into the session token. `tools/list` advertises only those tools, and `tools/call` rejects others.
 
-## workplace_assistant with Claude Code
+## Legacy compatibility (not recommended)
+
+<Warning>
+The agent-owned `/run` path is **legacy and not recommended for use. It will be deprecated in a future release.** Use the Environment Server typed-session path above for new integrations, and migrate existing integrations to it. This warning concerns the Agent Server's `/run` endpoint; the Environment Server's `/run` remains the episode entrypoint.
+</Warning>
+
+The following examples are retained only to explain existing configurations. Claude Code needs per-session MCP grant support before its weather pairing can move to the recommended path.
+
+<Accordion title="Legacy: Claude Code weather example (/run)">
+
+### Run the weather example (legacy)
+
+Start with a working Gym installation from the [quickstart](/main/get-started/quickstart). Add your Anthropic API key to the repository-root `env.yaml`:
+
+```yaml
+anthropic_api_key: sk-ant-...
+```
+
+The [shipped configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml) enables MCP and runs `claude_code_agent` through its `/run` endpoint under the `legacy_agent` Environment Server. Claude Code is installed automatically on its first local invocation; see the [agent README](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) for other model endpoints.
+
+Start the servers:
+
+```bash
+gym env start --config resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
+```
+
+In another terminal, collect the example rollouts:
+
+```bash
+gym eval run --no-serve \
+    --agent example_mcp_weather_claude_code_agent \
+    --input resources_servers/example_mcp_weather/data/example.jsonl \
+    --output results/weather_rollouts.jsonl
+```
+
+In `results/weather_rollouts.jsonl`, a successful episode contains a call to `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`. For Paris, the expected answer contains `The weather in Paris is sunny and 72 F.` The verifier checks that the tool was actually called in that episode's session, as well as checking the answer.
+
+### Wiring the agent (Claude Code, legacy)
+
+The Gym agent seeds the weather session and starts the Claude Code CLI with the generated MCP config:
+
+```mermaid
+sequenceDiagram
+    participant Agent as Gym agent
+    participant CLI as Claude Code CLI
+    participant Weather as Weather server
+
+    Agent->>Weather: POST /seed_session
+    Weather-->>Agent: Session cookie + MCP metadata
+    Note over Agent: Generate MCP config<br/>with server URL and token
+    Agent->>CLI: Start with --mcp-config
+    CLI->>Weather: POST /mcp: tools/call<br/>get_weather(city) + token
+    Note over Weather: Record tool call<br/>in the seeded session
+    Weather-->>CLI: Weather sentence
+    CLI-->>Agent: Final answer
+    Agent->>Weather: POST /verify<br/>Final response + cookie
+    Weather-->>Agent: Reward
+```
+
+The Gym agent and Claude Code CLI are separate processes. All three weather endpoints run in the same Resources Server. The MCP config carries a signed `X-NeMo-Gym-Session-Token`; it identifies the same resources session as the cookie used for verification.
+
+The generated MCP config uses the weather server's name and address; you do not need to write it yourself.
+
+</Accordion>
+
+<Accordion title="Legacy: workplace_assistant with Claude Code (/run)">
 
 `workplace_assistant` is a real environment with 27 tools (five toolkits plus an always-included company-directory lookup).
 
 Some servers dispatch every tool through `POST /{path}`. For those servers, override `mcp_tools(self, harvested, catchall)` to supply each tool's schema. `harvested` contains the tools found from typed routes; `catchall.tool(...)` creates a tool that dispatches through the catch-all route.
-
-<Accordion title="Optional walkthrough: expose workplace_assistant tools">
 
 Save this user-side subclass as `resources_servers/workplace_assistant/app_mcp.py`:
 
@@ -271,13 +300,13 @@ gym eval run --no-serve \
 
 A successful episode calls `mcp__workplace_assistant__*` tools and receives a reward of `1.0`. Gym normalizes MCP tool-name prefixes for verification while preserving the emitted names in the stored trajectory.
 
-</Accordion>
-
 The same `mcp_tools()` override can filter `harvested` to exclude routes or return `None`/`[]` to expose no tools. The latter keeps `/mcp` and its seed metadata available; turn off `expose_tools_over_mcp` to disable MCP exposure entirely.
 
-## Pointing at an existing / external MCP server
+</Accordion>
 
-For a server running outside Gym, give the agent a static `mcp_config`. The Resources Server verifies the resulting trajectory, since it does not own the external tool's session state:
+<Accordion title="Legacy: Claude Code with an external MCP server">
+
+For an existing Claude Code `/run` integration with a server outside Gym, the agent accepts a static `mcp_config`. The Resources Server verifies the resulting trajectory, since it does not own the external tool's session state:
 
 ```yaml
 my_external_mcp_agent:
@@ -289,5 +318,7 @@ my_external_mcp_agent:
 ```
 
 The external connection uses its own authentication. Gym's session cookie still connects the agent to its Resources Server. The agent can merge static MCP entries with the per-rollout Gym entry; if their server names collide, the Gym entry takes precedence.
+
+</Accordion>
 
 <NavButton href="/main/environment-tutorials/real-world-environment" label="Real-World Environment" direction="next" />
