@@ -78,6 +78,10 @@ needs only the `mlflow` extra, which the MLflow delivery check in `--inspect` us
    only adds (for example `++compute.cluster.walltime=00:40:00`). Check with `--resolve-only`.
 7. Not tracking in MLflow on purpose: `mlflow_tracking_required: false` in each benchmark's `run`. The
    delivery state is then `not_required`; health checks still run.
+8. For a large model, a fresh install or a loaded cluster, raise
+   `++driver.benchmarks.<name>.run.server_spinup_timeout_seconds` (default 600 s, which covers dependency
+   installation and model loading); a spin-up timeout is an infra stop that leaves rows untouched and never a
+   zero, and the chain waits for `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"`.
 
 ## 2. Submit and let the chain run
 
@@ -239,6 +243,10 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | `fresh-restart` (no task inventory) | Step 8. |
 | NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (warning `MLflow delivery <state>: <reasons>`) | The results are complete; delivery is reported beside the gate, never inside it. Close it: `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values from the run's `artifacts/rollouts_resolved_config.yaml`, and the token as `+mlflow_tracking_token=<token>` or `MLFLOW_TRACKING_TOKEN`. A repeat on an exported run verifies without touching the run lock; `--recover` on a complete run that requires tracking and has no receipt runs the export too. "although the saved config snapshot names a tracking URI...": tracking was required and the export did not finish: read the exporter's failure in the driver log, repair, export. "does not name all of the tracking URI, experiment and run name": nothing tracked the run; set `mlflow_tracking_required: false` next time. From a host without access to the tracking server the inspect reports `unverified` with `status query failed: ...`: inspect with `--mlflow-run-id <receipt run_id> --mlflow-status FINISHED` once you observed that status yourself (`GET <tracking uri>/api/2.0/mlflow/runs/get?run_id=<id>`, field `info.status`); `ModuleNotFoundError` means the reader's environment lacks `mlflow`. When the reason says the rollouts were not uploaded and the run sets `upload_rollouts: false`, the delivery stays `unverified` by configuration: report it; an export does not change it. |
 | `SUCCESS` | Done. Keep the run directory as the record. Nothing needs cancelling: the finishing job cancelled its successor and sentinel (`chain-end-journal.jsonl`). |
+
+A judge-only re-judge takes the judge key and the other forwarded credentials from the environment of the shell
+that dispatches it; the run keeps none of them. Export the valid key before dispatching: a stale key in that
+shell fails every judge call again.
 
 A rollout cut by a segment end restarts from its first step; there is no step-level resume. So the
 segment walltime (`compute.cluster.walltime`) must exceed the longest single task's runtime: shorter
