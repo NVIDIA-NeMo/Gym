@@ -433,6 +433,29 @@ class TestFernDocsLinks(unittest.TestCase):
 
         self.assertEqual([], slug_labels)
 
+    def test_latest_pages_do_not_repeat_the_title_as_a_heading(self):
+        # Fern renders the frontmatter title as the page heading, so a body "# <title>" shows it twice.
+        # These pages change in #5131, which removes their repeated titles; drop them here once it merges.
+        pending = {
+            "agent-server/add-or-update-a-harness.mdx",
+            "agent-server/remote-agent.mdx",
+            "contribute/environments/adding-a-benchmark.mdx",
+            "data/harbor-tasks.mdx",
+            "data/multi-step-tasks.mdx",
+            "evaluation-tutorials/terminal-bench-2-1-harbor.mdx",
+        }
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        repeated = []
+
+        for page in sorted(pages.rglob("*.mdx")):
+            text = page.read_text()
+            title = re.search(r'^title:\s*"?(.*?)"?\s*$', text, re.M)
+            relative = page.relative_to(pages).as_posix()
+            if title and relative not in pending and re.search(rf"^# {re.escape(title.group(1))}\s*$", text, re.M):
+                repeated.append(relative)
+
+        self.assertEqual([], repeated)
+
     def test_latest_r070_copy_review_items(self):
         pages = REPO_ROOT / "fern/versions/latest/pages"
         faq = (pages / "reference/faq.mdx").read_text()
