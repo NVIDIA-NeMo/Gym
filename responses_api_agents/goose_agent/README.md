@@ -1,114 +1,118 @@
 # Goose Agent
 
-Runs [Goose](https://github.com/aaif-goose/goose) (Apache-2.0) headless with `goose run` inside a
-provider-managed sandbox. Gym stays on the host: it provisions the sandbox, routes model requests through the
-Gym model server (with token capture), seeds authenticated MCP tools, exports the Goose session store, and calls
-the resources server's verifier.
+Runs [Goose](https://github.com/aaif-goose/goose) **1.54.0** (Apache-2.0) headless with `goose run` inside a Gym
+task sandbox. The Environment Server seeds the Resources and agent sessions, activates Goose once, closes the agent,
+verifies the task, and closes Resources. Goose runs its own tools and calls a Gym Model Server for inference.
+
+Capability level: **Evaluation**. The adapter returns the root session as Responses items and an observation bundle
+with explicit gaps. Token IDs are not captured.
 
 Goose's native subagents come from its built-in `summon` extension: the `delegate` tool runs a subagent in its own
-session, either synchronously or with `async: true` followed by `load(task_id)` to collect the result. Several
-delegate calls in one turn run concurrently. Delegates cannot delegate further (depth 1), and they inherit the
-parent's extensions, so they see the Gym MCP tools too.
+session, synchronously or with `async: true` followed by `load(task_id)`. Several delegate calls in one turn run
+concurrently. Delegates cannot delegate further (depth 1).
 
-## Install
+## Configure and run
 
-Each sandbox installs the pinned Goose 1.54.0 static (musl) release for its architecture (`uname -m`: `x86_64` or
-`aarch64`) and verifies its sha256 before running it. By default the sandbox downloads the archive from the
-GitHub release, which needs `curl` or `wget`, `sha256sum` and `tar` in the image and internet access. For
-sandboxes without internet (`network_access: model_only` or `model_and_tools`), download both archives once to
-a host directory and set `goose_archive_dir`. Gym then uploads the matching archive into each sandbox:
-
-```bash
-mkdir -p /path/to/goose-archives && cd /path/to/goose-archives
-for arch in x86_64 aarch64; do
-  curl -fLO https://github.com/aaif-goose/goose/releases/download/v1.54.0/goose-$arch-unknown-linux-musl.tar.gz
-done
-sha256sum goose-*.tar.gz  # must match GOOSE_ARCHIVE_SHA256 in app.py
-```
-
-## Configuration
-
-See [`configs/goose_agent.yaml`](configs/goose_agent.yaml).
-
-| Key | Meaning |
-|---|---|
-| `provider`, `model` | Goose provider (`GOOSE_PROVIDER`, default `openai`) and the request model name (`GOOSE_MODEL`). |
-| `base_url` | OpenAI-compatible base URL ending in `/v1`. `null` routes through the Gym model server, with the rollout prefix that token capture needs. |
-| `subagent_model` | `GOOSE_SUBAGENT_MODEL` for delegates. `null` reuses `model`. Through the Gym vLLM model server the request name does not change which model serves it, so a different child model needs its own endpoint behind `base_url`. |
-| `delegate` | `false` disables the `summon` extension (`delegate` and `load`) for a solo control. |
-| `max_turns` | `goose run --max-turns` for the root. Delegates use Goose's own limit (`GOOSE_SUBAGENT_MAX_TURNS`, default 25), settable through `env`. |
-| `goose_mode` | `GOOSE_MODE`. Use `auto` (default) headless, since `approve` and `smart_approve` ask a human to confirm tool calls. Delegates always run in `auto`. |
-| `env` | Extra Goose settings, for example `GOOSE_CONTEXT_LIMIT`, `GOOSE_SUBAGENT_MAX_TURNS`, `GOOSE_MAX_BACKGROUND_TASKS` (concurrent `async` delegates, default 5). |
-| `tool_servers` | Resources servers whose MCP tools are attached as Goose `streamable_http` extensions. |
-| `network_access` | `inherit`, `model_only` or `model_and_tools` (OpenSandbox egress allowlist, see the [OpenCode and Pi guide](../opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)). |
-
-The request's system and developer messages are appended to Goose's system prompt (`--system`) after
-`system_prompt`. The user messages form the task, passed on stdin (Goose ignores `--system` for `-i <file>`). Request `temperature` is passed as `GOOSE_TEMPERATURE`.
-
-## Outputs
-
-The response output is the root session converted to Responses items (reasoning, messages, function calls and
-their outputs). Usage sums every model call of the root and its delegates. Each rollout writes `stdout.jsonl`
-(`goose run --output-format stream-json`), `stderr.log`, the Goose session store (`sessions/sessions.db`, root and
-child sessions linked by `parent_session_id`) and `generation.json` under `artifacts_dir`. The verify response adds:
-
-| Field | Meaning |
-|---|---|
-| `goose_subagents` | Number of delegate sessions. |
-| `goose_max_concurrent_subagents` | Most delegates active at once (first to last message, second resolution). |
-| `goose_failed`, `goose_exit_code`, `goose_error_type` | Execution outcome. A run fails on a non-zero exit, a timeout (`timeout`, enforced inside the sandbox a little before `timeout` so Goose is stopped on every provider), a model error or `max_turns` that Goose itself ends with exit 0 (`model_error`, `max_turns`), or a completion cut at the output or context limit (`length`, the response is marked incomplete). With `execution_failure_reward_zero`, a failed run is graded as an empty response, except in a resource-owned sandbox, which is graded in place. |
-
-Sandbox or transport faults while Goose runs, model-server failures Goose reports as a network, server or rate-limit error, and extensions that fail to start fail the request instead of scoring it, so it can be retried.
-
-## Run
-
-Define one agent instance per arm on top of `goose_agent`, for example a solo control on math and a delegate arm
-whose MCP tools come from a tool server:
+[configs/goose_agent.yaml](configs/goose_agent.yaml) defines the agent defaults. For SWE-bench Pro, save this
+composition as `run.yaml`:
 
 ```yaml
-use_absolute_ip: true
 config_paths:
-- responses_api_models/vllm_model/configs/vllm_model.yaml
-- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
-- responses_api_agents/goose_agent/configs/goose_agent.yaml
-- resources_servers/math_with_judge/configs/math_with_judge.yaml
-- resources_servers/example_mcp_weather/configs/example_mcp_weather.yaml
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/goose_agent/configs/goose_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-goose_solo:
-  _inherit_from: goose_agent
-  responses_api_agents:
-    goose_agent:
-      resources_server: {type: resources_servers, name: math_with_judge}
-      delegate: false
-
-goose_swarm:
-  _inherit_from: goose_agent
-  responses_api_agents:
-    goose_agent:
-      resources_server: {type: resources_servers, name: example_mcp_weather}
-      tool_servers: [{type: resources_servers, name: example_mcp_weather}]
-      delegate: true
-      network_access: model_and_tools
-      goose_archive_dir: /path/to/goose-archives
-
-math_with_judge_simple_agent: null
-math_with_judge_environment_server: null
-example_mcp_weather_claude_code_agent: null
-example_mcp_weather_environment_server: null
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: swebench_pro_resources_server
+      agent_server:
+        name: goose_agent
+      resources_tool_transports: []
 ```
+
+Supply a `policy_model` Gym Model Server, `policy_model_name`, and the `sandbox` provider configuration in
+`model-provider.yaml`. The task sandbox must be able to reach the Model Server.
 
 ```bash
-gym env start --config goose_arms.yaml
-gym eval run --no-serve --agent goose_swarm --input <rows.jsonl> --output results/goose_swarm.jsonl
+python benchmarks/swebench/pro/prepare.py
+
+gym env start --config run.yaml --config model-provider.yaml --allow-unsupported-pairing
+
+gym eval run --no-serve \
+  --config run.yaml --config model-provider.yaml \
+  --agent goose_agent \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-Restricted network access requires OpenSandbox and `use_absolute_ip: true`.
+| Setting | Default | Purpose |
+|---|---:|---|
+| `goose_version` | `1.54.0` | Release whose archive checksums are pinned in the adapter. Other values are refused. |
+| `model` | `${policy_model_name}` | `GOOSE_MODEL`, the model name Goose sends. |
+| `timeout` | `3600` | Seconds per activation, enforced by the sandbox's process supervisor. Task `agent_timeout_sec` metadata can shorten it. |
+| `max_turns` | `1000` | `goose run --max-turns` for the root. Delegates use Goose's own limit. |
+| `delegate` | `true` | `false` disables `summon` (`delegate` and `load`), for a solo control. |
+| `subagent_model` | `null` | `GOOSE_SUBAGENT_MODEL` for delegates; `null` reuses `model`. |
+| `context_limit` | `null` | `GOOSE_CONTEXT_LIMIT`: the served model's context window, for Goose's compaction. |
+| `system_prompt` | `null` | Prepended to the request's system text. |
+| `sandbox_install_timeout_seconds` | `900` | Bound on session setup, including installation. |
+| `session_close_timeout_seconds` | `60` | Bound on each supervised close phase. |
+| `sandbox_provider`, `sandbox_config` | `null`, `{}` | Agent-owned sandbox, only when Resources supplies no `SandboxAccess`. |
 
-## Known limitations
+## Runtime and sandbox setup
 
-- Goose replays earlier reasoning as `reasoning_content`, which vLLM 0.16 and later ignore when rendering the
-  prompt. With token capture enabled, a multi-turn rollout therefore cannot link its calls into one chain and is
-  masked. Single-call rollouts rebuild cleanly.
-- The solo control removes `delegate` and `load`, but Goose's default extension manager stays enabled, so a model
-  could in principle re-enable `summon` at run time.
-- Delegates started with `async: true` are cancelled if the root ends its run without collecting them with `load`.
+Session setup installs the pinned static (musl) release for the sandbox's architecture (`uname -m`: `x86_64` or
+`aarch64`) under `/tmp/nemo-gym-goose-runtime-1.54.0`. The agent server downloads the GitHub release archive once into
+its asset cache, checks the SHA-256 pinned in `sandbox.py`, and uploads it; the sandbox checks the checksum again,
+extracts it, checks the version Goose reports, and reuses a runtime that already reports it. The sandbox needs only
+bash, `sha256sum`, `tar` and `gzip`, and no internet access; the agent server needs access to GitHub releases.
+
+Goose runs in `SandboxAccess.workdir` through the shared `harness_runner.sh` under the process supervisor. Its
+config, sessions and state live under `GOOSE_PATH_ROOT` in a private session directory, so tool shells keep the
+task's `HOME` and `XDG_*` directories. `SandboxAccess.env` is forwarded, except `GOOSE_*` and `OPENAI_*` variables,
+which could redirect Goose's configuration or model calls. Close removes only the session directory; the Resources
+Server destroys a borrowed sandbox, and the agent stops a sandbox it owns.
+
+## Requests, results and outcomes
+
+The request's system or developer message and `instructions` form Goose's system prompt (`--system`, at most
+128 KiB), and the user message is the task, passed on stdin. Request `temperature` is passed as `GOOSE_TEMPERATURE`.
+Other request fields, such as `max_output_tokens`, `top_p` and `tools`, are refused with HTTP 422, as are sessionless
+requests and `/run`.
+
+The response output is the root session converted to Responses items (reasoning, messages, function calls and their
+outputs). Goose's own messages (`userVisible: false`, such as compaction notices) are not output. Response metadata
+records `goose_exit_code`, `goose_stop_reason`, `goose_subagents` and `goose_max_concurrent_subagents`.
+
+| Goose 1.54.0 ending | Response |
+|---|---|
+| Finished | `completed` |
+| Supervisor deadline, with model output | `incomplete` (verified); without any model output, the activation fails |
+| `--max-turns` notice, or killed before the deadline (exit 137, usually out of memory in the task cgroup) | `incomplete` (verified) |
+| Completion cut at the output or context limit | `incomplete`, `max_output_tokens` |
+| Model calls failed at the Model Server (network, 5xx, rate limit, rejected credentials, missing model), in the root or a delegate | `failed`, `model_transport_error` (retryable) |
+| The model kept returning empty completions | `failed`, `agent_invalid_output` |
+| Another Goose error notice, or a nonzero exit | `failed`, `agent_run_error` |
+| Goose never started, left no session store, or an extension failed to start | The activation raises |
+
+## Limitations
+
+- Usage is `null`: Goose's usage ledger is not tied to individual model calls. The observation bundle declares
+  `usage_unavailable`, `model_call_ownership_unavailable` (Goose sends no per-call session header),
+  `harness_tool_timing_unavailable` and `child_invocations_unavailable`.
+- Required tool grants are refused at seed; optional grants are skipped and reported. A `SandboxAccess` user override
+  is refused.
+- One activation per session; there is no host execution path.
+- The solo control removes `delegate` and `load`, but Goose's extension manager stays enabled, so a model could in
+  principle re-enable `summon` at run time. Delegates started with `async: true` are cancelled if the root ends
+  without collecting them with `load`.
+
+## Tests
+
+```bash
+python -m pytest responses_api_agents/goose_agent/tests -q -o addopts=''
+```
+
+The lifecycle tests run the shared process supervisor and runner on Linux with a fake Goose CLI.

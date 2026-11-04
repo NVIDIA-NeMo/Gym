@@ -1,634 +1,474 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""Goose CLI adapter for Environment Server episodes, run inside the task sandbox."""
 
+import asyncio
+import io
 import json
 import logging
 import re
-import sqlite3
 import tarfile
-from asyncio import Semaphore, to_thread
-from copy import deepcopy
-from hashlib import sha256
-from pathlib import Path
+import tempfile
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 from shlex import quote
-from tempfile import TemporaryDirectory
 from time import time
-from typing import Any, Literal
+from typing import Any, ClassVar
 from uuid import uuid4
 
-from anyio import CancelScope
-from fastapi import Request
+from fastapi import HTTPException, Request
 from openai.types.responses.response import IncompleteDetails
-from pydantic import ConfigDict, Field
+from pydantic import Field, JsonValue
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
-    NeMoGymFunctionCallOutput,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseUsage,
-    NeMoGymSummary,
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionSetupError,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SandboxCommand,
+    SandboxSession,
+    SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.agent_tools import (
-    restricted_network_policy,
-    sandbox_server_url,
-    seed_mcp_servers,
-    verify_agent_response,
+from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.goose_agent.conversion import (
+    delegate_model_server_failure,
+    goose_messages_to_output,
+    goose_stop_reason,
+    max_concurrent,
+    read_goose_sessions,
+)
+from responses_api_agents.goose_agent.sandbox import (
+    GOOSE_VERSION,
+    RUNTIME_ROOT,
+    SESSION_ROOT,
+    GooseArtifacts,
+    GooseSession,
+)
 
 
 LOG = logging.getLogger(__name__)
 
-GOOSE_VERSION = "1.54.0"
-# sha256 of the official static (musl) release archives, keyed by `uname -m`.
-GOOSE_ARCHIVE_SHA256 = {
-    "x86_64": "777e49b6ae128fae06600f94bf51ff05c81572fce63c1581e9ea94bc49d64e42",  # pragma: allowlist secret
-    "aarch64": "baeb3e1b188fce75b444af35b5955f255e68fde87f60a5ba01f032227618a4ed",  # pragma: allowlist secret
-}
-GOOSE_RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GOOSE_VERSION}"
 # Goose takes the system prompt only as one argv value, which Linux caps at 128 KiB (MAX_ARG_STRLEN).
 MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
-# Goose's own text when the model returned empty completions until it gave up (persisted, exit 0).
-GOOSE_EMPTY_RESPONSE_NOTICE = "The model returned an empty response. Please resend your message to continue."
-# summon's wrapper around an async delegate's result in load's tool response.
-GOOSE_TASK_RESULT_HEADER = "# Background Task Result"
-GOOSE_TASK_OUTPUT = "\n## Output\n\n"
-# Goose's MAX_TURNS_MESSAGE, streamed when --max-turns is reached.
-GOOSE_MAX_TURNS_NOTICE = "I've reached the maximum number of actions I can do without user input"
-# Goose 1.54.0's provider errors for a model call that failed at the model server: unreachable, 5xx, rate limit, rejected
-# credentials or a missing model, during a turn or a compaction. The model server or the configuration failed, not the
-# policy, so the request fails and is retried.
-GOOSE_ERROR_NOTICES = ("Ran into this error: ", "Ran into this error trying to compact: ")
-GOOSE_MODEL_SERVER_ERRORS = (
-    "Network error",
-    "Server error",
-    "Rate limit exceeded",
-    "Authentication error",
-    "Request failed: Resource not found",
-)
-
-
-def goose_archive_name(arch: str) -> str:
-    """Return the release archive name for a sandbox architecture reported by ``uname -m``."""
-    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(arch, arch)
-    if arch not in GOOSE_ARCHIVE_SHA256:
-        raise ValueError(f"No Goose {GOOSE_VERSION} release for sandbox architecture {arch!r}")
-    return f"goose-{arch}-unknown-linux-musl.tar.gz"
+# harness_runner.sh exit statuses when Goose itself never ran.
+RUNNER_FAILURES = (125, 126, 127)
+# A kill (SIGKILL) before the deadline, usually the task cgroup running out of memory.
+KILLED = 128 + 9
 
 
 class GooseAgentConfig(BaseResponsesAPIAgentConfig):
-    """Goose CLI settings plus sandbox allocation and host-side tool services."""
+    """Goose release, model and sandbox settings; the Environment Server binds the benchmark."""
 
-    resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    concurrency: int = 32
-    timeout: float = 3600
-
-    provider: str = "openai"
-    model: str = "policy_model"
-    # Defaults to the Gym model server, with the rollout prefix used for token capture.
-    base_url: str | None = None
-    api_key: str = "dummy"  # pragma: allowlist secret
-    subagent_model: str | None = None
+    # Sent as GOOSE_MODEL. The Gym model server serves its configured model.
+    model: str
+    goose_version: str = GOOSE_VERSION
+    concurrency: int = Field(default=32, gt=0)
+    # Seconds per activation, enforced by the sandbox's process supervisor.
+    timeout: float = Field(default=3600, gt=0, allow_inf_nan=False)
+    max_turns: int = Field(default=1000, gt=0)
+    # false disables Goose's summon extension (delegate/load), for a solo control.
     delegate: bool = True
-    max_turns: int = 1000
-    goose_mode: Literal["auto", "approve", "smart_approve", "chat"] = "auto"
+    # GOOSE_SUBAGENT_MODEL; null reuses `model`.
+    subagent_model: str | None = None
+    # GOOSE_CONTEXT_LIMIT: the served model's context window, for Goose's compaction.
+    context_limit: int | None = Field(default=None, gt=0)
     system_prompt: str | None = None
-    env: dict[str, str] = Field(default_factory=dict)
-
-    # Release archives are fetched inside the sandbox unless a host directory holding them is given.
-    goose_release_url: str = GOOSE_RELEASE_URL
-    goose_archive_dir: str | None = None
-
-    sandbox_provider: str
-    sandbox_config: dict[str, Any] = Field(default_factory=dict)
-    network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
-    tool_servers: list[ResourcesServerRef] = Field(default_factory=list)
-    execution_failure_reward_zero: bool = False
-    artifacts_dir: str = "results/goose"
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
 
 
-class GooseAgentRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-
-class GooseAgentVerifyResponse(BaseVerifyResponse):
-    model_config = ConfigDict(extra="allow")
-
-    goose_failed: bool = False
-    goose_exit_code: int | None = None
-    goose_error_type: str | None = None
-    goose_results_dir: str = ""
-    goose_subagents: int = 0
-    goose_max_concurrent_subagents: int = 0
-
-
-def read_goose_sessions(db_path: Path) -> list[dict[str, Any]]:
-    """Read every session (root and delegate children) with its messages, in creation order."""
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    try:
-        sessions = [dict(row) for row in con.execute("select * from sessions order by created_at, id")]
-        for session in sessions:
-            session["messages"] = [
-                {
-                    "role": row["role"],
-                    "content": json.loads(row["content_json"]),
-                    "created": row["created_timestamp"],
-                    "message_id": row["message_id"],
-                    "user_visible": (json.loads(row["metadata_json"] or "{}") or {}).get("userVisible", True),
-                }
-                for row in con.execute(
-                    "select message_id, role, content_json, created_timestamp, metadata_json from messages "
-                    "where session_id = ? order by id",
-                    (session["id"],),
-                )
-            ]
-            session["usage"] = [
-                dict(row)
-                for row in con.execute(
-                    "select input_tokens, output_tokens, cache_read_tokens from usage_ledger where session_id = ?",
-                    (session["id"],),
-                )
-            ]
-    finally:
-        con.close()
-    return sessions
-
-
-def goose_messages_to_output(messages: list[dict[str, Any]]) -> list[Any]:
-    """Convert the root session's Goose messages into Responses output items.
-
-    Goose stores one assistant message per tool call of a turn and repeats the turn's thinking in each, so
-    a thinking block equal to the previous one of the same turn is dropped. A user message that is not a
-    tool response starts a new turn, so identical thinking there is kept. User text (the task and injected
-    turn context) is input, not output. Messages Goose writes for itself (userVisible false, such as the
-    compaction notice) are not policy output either.
-    """
-    output, last_thinking = [], None
-    for message in messages:
-        if not message.get("user_visible", True):
-            continue
-        if message["role"] == "user" and not any(b.get("type") == "toolResponse" for b in message["content"]):
-            last_thinking = None
-        for block in message["content"]:
-            kind = block.get("type")
-            if message["role"] == "assistant" and kind == "thinking" and block.get("thinking"):
-                if block["thinking"] != last_thinking:
-                    output.append(
-                        NeMoGymResponseReasoningItem(
-                            id=f"rs_{uuid4().hex}",
-                            summary=[NeMoGymSummary(text=block["thinking"], type="summary_text")],
-                        )
-                    )
-                last_thinking = block["thinking"]
-            elif message["role"] == "assistant" and kind == "text" and block.get("text"):
-                output.append(
-                    NeMoGymResponseOutputMessage(
-                        id=f"msg_{uuid4().hex}", content=[NeMoGymResponseOutputText(text=block["text"])]
-                    )
-                )
-            elif kind == "toolRequest":
-                call = block.get("toolCall") or {}
-                value = call.get("value") or {}
-                output.append(
-                    NeMoGymResponseFunctionToolCall(
-                        call_id=block["id"],
-                        name=value.get("name", ""),
-                        arguments=json.dumps(value.get("arguments") or {}),
-                    )
-                )
-            elif kind == "toolResponse":
-                result = block.get("toolResult") or {}
-                content = (result.get("value") or {}).get("content") or []
-                text = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
-                output.append(
-                    NeMoGymFunctionCallOutput(call_id=block["id"], output=text or str(result.get("error", "")))
-                )
-    return output
-
-
-def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None:
-    """Why Goose stopped early, or None.
-
-    When a model call fails past its retries or --max-turns is reached, Goose ends the run with a notice of its own as
-    the last assistant message: plain text that it does not persist and exits 0 on, or an error block that it persists
-    and exits 1 on (rejected credentials). Every message from the model is persisted under the id it was streamed with,
-    so an unpersisted last message is a notice too. "model_server" marks a notice for a model server that failed, not
-    the policy.
-    """
-    last = {}
-    for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue  # Goose prints a startup banner before the JSON events.
-        if isinstance(event, dict) and event.get("type") == "message":
-            if (event.get("message") or {}).get("role") == "assistant":
-                last = event["message"]
-    if not last:
-        return None
-    if (last.get("metadata") or {}).get("outputTokenLimitReached"):
-        # The output or context limit cut the last completion (the vLLM model server returns an empty one).
-        return "length"
-    blocks = [block for block in last.get("content") or [] if block.get("type") in ("text", "error")]
-    if "".join(block.get("text") or "" for block in blocks).strip() == GOOSE_EMPTY_RESPONSE_NOTICE:
-        return "empty_response"
-    persisted = {m["message_id"] for s in sessions for m in s["messages"]}
-    # Goose's own notice is never persisted, or is persisted as an error block (rejected credentials). Persisted text is
-    # the policy's own answer, whatever its wording.
-    if not (last.get("id") and last["id"] not in persisted) and not any(b.get("type") == "error" for b in blocks):
-        return None
-    text = "".join(block.get("text") or block.get("message") or "" for block in blocks)
-    if _model_server_error(text):
-        return "model_server"
-    return "max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"
-
-
-def _model_server_error(text: str) -> bool:
-    if text.startswith("Network error:"):
-        return True
-    head = next((h for h in GOOSE_ERROR_NOTICES if text.startswith(h)), None)
-    return head is not None and text[len(head) :].startswith(GOOSE_MODEL_SERVER_ERRORS)
-
-
-def delegate_model_server_failure(sessions: list[dict[str, Any]]) -> bool:
-    """Whether a delegate's model calls failed at the model server.
-
-    A delegate that hits a provider error ends with Goose's notice as its last message, which it does not persist, and
-    summon returns that text to the parent: as the delegate tool's result, or for an async delegate inside load's
-    "# Background Task Result" under "## Output". The parent carries on and Goose exits 0. Text a delegate persisted is
-    its own answer, whatever its wording.
-    """
-    persisted = {
-        "\n".join(block.get("text", "") for block in message["content"] if block.get("type") == "text")
-        for session in sessions
-        if session.get("parent_session_id")
-        for message in session["messages"]
-        if message["role"] == "assistant"
-    }
-    for session in sessions:
-        calls = {
-            block["id"]: name
-            for message in session["messages"]
-            for block in message["content"]
-            if block.get("type") == "toolRequest"
-            and (name := ((block.get("toolCall") or {}).get("value") or {}).get("name")) in ("delegate", "load")
-        }
-        for message in session["messages"]:
-            for block in message["content"]:
-                if block.get("type") != "toolResponse" or block.get("id") not in calls:
-                    continue
-                content = ((block.get("toolResult") or {}).get("value") or {}).get("content") or []
-                text = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
-                if calls[block["id"]] == "load":
-                    if not text.startswith(GOOSE_TASK_RESULT_HEADER) or GOOSE_TASK_OUTPUT not in text:
-                        continue
-                    text = text.split(GOOSE_TASK_OUTPUT, 1)[1]
-                if text not in persisted and _model_server_error(text):
-                    return True
-    return False
-
-
-def max_concurrent(intervals: list[tuple[int, int]]) -> int:
-    """Largest number of closed intervals sharing a point."""
-    events = sorted(
-        [(start, 1) for start, _ in intervals] + [(end, -1) for _, end in intervals], key=lambda e: (e[0], -e[1])
-    )
-    best = current = 0
-    for _, step in events:
-        current += step
-        best = max(best, current)
-    return best
+def _text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts = []
+    for part in content:
+        value = part if isinstance(part, dict) else part.model_dump()
+        if value.get("type") != "input_text":
+            raise HTTPException(422, "Goose accepts text input only")
+        parts.append(value["text"])
+    return "\n".join(parts)
 
 
 class GooseAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
+    """Run one Goose activation per agent session, inside the borrowed (or agent-owned) task sandbox."""
+
     config: GooseAgentConfig
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, context: Any, /) -> None:
-        # Goose is installed in each sandbox, never on the Gym host.
         super().model_post_init(context)
-        self._sem = Semaphore(self.config.concurrency)
+        self._sem = asyncio.Semaphore(self.config.concurrency)
 
-    def _model_base_url(self, body: GooseAgentRunRequest) -> str:
-        if self.config.base_url:
-            return self.config.base_url
-        base = sandbox_server_url(
-            self.config.model_server.name, require_reachable=self.config.network_access != "inherit"
-        )
-        return self.base_url_for_run(base, body).rstrip("/") + "/v1"
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """The failure kind read from Goose 1.54.0's own stop notice."""
+        return AgentOutcome(failure_kind=native_result.get("failure_kind", "unknown"))
 
-    async def _start_sandbox(self, seed: dict) -> AsyncSandbox:
-        global_config = get_global_config_dict()
-        provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config))
-        descriptor = seed.get("sandbox_descriptor")
-        if not descriptor and seed.get("sandbox_handle"):
-            descriptor = {"sandbox_id": seed["sandbox_handle"], "workdir": seed.get("workdir")}
-        if descriptor:
-            if self.config.network_access != "inherit":
-                raise ValueError("Cannot verify network policy on a resource-owned sandbox")
-            return await AsyncSandbox.connect(descriptor, provider=provider)
-        options = deepcopy(self.config.sandbox_config)
-        resources = SandboxResources.from_mapping(options.pop("resources", {}))
-        env = cpu_cap_env(resources.cpu) if options.pop("derive_cpu_env", True) else {}
-        env.update(options.pop("env", {}))
-        metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
-        metadata = metadata | options.pop("metadata", {}) | {"nemo_gym_agent": self.config.name}
-        if self.config.network_access != "inherit":
-            # Allow the endpoint Goose actually calls: a configured base_url, else the Gym model server.
-            urls = [self.config.base_url or sandbox_server_url(self.config.model_server.name, require_reachable=True)]
-            if self.config.network_access == "model_and_tools":
-                if not self.config.tool_servers:
-                    raise ValueError("model_and_tools requires tool_servers")
-                urls.extend(sandbox_server_url(s.name, require_reachable=True) for s in self.config.tool_servers)
-            options.setdefault("provider_options", {})["network_policy"] = restricted_network_policy(
-                provider.name, urls
-            )
-        sandbox = AsyncSandbox(provider)
-        await sandbox.start(SandboxSpec(resources=resources, env=env, metadata=metadata, **options))
-        return sandbox
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, GooseSession) else None
 
-    async def _install_goose(self, sandbox: AsyncSandbox, remote: str) -> None:
-        """Install the pinned, checksum-verified release. Failures are infrastructure errors."""
-        arch = await sandbox.exec(command="uname -m", timeout_s=60)
-        name = goose_archive_name((arch.stdout or "").strip())
-        archive = f"{remote}/{name}"
-        if self.config.goose_archive_dir:
-            await sandbox.upload(Path(self.config.goose_archive_dir) / name, archive)
-            fetch = ":"
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> GooseSession:
+        """Connect to (or start) the task sandbox and install Goose before the activation."""
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise AgentSeedRejectedError("Goose sessions use Goose's own tools; required tool grants are unsupported")
+        if self.config.goose_version != GOOSE_VERSION:
+            raise AgentSeedRejectedError(f"Goose sessions pin release checksums for goose_version {GOOSE_VERSION}")
+        access = body.sandbox_access
+        owns_sandbox = access is None
+        if owns_sandbox:
+            if not self.config.sandbox_provider:
+                raise AgentSeedRejectedError("Goose requires sandbox_access or a configured sandbox_provider")
+            provider_ref = self.config.sandbox_provider
+            workdir = self.config.sandbox_config.get("workdir") or "/app"
         else:
-            url = quote(f"{self.config.goose_release_url.rstrip('/')}/{name}")
-            fetch = f"(curl -fsSL -o {quote(archive)} {url} || wget -qO {quote(archive)} {url})"
-        command = (
-            f"mkdir -p {quote(remote)} && {fetch} "
-            f"&& echo {quote(GOOSE_ARCHIVE_SHA256[name.split('-')[1]] + '  ' + archive)} | sha256sum -c - "
-            f"&& tar xzf {quote(archive)} -C {quote(remote)} "
-            f'&& test "$({quote(remote + "/goose")} --version | tr -d " ")" = {GOOSE_VERSION}'
+            if not isinstance(access.connection, DirectSandboxConnection):
+                raise AgentSeedRejectedError("Goose requires direct SandboxAccess")
+            if access.user is not None:
+                raise AgentSeedRejectedError("Goose does not support a SandboxAccess user override")
+            provider_ref = access.connection.provider_config_ref
+            workdir = access.workdir
+        path = PurePosixPath(workdir) if isinstance(workdir, str) else None
+        if (
+            path is None
+            or not path.is_absolute()
+            or ".." in path.parts
+            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or str(path).startswith((SESSION_ROOT, RUNTIME_ROOT))
+        ):
+            raise AgentSeedRejectedError("Goose task workdir must be absolute and separate from its session storage")
+
+        global_config = get_global_config_dict()
+        provider = create_provider(resolve_provider_config(provider_ref, global_config))
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+        state = GooseSession(
+            request=body,
+            provider_name=provider.name,
+            sandbox_id=sandbox.sandbox_id,
+            session=SandboxSession(
+                sandbox=sandbox,
+                session_dir=f"{SESSION_ROOT}/{uuid4().hex}",
+                workdir=str(path),
+                harness="Goose",
+                owns_sandbox=owns_sandbox,
+            ),
         )
-        result = await sandbox.exec(command=command, timeout_s=900)
-        if result.return_code != 0 or result.error_type:
-            raise RuntimeError(
-                f"Goose {GOOSE_VERSION} install failed: {(result.stderr or result.stdout or '')[-500:]}"
-            )
+        try:
+            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                if owns_sandbox:
+                    settings = dict(self.config.sandbox_config)
+                    metadata = settings.pop("metadata", None) or {}
+                    settings["metadata"] = {
+                        **resolve_provider_metadata(provider_ref, global_config),
+                        **metadata,
+                        "agent_session_id": body.agent_session_id[:63],
+                    }
+                    settings["workdir"] = str(path)
+                    settings.setdefault(
+                        "ttl_s", int(self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
+                    )
+                    await sandbox.start(SandboxSpec(**settings))
+                    state.sandbox_id = sandbox.sandbox_id
+                    made = await sandbox.exec(f"mkdir -p -- {quote(str(path))}", cwd="/", timeout_s=30)
+                    if made.return_code != 0 or made.error_type:
+                        raise RuntimeError(f"Cannot create the Goose task workdir {path}")
+                await state.install(timeout=self.config.sandbox_install_timeout_seconds)
+        except BaseException as error:
+            try:
+                await state.close(timeout=self.config.session_close_timeout_seconds)
+            except BaseException:
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
+        return state
 
-    def _goose_config(self, mcp: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        # Goose fills in every other platform extension with its own default on load.
-        extensions = {"summon": {"enabled": self.config.delegate}}
-        for name, server in mcp.items():
-            extensions[name] = {
-                "type": "streamable_http",
-                "name": name,
-                "description": "",
-                "uri": server["url"],
-                "headers": server["headers"],
-                "timeout": int(self.config.timeout),
-                "enabled": True,
-            }
-        return {"extensions": extensions}
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, GooseSession):
+            raise TypeError("Expected GooseSession")
+        await state.close(timeout=self.config.session_close_timeout_seconds)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            cleanup_confirmed=state.session.cleanup_confirmed,
+            agent_observations=state.observations
+            or AgentObservationBundle(source="goose", gaps=[ObservationGap(code="observation_capture_failed")]),
+        )
 
-    async def _run_goose(
-        self, sandbox: AsyncSandbox, body: GooseAgentRunRequest, mcp: dict[str, dict[str, Any]], root: Path
-    ) -> dict[str, Any]:
-        params = body.responses_create_params
-        messages = [{"role": "user", "content": params.input}] if isinstance(params.input, str) else params.input
-        prompt, system = [], [text for text in (self.config.system_prompt, params.instructions) if text]
-        for item in messages:
-            item = item if isinstance(item, dict) else item.model_dump()
-            content = item.get("content")
-            text = content if isinstance(content, str) else "\n".join(p.get("text", "") for p in content or [])
-            (system if item.get("role") in ("system", "developer") else prompt).append(text)
-        if not prompt:
-            raise ValueError("Goose needs a user message")
-        if len(("--system=" + "\n\n".join(system)).encode()) + 1 > MAX_SYSTEM_PROMPT_BYTES:
-            raise ValueError(f"Goose system prompt exceeds the {MAX_SYSTEM_PROMPT_BYTES} byte argument limit")
+    def _conversation(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+        """Split the request into Goose's task (stdin) and system prompt (--system), rejecting other controls."""
+        if body.model is not None and body.model != self.config.model:
+            raise HTTPException(422, "Goose model is selected by the agent configuration")
+        supported = {"input", "instructions", "model", "temperature"}
+        for name, field in type(body).model_fields.items():
+            value = getattr(body, name)
+            if name in supported or (name in ("stream", "background") and value is False):
+                continue
+            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
+            if value != field.get_default(call_default_factory=True):
+                raise HTTPException(422, f"Goose does not support request field {name}")
+        items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        roles = [getattr(item, "role", None) for item in items]
+        if roles not in (["user"], ["system", "user"], ["developer", "user"]):
+            raise HTTPException(422, "Goose accepts one user message with an optional system or developer message")
+        prompt = _text(items[-1].content)
+        if not prompt.strip():
+            raise HTTPException(422, "Goose requires a nonempty task")
+        system = [self.config.system_prompt, body.instructions] + [_text(item.content) for item in items[:-1]]
+        system_text = "\n\n".join(part for part in system if part)
+        if len(("--system=" + system_text).encode()) + 1 > MAX_SYSTEM_PROMPT_BYTES:
+            raise HTTPException(422, f"Goose system prompt exceeds the {MAX_SYSTEM_PROMPT_BYTES} byte argument limit")
+        return prompt, system_text
 
-        remote = "/tmp/nemo-gym-goose-" + uuid4().hex
-        await self._install_goose(sandbox, remote)
-        files = {
-            # JSON is valid YAML, and Goose reads its config file as YAML.
-            f"{remote}/root/config/config.yaml": json.dumps(self._goose_config(mcp)),
-            f"{remote}/prompt.txt": "\n\n".join(prompt),
-            f"{remote}/system.txt": "\n\n".join(system),
-        }
-        with TemporaryDirectory() as directory:
-            for i, (target, contents) in enumerate(files.items()):
-                local = Path(directory) / str(i)
-                local.write_text(contents)
-                await sandbox.upload(local, target)
-        # The config holds per-session MCP credentials.
-        protect = await sandbox.exec(command=f"chmod -R go-rwx {quote(remote)}", timeout_s=60)
-        if protect.return_code != 0 or protect.error_type:
-            raise RuntimeError("Unable to protect Goose session configuration")
+    def _command(self, state: GooseSession, system: str) -> list[str]:
+        command = [
+            f"{state.runtime}/goose",
+            "run",
+            "--name",
+            "gym",
+            # The task goes in on stdin: Goose drops --system for `-i <file>`.
+            "-i",
+            "-",
+            "--max-turns",
+            str(self.config.max_turns),
+            "--output-format",
+            "stream-json",
+        ]
+        # `--system=` keeps a prompt that starts with "-" from being parsed as an option.
+        return command + ([f"--system={system}"] if system else [])
 
+    def _env(self, state: GooseSession, body: NeMoGymResponseCreateParamsNonStreaming) -> dict[str, str]:
+        access = state.request.sandbox_access
         env = {
-            "GOOSE_PATH_ROOT": f"{remote}/root",
-            "GOOSE_PROVIDER": self.config.provider,
+            key: value
+            for key, value in (access.env if access else {}).items()
+            if not key.startswith(("GOOSE_", "OPENAI_"))
+        }
+        env |= {
+            # Goose's config, sessions and state live in the session directory, so tool shells keep the task's HOME.
+            "GOOSE_PATH_ROOT": state.root,
+            "GOOSE_PROVIDER": "openai",
             "GOOSE_MODEL": self.config.model,
-            "GOOSE_MODE": self.config.goose_mode,
+            # Headless runs cannot answer approval prompts.
+            "GOOSE_MODE": "auto",
             "GOOSE_DISABLE_KEYRING": "1",
             "GOOSE_TELEMETRY_OFF": "1",
-            "OPENAI_BASE_URL": self._model_base_url(body),
-            "OPENAI_API_KEY": self.config.api_key,
+            "OPENAI_BASE_URL": self.model_endpoint(
+                model_server=self.config.model_server, rollout_id=state.request.episode_id.capture_key
+            ).base_url,
+            "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
         }
         if self.config.subagent_model:
             env["GOOSE_SUBAGENT_MODEL"] = self.config.subagent_model
-        if params.temperature is not None:
-            env["GOOSE_TEMPERATURE"] = str(params.temperature)
-        env |= self.config.env
-        # `--system=` keeps a prompt that starts with "-" from being parsed as an option.
-        system_arg = f'--system="$(cat {quote(remote)}/system.txt)"' if system else ""
-        # Goose is stopped inside the sandbox before the provider deadline, because some providers only stop waiting at
-        # theirs (Goose keeps running) and some raise instead of returning a timeout. A kill after the deadline (137) is
-        # recorded as the deadline's 124, so any other 137 is a kill before it (`killed`, usually out of memory). The
-        # task goes in on stdin: Goose drops --system for `-i <file>`. Sessions are archived even when Goose fails, so
-        # partial transcripts stay inspectable. The exit code file records that Goose finished, whatever the provider
-        # reports afterwards.
-        deadline = int(self.config.timeout - min(120, self.config.timeout / 4))
-        command = (
-            f"start=$(date +%s); timeout --kill-after=10 {deadline} {quote(remote)}/goose run --name gym -i - "
-            f"--max-turns {self.config.max_turns} --output-format stream-json {system_arg} < {quote(remote)}/prompt.txt "
-            f"> {quote(remote)}/stdout.jsonl 2> {quote(remote)}/stderr.log; code=$?; "
-            f"[ $code -eq 137 ] && [ $(($(date +%s) - start)) -ge {deadline} ] && code=124; "
-            f"tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions; "
-            f"echo $code > {quote(remote)}/exit_code; exit $code"
-        )
-        result, fault = None, None
-        try:
-            result = await sandbox.exec(command=command, env=env, timeout_s=self.config.timeout)
-        except Exception as exc:
-            fault = exc
-            LOG.exception("Goose sandbox execution failed")
-        error_type, return_code = getattr(result, "error_type", None), getattr(result, "return_code", None)
-        if fault or error_type or return_code == 124:
-            recorded = await sandbox.exec(command=f"cat {quote(remote)}/exit_code", timeout_s=60)
-            if (recorded.stdout or "").strip().isdigit():
-                # Goose finished and only the provider lost its outcome.
-                error_type, return_code = None, int(recorded.stdout)
-            elif not fault and ("timeout" in (error_type or "").lower() or (not error_type and return_code == 124)):
-                # Providers return a timeout (Docker: error_type "timeout", OpenSandbox and ECS: exit 124) instead
-                # of raising it. The run was cut off before archiving its sessions.
-                error_type = error_type or "timeout"
-                await sandbox.exec(
-                    command=f"tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions",
-                    timeout_s=300,
-                )
-            else:
-                # A sandbox or transport fault is not the policy's failure: retry the request instead of scoring it.
-                raise RuntimeError(f"Goose sandbox execution failed: {error_type or type(fault).__name__}") from fault
-        if return_code == 124 and not error_type:
-            error_type = "timeout"
-        elif return_code == 137:
-            # Killed before the deadline: usually an out-of-memory kill in the sandbox cgroup, which the policy's own
-            # commands share, so it is scored as the episode's failure rather than retried.
-            error_type = "killed"
-        # Export failures propagate, so retrying such a request cannot become a scored zero.
-        for name in ("stdout.jsonl", "stderr.log", "sessions.tgz"):
-            await sandbox.download(f"{remote}/{name}", root / name)
-        # Goose continues without an extension that fails to start and still exits 0.
-        failed = re.findall(r"Failed to start extension '([^']+)'", (root / "stderr.log").read_text(errors="replace"))
-        if failed:
-            raise RuntimeError(f"Goose extensions could not be initialized: {', '.join(sorted(set(failed)))}")
-        with tarfile.open(root / "sessions.tgz") as archive:
-            archive.extractall(root, filter="data")
-        sessions = await to_thread(read_goose_sessions, root / "sessions" / "sessions.db")
-        if not error_type:
-            error_type = goose_stop_reason((root / "stdout.jsonl").read_text(errors="replace"), sessions)
-            if error_type == "model_server" or delegate_model_server_failure(sessions):
-                raise RuntimeError(
-                    "Goose's model calls failed at the model server (unreachable, failing, rejecting credentials or "
-                    "missing the model)"
-                )
-        return {
-            "sessions": sessions,
-            "goose_failed": bool(error_type or return_code != 0),
-            "goose_exit_code": return_code,
-            "goose_error_type": error_type,
-            "goose_results_dir": str(root),
-        }
+        if self.config.context_limit:
+            env["GOOSE_CONTEXT_LIMIT"] = str(self.config.context_limit)
+        if body.temperature is not None:
+            env["GOOSE_TEMPERATURE"] = str(body.temperature)
+        return env
 
-    def _response(self, body: GooseAgentRunRequest, sessions: list[dict[str, Any]]) -> NeMoGymResponse:
-        roots = [s for s in sessions if not s.get("parent_session_id")]
+    async def _stage(self, state: GooseSession, body: NeMoGymResponseCreateParamsNonStreaming) -> SandboxCommand:
+        prompt, system = self._conversation(body)
+        # JSON is valid YAML, which Goose reads its config as. Goose fills in its other extensions with defaults.
+        config = json.dumps({"extensions": {"summon": {"enabled": self.config.delegate}}})
+        return await state.stage(
+            command=self._command(state, system), env=self._env(state, body), prompt=prompt, config=config
+        )
+
+    @staticmethod
+    def _read_sessions(archive: bytes) -> list[dict[str, Any]]:
+        with tempfile.TemporaryDirectory(prefix="gym-goose-sessions-") as temporary:
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                tar.extractall(temporary, filter="data")
+            return read_goose_sessions(Path(temporary) / "sessions" / "sessions.db")
+
+    def _observations(
+        self, state: GooseSession, *, status: str, error_type: str | None, output: list[Any]
+    ) -> AgentObservationBundle:
+        cleanup = state.session.cleanup
+        conversation = []
+        if state.activation_request is not None:
+            prompt, _ = self._conversation(state.activation_request)
+            conversation.append(NeMoGymEasyInputMessage(role="user", content=prompt))
+        gaps = [
+            # Goose 1.54.0 sends no per-call session header to the model server.
+            "model_call_ownership_unavailable",
+            "usage_unavailable",
+            "harness_tool_timing_unavailable",
+            "child_invocations_unavailable",
+        ]
+        gaps += ["optional_tool_grant_skipped" for _ in self.effective_tool_accesses(state.request)]
+        return AgentObservationBundle(
+            source="goose",
+            records=[
+                AgentInvocation(
+                    invocation_id=state.request.episode_id.capture_key,
+                    status=status,
+                    error_type=error_type,
+                    conversation=conversation + output,
+                ),
+                SandboxObservation(
+                    role="agent",
+                    provider=state.provider_name,
+                    sandbox_id=state.sandbox_id,
+                    outcome="timeout"
+                    if cleanup and cleanup["timed_out"]
+                    else "failed"
+                    if status == "failed"
+                    else "completed",
+                    exit_code=cleanup["return_code"] if cleanup else None,
+                    error_type=error_type,
+                ),
+            ],
+            gaps=[ObservationGap(code=code) for code in sorted(set(gaps))],
+        )
+
+    async def _activate(self, state: GooseSession, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        timeout = resolve_agent_timeout(
+            body.metadata, ceiling=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout)
+        )
+        try:
+            async with self._sem:
+                artifacts: GooseArtifacts = await state.session.execute(
+                    stage_activation=lambda: self._stage(state, body),
+                    collect=state.collect,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
+        except BaseException as error:
+            state.observations = self._observations(state, status="failed", error_type=type(error).__name__, output=[])
+            raise
+        cleanup = state.session.cleanup
+        if cleanup is None or not cleanup["cleanup_confirmed"]:
+            raise RuntimeError("Goose ended without confirmed supervisor cleanup")
+        if cleanup["error"]:
+            raise RuntimeError(f"Goose supervision failed: {cleanup['error']}")
+        return_code, timed_out = cleanup["return_code"], cleanup["timed_out"]
+        if return_code in RUNNER_FAILURES and not timed_out:
+            raise RuntimeError(f"Goose did not start (runner exit {return_code}): {artifacts.stderr[-4096:]}")
+        if artifacts.sessions is None:
+            raise RuntimeError(f"Goose left no session store: {artifacts.stderr[-4096:]}")
+        failed_extensions = re.findall(r"Failed to start extension '([^']+)'", artifacts.stderr)
+        if failed_extensions:
+            raise RuntimeError(f"Goose extensions could not start: {', '.join(sorted(set(failed_extensions)))}")
+        sessions = await asyncio.to_thread(self._read_sessions, artifacts.sessions)
+        roots = [session for session in sessions if not session.get("parent_session_id")]
         if len(roots) != 1:
             raise RuntimeError(f"Expected one root Goose session, found {len(roots)}")
-        usage = [u for s in sessions for u in s["usage"]]
-        cached = sum(u["cache_read_tokens"] or 0 for u in usage)
-        input_tokens = sum(u["input_tokens"] or 0 for u in usage)
-        output_tokens = sum(u["output_tokens"] or 0 for u in usage)
-        return NeMoGymResponse(
+        output = goose_messages_to_output(roots[0]["messages"])
+        children = [session for session in sessions if session.get("parent_session_id")]
+
+        status, incomplete, failure_kind = "completed", None, None
+        stop = None if timed_out else goose_stop_reason(artifacts.stdout, sessions)
+        if timed_out:
+            if not output:
+                raise RuntimeError("Goose timed out before any model response")
+            status = "incomplete"
+        elif stop == "model_server" or delegate_model_server_failure(sessions):
+            # Goose's model calls failed at the model server: retry the episode rather than grade it.
+            status, failure_kind = "failed", "model_transport_error"
+        elif return_code == KILLED:
+            # Killed before the deadline, usually out of memory in the task cgroup the policy's commands share:
+            # the task state is graded as it stands.
+            status = "incomplete"
+        elif stop == "length":
+            status, incomplete = "incomplete", IncompleteDetails(reason="max_output_tokens")
+        elif stop == "max_turns":
+            status = "incomplete"
+        elif stop == "empty_response":
+            status, failure_kind = "failed", "agent_invalid_output"
+        elif stop == "model_error" or return_code != 0:
+            status, failure_kind = "failed", "agent_run_error"
+
+        state.observations = self._observations(state, status=status, error_type=stop, output=output)
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            model=self.config.model,
             object="response",
-            output=goose_messages_to_output(roots[0]["messages"]),
-            tool_choice="auto",
-            tools=[],
-            parallel_tool_calls=True,
-            # Child sessions are included: delegate calls are part of the rollout's cost.
-            usage=NeMoGymResponseUsage(
-                input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached),
-                output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=input_tokens + output_tokens,
-            ),
+            model=self.config.model,
+            output=output,
+            # Goose's usage ledger is not tied to individual model calls, so totals stay unknown.
+            usage=None,
+            status=status,
+            incomplete_details=incomplete,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            metadata={
+                "harness_execution": "sandbox",
+                "goose_version": GOOSE_VERSION,
+                "goose_exit_code": str(return_code),
+                "goose_stop_reason": stop or "",
+                "goose_subagents": str(len(children)),
+                "goose_max_concurrent_subagents": str(
+                    max_concurrent(
+                        [
+                            (min(m["created"] for m in s["messages"]), max(m["created"] for m in s["messages"]))
+                            for s in children
+                            if s["messages"]
+                        ]
+                    )
+                ),
+            },
         )
+        if status == "failed":
+            LOG.warning("Goose run failed (%s, exit %s); stderr tail: %s", stop, return_code, artifacts.stderr[-2048:])
+            return self.report_outcome(response, {"failure_kind": failure_kind})
+        return self.report_rollout_stop(response, state.session)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        raise ValueError("GooseAgent requires /run to seed tools and allocate its sandbox")
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            raise HTTPException(422, "Goose runs only in an agent session managed by an Environment Server")
+        state = self._require_agent_session(session_id)
+        if not isinstance(state, GooseSession):
+            raise TypeError("Expected GooseSession")
+        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+            raise HTTPException(409, "Goose activation must use its seeded rollout route")
+        if state.session.closing:
+            raise HTTPException(409, "Goose session is closing")
+        self._conversation(body)
+        if state.task is None:
+            state.activation_request = body.model_copy(deep=True)
+            state.task = asyncio.create_task(self._activate(state, state.activation_request))
+        elif body != state.activation_request:
+            raise HTTPException(409, "Goose sessions support one activation; retries must repeat the same request")
+        return (await asyncio.shield(state.task)).model_copy(deep=True)
 
-    async def run(self, request: Request, body: GooseAgentRunRequest) -> GooseAgentVerifyResponse:
-        async with self._sem:
-            seeded = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(),
-                cookies=request.cookies,
-            )
-            await raise_for_status(seeded)
-            cookies = request.cookies | seeded.cookies
-            seed = await get_response_json(seeded)
-            mcp = await seed_mcp_servers(
-                self.server_client,
-                self.config.tool_servers,
-                body,
-                cookies,
-                timeout_s=self.config.timeout,
-                require_reachable=self.config.network_access != "inherit",
-            )
-            rollout_id = self.rollout_id_from_run(body) or uuid4().hex
-            root = Path(self.config.artifacts_dir) / sha256(rollout_id.encode()).hexdigest()
-            root.mkdir(parents=True, exist_ok=True)
-            sandbox = await self._start_sandbox(seed)
-            # A resource-owned sandbox is graded in place from its state, so a failed run there is scored as it stands.
-            graded_in_place = bool(seed.get("sandbox_descriptor") or seed.get("sandbox_handle"))
-            try:
-                execution = await self._run_goose(sandbox, body, mcp, root)
-                sessions = execution.pop("sessions")
-                response = self._response(body, sessions)
-                if execution["goose_error_type"] == "length":
-                    response.status = "incomplete"
-                    response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
-                children = [s for s in sessions if s.get("parent_session_id")]
-                execution["goose_subagents"] = len(children)
-                execution["goose_max_concurrent_subagents"] = max_concurrent(
-                    [
-                        (min(m["created"] for m in s["messages"]), max(m["created"] for m in s["messages"]))
-                        for s in children
-                        if s["messages"]
-                    ]
-                )
-                payload = body.model_dump(mode="json") | {"response": response.model_dump(mode="json")}
-                (root / "generation.json").write_text(json.dumps(payload | execution))
-                result = await verify_agent_response(
-                    self.server_client,
-                    self.config.resources_server,
-                    body,
-                    response,
-                    cookies,
-                    force_zero_reward=execution["goose_failed"]
-                    and self.config.execution_failure_reward_zero
-                    and not graded_in_place,
-                )
-                return GooseAgentVerifyResponse.model_validate(result | execution)
-            finally:
-                # A resource-owned sandbox is graded in place, so it stays up until verification returns.
-                # Goose keeps running in the sandbox after a cancelled request. Only stopping the sandbox ends it.
-                with CancelScope(shield=True):
-                    try:
-                        await sandbox.stop()
-                    except Exception:
-                        LOG.exception("Failed to stop Goose sandbox")
+    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
+        """Goose runs through an Environment Server, which owns verification."""
+        raise HTTPException(422, "Run Goose through an Environment Server such as single_agent_turn")
 
 
 if __name__ == "__main__":
     GooseAgent.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = GooseAgent.run_webserver()  # noqa: F401
+    app = GooseAgent.run_webserver()
