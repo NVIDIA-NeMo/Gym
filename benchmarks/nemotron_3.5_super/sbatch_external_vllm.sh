@@ -575,10 +575,12 @@ serve_prefill() {
     fi
     # Trace graph nodes and child TP workers. 'stop' ends collection without
     # shutting down the serving process; this captures one window per launch.
+    # Sample only this engine's GPU mask, including UUIDs and TP groups, so
+    # concurrent profilers do not all collect counters from the same GPUs.
     VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile \
         --trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose \
         --nccl-trace=all --pytorch=functions-trace-shapes \
-        --gpu-metrics-devices=all \
+        --gpu-metrics-devices=cuda-visible \
         --sample=process-tree --cpuctxsw=none \
         --cudabacktrace=all --python-backtrace=cuda --python-sampling=true \
         --trace-fork-before-exec=true --cuda-graph-trace=node \
