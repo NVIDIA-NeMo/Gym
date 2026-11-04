@@ -7,7 +7,7 @@ import signal
 
 import pytest
 
-from nemo_gym.rollout_collection import _NO_SIGTERM_HOOK, RunTimingReport, _print_on_sigterm, _restore_sigterm
+from nemo_gym.rollouts.rollout_collection import _NO_SIGTERM_HOOK, RunTimingReport, _print_on_sigterm, _restore_sigterm
 
 
 def _report(total, **kwargs):
@@ -75,6 +75,14 @@ def test_timeout_failure_class_counts_as_timed_out(failure_class):
     assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
 
 
+def test_a_timeout_the_run_health_summary_counts_counts_here_too():
+    """The table and run.stats.timeouts classify a rollout alike, so the Codex agent's own deadline counts."""
+    r = _report(1)
+    r.record_start(r._t0)
+    r.record_result({"agent_timed_out": True}, 10)
+    assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
+
+
 async def test_sigterm_hook_installs_and_restores():
     before = signal.getsignal(signal.SIGTERM)
     previous = _print_on_sigterm(lambda: "table")
@@ -87,7 +95,7 @@ async def test_sigterm_hook_installs_and_restores():
 
 
 def test_waiting_ratio_row_micro_averages_over_servers():
-    from nemo_gym.rollout_collection import _sum_vllm_queue
+    from nemo_gym.rollouts.rollout_collection import _sum_vllm_queue
 
     text = 'vllm:num_requests_running{engine="0",model_name="m"} 40.0\nvllm:num_requests_waiting{engine="0",model_name="m"} 2.0\n# HELP x\n'
     assert _sum_vllm_queue(text) == (2.0, 40.0)

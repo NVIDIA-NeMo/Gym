@@ -8,8 +8,8 @@ import pytest
 import yaml
 
 from benchmarks.indic.aime_2026 import prepare as module
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config
 from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 
 
 def problem(*, index: int = 1) -> dict:
@@ -206,7 +206,7 @@ def test_cli(monkeypatch) -> None:
 def test_native_config_reuses_english_components_and_preserves_generation_defaults() -> None:
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     manifest = load_manifest(module.BENCHMARK_DIR / "manifest.yaml")
     assert manifest.resources_server == "math_with_judge"
@@ -247,7 +247,7 @@ def test_native_config_reuses_english_components_and_preserves_generation_defaul
         agent_key,
         environment_key,
     }
-    assert indic[environment_key].environment_servers.legacy_agent.agent_server.name == agent_key
+    assert indic[environment_key].environment_servers.single_agent_turn_legacy.agent_server.name == agent_key
     agent = indic[agent_key].responses_api_agents.simple_agent
     assert (
         agent.datasets[0].prompt_config
@@ -257,15 +257,15 @@ def test_native_config_reuses_english_components_and_preserves_generation_defaul
     assert indic.get("num_repeats", 1) == 1 and indic.num_repeats_add_seed is True
     assert not indic.get("responses_create_params")
     policy = indic.policy_model.responses_api_models.vllm_model
-    assert policy.chat_template_kwargs is None
-    assert policy.sampling_overrides is None
+    assert policy.get("chat_template_kwargs") is None
+    assert policy.get("sampling_overrides") is None
 
 
 def _resolve_cli_config(flags: list[str]) -> dict:
     from omegaconf import OmegaConf
 
     from nemo_gym.cli.main import _merge_config_paths, build_parser
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     args = build_parser().parse_args(
         [
@@ -297,8 +297,8 @@ def _resolve_cli_config(flags: list[str]) -> dict:
 
 
 def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict], tmp_path: Path) -> list[dict]:
-    from nemo_gym.config_types import BenchmarkDatasetConfig
-    from nemo_gym.train_data_utils import TrainDataProcessor
+    from nemo_gym.config.config_types import BenchmarkDatasetConfig
+    from nemo_gym.data.dataset_preparation import TrainDataProcessor
 
     dataset = dict(config[agent_name]["responses_api_agents"]["simple_agent"]["datasets"][0])
     source_path = tmp_path / f"{agent_name}.jsonl"
@@ -312,7 +312,7 @@ def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict],
 
 
 def _collect_rows(config: dict, source_rows: list[dict], tmp_path: Path) -> list[dict]:
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     prepared = tmp_path / "prepared.jsonl"
     prepared.write_text("".join(json.dumps(row) + "\n" for row in source_rows))

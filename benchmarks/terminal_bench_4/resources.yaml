@@ -22,6 +22,20 @@ terminal_bench_4:
         sandbox_provider_options:
           resource_requests: limits
         compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
+        # Non-root services cannot edit /etc/hosts or su; null drops the image's
+        # explicit user. See the resources server README.
+        compose_service_overrides:
+          medical-claims-processing:
+            # Its only peer URL is the browser's initial workspace page (which uses relative URLs).
+            playwright-mcp:
+              x-sandbox: {hosts: [], resolve_environment: [BROWSER_URL]}
+              user: null
+          payments-pipeline-fix:
+            # This single broker uses localhost for its controller.
+            # Clients still resolve its advertised kafka:9092 address.
+            kafka:
+              x-sandbox: {hosts: []}
+              user: null
         sandbox_provider:
           opensandbox:
             connection:

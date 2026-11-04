@@ -18,7 +18,7 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym import component_search_roots
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config import ConfigError
 from nemo_gym.environment.manifest import (
     Determinism,
     EnvironmentKind,
@@ -638,14 +638,15 @@ def _resources_server_app(module_name: str) -> str:
 
         from pydantic import ConfigDict
 
-        from nemo_gym.base_resources_server import (
+        from nemo_gym.server_runtime.base_resources_server import (
             BaseResourcesServerConfig,
             BaseVerifyRequest,
             BaseVerifyResponse,
             ReverifyMode,
             SimpleResourcesServer,
         )
-        from nemo_gym.verifier_fixture import VerifierFixture
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+        from nemo_gym.verification import VerifierFixture
 
 
         class {class_name}ResourcesServerConfig(BaseResourcesServerConfig):
@@ -676,6 +677,9 @@ def _resources_server_app(module_name: str) -> str:
 
         if __name__ == "__main__":
             {class_name}ResourcesServer.run_webserver()
+        elif is_nemo_gym_fastapi_entrypoint(__file__):
+            # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+            app = {class_name}ResourcesServer.run_webserver()  # noqa: F401
         """
     )
 
@@ -685,7 +689,7 @@ def _resources_server_test() -> str:
         """\
         import asyncio
 
-        from nemo_gym.verifier_fixture import exercise_verifier_fixture
+        from nemo_gym.verification import exercise_verifier_fixture
 
         from ..app import VERIFIER_FIXTURE
 
@@ -764,8 +768,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.agents import Body
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import SimpleAgent
 
 
@@ -783,8 +788,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.agents import Body
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import (
             SimpleAgent,
             SimpleAgentRunRequest,
@@ -815,6 +821,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
         if __name__ == "__main__":
             {class_name}Agent.run_webserver()
+        elif is_nemo_gym_fastapi_entrypoint(__file__):
+            # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+            app = {class_name}Agent.run_webserver()  # noqa: F401
         """
         )
     )
@@ -832,7 +841,7 @@ def _rollout_driver() -> str:
             _global_config_dict: Mapping[str, Any],
         ) -> None:
             """TODO: Replace this delegation with custom rollout coordination."""
-            from nemo_gym.rollout_collection import RolloutCollectionHelper
+            from nemo_gym.rollouts import RolloutCollectionHelper
 
             await RolloutCollectionHelper().run_from_config(rollout_collection_config)
         '''

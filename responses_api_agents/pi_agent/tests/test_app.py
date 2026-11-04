@@ -25,16 +25,16 @@ import pytest
 import yaml
 from fastapi import Request
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation, ToolCallObservation
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, ToolCallObservation
 from responses_api_agents.pi_agent.app import (
     PiAgent,
     PiAgentConfig,
@@ -72,6 +72,13 @@ def _config(**kwargs) -> PiAgentConfig:
 
 def _make_agent(**kwargs) -> PiAgent:
     return PiAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+
+
+def test_prompt_control_defaults_and_validation() -> None:
+    config = _config()
+    assert config.enable_tools is True and config.system_prompt_mode == "append"
+    with pytest.raises(ValueError, match="system_prompt_mode"):
+        _config(system_prompt_mode="invalid")
 
 
 def _msg_end(role, content, **extra) -> str:
@@ -127,11 +134,17 @@ async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope
 
 class TestLocalRuntimeSetup:
     @pytest.mark.parametrize("timed_out, collect", [(False, True), (True, True), (True, False)])
-    async def test_local_exit_preserves_events_and_removes_workspace(self, tmp_path, timed_out, collect) -> None:
+    @pytest.mark.parametrize("mode", ["append", "replace"])
+    @pytest.mark.parametrize("enable_tools", [True, False])
+    async def test_local_exit_preserves_events_and_removes_workspace(
+        self, tmp_path, timed_out, collect, mode, enable_tools
+    ) -> None:
         agent = _make_agent(
             workspace_root=str(tmp_path),
             timeout=1,
             thinking="high",
+            system_prompt_mode=mode,
+            enable_tools=enable_tools,
             model_server=ModelServerRef(type="responses_api_models", name="policy"),
         )
         process = MagicMock(returncode=None if timed_out else 0)
@@ -165,6 +178,9 @@ class TestLocalRuntimeSetup:
         assert process.kill.call_count == int(timed_out)
         assert not list(tmp_path.iterdir())
         assert "--thinking" in spawn.call_args.args and "system rules" in spawn.call_args.args
+        assert ("--no-builtin-tools" in spawn.call_args.args) is (not enable_tools)
+        flag = "--system-prompt" if mode == "replace" else "--append-system-prompt"
+        assert spawn.call_args.args[-3:] == (flag, "system rules", "task")
         expected_events = [json.loads(event)] if collect else []
         if collect and timed_out:
             expected_events.append({"type": "_ng_process_exit", "timed_out": True})

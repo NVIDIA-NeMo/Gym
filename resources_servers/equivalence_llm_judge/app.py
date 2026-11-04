@@ -32,22 +32,22 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
 
@@ -612,16 +612,19 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             body, extract_regex, extraction_failure_message=self.config.msg_extraction_failure
         )
 
-        # Step 4: Run first judge evaluation
-        first_equal, first_eval = await self._generate_judge_evaluation(
-            question=question, expected_answer=expected, generated_answer=generated
-        )
+        async def grade() -> LLMJudgeVerifyResponse:
+            # Step 4: Run first judge evaluation
+            first_equal, first_eval = await self._generate_judge_evaluation(
+                question=question, expected_answer=expected, generated_answer=generated
+            )
 
-        # Step 5 & 6: Handle result based on first evaluation
-        if not first_equal:
-            return await self._handle_first_pass_failed(body, expected, question, first_eval)
-        else:
+            # Step 5 & 6: Handle result based on first evaluation
+            if not first_equal:
+                return await self._handle_first_pass_failed(body, expected, question, first_eval)
             return await self._handle_first_pass_succeeded(body, expected, question, generated, first_eval)
+
+        # Every judge pass (rescue and swap included) is a dependency of the returned grade.
+        return await observe_llm_judge_grading(grade)
 
     async def _generate_judge_evaluation(
         self, *, question: str, expected_answer: str, generated_answer: str
@@ -676,6 +679,14 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             truncated=judge_response.status == "incomplete",
             case_insensitive=cfg.judge_labels_case_insensitive,
         )
+        if (
+            equal_label != not_equal_label
+            and eval_record.verdict_label is not None
+            and judge_response.status != "incomplete"
+            and not {"conflicting_verdicts", "truncated_judge_output"} & set(eval_record.judgement_parsing_issues)
+        ):
+            # Only an unambiguous, complete verdict is a parsed grade; the not-equal fallback stays unknown.
+            record_parsed_judge_verdict()
         return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:

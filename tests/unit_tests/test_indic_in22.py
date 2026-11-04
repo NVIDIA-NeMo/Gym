@@ -8,8 +8,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.in22 import prepare as prepare_module
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.prompt import fill_prompt, load_prompt_config
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.data.prompt import fill_prompt, load_prompt_config
 
 
 BENCHMARK_DIR = prepare_module.DIRECTORY
@@ -220,7 +220,7 @@ def _resolve_cli_config(config_names: list[str], flags: list[str] = ()) -> dict:
 
 def test_manifest_is_discoverable_under_its_catalog_path(monkeypatch: pytest.MonkeyPatch) -> None:
     from nemo_gym.environment import validation
-    from nemo_gym.registry import discover_environment_catalog, resolve_catalog_entry
+    from nemo_gym.environment.registry import discover_environment_catalog, resolve_catalog_entry
 
     # Check real catalog identity and configuration without downloading gated benchmark data.
     monkeypatch.setattr(validation, "_validate_dataset", lambda *args, **kwargs: None)
@@ -251,14 +251,14 @@ def test_gen_and_conv_compose_with_separate_preparation(config_names, monkeypatc
         assert {json.loads(line)["uuid"].split("/")[2] for line in output.read_text().splitlines()} == {subset}
         agent = config[dataset.agent_name]["responses_api_agents"]["simple_agent"]
         assert agent["resources_server"]["name"] == "in22_wmt_translation_resources_server"
-        env = config[f"in22_{subset}_environment_server"]["environment_servers"]["legacy_agent"]
+        env = config[f"in22_{subset}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         assert env["agent_server"]["name"] == dataset.agent_name
 
 
 @pytest.mark.parametrize("cli_override", [False, True])
 def test_cli_defaults_overrides_and_duplicate_conv_tasks(monkeypatch, tmp_path, cli_override) -> None:
-    from nemo_gym.prompt import apply_prompt_to_row
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.data.prompt import apply_prompt_to_row
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--temperature", "0.4", "--top-p", "0.8", "--max-output-tokens", "1024"] if cli_override else []
     config = _resolve_cli_config(["config_conv.yaml"], flags)
@@ -300,8 +300,8 @@ def test_cli_defaults_overrides_and_duplicate_conv_tasks(monkeypatch, tmp_path, 
 
 @pytest.mark.parametrize("add_seed", [False, True])
 def test_repeat_seeds_are_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, add_seed: bool) -> None:
-    from nemo_gym.prompt import apply_prompt_to_row
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.data.prompt import apply_prompt_to_row
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--num-repeats", "3"] + (["+num_repeats_add_seed=true"] if add_seed else [])
     config = _resolve_cli_config(["config.yaml"], flags)
