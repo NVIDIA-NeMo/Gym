@@ -20,12 +20,12 @@ from nemo_gym.agents.utils.sandbox_session import (
     shell_assignments,
 )
 from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import SupportsSandboxIndependentUploads
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
 from nemo_gym.sandbox.providers.registry import get_provider_class
-from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}

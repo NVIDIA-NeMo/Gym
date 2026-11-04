@@ -43,7 +43,6 @@ import orjson
 from aiohttp import ClientConnectorError, ClientError
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
-from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
@@ -89,7 +88,8 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     CANCELLED,
     COLLECTION_DISPATCH_FAILED,
@@ -97,11 +97,15 @@ from nemo_gym.core.failure_kinds import (
     ENVIRONMENT_SERVER_FAILED,
     JUDGE_FAILED,
     JUDGE_FAILURE_KINDS,
+    PROVIDER_CREDENTIALS_REJECTED,
     is_namespaced,
     is_registered,
 )
+from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
+from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.progress_utils import tqdm
 from nemo_gym.rollouts.batch_status import BatchStatusTracker
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
@@ -145,12 +149,6 @@ from nemo_gym.rollouts.rollout_recovery import (
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_runtime.episode_types import (
-    EpisodeFailure,
-    FailureBoundary,
-    FailureReport,
-    is_materialized_task_row,
-)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -172,7 +170,6 @@ from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     failure_observations,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -199,21 +196,20 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.models.token_capture import (
-    TokenCaptureConfig,
-    TokenCaptureStore,
+from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
-    installed_token_source,
     mask_incomplete_when_attributed_from_config,
     token_capture_dirs_from_config,
 )
-from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
+from nemo_gym.models.token_capture.protocols import installed_token_source
+from nemo_gym.models.token_capture.store import TokenCaptureStore
 from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 
 
@@ -1041,6 +1037,20 @@ class SharedRolloutCollectionConfig(
                 retryable=retryable,
                 made_progress=made_progress,
             )
+
+
+def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+    """The end of a run whose sandbox provider refused its credentials: no attempt succeeds until they are fixed."""
+    rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
+    if not rejected:
+        return None
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the sandbox provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
+        "rollout(s); another attempt cannot succeed until they are fixed. Fix the credentials, then continue "
+        "with gym eval resubmit --recover.",
+        retryable=False,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -2715,9 +2725,6 @@ class RolloutCollectionHelper(BaseModel):
     _store: RolloutStore | None = PrivateAttr(default=None)
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
-        if config.limit:
-            print(f"Limiting the number of tasks to {config.limit}")
-
         # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
@@ -2746,7 +2753,14 @@ class RolloutCollectionHelper(BaseModel):
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
-        return RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+        rows = RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+        if config.limit:
+            # Operators read --limit as rows; it counts tasks, each with every saved copy and num_repeats.
+            tasks = len({row_str for _, row_str, _ in raw_rows})
+            print(
+                f"Limiting to {tasks} tasks ({len(rows)} rows with their repeats); --limit={config.limit} counts tasks"
+            )
+        return rows
 
     def preprocess_examples(
         self,
@@ -3134,16 +3148,19 @@ class RolloutCollectionHelper(BaseModel):
             has_recorded_grade,
             has_saved_generation,
             has_unclassified_execution_failure,
+            is_infrastructure_agent_timeout,
             keeps_partial_response,
         )
 
+        # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
         unclassified = {
             k
             for k, row in latest_by_key.items()
             if has_unclassified_execution_failure(row)
-            or has_saved_generation(row)
-            or has_recorded_grade(row)
-            or keeps_partial_response(row)
+            or (
+                (has_saved_generation(row) or has_recorded_grade(row) or keeps_partial_response(row))
+                and not is_infrastructure_agent_timeout(row)
+            )
         }
         gated = successes_seen | terminal_keys | maxed_out | unclassified
 
@@ -3746,7 +3763,7 @@ executions → not run again (left to recovery)
                             )
 
                 if failure_class is not None:
-                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.manifest.max_rollout_attempts
+                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.attempt_cap
                 completed_count += 1
                 if config.retain_results_in_memory:
                     rows.append(row)
@@ -3971,6 +3988,9 @@ executions → not run again (left to recovery)
                 if latency_tracker.drained
                 else ""
             )
+            stop = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            if stop is not None:
+                raise stop
             raise IncompleteEvaluationError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report.",
@@ -4091,12 +4111,16 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
+        if config.require_complete and (
+            stop := await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+        ):
+            raise stop
         # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
         # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,
-            completed=completion["successful"] + completion["final_zeros"],
+            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.progress_outcomes_recorded > 0,

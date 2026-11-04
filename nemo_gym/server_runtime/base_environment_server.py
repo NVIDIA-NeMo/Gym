@@ -19,9 +19,12 @@ from typing_extensions import Self
 
 from nemo_gym.client.http_client import format_exception_with_response_body
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
-from nemo_gym.core.episode import EpisodeId, rollout_context
+from nemo_gym.core.episode_context import rollout_context
+from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId
 from nemo_gym.core.failure_kinds import EPISODE_FAILED, SESSION_RELEASE_FAILED, FailureStage
-from nemo_gym.failure_transport import reply_failure_report, report_for_current_request
+from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
+from nemo_gym.core.failure_transport import reply_failure_report, report_for_current_request
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 from nemo_gym.server_runtime._checkpoint.errors import ControlError
@@ -29,14 +32,6 @@ from nemo_gym.server_runtime._checkpoint.participant_workers import install_serv
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
 from nemo_gym.server_runtime.base_server import SimpleServer
-from nemo_gym.server_runtime.episode_types import (
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
-    EpisodeFailure,
-    FailureBoundary,
-    FailureReport,
-)
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
 
 LOGGER = logging.getLogger(__name__)

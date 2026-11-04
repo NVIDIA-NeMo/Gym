@@ -19,15 +19,14 @@ from typing_extensions import Self
 
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.failure_transport import FailureReportRow, reply_failure_report
-from nemo_gym.server_runtime import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
+from nemo_gym.core import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
-    CleanupContext,
+    FailureReportRow,
+    NgFailureEvent,
+    reply_failure_report,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.server_runtime import BaseEnvironmentServer, BaseEnvironmentServerConfig, CleanupContext
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

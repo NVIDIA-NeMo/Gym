@@ -76,7 +76,7 @@ def _mutate(kind: str) -> list[dict]:
 
 def _entry(output: list[dict]) -> TokenEntry:
     entry = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="served",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],

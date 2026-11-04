@@ -74,13 +74,15 @@ current results at build time.
 ## Run diagnostic probes
 
 Run predetermined model replies and failures through real Gym harnesses, collect
-their rollouts, and apply the existing P0 evidence checks:
+their rollouts, and apply the scenario and evidence checks:
 
 ```bash
 python scripts/run_harness_conformance.py \
     --harness codex --harness pi --harness opencode --harness hermes \
     --output results/conformance
 ```
+
+Use `--gate-tier P1` to include P1 requirements in the exit status; the default is P0.
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
 installed. Simple Agent (`--harness simple`) uses Gym's Python implementation and
@@ -138,6 +140,7 @@ python scripts/run_harness_conformance.py --harness codex \
 | `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
 | `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
+| `context_compaction` | Automatic compaction between shell actions; summary reused, helper retained without becoming a turn | Existing P0 checks plus P1 compaction checks (TE-13) |
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat
@@ -194,9 +197,7 @@ tree, including harnesses that start new process groups.
 
 Exit codes: **0** when all selected gates pass, **1** for evidence or scenario
 failures, and **2** for execution, dependency, input, or checker errors. Existing
-harness evidence gaps are expected to remain visible as failures. This suite
-covers P0 checks, including ownership and call-to-step checks. Multimodal content,
-compaction, parallelism and transport disconnects remain outside its qualification scope.
+harness evidence gaps remain visible as failures.
 
 Run regression checks with:
 
