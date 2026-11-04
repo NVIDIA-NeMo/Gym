@@ -20,7 +20,7 @@ from nemo_gym.agents import (
     check_agent_seed_rejected,
 )
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.nemo_fabric_agent import app
 from responses_api_agents.nemo_fabric_agent.sandbox import FabricSandboxSession
