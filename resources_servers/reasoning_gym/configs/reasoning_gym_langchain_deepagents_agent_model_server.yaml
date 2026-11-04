@@ -49,5 +49,3 @@ reasoning_gym_langchain_deepagents_agent_model_server_environment_server:
         name: reasoning_gym_langchain_deepagents_agent_model_server
       # The deepagents graph runs its own tools and never calls Resources tools, so no grant is sent.
       resources_tool_transports: []
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
