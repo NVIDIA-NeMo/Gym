@@ -60,6 +60,7 @@ from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToo
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
@@ -139,6 +140,17 @@ def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef
             records.append(ToolCallObservation.model_validate(tool))
         except Exception as error:
             failed(f"tool_calls[{index}]", error)
+    for index, compaction in enumerate(raw.get("compactions") or []):
+        try:
+            event = ContextCompactionObservation.model_validate(
+                {
+                    **compaction,
+                    "model_calls": [{**ref, "model_ref": model_server} for ref in compaction.get("model_calls", [])],
+                }
+            )
+            records.append(event)
+        except Exception as error:
+            failed(f"compactions[{index}]", error)
     return AgentObservationBundle(source="stirrup", records=records, gaps=gaps)
 
 
