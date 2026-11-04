@@ -81,6 +81,12 @@ def fake_sandbox(monkeypatch):
                 Path(local_path).write_text("bad PNG")
             else:
                 Image.new("RGB", (40, 50), "white").save(local_path)
+                if self.mode == "invalid_checksum":
+                    data = bytearray(Path(local_path).read_bytes())
+                    chunk = data.index(b"IDAT")
+                    length = int.from_bytes(data[chunk - 4 : chunk], "big")
+                    data[chunk + 4 + length] ^= 1  # Corrupt the CRC while keeping the image data intact.
+                    Path(local_path).write_bytes(data)
 
         async def stop(self):
             self.stop_entered.set()
@@ -118,6 +124,7 @@ async def attempt(tmp_path, **kwargs):
         ("symlink", "invalid_output"),
         ("oversized", "invalid_output"),
         ("invalid", "invalid_output"),
+        ("invalid_checksum", "invalid_output"),
         ("create_failure", "infrastructure_failure"),
         ("isolation_failure", "infrastructure_failure"),
         ("mount_failure", "infrastructure_failure"),
@@ -149,8 +156,10 @@ async def test_lifecycle(fake_sandbox, tmp_path, mode, status):
     if mode == "ok":
         assert (result.width, result.height, result.dimension_mismatch) == (40, 50, False)
         assert (tmp_path / "output.png").exists()
-    if mode == "invalid":
+    if mode in {"invalid", "invalid_checksum"}:
         assert not (tmp_path / "output.png").exists()
+    if mode == "invalid_checksum":
+        assert "bad header checksum" in result.diagnostics["validation_error"]
 
 
 @pytest.mark.asyncio

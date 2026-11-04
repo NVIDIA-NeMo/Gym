@@ -30,6 +30,13 @@ VALID = "from PIL import Image\nImage.new('RGB',(TARGET_WIDTH,TARGET_HEIGHT),'wh
         ("while True: pass", "timeout"),
         ("pass", "missing_output"),
         ("open(OUTPUT_PATH,'w').write('not png')", "invalid_output"),
+        (
+            VALID + "\nfrom pathlib import Path\n"
+            "p = Path(OUTPUT_PATH)\ndata = bytearray(p.read_bytes())\n"
+            "chunk = data.index(b'IDAT')\nlength = int.from_bytes(data[chunk-4:chunk], 'big')\n"
+            "data[chunk+4+length] ^= 1\np.write_bytes(data)",
+            "invalid_output",
+        ),
         ("import os; os.symlink('/etc/hosts',OUTPUT_PATH)", "invalid_output"),
         ("with open(OUTPUT_PATH,'wb') as f: f.truncate(32*1024*1024+1)", "invalid_output"),
         ("from PIL import Image; Image.new('1',(5001,5000)).save(OUTPUT_PATH)", "invalid_output"),

@@ -205,7 +205,8 @@ async def render(
         await sandbox.download("/workspace/output.png", path)
         try:
             result.width, result.height = validate_png(path)
-        except (ValueError, OSError, Image.DecompressionBombError) as exc:
+        except (ValueError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
+            # Pillow raises SyntaxError for malformed PNG chunks and checksum failures.
             path.unlink(missing_ok=True)
             result.status = "invalid_output"
             result.diagnostics["validation_error"] = str(exc)

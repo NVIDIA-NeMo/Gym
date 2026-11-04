@@ -73,6 +73,12 @@ The launcher supplies `OUTPUT_PATH`, `TARGET_WIDTH`, and `TARGET_HEIGHT`; code m
 `/workspace/output.png`. Defaults: 60-second execution timeout and eight concurrent renders.
 The worker or scheduler supplies resource limits; Enroot does not enforce per-attempt CPU/memory limits.
 
+Recreate the reference background as well as its foreground content. When the reference
+has an opaque background, replacing it with transparency is a recreation error even if a
+viewer displays it against a similar background. Transparency is not automatically flattened
+before the judge comparison or the dataset rubric's blank/degenerate-image inspection.
+Blend A's pixel metrics separately composite alpha onto white, as described by their scoring protocol.
+
 Optionally check isolation when setting up a new worker or renderer image; Slurm is optional.
 This diagnostic is separate from normal evaluation, which checks isolation before each render:
 
