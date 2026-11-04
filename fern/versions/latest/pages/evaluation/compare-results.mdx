@@ -237,7 +237,7 @@ delta = candidate_mean - baseline_mean
 
 Its estimated variance is the sum of each side's sample variance divided by that side's repeat count. The aggregate adds these variances using squared cell weights and uses Welch–Satterthwaite effective degrees of freedom for its Student-t interval.
 
-The numerical method, including normalization and metric averaging, is isolated in `nemo_gym/comparison/statistics/unpaired_welch_fixed_suite.py`. The [NIST two-sample t-test reference](https://www.itl.nist.gov/div898/handbook/eda/section3/eda353.htm) and [coverage-factor guidance](https://www.nist.gov/pml/nist-technical-note-1297/nist-tn-1297-appendix-b-coverage-factors) describe the independent-sample and effective-degrees-of-freedom calculations.
+The numerical method, including normalization and metric averaging, is isolated in `nemo_gym/eval/comparison/statistics/unpaired_welch_fixed_suite.py`. The [NIST two-sample t-test reference](https://www.itl.nist.gov/div898/handbook/eda/section3/eda353.htm) and [coverage-factor guidance](https://www.nist.gov/pml/nist-technical-note-1297/nist-tn-1297-appendix-b-coverage-factors) describe the independent-sample and effective-degrees-of-freedom calculations.
 
 <Note>
 The interval quantifies repeat uncertainty for the fixed selected benchmarks, models, and task sets. It assumes independent repeats within each side, independent baseline/candidate collections, and independent cell estimates. It does not include uncertainty from sampling different benchmarks or models. Shared conditions or genuinely paired samples can require covariance terms beyond this method.

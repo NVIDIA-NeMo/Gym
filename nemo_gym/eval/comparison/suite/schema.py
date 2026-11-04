@@ -19,8 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.comparison.schema import ReportFormat
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.eval.comparison.schema import ReportFormat
 
 
 class _SuiteModel(BaseModel):

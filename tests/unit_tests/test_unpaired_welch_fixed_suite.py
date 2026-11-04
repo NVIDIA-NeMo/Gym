@@ -18,7 +18,7 @@ import math
 import pytest
 from scipy import stats
 
-from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import (
+from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     BenchmarkSamples,
     MetricScale,
     SampleSummary,

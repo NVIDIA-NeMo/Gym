@@ -299,7 +299,7 @@ class TestEvalCompareCommands:
     @pytest.mark.parametrize(
         ("command", "accepted", "absent"),
         [
-            ("compare", ("--baseline", "--candidates", "--agent"), ("--suite", "--confidence-level", "--level")),
+            ("compare", ("--baseline", "--candidates", "--agent", "--confidence-level"), ("--suite", "--level")),
             ("compare-suite", ("--suite", "--confidence-level"), ("--baseline", "--candidates", "--agent", "--level")),
         ],
     )
@@ -320,7 +320,6 @@ class TestEvalCompareCommands:
         ("command", "flag", "value"),
         [
             ("compare", "--suite", "suite.yaml"),
-            ("compare", "--confidence-level", "0.9"),
             ("compare", "--level", "suite"),
             ("compare", "--level", "run"),
             ("compare-suite", "--level", "suite"),
@@ -343,6 +342,12 @@ class TestEvalCompareCommands:
         stderr = capsys.readouterr().err
         assert "unrecognized arguments" in stderr
         assert flag in stderr
+
+    @pytest.mark.parametrize("command", ["compare", "compare-suite"])
+    def test_both_commands_accept_confidence_level(self, monkeypatch: MonkeyPatch, command: str) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["eval", command, "--confidence-level", "0.9"])
+        assert target == f"nemo_gym.cli.eval:{command.replace('-', '_')}"
+        assert overrides == ["+confidence_level=0.9"]
 
 
 class TestEvalExportFlags:

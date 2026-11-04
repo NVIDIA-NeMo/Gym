@@ -1313,9 +1313,9 @@ Repeat-level metrics: {repeat_level_metrics_fpath}""")
 
 @exit_cleanly_on_config_error
 def compare() -> None:  # pragma: no cover
-    from nemo_gym.comparison.report import render_key_metrics_tables, summary_lines
-    from nemo_gym.comparison.runner import invoked_command, run_comparison
-    from nemo_gym.comparison.schema import ComparisonConfig
+    from nemo_gym.eval.comparison.report import render_key_metrics_tables, summary_lines
+    from nemo_gym.eval.comparison.runner import invoked_command, run_comparison
+    from nemo_gym.eval.comparison.schema import ComparisonConfig
 
     config = ComparisonConfig.model_validate(get_global_config_dict())
 
@@ -2035,15 +2035,16 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
 @exit_cleanly_on_config_error
 def compare_suite() -> None:
     """Compare baseline and candidate runs across a configured benchmark and model suite."""
-    from nemo_gym.comparison.suite.report import render_suite_summary, write_suite_reports
-    from nemo_gym.comparison.suite.runner import build_suite_comparison, invoked_command
-    from nemo_gym.comparison.suite.schema import SuiteComparisonConfig
+    from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
+    from nemo_gym.eval.comparison.suite.report import render_suite_summary, write_suite_reports
+    from nemo_gym.eval.comparison.suite.runner import build_suite_comparison, invoked_command
+    from nemo_gym.eval.comparison.suite.schema import SuiteComparisonConfig
 
     config_dict = get_global_config_dict()
     if not config_dict.get("suite_fpath"):
         raise ConfigError("gym eval compare-suite requires --suite PATH.")
     config = SuiteComparisonConfig.model_validate(config_dict)
-    result = build_suite_comparison(config, invoked_command())
+    result = build_suite_comparison(config, invoked_command(), reward_metric_resolver=resolve_benchmark_reward_metric)
     output = Path(config.output_dirpath) if config.output_dirpath else result.suite_fpath.parent
     written = write_suite_reports(result, output, config.report_format)
     print(render_suite_summary(result))
