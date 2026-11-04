@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from environments.chess.prepare import EXAMPLE_TASKS, build_row, generated_tasks
+from environments.chess.prepare import EXAMPLE_TASKS, build_row, generated_tasks, mate_in_one_tasks
 from nemo_gym.client import ServerClient
 from resources_servers.chess.app import ChessResourcesServer, ChessResourcesServerConfig, choose_opponent_move
 from resources_servers.chess.chess_rules import STARTING_FEN, Position
@@ -378,3 +378,16 @@ class TestTaskData:
             (color, opponent) for color in ("white", "black") for opponent in ("random", "greedy", "lookahead")
         }
         assert not {task["seed"] for task in train} & {task["seed"] for task in validation}
+
+    def test_mate_in_one_tasks_have_a_mate_for_the_side_to_move(self):
+        for task in mate_in_one_tasks("train", 5):
+            position = Position.from_fen(task["fen"])
+            assert task["agent_color"] == position.turn
+            assert any(
+                (after := position.apply(move)).in_check() and not after.legal_moves for move in position.legal_moves
+            )
+
+    def test_mate_in_one_splits_are_disjoint_and_reproducible(self):
+        train = mate_in_one_tasks("train", 5)
+        assert train == mate_in_one_tasks("train", 5)
+        assert not {task["fen"] for task in train} & {task["fen"] for task in mate_in_one_tasks("validation", 3)}

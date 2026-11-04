@@ -92,7 +92,7 @@ def _lookahead_score(position: Position, move: Move) -> int:
 
 
 def _is_checkmate(position: Position) -> bool:
-    return not position.legal_moves and position.in_check()
+    return position.in_check() and not position.legal_moves
 
 
 def _material_balance(position: Position, color: Color) -> int:

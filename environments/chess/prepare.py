@@ -1,19 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Write chess task rows: the committed examples, or train and validation games from the initial position.
+"""Write chess task rows: the committed examples, or train and validation splits.
 
-Generated splits cycle through both colors and all opponents, with disjoint seeds per split.
+``--tasks games`` (the default) starts every game from the initial position, cycling through both colors and all
+opponents with disjoint seeds per split. ``--tasks mate1`` writes positions where the side to move can checkmate at
+once, a short-horizon task for training.
 
 Usage:
     python environments/chess/prepare.py --split train --size 1000
     python environments/chess/prepare.py --split validation --size 100
+    python environments/chess/prepare.py --split train --tasks mate1 --size 3000
     python environments/chess/prepare.py --split example
 """
 
 import argparse
 import json
+import random
+import zlib
 from pathlib import Path
 from typing import Optional
+
+from resources_servers.chess.app import choose_opponent_move
+from resources_servers.chess.chess_rules import ChessGame, Position
 
 
 AGENT_NAME = "chess_gymnasium_agent"
@@ -105,13 +113,50 @@ def generated_tasks(split: str, size: int) -> list[dict]:
     ]
 
 
+def mate_in_one_tasks(split: str, size: int) -> list[dict]:
+    """Positions from seeded random and greedy self-play where the side to move can checkmate at once.
+
+    A position belongs to validation when the CRC32 of its FEN is divisible by 10 and to train otherwise, so the
+    splits never share a position.
+    """
+    rng = random.Random(SPLIT_SEED_OFFSETS[split])
+    tasks: list[dict] = []
+    seen: set[str] = set()
+    while len(tasks) < size:
+        game = ChessGame()
+        players = {color: rng.choice(["random", "greedy"]) for color in ("white", "black")}
+        first_ply = rng.randrange(10, 120)
+        while game.outcome() is None and len(game.moves) < 200:
+            position = game.position
+            fen = position.fen()
+            in_split = (zlib.crc32(fen.encode()) % 10 == 0) == (split == "validation")
+            if len(game.moves) >= first_ply and in_split and fen not in seen and _has_mate_in_one(position):
+                seen.add(fen)
+                tasks.append({"fen": fen, "agent_color": position.turn, "opponent": "greedy", "seed": len(tasks)})
+                break
+            game.play(choose_opponent_move(position, rng, players[position.turn]).uci())
+    return tasks
+
+
+def _has_mate_in_one(position: Position) -> bool:
+    return any((after := position.apply(move)).in_check() and not after.legal_moves for move in position.legal_moves)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--split", choices=["example", *SPLIT_SEED_OFFSETS], default="train")
-    parser.add_argument("--size", type=int, default=1000, help="Number of games for train or validation.")
+    parser.add_argument(
+        "--tasks", choices=["games", "mate1"], default="games", help="Task type for train or validation."
+    )
+    parser.add_argument("--size", type=int, default=1000, help="Number of rows for train or validation.")
     args = parser.parse_args()
 
-    tasks = EXAMPLE_TASKS if args.split == "example" else generated_tasks(args.split, args.size)
+    if args.split == "example":
+        tasks = EXAMPLE_TASKS
+    elif args.tasks == "mate1":
+        tasks = mate_in_one_tasks(args.split, args.size)
+    else:
+        tasks = generated_tasks(args.split, args.size)
     output_path = Path(__file__).parent / "data" / f"{args.split}.jsonl"
     with output_path.open("w") as f:
         for task in tasks:
