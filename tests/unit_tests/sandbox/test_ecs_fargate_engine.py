@@ -2304,6 +2304,45 @@ async def test_upload_via_s3_packs_and_extracts(tmp_path):
     assert "tar xzf" in dl_cmd and "/dest" in dl_cmd
 
 
+@pytest.mark.parametrize("extraction_fails", [False, True])
+async def test_borrower_disconnect_deletes_only_its_s3_uploads(tmp_path: Path, extraction_fails: bool) -> None:
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"x" * (1024 * 1024))
+    owner = _make_sandbox(s3_bucket="bkt")
+    owner_client = _attach_exec_client(owner, engine.ExecResult("ok", "", 0))
+    borrower_client = MagicMock(spec=engine.ExecClient)
+    borrower_client.exec.return_value = (
+        engine.ExecResult("", "tar failed", 1) if extraction_fails else engine.ExecResult("ok", "", 0)
+    )
+    ecs, s3 = MagicMock(), MagicMock()
+    s3.generate_presigned_url.return_value = "https://example.invalid/upload"
+    with (
+        _patch_aws(ecs=ecs, ec2=MagicMock(), ssm=MagicMock(), s3=s3),
+        patch(f"{_ENG}.ExecClient", return_value=borrower_client),
+    ):
+        borrower = await engine.EcsFargateSandbox.attach_exec_server(
+            owner.spec, ecs_config=owner._cfg, task_arn="task-arn", port=19000
+        )
+        await owner.upload(payload, "/workspace/owner.bin")
+        owner_key = s3.put_object.call_args.kwargs["Key"]
+        if extraction_fails:
+            with pytest.raises(RuntimeError, match="S3 upload extraction failed"):
+                await borrower.upload(payload, "/workspace/borrower.bin")
+        else:
+            await borrower.upload(payload, "/workspace/borrower.bin")
+        borrower_key = s3.put_object.call_args.kwargs["Key"]
+        assert borrower_key != owner_key
+        await borrower.disconnect_exec_server()
+        await borrower.disconnect_exec_server()
+
+    s3.delete_object.assert_called_once_with(Bucket="bkt", Key=borrower_key)
+    assert owner._s3_artifacts == [owner_key]
+    assert borrower._s3_artifacts == []
+    ecs.stop_task.assert_not_called()
+    owner_client.close.assert_not_awaited()
+    borrower_client.close.assert_awaited_once()
+
+
 async def test_upload_via_s3_packs_a_directory(tmp_path):
     d = tmp_path / "dir"
     (d / "sub").mkdir(parents=True)
