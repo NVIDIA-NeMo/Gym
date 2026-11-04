@@ -40,6 +40,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Assess and reapprove
+        # gh and git are preinstalled on the hosted Ubuntu runner.
         env:
           GH_TOKEN: ${{ github.token }}
           REAPPROVE_API_KEY: ${{ secrets.REAPPROVE_API_KEY }}

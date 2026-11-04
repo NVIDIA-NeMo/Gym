@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""One-shot conflict reapproval. PR trees are read as data, never checked out or executed."""
+"""One-shot conflict reapproval using the runner's gh and git CLIs.
+
+gh authenticates with GH_TOKEN (contents:read, pull-requests:write). PR trees are read
+as data, never checked out or executed. Python imports use only the standard library.
+"""
 
 import hashlib
 import json
@@ -71,20 +75,27 @@ class GitHub:
     def __init__(self, repository: str) -> None:
         self.repository = repository
 
-    def api(self, path: str, data: dict | None = None) -> dict | list:
-        return _json_request(f"https://api.github.com/repos/{self.repository}/{path}", os.environ["GH_TOKEN"], data)
+    def api(self, path: str, data: dict | None = None, *, paginate: bool = False) -> dict | list:
+        command = ["gh", "api", "--hostname", "github.com", f"repos/{self.repository}/{path}".rstrip("/")]
+        if data is not None:
+            command.extend(["--method", "POST", "--input", "-"])
+        if paginate:
+            command.extend(["--paginate", "--slurp"])
+        result = subprocess.run(
+            command,
+            input=json.dumps(data).encode() if data is not None else None,
+            capture_output=True,
+            check=True,
+            timeout=180,
+        )
+        return json.loads(result.stdout.decode("utf-8", errors="replace"))
 
     def pages(self, path: str) -> list[dict]:
-        result = []
         separator = "&" if "?" in path else "?"
-        for page in range(1, 101):
-            batch = self.api(f"{path}{separator}per_page=100&page={page}")
-            if not isinstance(batch, list):
-                raise Declined("Incomplete GitHub response.")
-            result.extend(batch)
-            if len(batch) < 100:
-                return result
-        raise Declined("Too much history to assess completely.")
+        pages = self.api(f"{path}{separator}per_page=100", paginate=True)
+        if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+            raise Declined("Incomplete GitHub response.")
+        return [item for page in pages for item in page]
 
     def writer(self, login: str) -> None:
         permission = self.api(f"collaborators/{login}/permission")["permission"]

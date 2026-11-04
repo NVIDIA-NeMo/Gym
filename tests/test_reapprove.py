@@ -21,6 +21,13 @@ def commit(path, content):
 
 
 @pytest.fixture
+def review_state():
+    pr = bot.PullRequest(1, "1" * 40, "2" * 40, "topic", "main", "author")
+    approval = bot.Approval(7, "3" * 40, "reviewer", "https://github.com/org/repo/pull/1#pullrequestreview-7", pr.head)
+    return pr, approval
+
+
+@pytest.fixture
 def history(tmp_path):
     path = tmp_path / "source"
     path.mkdir()
@@ -42,24 +49,6 @@ def history(tmp_path):
         7, approved, "reviewer", "https://github.com/org/repo/pull/1#pullrequestreview-7", resolved
     )
     return path, base, pr, approval, tail
-
-
-def test_merge_resolution_evidence(history):
-    path, base, pr, approval, _ = history
-    evidence = bot._evidence(path, pr, approval, base)
-    assert "+timeout = 20  # seconds" in evidence["resolutions"]
-    assert "<<<<<<<" in evidence["resolutions"]
-    assert "+timeout = 20" in evidence["approved_change"]
-    assert "+timeout = 10  # seconds" in evidence["base_update"]
-
-
-def test_rebase_does_not_require_approved_head_ancestry(history):
-    path, base, pr, approval, tail = history
-    git(path, "switch", "--detach", pr.base)
-    head = commit(path, "timeout = 20  # seconds\n" + tail)
-    pr, approval = replace(pr, head=head), replace(approval, dismissal_commit=head)
-    assert git(path, "merge-base", approval.head, pr.head) == base
-    assert bot._evidence(path, pr, approval, base)["pr"] == 1
 
 
 @pytest.mark.parametrize("extra_file", [False, True])
@@ -132,8 +121,8 @@ def dismissal(approval):
     }
 
 
-def test_human_baseline_requires_commit_linked_approval_dismissal(history):
-    _, _, pr, approval, _ = history
+def test_human_baseline_requires_commit_linked_approval_dismissal(review_state):
+    pr, approval = review_state
     assert bot._human_approval([review(approval)], [dismissal(approval)], pr) == approval
     for events in ([], [dismissal(replace(approval, dismissal_commit=None))]):
         with pytest.raises(bot.Declined, match="manual or cannot"):
@@ -147,36 +136,36 @@ def test_human_baseline_requires_commit_linked_approval_dismissal(history):
 @pytest.mark.parametrize(
     "login,user_type", [("github-actions[bot]", "Bot"), ("svcnemo-autobot", "User"), ("author", "User")]
 )
-def test_bot_and_author_cannot_supply_human_baseline(history, login, user_type):
-    _, _, pr, approval, _ = history
+def test_bot_and_author_cannot_supply_human_baseline(review_state, login, user_type):
+    pr, approval = review_state
     with pytest.raises(bot.Declined, match="no eligible"):
         bot._human_approval([review(approval, login=login, user_type=user_type)], [dismissal(approval)], pr)
 
 
-def test_later_human_changes_request_blocks_even_with_another_approval(history):
-    _, _, pr, approval, _ = history
+def test_later_human_changes_request_blocks_even_with_another_approval(review_state):
+    pr, approval = review_state
     blocked = review(replace(approval, review_id=8), state="CHANGES_REQUESTED", login="second-reviewer")
     with pytest.raises(bot.Declined, match="still requests changes"):
         bot._human_approval([review(approval), blocked], [dismissal(approval)], pr)
 
 
-def test_later_approval_replaces_manual_dismissal(history):
-    _, _, pr, approval, _ = history
+def test_later_approval_replaces_manual_dismissal(review_state):
+    pr, approval = review_state
     current = replace(approval, review_id=9, head=pr.head, dismissal_commit=None)
     new_review = review(current, state="APPROVED")
     new_review["submitted_at"] = "2026-11-04T11:00:00Z"
     assert bot._human_approval([review(approval), new_review], [], pr) == current
 
 
-def test_retargeting_cannot_expand_what_the_human_approved(history):
-    _, _, pr, approval, _ = history
+def test_retargeting_cannot_expand_what_the_human_approved(review_state):
+    pr, approval = review_state
     events = [dismissal(approval), {"event": "base_ref_changed", "created_at": "2026-11-04T11:00:00Z"}]
     with pytest.raises(bot.Declined, match="retargeted"):
         bot._human_approval([review(approval)], events, pr)
 
 
-def test_stack_follows_verified_branch_relationships(history):
-    _, _, root, _, _ = history
+def test_stack_follows_verified_branch_relationships(review_state):
+    root, _ = review_state
     middle = replace(root, number=2, branch="middle", base_branch="topic", base=root.head, head="2" * 40)
     top = replace(root, number=3, branch="top", base_branch="middle", base=middle.head)
     unrelated = replace(root, number=4, branch="unrelated")
@@ -262,8 +251,12 @@ class FakeGitHub:
 
 
 @pytest.fixture
-def run_fixture(history, monkeypatch, tmp_path):
-    source, _, pr, approval, _ = history
+def run_fixture(history, monkeypatch, tmp_path, request):
+    source, _, pr, approval, tail = history
+    if getattr(request, "param", "merge") == "rebase":
+        git(source, "switch", "--detach", pr.base)
+        head = commit(source, "timeout = 20  # seconds\n" + tail)
+        pr, approval = replace(pr, head=head), replace(approval, dismissal_commit=head)
     github = FakeGitHub(pr, approval)
     real_git = bot._git
 
@@ -287,6 +280,7 @@ def run_fixture(history, monkeypatch, tmp_path):
     return github, run
 
 
+@pytest.mark.parametrize("run_fixture", ["merge", "rebase"], indirect=True)
 def test_end_to_end_only_posts_exact_reviewed_head_once(run_fixture):
     github, run = run_fixture
     run()
@@ -324,10 +318,39 @@ def test_declined_model_never_posts(run_fixture, monkeypatch):
     assert not github.writes
 
 
-def test_pagination_does_not_lose_old_approval(monkeypatch):
+def test_github_cli_preserves_review_payload_and_flattens_pages(monkeypatch):
+    payload = {"event": "APPROVE", "commit_id": "a" * 40, "body": "Review: `quoted`\n$(not a command)"}
+
+    def run(command, **kwargs):
+        assert command[:4] == ["gh", "api", "--hostname", "github.com"]
+        assert kwargs["check"] and kwargs["timeout"] == 180
+        if "--paginate" in command:
+            assert "--slurp" in command
+            assert command[4] == "repos/org/repo/pulls/1/reviews?per_page=100"
+            return subprocess.CompletedProcess(command, 0, b'[[{"id": 7}], [{"id": 8}]]')
+        assert command[4:] == ["repos/org/repo/pulls/1/reviews", "--method", "POST", "--input", "-"]
+        assert json.loads(kwargs["input"]) == payload
+        return subprocess.CompletedProcess(command, 0, b'{"id": 9}')
+
+    monkeypatch.setattr(bot.subprocess, "run", run)
     github = bot.GitHub("org/repo")
-    monkeypatch.setattr(github, "api", lambda path: [{"id": 1}] * 100 if path.endswith("&page=1") else [{"id": 2}])
-    assert len(github.pages("pulls/1/reviews")) == 101
+    assert github.pages("pulls/1/reviews") == [{"id": 7}, {"id": 8}]
+    assert github.api("pulls/1/reviews", payload) == {"id": 9}
+
+
+def test_incomplete_github_history_stops_before_assessment(run_fixture, monkeypatch):
+    github, run = run_fixture
+
+    def failed_page(command, **kwargs):
+        # gh may emit earlier pages before a later request fails. Never consume them.
+        raise subprocess.CalledProcessError(1, command, output=b'[[{"id": 7}]]')
+
+    monkeypatch.setattr(bot.subprocess, "run", failed_page)
+    monkeypatch.setattr(github, "approval", bot.GitHub("org/repo").approval)
+    monkeypatch.setattr(bot, "_assess", lambda _: pytest.fail("incomplete history reached assessment"))
+    with pytest.raises(subprocess.CalledProcessError):
+        run()
+    assert not github.writes
 
 
 def test_only_exact_commands_run(tmp_path, monkeypatch):
