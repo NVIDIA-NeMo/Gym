@@ -13,10 +13,26 @@ from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.eval.recovery.trials import _observed_trial_operations
 
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def recorded_run(name: str) -> str:
+    """A recorded run's collected evidence as JSON: its file, or its base file with the values its patch sets."""
+    path = FIXTURES / f"{name}.json"
+    if path.exists():
+        return path.read_text()
+    patch = json.loads((FIXTURES / f"{name}.patch.json").read_text())
+    run = json.loads((FIXTURES / patch["base"]).read_text())
+    for keys, value in patch["set"]:
+        node = run
+        for key in keys[:-1]:
+            node = node[key]
+        node[keys[-1]] = value
+    return json.dumps(run)
+
+
 def fixture(case="healthy"):
-    return CollectedEvidence.model_validate_json(
-        (Path(__file__).parent / "fixtures" / f"cpu-tool-trial-{case}.json").read_text()
-    )
+    return CollectedEvidence.model_validate_json(recorded_run(f"cpu-tool-trial-{case}"))
 
 
 def health(collected):
@@ -322,9 +338,7 @@ def test_unobserved_or_unbound_grading_cannot_accept(change):
 
 @pytest.mark.parametrize("case,reward", [("healthy", 1), ("wrong", 0)])
 def test_actual_mcqa_calculation_keeps_ordinary_scores(case, reward):
-    c = CollectedEvidence.model_validate_json(
-        (Path(__file__).parent / "fixtures" / f"cpu-grading-mcqa-{case}.json").read_text()
-    )
+    c = CollectedEvidence.model_validate_json(recorded_run(f"cpu-grading-mcqa-{case}"))
     decision, (passed, _) = health(c)
     assert passed is True and decision.action.value == "noop"
     assert c.results[0]["reward"] == reward

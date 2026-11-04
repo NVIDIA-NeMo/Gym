@@ -3,7 +3,6 @@
 """Strict consumer boundary controls; fixture metadata is not a new runtime acceptance claim."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -16,10 +15,11 @@ from nemo_gym.eval.recovery.gate import (
     trial_verdict,
 )
 from nemo_gym.eval.recovery.planner import decide_from_collected
+from tests.unit_tests.test_tool_trial_coverage import recorded_run
 
 
 def session_fixture(case="healthy"):
-    value = json.loads((Path(__file__).parent / f"fixtures/cpu-grading-mcqa-{case}.json").read_text())
+    value = json.loads(recorded_run(f"cpu-grading-mcqa-{case}"))
     c = CollectedEvidence.model_validate(value)
     row = c.results[0]
     environment = c.quality["provenance"]["servers"][row["_ng_environment_server"]]
