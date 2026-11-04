@@ -102,3 +102,11 @@ data/
 - `steps/rollout/instruction.md`: Task-specific [prompt](https://www.harborframework.com/docs/tasks#instruction) presented to the agent.
 - `steps/rollout/workdir/setup.sh`: Starts the [BixBench-Hypothesis MCP server](./pkgs/bbh-mcp/src/bbh_mcp/server.py).
 - `steps/rollout/tests/test.sh`: Collects the MCP server's reward artifact for Harbor.
+
+### Locked MCP server environment
+
+The container installs `pkgs/bbh-mcp/uv.lock` into `/opt/envs/bbh-mcp` with
+`uv sync --locked`. This environment is separate from the conda-locked scientific
+kernels, so synchronizing the MCP package cannot remove their dependencies.
+`BBH_MCP_PYTHON` selects its interpreter when the task starts. After changing MCP
+dependencies, run `uv lock --project pkgs/bbh-mcp` and commit the updated lock.
