@@ -1,0 +1,35 @@
+# BIRD-Interact Lite in c-Interact, with the Auto Ontology agent in place of simple_agent. Auto Ontology runs c-Interact
+# only, so this file has no a-Interact server. See responses_api_agents/auto_ontology_agent/README.md.
+#
+#   gym eval prepare --config benchmarks/bird_interact/auto_ontology.yaml \
+#     +prepare_script_args.ground_truth_jsonl=<ground truth file>
+#   gym eval run --config benchmarks/bird_interact/auto_ontology.yaml --model-type vllm_model --split benchmark \
+#     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --output results/bird_interact_lite_c_ao.jsonl
+
+config_paths:
+  - benchmarks/bird_interact/config.yaml
+  - responses_api_agents/auto_ontology_agent/configs/auto_ontology_agent.yaml
+
+# The datasets move from simple_agent's instance to Auto Ontology's.
+bird_interact_agent: null
+auto_ontology_agent:
+  responses_api_agents:
+    auto_ontology_agent:
+      datasets:
+        - name: bird_interact_lite_c_interact
+          type: benchmark
+          jsonl_fpath: benchmarks/bird_interact/data/lite/c_interact.jsonl
+          taskset: bird_interact:c_interact
+          prepare_script: benchmarks/bird_interact/prepare.py
+          num_repeats: 1
+          license: CC BY-SA 4.0
+
+environment_server_routes:
+  _delete_key: "bird_interact:a_interact,bird_interact:a_interact_example"
+bird_interact_a_interact: null
+
+bird_interact_c_interact:
+  environment_servers:
+    bird_interact:
+      agent_server:
+        name: auto_ontology_agent
