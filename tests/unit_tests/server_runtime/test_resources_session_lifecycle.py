@@ -161,6 +161,18 @@ async def test_cookie_seed_after_verification_keeps_the_session_id_and_starts_fr
 
     assert request.session[SESSION_ID_KEY] == "caller-cookie"
     assert server.state == {"caller-cookie": 2}
+    # The new run's verify must score its own state, not replay the finished run's receipt.
+    assert "caller-cookie" not in server._verified_sessions
+
+
+async def test_a_failed_cookie_reseed_keeps_the_finished_runs_receipt() -> None:
+    server = _flaky_server()
+    server._verified_sessions.remember("caller-cookie", (None, "receipt"))
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await server.seed_session(TaskSeed(value=2), request=_request())
+
+    assert server._verified_sessions.get("caller-cookie") == (None, "receipt")
 
 
 @pytest.mark.parametrize("operation", ["close", "retire"])

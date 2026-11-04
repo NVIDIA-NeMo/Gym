@@ -528,6 +528,45 @@ class TestVerify:
         assert len(server._sessions) == 0
         mock_env_instance.close.assert_called_once()
 
+    def test_a_reused_cookie_scores_and_releases_its_next_run(self) -> None:
+        """A /run that reuses a verified cookie is scored from its own steps, not the finished run's reward."""
+        rewards = iter([1.0, 0.0])
+
+        def mock_step(action):
+            obs = MagicMock()
+            obs.reward = next(rewards)
+            obs.done = False
+            obs.model_dump.return_value = {"reward": obs.reward, "done": False}
+            return obs
+
+        server = _make_server(is_mcp=False)
+        server._env_class = MagicMock(return_value=_make_mock_env(step_side_effect=mock_step))
+        server._action_class = MagicMock()
+        client = _make_test_client(server)
+        verify_body = {
+            "responses_create_params": {"input": "test"},
+            "response": {
+                "id": "test",
+                "output": [],
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        }
+        cookies = client.post("/seed_session", json={}).cookies
+        client.post("/step", json={}, cookies=cookies)
+        assert client.post("/verify", json=verify_body, cookies=cookies).json()["reward"] == pytest.approx(1.0)
+
+        # The next /run on the same cookie keeps its session ID and replaces the finished run.
+        assert client.post("/seed_session", json={}, cookies=cookies).status_code == 200
+        assert len(server._sessions) == 1
+        client.post("/step", json={}, cookies=cookies)
+        assert client.post("/verify", json=verify_body, cookies=cookies).json()["reward"] == pytest.approx(0.0)
+        assert server._sessions == {}
+
     def test_verify_without_session_is_masked(self) -> None:
         """verify() without a live session has no reward to report, so the sample is masked."""
         server = _make_server(is_mcp=False)
