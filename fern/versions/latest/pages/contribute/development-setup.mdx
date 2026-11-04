@@ -352,6 +352,31 @@ gh stack sync --prune      # fetch, rebase, push, drop merged branches
 
 On a rebase conflict (exit code 3), resolve the listed files, `git add` them, then `gh stack rebase --continue` (or `--abort`). Merging is done from the GitHub PR UI; CLI merge is not supported yet.
 
+#### Reapprove After Conflict Resolution
+
+When GitHub dismisses a human approval after a merge or rebase, a contributor with repository
+write permission can comment `/review-reapprove` on the PR, or
+`/review-reapprove scope=stack` on any layer to assess the whole stack.
+
+The workflow reconstructs the update from the human-approved revision, rejects edits outside
+textual conflict regions, and asks a model whether the resolutions preserve the approved
+behavior. Stack assessment includes each layer and the combined change before posting any
+approvals. It uses the GitHub Actions bot identity; required checks and independent human or
+CODEOWNER approval requirements still apply.
+
+This supports open, non-draft PRs in the same repository. Single PRs must target the default
+branch; stacks must form a unique linear chain of at most ten PRs rooted there. Missing history,
+manual dismissals, ambiguous stacks, structural conflicts, and uncertain assessments require a
+human review. A later force-push that removes the dismissal commit also requires human review.
+GitHub posts approvals separately, so publication failures report any confirmed partial result.
+
+To enable it, maintainers configure the `REAPPROVE_API_KEY` Actions secret and `REAPPROVE_MODEL`
+repository variable. Optionally set `REAPPROVE_API_URL` to an HTTPS OpenAI-compatible
+chat-completions endpoint (default: `https://api.openai.com/v1/chat/completions`); the model must
+support JSON response mode. Enable **Allow GitHub Actions to create and approve pull requests**
+under **Settings → Actions → General → Workflow permissions**. The workflow must be on the
+default branch before comments can trigger it. PR code is never checked out or executed.
+
 #### Command Reference
 
 The vendored skill (`.agents/skills/gh-stack/SKILL.md`) carries the full reference, exit codes, and non-interactive rules for agents.
