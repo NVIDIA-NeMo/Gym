@@ -24,6 +24,34 @@ Then collect rollouts against `data/example.jsonl` and reward-profile as in the
 [quickstart](https://github.com/NVIDIA-NeMo/Gym/tree/main/fern/versions/latest/pages/get-started/quickstart.mdx).
 A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
 
+## Wiring the agent (Claude Code)
+
+In the example's `/run` flow, the Gym agent seeds the weather Resources Server and generates an MCP config
+for the Claude Code CLI:
+
+```mermaid
+sequenceDiagram
+    participant Agent as Gym agent
+    participant CLI as Claude Code CLI
+    participant Weather as Weather server
+
+    Agent->>Weather: POST /seed_session
+    Weather-->>Agent: Session cookie + MCP metadata
+    Note over Agent: Generate MCP config<br/>with server URL and token
+    Agent->>CLI: Start with --mcp-config
+    CLI->>Weather: POST /mcp: tools/call<br/>get_weather(city) + token
+    Note over Weather: Record tool call<br/>in the seeded session
+    Weather-->>CLI: Weather sentence
+    CLI-->>Agent: Final answer
+    Agent->>Weather: POST /verify<br/>Final response + cookie
+    Weather-->>Agent: Reward
+```
+
+The MCP config carries the signed `X-NeMo-Gym-Session-Token` header. It resolves to the same session as the
+cookie used for verification. `/mcp` dispatches to the existing `get_weather` handler; all three endpoints
+run in the same weather server. A reward of `1.0` requires both a tool call for the expected city in that
+session and the matching weather sentence in the final answer.
+
 ## Sessions under an Environment Server
 
 An Environment Server such as `single_agent_turn` seeds the server with a typed `ResourcesSeedSessionRequest`. It names
