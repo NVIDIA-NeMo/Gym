@@ -218,20 +218,6 @@ def merge_model_call_capture_into_record(
     if observations is not None:
         try:
             bundle = AgentObservationBundle.model_validate(observations)
-            if bundle.source == "claude_code":
-                try:
-                    from responses_api_agents.claude_code_agent.observability import (
-                        associate_claude_code_compaction_calls,
-                    )
-
-                    bundle = associate_claude_code_compaction_calls(bundle, calls)
-                except Exception:
-                    logger.warning(
-                        "Could not associate Claude Code compaction calls for rollout %s.",
-                        rollout_id,
-                        exc_info=True,
-                    )
-                    bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             agent_calls = exclude_verifier_model_calls(calls, verifier_invocations.values())
             bundle = join_agent_model_calls(bundle, agent_calls)
             if any(call.client_assistant_message_id for call in calls):

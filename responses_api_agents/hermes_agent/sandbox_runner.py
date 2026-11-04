@@ -23,13 +23,14 @@ def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 _MODEL_API_KEY = "gym"
+_COMPRESSION_CONFIG_KEY = "compression"
 
 
 def _use_model_server(base_url: str) -> None:
     """Point every model client Hermes builds in this process at the Gym Model Server.
 
     The root agent and its iteration-limit summary share one client, delegated children inherit the
-    parent's base URL, and auxiliary clients such as context compression read ``OPENAI_BASE_URL``.
+    parent's base URL. Compression's auxiliary client is configured in the episode's config.yaml.
     """
     os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = _MODEL_API_KEY
@@ -62,7 +63,16 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     # harness imports, including sibling modules that may import Hermes transitively; preserve the task's HOME.
     hermes_home = session_dir / "hermes-home"
     hermes_home.mkdir(parents=True, exist_ok=True)
-    (hermes_home / "config.yaml").write_text(payload["config_yaml"])
+    import yaml
+
+    config = yaml.safe_load(payload["config_yaml"]) or {}
+    config.setdefault("auxiliary", {})[_COMPRESSION_CONFIG_KEY] = {
+        "provider": "custom",
+        "base_url": payload["model_base_url"],
+        "api_key": _MODEL_API_KEY,
+        "model": payload["model"],
+    }
+    (hermes_home / "config.yaml").write_text(yaml.safe_dump(config))
     os.environ["HERMES_HOME"] = str(hermes_home)
     os.environ["TERMINAL_ENV"] = "local"
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
@@ -70,10 +80,10 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
 
     try:
         from .model_kwargs import _model_api_kwargs, install_summary_compat
-        from .sandbox_observer import SandboxHermesObserver
+        from .sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     except ImportError:
         from model_kwargs import _model_api_kwargs, install_summary_compat
-        from sandbox_observer import SandboxHermesObserver
+        from sandbox_observer import SESSION_TOKEN_COUNTERS, SandboxHermesObserver
     from run_agent import AIAgent
 
     if payload["mcp_servers"]:
@@ -159,13 +169,13 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     # Hermes omits aggregates on early returns. Preserve its actual counters, including zero
     # before any completed call, without manufacturing usage absent from the runtime.
     result = dict(result)
-    for field in ("prompt_tokens", "completion_tokens", "cache_read_tokens", "reasoning_tokens"):
-        count = getattr(agent, f"session_{field}", None)
+    for field, counter in SESSION_TOKEN_COUNTERS.items():
+        count = getattr(agent, counter, None)
         if field not in result and type(count) is int and count >= 0:
             result[field] = count
     return {
         "observations": observer.finish(result, error),
-        "result": result,
+        "result": observer.restore_messages(result),
         "runtime": runtime,
     }
 
