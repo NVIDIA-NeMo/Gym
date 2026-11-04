@@ -3,7 +3,7 @@
 
 """Run scripted requests through real Gym harnesses and inspect the resulting rollouts."""
 
-from harness_conformance.runner import main
+from scripts.harness_conformance.runner import main
 
 
 if __name__ == "__main__":
