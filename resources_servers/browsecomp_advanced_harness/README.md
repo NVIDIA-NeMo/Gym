@@ -47,6 +47,12 @@ For example, composing `nemo_gym/sandbox/providers/docker/configs/docker.yaml` d
 The shared sandbox API also supports other providers; Enroot needs an image available on its cluster. Provider
 `default_metadata` is merged with `sandbox_config.metadata`, then the resource server and session labels.
 
+Enroot must provide a PID namespace separate from the resources-server host, with `/proc` mounted for that same
+namespace. Setup checks the running sandbox's namespace IDs before permitting model commands; a version string
+or `ENROOT_UNSHARE_PID` setting alone is insufficient because older Enroot builds may ignore that setting. If the
+check fails, upgrade or configure Enroot with working PID isolation, or select another isolating provider. The
+failed session follows the usual sandbox cleanup and close-retry path.
+
 Each resources session owns one tool sandbox. An agent that runs its loop in a sandbox owns a separate sandbox;
 neither component borrows the other's container. This works with providers such as Enroot that do not support
 serializing and reconnecting to a sandbox. Search and browse retain their existing responses and write immutable
