@@ -9,21 +9,27 @@ Episodes are deterministic: the same spec and the same tool calls give the same 
 
 The environment is the `officeenv` package (pydantic and the standard library), a separate
 repository. This directory is the Gym integration: `app.py` routes Gym's endpoints to OfficeEnv's
-framework-neutral episode service (`officeenv.service.EpisodeService`), and `requirements.txt`
-pins the release it runs.
+framework-neutral episode service (`officeenv.service.EpisodeService`), and the section below
+says which release it runs and how that installs.
 
 ## The OfficeEnv version
 
-`requirements.txt` pins a release tag:
+The server runs OfficeEnv 1.10.0. OfficeEnv is not published yet, so the server's `pyproject.toml`
+and `uv.lock` list only its public dependencies, and OfficeEnv installs apart, from NVIDIA's
+internal GitLab, into the venv Gym builds from them:
 
-```
-officeenv @ git+ssh://git@gitlab-master.nvidia.com:12051/post-training/officeenv.git@v1.10.0
+```bash
+uv pip install --python resources_servers/officeenv/.venv/bin/python "officeenv @ git+${OFFICEENV_GIT_URL}@v1.10.0"
 ```
 
-OfficeEnv is not published yet, so building this server's venv needs SSH read access to that
-repository (`git+https://gitlab-master.nvidia.com/...` works instead where a git credential helper
-or `~/.netrc` holds a token). On a cluster, build the venv on a login node and reuse it
-(`skip_venv_if_present=true`), or bake it into the container with `gym env prefetch`.
+`OFFICEENV_GIT_URL` is that repository's git URL: `ssh://...` with an SSH key, or `https://...`
+where a git credential helper or `~/.netrc` holds a token (ask the point of contact, Daniele
+Molinari <dmolinari@nvidia.com>). Gym builds the venv the first time it starts or tests the
+server (`gym env test +entrypoint=resources_servers/officeenv`), and later builds only add to it,
+so OfficeEnv stays installed. Without OfficeEnv the server stops at start with an error that names
+this step, and its tests are skipped. On a cluster, build the venv and install OfficeEnv on a
+login node, then reuse it (`skip_venv_if_present=true`). Once OfficeEnv is published, it moves into
+`pyproject.toml` and the lock like any other dependency.
 
 Release numbers follow OfficeEnv's `docs/RELEASING.md`: a patch release changes no verdict for an
 existing row, a minor one may add features or move verdicts (each listed in OfficeEnv's
@@ -31,7 +37,7 @@ existing row, a minor one may add features or move verdicts (each listed in Offi
 
 To move to a new release:
 
-1. change the tag in `requirements.txt`;
+1. change the tag in the install step above;
 2. emit `data/example.jsonl` again with that release (below), collect `data/example_rollouts.jsonl`
    again (see Run), and regenerate `data/example_metrics.json`:
    `gym dataset collate "+config_paths=[resources_servers/officeenv/configs/officeenv.yaml]" +output_dirpath=data/officeenv +mode=example_validation`;
@@ -39,7 +45,7 @@ To move to a new release:
 
 To run an unreleased OfficeEnv, put its source first on `PYTHONPATH` when starting the servers
 (`PYTHONPATH=<officeenv checkout>/src gym env start ...`). Gym keeps the caller's `PYTHONPATH` for
-every server, so that tree shadows the pinned release, and `/verify` reports its version.
+every server, so that tree shadows the installed release, and `/verify` reports its version.
 
 ## Rows
 

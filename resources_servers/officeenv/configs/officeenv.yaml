@@ -1,6 +1,6 @@
 # OfficeEnv: connected SaaS apps simulated per rollout. The environment is the officeenv
-# package pinned in requirements.txt; rows come from `officeenv emit` and carry the officeenv
-# version that emitted them.
+# package, installed as the server's README.md says; rows come from `officeenv emit` and carry
+# the officeenv version that emitted them.
 officeenv_resources_server:
   resources_servers:
     officeenv:

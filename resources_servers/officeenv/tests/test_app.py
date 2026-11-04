@@ -19,11 +19,16 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+
+# OfficeEnv installs apart from the server's locked dependencies until it is published: without it these tests skip.
+pytest.importorskip("officeenv", reason="OfficeEnv is not installed (README.md, 'The OfficeEnv version')")
+
 from officeenv import __version__ as officeenv_version
 from officeenv.apps import available
 from officeenv.artifacts import externalize
 from officeenv.emit import gym_row
-from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId

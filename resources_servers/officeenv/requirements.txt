@@ -1,4 +1,0 @@
--e nemo-gym[dev] @ ../../
-# OfficeEnv is not public yet. It will be released at a later date, and this pin will then point to that release;
-# until then it installs from NVIDIA's internal GitLab. Point of contact: Daniele Molinari <dmolinari@nvidia.com>
-officeenv @ git+ssh://git@gitlab-master.nvidia.com:12051/post-training/officeenv.git@v1.10.0

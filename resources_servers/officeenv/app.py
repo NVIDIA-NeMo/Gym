@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """OfficeEnv resources server: connected SaaS apps simulated per rollout.
 
-The environment is the ``officeenv`` package at the release requirements.txt pins. This server
-routes Gym's endpoints to OfficeEnv's framework-neutral episode service
-(``officeenv.service.EpisodeService``) and adds only Gym's own response fields.
+The environment is the ``officeenv`` package, which installs apart from this server's locked
+dependencies until it is published (README.md, "The OfficeEnv version"). This server routes Gym's
+endpoints to OfficeEnv's framework-neutral episode service (``officeenv.service.EpisodeService``)
+and adds only Gym's own response fields.
 
 A row (one JSONL line, written by ``officeenv emit`` or ``officeenv.emit.gym_row``):
 
@@ -36,16 +37,13 @@ schedule the penalty on its own (NeMo RL ``grpo.phasic_reward_components``).
 """
 
 import contextvars
+import importlib.util
 import os
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from officeenv.apps import available, get_app_class
-from officeenv.artifacts import ArtifactStore
-from officeenv.exposure import Catalog, ToolsExposure
-from officeenv.service import EpisodeService, Reply
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
@@ -69,6 +67,21 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+# OfficeEnv installs apart from this server's locked dependencies until it is published (README.md, "The OfficeEnv
+# version"): without it the server stops here, naming the step that installs it.
+if importlib.util.find_spec("officeenv") is None:
+    raise ImportError(
+        "OfficeEnv is not installed in this server's venv. Until OfficeEnv is published it installs apart from the "
+        "server's locked dependencies: see 'The OfficeEnv version' in resources_servers/officeenv/README.md "
+        "(OFFICEENV_GIT_URL)."
+    )
+
+from officeenv.apps import available, get_app_class
+from officeenv.artifacts import ArtifactStore
+from officeenv.exposure import Catalog, ToolsExposure
+from officeenv.service import EpisodeService, Reply
 
 
 if TYPE_CHECKING:
