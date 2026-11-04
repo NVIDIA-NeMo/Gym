@@ -33,22 +33,20 @@ import regex
 from fastapi import Body, FastAPI
 from pydantic import ConfigDict, Field, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import raise_for_status, request
+from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollouts import model_call_capture_dirs_from_config
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, upload_text
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.observability.model_calls import model_call_capture_dirs_from_config
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import upload_text
-from nemo_gym.server_utils import raise_for_status, request
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.misalignment_monitor.prompts import (
     ACTIVATION_SECTION,
     ALIGNMENT_INVESTIGATOR_PROMPT,
@@ -703,7 +701,7 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
             if isinstance(verdict, BaseException) and not isinstance(verdict, Exception):
                 raise verdict
             # A replay measures the judge, so a failed judge call there is a masked row, not a detected incident.
-            if case.reason == "replay" and isinstance(verdict, JudgeError):
+            if case.reason == "replay" and is_judge_failure(verdict):
                 raise verdict
         # A failed investigation leaves an 'unparsed' verdict, so the flag still becomes an alert.
         security, alignment = (
@@ -723,8 +721,8 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
             )
             try:
                 report["l3"] = _parse_json(self._reply_text(await self._judge([{"role": "user", "content": prompt}])))
-            except JudgeError as e:
-                if case.reason == "replay":
+            except JUDGE_FAILURES as e:
+                if case.reason == "replay" or not is_judge_failure(e):
                     raise
                 # A P0 is never lost to a failed check: without an answer, it pages.
                 report["l3"] = {"error": str(e)}

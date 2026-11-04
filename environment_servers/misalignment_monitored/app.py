@@ -21,10 +21,17 @@ from fastapi import Body, FastAPI, Request, Response
 from pydantic import Field
 
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
+    AGENT_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
+from nemo_gym.core import maybe_rollout_id_from_run_body
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # How often to ask the monitor whether to pause, how long to wait for its answer, and how long shutdown

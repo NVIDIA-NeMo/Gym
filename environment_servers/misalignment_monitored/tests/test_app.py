@@ -14,8 +14,8 @@ from environment_servers.misalignment_monitored.app import (
     MisalignmentMonitoredEnvironmentServer,
     MisalignmentMonitoredEnvironmentServerConfig,
 )
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
-from nemo_gym.server_utils import BaseServerConfig, ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
 
 
 # A reply that never comes, like a monitor that accepts no connection while the client keeps retrying.

@@ -29,10 +29,11 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, judge_failsafe
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.misalignment_monitor import app
 from resources_servers.misalignment_monitor.app import (
     MisalignmentMonitorConfig,
