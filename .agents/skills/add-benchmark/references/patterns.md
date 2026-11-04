@@ -21,7 +21,7 @@ Detailed patterns, schemas, and code examples for adding benchmarks to NeMo-Gym.
 ### Minimal verify-only server (e.g. `example_single_tool_call`)
 
 ```python
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseVerifyRequest, BaseVerifyResponse,
 )
@@ -53,7 +53,7 @@ from asyncio import Semaphore, get_running_loop
 from time import time
 from typing import Any, Dict, List, Optional
 import ray
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse,
 )
@@ -308,7 +308,7 @@ For single-turn benchmarks (model generates once, verify). Just reference `simpl
 For benchmarks where the model gets error feedback and retries:
 
 ```python
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef

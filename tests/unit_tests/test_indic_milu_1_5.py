@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from benchmarks.indic.milu_1_5 import prepare as module
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
 
 def source(question="कौन?", **extra):
@@ -207,8 +207,8 @@ def test_examples_and_config(monkeypatch):
     from omegaconf import OmegaConf
 
     import nemo_gym.config.global_config as global_config
-    from nemo_gym.benchmarks import BenchmarkConfig, _benchmark_config_paths
     from nemo_gym.cli.main import _asset_config_path
+    from nemo_gym.environment.benchmarks import BenchmarkConfig, _benchmark_config_paths
     from nemo_gym.environment.manifest import load_manifest
 
     prompt = load_prompt_config(str(module.DIRECTORY / "prompts/default.yaml"))
@@ -258,7 +258,7 @@ def test_examples_and_config(monkeypatch):
 
 
 def test_run_overrides_preserve_row_scoped_vllm_metadata(tmp_path):
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     row = module.build_rows([source()], language="hi")[0]
     row["agent_ref"] = {"name": "milu_1_5_simple_agent"}

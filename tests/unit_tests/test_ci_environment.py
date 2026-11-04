@@ -180,7 +180,7 @@ def test_full_suite_retry_is_bounded_and_reruns_only_failed_jobs() -> None:
 
 
 def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
-    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 2)]:
+    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 4)]:
         workflow = workflow_path.read_text()
         assert workflow.count("run: ./scripts/ci/reclaim_runner_disk.sh") == expected_jobs
         assert workflow.count("Reclaim runner disk") == expected_jobs

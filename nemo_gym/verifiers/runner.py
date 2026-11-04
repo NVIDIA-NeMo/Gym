@@ -3,7 +3,7 @@
 
 """The in-sandbox runner of a Python verifier: ``python3 run_verifier.py --verifier ... --workspace ...``.
 
-Copied into the verifier sandbox by the ``test.sh`` shim (``nemo_gym.tasks.harbor.python_verifier``) and run
+Copied into the verifier sandbox by the ``test.sh`` shim (``nemo_gym.data.tasks.harbor.python_verifier``) and run
 there as a script, so it is standard library only and imports nothing from ``nemo_gym``. It puts its own
 ``.ng`` folder first on ``sys.path``, where the shim vendored ``nemo_gym/verifiers``, then the verifier module's
 own folder, then the tests folder around the shim (a helper module beside the task's ``tests/verifier.py`` stays

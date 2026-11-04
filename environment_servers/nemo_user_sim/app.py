@@ -17,12 +17,11 @@ from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from environment_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeFailure,
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
 )
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -31,8 +30,8 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.client import format_exception_with_response_body, get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
+    TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
-    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -47,6 +46,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -54,7 +54,6 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServerConfig,
     CleanupContext,
     CleanupHandle,
-    HandledEpisodeError,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -62,7 +61,11 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
     is_retryable_dependency_status,
 )
-from nemo_gym.trajectory import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
+from nemo_gym.trajectory import (
+    AgentObservationBundle,
+    ToolCallObservation,
+    TrajectoryRecord,
+)
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,
@@ -594,7 +597,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         *,
         capture_training_tokens: bool,
     ) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         target_config = get_first_server_config_dict(self.server_client.global_config_dict, target_name)
         token_capture = (
             capture_training_tokens
@@ -610,10 +613,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         error: Exception,
         *,
         terminal: bool | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         return dependency_failure(
             error,
-            failure_model=UserSimEpisodeFailure,
             stage=stage,
             terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
             name_error_type=True,

@@ -11,7 +11,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from benchmarks.automationbench import prepare
-from nemo_gym.task_data import validate_jsonl_rows
+from nemo_gym.data import validate_jsonl_rows
 from responses_api_agents.verifiers_agent.task_data import TaskData
 
 

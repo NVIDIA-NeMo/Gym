@@ -309,7 +309,7 @@ class TestRequestCounters:
 def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(collected, monkeypatch, prefix_middleware):
     from fastapi import FastAPI, Response
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
     from nemo_gym.server_runtime import base_server
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
@@ -408,7 +408,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 ):
     from fastapi import FastAPI, Response
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
     from nemo_gym.server_runtime import base_server
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
@@ -657,7 +657,7 @@ class TestDriverMetrics:
     def test_output_writes_record_their_duration_and_size(self, collected):
         import time
 
-        from nemo_gym.rollout_store import _record_output_write
+        from nemo_gym.rollouts.rollout_store import _record_output_write
 
         async def run():
             async with observer.observe_event_loop("driver"):
@@ -672,7 +672,7 @@ class TestDriverMetrics:
     def test_nothing_is_recorded_without_an_observer(self):
         import time
 
-        from nemo_gym.rollout_store import _record_output_write
+        from nemo_gym.rollouts.rollout_store import _record_output_write
 
         assert observer.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")
@@ -680,7 +680,7 @@ class TestDriverMetrics:
 
 class TestRolloutShape:
     def _record(self, collected, row, result):
-        from nemo_gym.rollout_collection import _record_rollout_shape
+        from nemo_gym.rollouts.rollout_collection import _record_rollout_shape
 
         async def run():
             async with observer.observe_event_loop("driver"):

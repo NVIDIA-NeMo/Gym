@@ -7,7 +7,7 @@ import signal
 
 import pytest
 
-from nemo_gym.rollout_collection import _NO_SIGTERM_HOOK, RunTimingReport, _print_on_sigterm, _restore_sigterm
+from nemo_gym.rollouts.rollout_collection import _NO_SIGTERM_HOOK, RunTimingReport, _print_on_sigterm, _restore_sigterm
 
 
 def _report(total, **kwargs):
@@ -95,7 +95,7 @@ async def test_sigterm_hook_installs_and_restores():
 
 
 def test_waiting_ratio_row_micro_averages_over_servers():
-    from nemo_gym.rollout_collection import _sum_vllm_queue
+    from nemo_gym.rollouts.rollout_collection import _sum_vllm_queue
 
     text = 'vllm:num_requests_running{engine="0",model_name="m"} 40.0\nvllm:num_requests_waiting{engine="0",model_name="m"} 2.0\n# HELP x\n'
     assert _sum_vllm_queue(text) == (2.0, 40.0)
