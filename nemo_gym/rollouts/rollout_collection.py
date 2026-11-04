@@ -47,7 +47,6 @@ from aiohttp import ClientConnectorError, ClientError
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
-from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
@@ -110,6 +109,7 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.progress_utils import tqdm
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,

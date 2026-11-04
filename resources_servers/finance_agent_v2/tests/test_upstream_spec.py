@@ -59,7 +59,7 @@ def test_committed_snapshot_matches_installed_package(exporter) -> None:
 
 
 def test_one_upstream_version_across_the_pin_snapshot_and_dataset(exporter, committed) -> None:
-    """Bumping the requirements pin is what makes the snapshot stale, and nothing
+    """Bumping the project dependency pin is what makes the snapshot stale, and nothing
     else. prepare.py refuses to run when it disagrees; catch it here, where the
     failure names the cause."""
     from benchmarks.finance_agent_v2 import prepare as prepare_module
@@ -82,3 +82,45 @@ def test_unknown_upstream_tool_fails_the_export(exporter, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="brand_new_tool"):
         exporter.build_spec()
+
+
+@pytest.mark.parametrize("dependency_name", ["finance-agent", "finance_agent", "Finance-Agent"])
+def test_upstream_sha_reads_only_the_direct_project_dependency(
+    exporter, monkeypatch, tmp_path, dependency_name
+) -> None:
+    """Unrelated TOML metadata must not supply or duplicate the upstream pin."""
+    sha = "a" * 40
+    project = tmp_path / "pyproject.toml"
+    project.write_text(
+        "[project]\ndependencies = [\n"
+        f'  "{dependency_name} @ git+https://github.com/vals-ai/finance-agent-v2.git@{sha}",\n'
+        '  "model-library==0.1.25",\n]\n'
+        '[tool.snapshot]\nexample = "finance-agent-v2.git@' + "b" * 40 + '"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(exporter, "PROJECT_FPATH", project)
+
+    assert exporter._upstream_sha() == sha
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        [],
+        ["finance-agent==0.1.0"],
+        ["finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@main"],
+        ["finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@bb460b52"],
+        ["finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@" + "a" * 41],
+        ["finance-agent @ git+https://github.com/other/finance-agent-v2.git@" + "a" * 40],
+        ["finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@" + "a" * 40] * 2,
+    ],
+)
+def test_upstream_sha_rejects_missing_ambiguous_or_unpinned_dependencies(
+    exporter, monkeypatch, tmp_path, dependencies
+) -> None:
+    project = tmp_path / "pyproject.toml"
+    project.write_text("[project]\ndependencies = " + json.dumps(dependencies) + "\n", encoding="utf-8")
+    monkeypatch.setattr(exporter, "PROJECT_FPATH", project)
+
+    with pytest.raises(ValueError, match="expected .*finance-agent"):
+        exporter._upstream_sha()

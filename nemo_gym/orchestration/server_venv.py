@@ -25,12 +25,13 @@ from subprocess import Popen
 from sys import stderr, stdout
 from typing import IO, Any, Mapping
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.config.global_config import (
+    COMPONENT_EXTRAS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -228,7 +229,7 @@ def _server_python_request(dir_path: Path, parent_python: str) -> str:
     return parent_python if _python_request_admits(request, parent_python) else request
 
 
-def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
+def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     head_server_deps = [str(dependency) for dependency in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]]
     head_server_dep_args = shlex.join(head_server_deps)
     # Pins applied only to packages a server installs anyway, e.g. the parent's exact Ray version.
@@ -291,8 +292,16 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
             )
         elif has_pyproject_toml:
+            import tomllib
+
+            metadata = tomllib.loads((dir_path / "pyproject.toml").read_text())
+            target = (
+                "--requirements pyproject.toml"
+                if metadata.get("tool", {}).get("uv", {}).get("package") is False
+                else "'-e .'"
+            )
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}'-e .' {head_server_dep_args}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{target} {head_server_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
@@ -300,7 +309,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}nemo-gym{version_spec} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources '-e .' {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources {target} {head_server_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
@@ -338,6 +347,74 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         sys.executable,
         # Found by module name rather than next to this file, because the script may live in another package.
         # The script itself runs without importing Gym.
+        importlib.util.find_spec("nemo_gym.utils.venv_setup").origin,
+        "--venv",
+        str(venv_path),
+        "--command",
+        install_command,
+    ]
+    if skip_venv_if_present:
+        setup_command.append("--skip-if-ready")
+
+    return f"cd {shlex.quote(str(dir_path))} && {shlex.join(setup_command)} && {activate_cmd}"
+
+
+def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
+    """Prepare a component from its lock, or retain custom component setup."""
+    # External components keep the pre-lock requirements/project contracts.
+    # Managed component locks are enforced by repository CI, not user migration.
+    if not all((dir_path / name).is_file() for name in ("pyproject.toml", "uv.lock")):
+        return _legacy_setup_env_command(dir_path, global_config_dict, prefix)
+
+    venv_path = get_venv_path(dir_path, global_config_dict)
+    venv_python_fpath = venv_path / "bin/python"
+    venv_activate_fpath = venv_path / "bin/activate"
+    skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
+    activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
+    if skip_venv_if_present and venv_python_fpath.exists() and venv_activate_fpath.exists():
+        return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
+    if (dir_path / "requirements.txt").is_file():
+        raise RuntimeError(f"Found both pyproject.toml and requirements.txt in {dir_path}; use only one.")
+
+    try:
+        sync_command = [
+            sys.executable,
+            str(Path(__file__).parents[1] / "cli" / "_locked_env.py"),
+            "--project",
+            str(dir_path.absolute()),
+            "--venv",
+            str(venv_path),
+            "--python",
+            _server_python_request(dir_path, str(global_config_dict[PYTHON_VERSION_KEY_NAME])),
+        ]
+        extras_by_component = global_config_dict.get(COMPONENT_EXTRAS_KEY_NAME) or {}
+        if not isinstance(extras_by_component, Mapping):
+            raise RuntimeError("component_extras must map component paths to lists of extra names.")
+        component_path = "/".join(dir_path.parts[-2:])
+        extras = extras_by_component.get(component_path, [])
+        if not isinstance(extras, (list, ListConfig)) or any(
+            not isinstance(extra, str) or not extra for extra in extras
+        ):
+            raise RuntimeError(f"component_extras[{component_path!r}] must be a list of nonempty extra names.")
+        for extra in extras:
+            sync_command.extend(["--extra", extra])
+        for requirement in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]:
+            sync_command.extend(["--requirement", requirement])
+        for constraint in global_config_dict.get(HEAD_SERVER_CONSTRAINTS_KEY_NAME) or []:
+            sync_command.extend(["--constraint", constraint])
+        if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME):
+            sync_command.append("--verbose")
+        prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+        install_command = f"{shlex.join(sync_command)}{prefix_cmd}"
+    except RuntimeError as error:
+        if not skip_venv_if_present:
+            raise
+        install_command = f"printf '%s\\n' {shlex.quote(str(error))} >&2; exit 1"
+
+    # When setup is needed, serialize installers and recheck readiness under
+    # the lock in case another server completes installation before this one.
+    setup_command = [
+        sys.executable,
         importlib.util.find_spec("nemo_gym.utils.venv_setup").origin,
         "--venv",
         str(venv_path),

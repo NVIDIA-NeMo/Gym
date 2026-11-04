@@ -31,7 +31,6 @@ from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 import orjson
 from omegaconf import DictConfig
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
-from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
@@ -63,6 +62,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.progress_utils import tqdm
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
