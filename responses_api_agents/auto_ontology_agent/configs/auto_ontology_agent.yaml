@@ -1,0 +1,42 @@
+# The Auto Ontology Agent Server, which runs BIRD-Interact c-Interact on the bird_interact Environment Server.
+# benchmarks/bird_interact/auto_ontology.yaml pairs them. Auto Ontology needs its catalog, filled for each database,
+# and the source databases: see README.md.
+#
+# env.yaml supplies the settings below that name it: the embedding endpoint, the catalog's password and the source
+# databases' connection string.
+auto_ontology_agent:
+  responses_api_agents:
+    auto_ontology_agent:
+      entrypoint: app.py
+      reasoning_model_server:
+        type: responses_api_models
+        name: policy_model
+      # The name Auto Ontology sends. An openai/, azure/ or aws/ prefix selects its OpenAI-compatible client.
+      reasoning_model: ${policy_model_name}
+      # null: the reasoning model also serves Auto Ontology's fast calls.
+      fast_model_server: null
+      fast_model: null
+      embedding_base_url: ${auto_ontology_embedding_base_url}
+      embedding_api_key: ${auto_ontology_embedding_api_key}
+      embedding_model: ${auto_ontology_embedding_model}
+      catalog:
+        host: localhost
+        port: 5432
+        user: postgres
+        password: ${auto_ontology_catalog_password}
+        database: auto_ontology
+      # For example postgresql://root@localhost:5432/{database}.
+      source_database_url: ${auto_ontology_source_database_url}
+      # auto-ontology-eval's BIRD-Interact flags (ontology_sql_eval/env.py at 8657bd6) that Auto Ontology reads.
+      feature_flags:
+        INTERACTIVE: "true"
+        DB_PROBE_JSONB_PATH_CHECK: "true"
+        DB_PROBE_JOIN_PATH_CHECK: "true"
+        DB_PROBE_PROACTIVE: "true"
+        DETECT_VACUOUS_GROUP_BY: "true"
+        HUB_SIBLING_EXPANSION_ENABLED: "true"
+        HUB_SIBLING_CAP: "6"
+      # A directory of <database>/<database>_kb.jsonl files, to give Auto Ontology the knowledge entries' children,
+      # as auto-ontology-eval does. The ADK hides them from agents, so leave it null for scores to compare with others.
+      knowledge_children_dir: null
+      max_concurrent_steps: 8
