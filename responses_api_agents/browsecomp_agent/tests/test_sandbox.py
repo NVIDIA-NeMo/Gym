@@ -7,7 +7,7 @@ import json
 import sys
 import zipfile
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web
@@ -24,6 +24,68 @@ from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import (
     _seed,
     _tool_call,
 )
+
+
+@pytest.mark.parametrize(
+    ("stdout", "return_code", "error_type"),
+    [
+        ("pid:[100]\n", 0, None),  # Same namespace as the host.
+        ("", 1, None),  # Includes a different /proc/1 namespace: the in-container assertion fails.
+        ("pid:[200]\n", 0, "timeout"),
+        ("", 0, None),
+        ("not a namespace", 0, None),
+    ],
+)
+async def test_enroot_rejects_missing_process_isolation(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, return_code: int, error_type: str | None
+) -> None:
+    session = MagicMock()
+    session.sandbox.provider_name = "enroot"
+    session.sandbox.exec = AsyncMock(
+        return_value=MagicMock(stdout=stdout, return_code=return_code, error_type=error_type)
+    )
+    state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
+    with pytest.raises(RuntimeError, match="isolated PID namespace"):
+        await state._check_process_isolation(python="/private/python")
+
+
+async def test_enroot_accepts_a_distinct_process_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = MagicMock()
+    session.sandbox.provider_name = "enroot"
+    session.sandbox.exec = AsyncMock(return_value=MagicMock(stdout="pid:[200]\n", return_code=0, error_type=None))
+    state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
+    await state._check_process_isolation(python="/private/python")
+    assert session.sandbox.exec.await_args.kwargs["timeout_s"] == 30
+
+
+async def test_process_probe_does_not_run_on_other_providers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_host_proc(path: str) -> str:
+        raise AssertionError("Other providers must not inspect host /proc")
+
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", no_host_proc)
+    session = MagicMock()
+    session.sandbox.provider_name = "docker"
+    session.sandbox.exec = AsyncMock()
+    state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
+    await state._check_process_isolation(python="/private/python")
+    session.sandbox.exec.assert_not_awaited()
+
+
+async def test_isolation_failure_prevents_source_and_input_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    from responses_api_agents.browsecomp_agent import sandbox
+
+    session = MagicMock()
+    session.sandbox.upload = AsyncMock()
+    state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
+    runtime = MagicMock(install=AsyncMock())
+    monkeypatch.setattr(sandbox, "_runtime", lambda: runtime)
+    monkeypatch.setattr(state, "_check_process_isolation", AsyncMock(side_effect=RuntimeError("isolation failed")))
+    with pytest.raises(RuntimeError, match="isolation failed"):
+        await state.install_runtime(timeout=60)
+    runtime.install.assert_awaited_once()
+    session.sandbox.upload.assert_not_awaited()
 
 
 def test_host_execution_is_an_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:

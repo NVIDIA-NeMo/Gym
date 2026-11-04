@@ -6,6 +6,8 @@ import asyncio
 import functools
 import importlib.metadata
 import json
+import os
+import re
 import tempfile
 import zipfile
 from dataclasses import dataclass
@@ -75,6 +77,7 @@ class BrowsecompSandboxSession(AgentSessionState):
         """Install a private Python, then upload this revision of Gym and the harness."""
         runtime = _runtime()
         await runtime.install(self.session.sandbox, timeout_s=timeout)
+        await self._check_process_isolation(python=runtime.python)
         directory = self.session.session_dir
         prepared = await self.session.sandbox.exec(
             f"mkdir -p {quote(directory)} {quote(self.session.workdir)}", cwd="/", timeout_s=30
@@ -93,6 +96,30 @@ class BrowsecompSandboxSession(AgentSessionState):
         )
         if result.return_code != 0 or result.error_type is not None:
             raise RuntimeError(result.stderr or "Cannot unpack BrowseComp sandbox sources")
+
+    async def _check_process_isolation(self, *, python: str) -> None:
+        # Older Enroot silently ignores ENROOT_UNSHARE_PID. Check the actual exec
+        # namespace and its proc mount before delivering any rollout input.
+        sandbox = self.session.sandbox
+        if sandbox.provider_name != "enroot":
+            return
+        host_namespace = os.readlink("/proc/self/ns/pid")
+        probe = (
+            "import os; namespace = os.readlink('/proc/self/ns/pid'); "
+            "assert namespace == os.readlink('/proc/1/ns/pid'); print(namespace)"
+        )
+        result = await sandbox.exec(f"{quote(python)} -I -c {quote(probe)}", cwd="/", timeout_s=30)
+        namespace = result.stdout.strip()
+        if (
+            result.return_code != 0
+            or result.error_type is not None
+            or re.fullmatch(r"pid:\[\d+\]", namespace) is None
+            or namespace == host_namespace
+        ):
+            raise RuntimeError(
+                "BrowseComp requires an isolated PID namespace and matching /proc mount. "
+                "Install a complete Enroot distribution with PID isolation support (4.2 or newer)."
+            )
 
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
         """Write input as data; model-controlled strings never become a launch command."""

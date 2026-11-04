@@ -8,6 +8,8 @@ The repository-native research loop runs inside a task sandbox through an agent 
 
 The agent borrows `sandbox_access` when supplied. Otherwise `sandbox_provider` and `sandbox_config` create an owned sandbox. Missing sandbox configuration, the unisolated Local provider, required MCP grants, and more than one direct HTTP grant are refused. No sandbox error falls back to host execution. Close stops the harness through `SandboxSession`, captures output, then disconnects a borrowed sandbox or destroys an owned one.
 
+Enroot must provide PID isolation (upstream 4.2 or newer). Startup checks the actual exec process namespace and its `/proc` mount before staging rollout input; a shared host namespace or failed probe rejects the session. Use a complete matching Enroot installation, including its helper binaries. Merely setting `ENROOT_UNSHARE_PID` on an older installation is insufficient.
+
 The Resources Server remains independent. A direct HTTP grant supplies its tools with per-session headers/cookies; the updated cookie jar returns at agent close. BrowseComp resources execute `bash_command` in their own sandbox, separate from the agent container. This uses two containers per BrowseComp episode and does not require a provider to serialize/connect an existing sandbox. Search credentials, ground truth and verifier code stay on the Resources Server. The model upstream API key stays on the Model Server.
 
 For a compatible tool-free benchmark, use `resources_tool_transports: []` and change only the Environment Server's resources binding and dataset. Set `progress: false` when the pairing does not use the progress board. The adapter does not depend on BrowseComp task fields or its verifier. No SWE-bench Pro or Terminal-Bench support is claimed.
