@@ -1475,3 +1475,60 @@ def test_retirement_batch_is_due_when_full_or_old(monkeypatch):
     for rollout_id in ("1-0", "2-0", "3-0"):
         batch.add(rollout_id, {}, None)
     assert batch.due() is True, "full"
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_retirement_async_flush_finishes_before_propagating_cancellation(tmp_path, cancel_count):
+    import asyncio
+    import threading
+
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", _COVERED_ROLLOUT, snapshot_model_call_capture("0-0", [tmp_path]))
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    durable = []
+
+    def sync():
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "event loop could not release the disk worker"
+        durable.append(True)
+
+    task = asyncio.create_task(batch.flush_async(sync))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        for _ in range(cancel_count):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done(), "cleanup returned while the worker still needed the output files"
+            assert store.path_for("0-0").exists()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert durable == [True]
+    assert batch.retired == 1
+    assert not store.path_for("0-0").exists()
+
+
+async def test_retirement_async_flush_preserves_captures_on_sync_failure(tmp_path):
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", _COVERED_ROLLOUT, snapshot_model_call_capture("0-0", [tmp_path]))
+
+    def fail():
+        raise OSError("fsync failed")
+
+    with pytest.raises(OSError, match="fsync failed"):
+        await batch.flush_async(fail)
+
+    assert store.path_for("0-0").exists()
+    assert batch.retired == 0

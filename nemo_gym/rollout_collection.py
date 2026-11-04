@@ -3993,7 +3993,7 @@ class RolloutCollectionHelper(BaseModel):
                             shares_capture_key=rollout_id in shared_capture_ids,
                         )
                         if capture_retirements.due():
-                            capture_retirements.flush(lambda: os.fsync(results_file.fileno()))
+                            await capture_retirements.flush_async(lambda: os.fsync(results_file.fileno()))
 
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
@@ -4130,7 +4130,7 @@ class RolloutCollectionHelper(BaseModel):
                 )
             # Only a run that finished deletes what is still queued; an aborted run leaves those files in place.
             if capture_retirements is not None:
-                capture_retirements.flush(lambda: os.fsync(results_file.fileno()))
+                await capture_retirements.flush_async(lambda: os.fsync(results_file.fileno()))
             collection_succeeded = True
         finally:
             try:

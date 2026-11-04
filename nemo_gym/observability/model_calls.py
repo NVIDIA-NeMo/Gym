@@ -721,6 +721,21 @@ class CaptureRetirementBatch:
             len(self._pending) >= self._max_size or time.monotonic() - self._last_flush >= self._max_age_s
         )
 
+    async def flush_async(self, make_rollouts_durable: Callable[[], None]) -> None:
+        """Flush off the event loop, finishing before cancellation can close the output files."""
+        task = asyncio.create_task(asyncio.to_thread(self.flush, make_rollouts_durable))
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Cancelling to_thread cannot stop its worker. Keep its files open until it finishes,
+                # including when shutdown sends more than one cancellation request.
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
     def flush(self, make_rollouts_durable: Callable[[], None]) -> None:
         """Make the queued rollouts durable, then delete the capture files that nothing keeps."""
         if not self._pending:

@@ -5918,6 +5918,7 @@ class TestRolloutCollection:
             pytest.param({"retire_covered_model_call_captures": True}, True, False, id="redacted payloads"),
         ],
     )
+    @pytest.mark.parametrize("flush_on_finish", [False, True])
     async def test_run_from_config_deletes_a_covered_capture_file_only_when_asked(
         self,
         tmp_path: Path,
@@ -5925,8 +5926,23 @@ class TestRolloutCollection:
         global_config_extra: dict,
         redact_payloads: bool,
         expect_deleted: bool,
+        flush_on_finish: bool,
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.observability.model_calls import CaptureRetirementBatch
+
+        monkeypatch.setattr(CaptureRetirementBatch, "due", lambda self: not flush_on_finish)
+        loop = asyncio.get_running_loop()
+        delete = CaptureStore.delete_if_unchanged
+        loop_progress = threading.Event()
+
+        def slow_delete(self, *args, **kwargs):
+            # A slow disk operation must let another callback run on the collection event loop.
+            loop.call_soon_threadsafe(loop_progress.set)
+            assert loop_progress.wait(5), "capture deletion blocked the collection event loop"
+            return delete(self, *args, **kwargs)
+
+        monkeypatch.setattr(CaptureStore, "delete_if_unchanged", slow_delete)
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(
@@ -5966,6 +5982,7 @@ class TestRolloutCollection:
         results = await Helper().run_from_config(config)
 
         assert store.path_for("0-0").exists() is not expect_deleted
+        assert loop_progress.is_set() is expect_deleted
         # The persisted rollout carries the call whether or not its capture file is kept.
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
 
