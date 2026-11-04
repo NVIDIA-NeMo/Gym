@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models._checkpoint import (
     CheckpointableLedger,
     CutRequester,

@@ -56,15 +56,15 @@ from pydantic import BaseModel
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     VERIFIER_INVOCATION_HEADER,
     current_verifier_invocation_id,
     note_verifier_model_request,
 )
-from nemo_gym.core.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
 )
+from nemo_gym.core.failure_records import FailureBoundary, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureReportRow, observe_failure, report_for_current_request
 from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
 from nemo_gym.trajectory.trajectory_record import ModelCallRef

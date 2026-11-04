@@ -43,8 +43,8 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.core.episode_types import FailureBoundary
 from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text

@@ -37,7 +37,9 @@ export RAY_HEAD_NODE_IP="$head_node_ip:6379"
 echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
-ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
+# A container without the ray CLI installs a tested Ray with the Serve extra: the gateway imports ray.serve, whose
+# dependencies `default` lacks, and an unpinned install takes whatever Ray was released last.
+ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default,serve]==2.59.0"'
 
 # Default node-join wait (30s) is too short for slow image pulls. Also bounds a worker's wait for the head.
 RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
