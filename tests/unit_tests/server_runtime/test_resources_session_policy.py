@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -86,6 +87,18 @@ def test_legacy_seed_rotates_only_after_verification() -> None:
     assert str(UUID(new_id)) == new_id
     # Rotation leaves the previous cookie available for the environment's verify-retry evidence.
     assert fence.closed_episode("session") is None
+
+
+def test_legacy_seed_deprecation_is_logged_once_and_names_the_migration(caplog) -> None:
+    fence = ResourcesSessionFence(window_seconds=10)
+    with caplog.at_level(logging.WARNING):
+        fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
+        assert not caplog.records
+        fence.legacy_seed_session_id("first", identity=None, verified=False)
+        fence.legacy_seed_session_id("second", identity=None, verified=True)
+    assert len(caplog.records) == 1
+    assert "deprecated" in caplog.records[0].message
+    assert "ResourcesSeedSessionRequest" in caplog.records[0].message
 
 
 @pytest.mark.parametrize("verified", [False, True])

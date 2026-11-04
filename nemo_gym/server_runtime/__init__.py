@@ -115,6 +115,7 @@ if TYPE_CHECKING:
         SingleAgentTurnResult,
         SingleAgentTurnTaskInput,
     )
+    from nemo_gym.server_runtime.stateful_resources_server import StatefulResourcesServer
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
         DirectHTTPToolAccess,
@@ -191,6 +192,7 @@ _PUBLIC_API = {
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SandboxFailureDetails": "episode_types",
     "SimpleResourcesServer": "base_resources_server",
+    "StatefulResourcesServer": "stateful_resources_server",
     "SimpleServer": "base_server",
     "SingleAgentTurnFailure": "single_agent_turn_types",
     "SingleAgentTurnRequest": "single_agent_turn_types",

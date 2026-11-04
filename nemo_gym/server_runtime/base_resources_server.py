@@ -476,6 +476,7 @@ class ResourcesSessionFence:
         self._window_seconds = window_seconds
         self._locks: dict[str, _FenceLock] = {}
         self._closed: ClosedResourcesSessionRecords[EpisodeId] = ClosedResourcesSessionRecords(window_seconds)
+        self._legacy_seed_warning_emitted = False
 
     @asynccontextmanager
     async def locked(self, resources_session_id: str) -> AsyncIterator[None]:
@@ -508,12 +509,19 @@ class ResourcesSessionFence:
     ) -> str:
         """Check a legacy seed and rotate a completed cookie without invalidating its verification retries.
 
+        Deprecated compatibility path: migrate callers to typed ``ResourcesSeedSessionRequest`` seeds.
         Call while holding ``locked(session_id)``. Pass the active or retained verification identity, if any.
         Bind the returned ID to the request cookie only after creating the new state successfully.
         """
         self.raise_if_closed(session_id)
         if identity is not None:
             raise ResourcesSessionConflictError("A legacy seed cannot replace a typed session")
+        if not self._legacy_seed_warning_emitted:
+            logger.warning(
+                "Legacy cookie-based /seed_session is deprecated. Migrate to an Environment Server that sends "
+                "ResourcesSeedSessionRequest with resources_session_id, episode_id, task_id, and task_data."
+            )
+            self._legacy_seed_warning_emitted = True
         return str(uuid4()) if verified else session_id
 
     def check_typed_seed(
