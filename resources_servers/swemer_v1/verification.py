@@ -223,7 +223,7 @@ def _slice(log: str, begin: str, end: str) -> str:
     return log[start:stop] if stop != -1 else log[start:]
 
 
-def mirror_files() -> dict[str, str]:
+def mirror_files(*, maven_settings: bool = True) -> dict[str, str]:
     """Redirect Maven Central to its Google-hosted mirror.
 
     Confirmed for real on this same cluster (see swe_rebench.verification.mirror_files): under
@@ -241,16 +241,16 @@ def mirror_files() -> dict[str, str]:
     files: dict[str, str] = {}
     settings = mirror_dir / "settings.xml"
     init_gradle = mirror_dir / "init.gradle"
-    if settings.exists():
+    if maven_settings and settings.exists():
         files[MAVEN_SETTINGS_PATH] = settings.read_text()
     if init_gradle.exists():
         files[GRADLE_INIT_PATH] = init_gradle.read_text()
     return files
 
 
-def verification_files(inputs: VerificationInputs) -> dict[str, str]:
+def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: bool = True) -> dict[str, str]:
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
-    files.update(mirror_files())
+    files.update(mirror_files(maven_settings=overwrite_maven_settings))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():

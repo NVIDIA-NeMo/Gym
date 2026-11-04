@@ -21,26 +21,79 @@ harbor_agent_general:
       entrypoint: app.py
       domain: agent
 
-      harbor_jobs_dir: ${harbor_jobs_dir}
+      # Per-job worker variables; kept out of Ray runtime_env logs.
+      harbor_worker_env: {}
 
-      ## Follows harbor.models.job.config:DatasetConfig spec.
-      harbor_dataset:
-        ...
-
-      ## Follows harbor.models.trial.config:EnvironmentConfig spec.
-      harbor_environment:
-        ...
-
-      ## Follows harbor.models.trial.config:AgentConfig spec.
-      harbor_agent:
-        ...
-
-      ## Follows harbor.models.trial.config:VerifierConfig spec.
-      harbor_verifier:
-        ...
+      # Native harbor.models.job.config.JobConfig fields.
+      job:
+        jobs_dir: ${harbor_jobs_dir}
+        datasets:
+          - path: ${harbor_dataset_path}
+        agents:
+          - name: opencode
+            model_name: ${policy_model_name}
+        environment:
+          type: docker
+        timeout_multiplier: 2.0
+        verifier_timeout_multiplier: 3.0
+        retry:
+          max_retries: 3
 ```
 
-See [configs](./configs) for specific examples.
+`job` is validated by the installed Harbor `JobConfig` model. Use Harbor's names and nested structures directly;
+options such as retry policy, artifacts, extra instructions, and environment settings do not need individual Gym
+forwarding fields. See [configs](./configs) for specific examples.
+
+Gym runs one Harbor trial for each input row. These constraints are checked when the configuration loads:
+
+- Exactly one entry in `datasets` and one in `agents`.
+- `n_attempts` and `n_concurrent_trials` must be `1` (Gym's defaults). Configure overall concurrency and repeats in Gym.
+- Omit `job_name` and dataset `task_names`, `exclude_task_names`, and `n_tasks`. Gym assigns a job name from the
+  task/rollout indices and selects the task from the row's `task_name`.
+- Leave `tasks`, `source_jobs`, and `install_only` unset; they bypass Gym's per-row task selection or execution.
+- `environment.delete` must remain `true` so each rollout cleans up its environment.
+
+All other options use Harbor's defaults, except `quiet`, which defaults to `true` and can be overridden.
+`jobs_dir` is resolved to an absolute path; a `.jsonl` path still selects its sibling `harbor` directory.
+The existing path-resolution and unique-job-name options described below retain their behavior.
+The Gym-specific `harbor_ray_task_num_cpus`, `harbor_reward_key`, `harbor_worker_env`,
+`harbor_resolve_paths_from_gym_root`, and `harbor_unique_job_names` remain outside `job`.
+Worker environment variables are passed as task arguments and installed only for one Harbor Ray task, rather than
+stored in Ray runtime environment setup logs.
+
+The legacy fields listed below remain accepted for compatibility, but cannot be mixed with `job`.
+To migrate, move their values under `job` using this mapping:
+
+| Existing field | Native field under `job` |
+| --- | --- |
+| `harbor_jobs_dir`, `harbor_debug` | `jobs_dir`, `debug` |
+| `harbor_max_retries` | `retry.max_retries` |
+| `harbor_dataset`, `harbor_agent` | `datasets`, `agents` (single-element lists) |
+| `harbor_environment`, `harbor_verifier` | `environment`, `verifier` |
+
+The execution constraints above apply to both forms. Previously ignored conflicting settings now raise an error.
+
+> [!important]
+> The bridge converts Harbor's `agent/trajectory.json`, so the selected Harbor
+> agent must declare `capabilities.atif=True` and actually emit that file. Harbor
+> can run additional native agents, such as Pi, that do not emit ATIF; those
+> trials are not currently convertible into Gym rollouts by this bridge. Harbor
+> also has no generic image-capability flag, so local-image support must be
+> validated per agent and model provider.
+
+To inspect the exact agents and ATIF capabilities in the installed Harbor
+version:
+
+```bash
+python - <<'PY'
+from harbor.agents.factory import AgentFactory
+from harbor.models.trial.config import AgentConfig
+
+for name in AgentFactory.registered_names():
+    cls = AgentFactory.get_agent_class_from_config(AgentConfig(name=name))
+    print(f"{name}: atif={cls.capabilities.atif}")
+PY
+```
 
 ## Example
 
@@ -98,12 +151,23 @@ gym eval run --no-serve \
 
 ## Implementation Notes
 
+Relative job paths resolve from the agent process's working directory, and
+dataset paths are passed to Harbor unchanged. Built-in profiles can opt into
+repository-root resolution with `harbor_resolve_paths_from_gym_root: true`;
+absolute paths remain unchanged.
+
+Job names default to `t<task>-r<rollout>` for resuming trials. Set
+`harbor_unique_job_names: true` to append a fresh UUID for every rollout
+request, including retries, and prevent independent collections from colliding
+or reusing an old result. Prior job directories are preserved. LabBench2 enables
+both options; the generic Docker and Singularity configs retain their defaults.
+
 A few notable details make it more general than the [older implementation](../harbor_agent/README.md):
 - The Gym configurations now support the full Harbor spec same as the original Pydantic models (see `HarborAgentConfig` in [app.py](./app.py)), allowing a direct translation from a `harbor run` CLI/config to Gym config, without guesswork.
-  - New Harbor datasets can be directly used by using appropriate keys in `harbor_dataset` config key, which maps directly to the `harbor.models.job.config:DatasetConfig` specification.
+  - New Harbor datasets can be directly used by using appropriate keys in `job.datasets`, which maps directly to the `harbor.models.job.config:DatasetConfig` specification.
 - All parsing of the Harbor trajectory into a Gym rollout trajectory now uses Harbor APIs instead of custom dictionary parsing.
 - Reasoning text is correctly handled via `NeMoGymResponseReasoningItem` objects.
-- A minimum harbor version sets to `0.20.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
+- The minimum Harbor version is `0.24.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
 
 > [!caution]
 > Using this agent for training is currently not supported because underlying Harbor agents may not return
@@ -155,3 +219,13 @@ Example rollout metadata:
   }
 }
 ```
+
+### SkillsBench
+
+`benchmarks/skillsbench/harbor.yaml` and `harbor_opensandbox.yaml` use
+`skillsbench_app.py`, a thin subclass of this bridge. It supplies the Gym model
+server URL to the worker-side OpenHands harness and passes the named sandbox
+provider through `harbor_worker_env`, keeping credentials out of Harbor's
+retained configuration. Scheduling, job execution, scoring, and ATIF conversion
+use this general adapter. See [SkillsBench](../../benchmarks/skillsbench/README.md)
+for preparation and execution.

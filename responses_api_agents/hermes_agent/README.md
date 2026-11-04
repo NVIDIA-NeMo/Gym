@@ -52,7 +52,7 @@ gym eval run --no-serve \
 
 The collector calls Environment Server `/run`: seed Resources, seed the agent, call its
 rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
-flat rows use `single_agent_turn_legacy` with this native session lifecycle; no additional
+flat rows use `single_agent_turn_legacy` with this agent session lifecycle; no additional
 materialization script is needed. Collection does not call the agent's compatibility `/run`.
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
@@ -102,7 +102,7 @@ hermes_agent:
 | `enabled_toolsets` | `null` (all) | forwarded to `AIAgent(enabled_toolsets=...)` |
 | `disabled_toolsets` | `null` | forwarded to `AIAgent(disabled_toolsets=...)` |
 | `model` | `${policy_model_name}` in the default YAML | served model ID; configs that omit it retain the legacy `model_server.name` fallback |
-| `resources_server` | `null` | required only for the agent's compatibility `/run`; Environment Server binds Resources for native sessions |
+| `resources_server` | `null` | required only for the agent's compatibility `/run`; Environment Server binds Resources for agent sessions |
 | `max_turns` | `30` | maps to `AIAgent.max_iterations` |
 | `concurrency` | `32` | max simultaneous `run()` calls |
 | `temperature` | `null` | sampling temperature passed to `AIAgent`; request `temperature` overrides it, including `0.0` |
@@ -113,6 +113,7 @@ hermes_agent:
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
 | `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
+| `checkpoints_enabled` | `false` | turns on Hermes' own checkpoints (`checkpoints.enabled` in its config); unrelated to Gym's partial-rollout checkpoints, which this agent joins as restart-only |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
 
@@ -130,9 +131,9 @@ Remove unsupported fields that older versions silently ignored.
 
 ## Runtime and model requirements
 
-Sandbox sessions live in the memory of the worker that seeded them, so seeding a session requires `num_workers: 1`. Calling the agent's `/run` directly keeps no session and still supports several workers.
+Sandbox sessions live in the memory of the worker that seeded them. With several agent workers, session routing sends each session's requests to the worker that seeded it. Calling the agent's `/run` directly keeps no session.
 
-Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Its image must also match the host CPU architecture and C library because the host's `uv` executable is copied into the sandbox.
+Each sandbox session installs the Hermes version pinned in `pyproject.toml`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<key>/python`, for example because an earlier session in the same sandbox installed it. The key covers the Python build, the Hermes requirement and this server's package versions. The Agent Server builds the runtime for the sandbox's architecture and C library: a pinned standalone CPython plus Hermes and its dependencies at this server's versions, cached under `sandbox_python` in Gym's `cache_dir`. Building needs `uv` and outbound access to GitHub and the Python package index on the Agent Server; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python build can be given the file in that cache directory. The sandbox needs only x86_64 or aarch64 Linux, `bash`, `tar` with gzip and glibc 2.17 or musl, with no network or Python of its own. Hermes calls the Model Server directly from the sandbox, so the sandbox must reach the Model Server at its configured host and port.
 
 Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes names MCP tools `mcp_<server>_<tool>`; the response reports them as `mcp__<server>__<tool>`, the form Gym strips before verification, while captured model calls keep Hermes' names. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
 
@@ -142,9 +143,9 @@ The Hermes runner and the model's terminal tool execute as the same user in the 
 
 Calls without an agent session run Hermes on the agent-server host. They do not operate on
 a Resources-owned task sandbox. The agent's compatibility `/run` requires an explicit
-`resources_server`; native sessions and direct `/v1/responses` do not.
+`resources_server`; agent sessions and direct `/v1/responses` do not.
 
-The default YAML now selects native composition rather than acting as an unbound legacy
+The default YAML now selects composition with an Environment Server rather than acting as an unbound legacy
 swap source. Legacy swap configurations must explicitly restore
 `resources_server: {type: resources_servers, name: "???"}` on the agent. Existing bound
 recipes, including `hermes_math` and `swebench/pro/hermes`, keep their bindings.
@@ -163,4 +164,4 @@ gym eval run --no-serve \
 ```
 
 Example math rollouts are in `environments/hermes_math/data/example_rollouts.jsonl`.
-For the local adapter, terminal provider failures retain their response and observation evidence and reach verification. The returned rollout is always masked (`mask_sample: true`, `failure_kind: agent_request_failed`), even if the verifier awards a positive reward, so provider failures remain excluded from scores. Sandbox sessions retain their existing retryable failure path. Correlated model requests carry an invocation header through SDK retries, including attempts without a response ID.
+For the local adapter, terminal provider failures retain their response and observation evidence and reach verification. The returned rollout is always masked (`mask_sample: true`, `failure_kind: agent_request_failed`), even if the verifier awards a positive reward, so provider failures remain excluded from scores. Agent sessions report the failure cause; the Environment Server's `agent_outcome_policy` decides whether to verify, retry, or fail without grading. Worker and cleanup failures remain execution errors. Correlated model requests carry an invocation header through SDK retries, including attempts without a response ID.

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+user: |-
+  {text}
+
+  Translate the above {source_lang_name} text into {target_lang_name}.
+  Do not reason, explain, add labels, or use markdown. Return only the translation.

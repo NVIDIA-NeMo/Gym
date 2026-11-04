@@ -19,25 +19,44 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import aiohttp
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
+from nooa.unifiedllm.limits import REPLY_CAP_KEYS, ContextLimits
 from pydantic import BaseModel
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
-from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from nemo_gym.trajectory import ModelCallRef, ObservationGap
+
+
+class GymModelClient(Protocol):
+    """Model transport usable in the agent server or a sandbox process."""
+
+    async def post(
+        self,
+        *,
+        server_name: str,
+        url_path: str,
+        json: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: dict[str, str],
+        headers: dict[str, str],
+    ) -> aiohttp.ClientResponse: ...
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
+
+
+class OutputTokenLimitExceeded(RuntimeError):
+    """A recorded model response stopped at its output-token limit."""
 
 
 class InvalidPolicyOutputError(ValueError):
@@ -58,14 +77,15 @@ class GymModelCall:
 class RolloutLLMState:
     """Gym-owned budget and exact model evidence shared by this rollout's clients."""
 
-    max_policy_calls: int
+    max_policy_calls: int | None
+    fatal_error: Exception | None = None
     used: int = 0
     calls: list[GymModelCall] = field(default_factory=list)
     gaps: list[ObservationGap] = field(default_factory=list)
 
     def charge(self) -> None:
         # No await between check and increment: atomic for the async rollout task tree.
-        if self.used >= self.max_policy_calls:
+        if self.max_policy_calls is not None and self.used >= self.max_policy_calls:
             raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self.max_policy_calls} calls")
         self.used += 1
 
@@ -210,25 +230,43 @@ class GymResponsesLLM(UnifiedLLM):
     def __init__(
         self,
         *,
-        server_client: ServerClient,
+        server_client: GymModelClient,
         model_server_name: str,
         model_url_path: str,
         state: RolloutLLMState,
         cookies: dict[str, str],
         model: str = "gym-policy",
         on_call: Callable[[GymModelCall], None] | None = None,
+        on_response: Callable[[], None] | None = None,
         sampling_overrides: dict[str, Any] | None = None,
+        context_window: int | None = None,
     ) -> None:
-        super().__init__(model=model)
+        super().__init__(model=model, context_window=context_window)
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
         self._state = state
         self._on_call = on_call
+        self._on_response = on_response
         self._sampling_overrides = dict(sampling_overrides or {})
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
+
+    def get_context_limits(
+        self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
+    ) -> ContextLimits:
+        """Reserve the same reply cap that the Gym request will actually send."""
+        params = dict(overrides or {})
+        cap = self._sampling_overrides.get("max_output_tokens")
+        if cap is not None:
+            params = {key: value for key, value in params.items() if key not in REPLY_CAP_KEYS}
+            if params.get("extra_body"):
+                params["extra_body"] = {
+                    key: value for key, value in params["extra_body"].items() if key not in REPLY_CAP_KEYS
+                }
+            params["max_tokens"] = cap
+        return super().get_context_limits(params, fallback_reserve=fallback_reserve)
 
     @property
     def calls(self) -> int:
@@ -260,6 +298,7 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        limits = self.get_context_limits(kwargs)
         self._state.charge()
         self._calls += 1
 
@@ -282,15 +321,17 @@ class GymResponsesLLM(UnifiedLLM):
                 }
             }
 
-        aliases = {"max_tokens": "max_output_tokens"}
         supported = set(NeMoGymResponseCreateParamsNonStreaming.model_fields) - {"model"}
         for name, value in kwargs.items():
-            destination = aliases.get(name, name)
-            if destination in supported and value is not None:
-                request[destination] = value
+            if name not in REPLY_CAP_KEYS and name in supported and value is not None:
+                request[name] = value
 
         # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
         request.update(self._sampling_overrides)
+        if limits.reserve_is_fallback:
+            request.pop("max_output_tokens", None)
+        else:
+            request["max_output_tokens"] = limits.reserved_output_tokens
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         call = GymModelCall(
             model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
@@ -299,26 +340,41 @@ class GymResponsesLLM(UnifiedLLM):
         self._state.calls.append(call)
         if self._on_call is not None:
             self._on_call(call)
-        http_response = await self._server_client.post(
-            server_name=self._model_server_name,
-            url_path=self._model_url_path,
-            json=body,
-            cookies=self._cookies,
-        )
         try:
-            await raise_for_status(http_response)
-        except aiohttp.ClientResponseError as error:
-            # Expose the response body for NOOA context-overflow detection.
-            content = getattr(error, "response_content", b"")
-            if content:
-                if isinstance(content, bytes):
-                    content = content.decode(errors="replace")
-                error.message = f"{error.message}: {content}"
+            http_response = await self._server_client.post(
+                server_name=self._model_server_name,
+                url_path=self._model_url_path,
+                json=body,
+                cookies=self._cookies,
+                headers={"x-session-id": call.invocation_id} if call.invocation_id is not None else {},
+            )
+            try:
+                await raise_for_status(http_response)
+            except aiohttp.ClientResponseError as error:
+                # Expose the response body for NOOA context-overflow detection.
+                content = getattr(error, "response_content", b"")
+                if content:
+                    if isinstance(content, bytes):
+                        content = content.decode(errors="replace")
+                    error.message = f"{error.message}: {content}"
+                raise
+            raw = await get_response_json(http_response)
+            response = NeMoGymResponse.model_validate(raw)
+            call.response = response
+            self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
+        except Exception as error:
+            self._state.fatal_error = error
             raise
-        raw = await get_response_json(http_response)
-        response = NeMoGymResponse.model_validate(raw)
-        call.response = response
-        self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
+
+        # A successful retry clears only the earlier transport failure.
+        self._state.fatal_error = None
+        if self._on_response is not None:
+            self._on_response()
+
+        # Capture the upstream response first, but never hand a truncated tool
+        # call to NOOA for execution. Its retry loop may recover with a later call.
+        if response.incomplete_details is not None and response.incomplete_details.reason == "max_output_tokens":
+            raise OutputTokenLimitExceeded("Gym model response exhausted max_output_tokens before completion")
 
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None

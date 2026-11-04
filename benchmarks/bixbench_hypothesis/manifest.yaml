@@ -1,0 +1,30 @@
+name: bixbench_hypothesis
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: BixBench-Hypothesis bioinformatics tasks adapted to Harbor and evaluated with a rubric-based LLM judge.
+modality: text
+licensing: unknown
+authors:
+- Sanyam Kapoor
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: config.yaml
+resources_server: null
+agent_server: harbor_agent_general
+datasets:
+- name: bixbench_hypothesis
+  type: benchmark
+  jsonl_fpath: benchmarks/bixbench_hypothesis/data/gym.jsonl
+  prepare_script: benchmarks/bixbench_hypothesis/harbor/adapter.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: experimental

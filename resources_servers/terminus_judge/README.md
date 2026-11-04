@@ -29,14 +29,17 @@ For each verification request, the agent's JSON output is validated through mult
 
 ## Running servers
 
-The following command can be used to run this resources server, along with the simple agent and a policy model:
+The following command can be used to run this resources server, along with the simple agent, a policy model, and a judge model:
 
 ```bash
 gym env start \
   --resources-server terminus_judge \
+  --config resources_servers/terminus_judge/configs/judge_model.yaml \
   --model-type openai_model \
-  +terminus_judge_resources_server.resources_servers.terminus_judge.judge_responses_create_params.max_output_tokens=512
+  +terminus_judge_resources_server.resources_servers.terminus_judge.judge_responses_create_params.max_output_tokens=4096
 ```
+
+`configs/terminus_judge.yaml` sends LLM-judge calls to a model server named `judge_model`, which `configs/judge_model.yaml` defines with the `openai_model` adapter. By default the judge uses the policy endpoint and model. To use a separate judge, set `judge_base_url`, `judge_api_key`, and `judge_model_name`, for example in `env.yaml`. The command gives the judge 4096 output tokens because reasoning models spend most of their budget before they write the verdict, and a judge reply with no verdict scores 0.
 
 Then, rollouts can be collected using a command such as the following:
 

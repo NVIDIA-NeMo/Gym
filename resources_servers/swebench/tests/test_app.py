@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,20 +22,18 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle
 from resources_servers.swebench.app import (
     DockerContainer,
     SwebenchResourcesServer,
     SwebenchResourcesServerConfig,
-    SWEBenchSeedSessionRequest,
-    SWEBenchSeedSessionResponse,
+    SWEBenchVerifyRequest,
     SWEBenchVerifyResponse,
+    patch_extraction_command,
+    strip_binary_diffs,
 )
+from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox
 
 
 def make_sandbox(
@@ -123,6 +122,9 @@ class TestApp:
             "peak_memory_mib": None,
             "resource_usage_source": None,
             "error_type": None,
+            "observed_client_interval_s": None,
+            "teardown_confirmed": None,
+            "cleanup_errors": [],
         }
 
     async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
@@ -281,210 +283,155 @@ class TestApp:
         assert observation.error_type == "RuntimeError"
 
 
-_INSTANCE = {
+class TestMultilingualMavenSettings:
+    @pytest.mark.parametrize("overwrite", [True, False])
+    async def test_maven_settings_upload_follows_config(self, overwrite: bool) -> None:
+        sandbox = make_sandbox()
+        await patch_swebench_multilingual_sandbox(
+            "google/gson", "google__gson-1", sandbox, overwrite_maven_settings=overwrite
+        )
+
+        destinations = [call.args[1] for call in sandbox.upload.await_args_list]
+        assert ("/root/.m2/settings.xml" in destinations) is overwrite
+        assert "/root/.gradle/init.d/maven_central_mirror.gradle" in destinations
+
+
+class TestPatchExtraction:
+    def test_command_stages_tracked_changes_and_diffs_the_index_against_the_seed_commit(self) -> None:
+        cmd = patch_extraction_command("/testbed", "abc123")
+        assert cmd.startswith("cd /testbed && git add -u ")
+        assert "add -A" not in cmd  # untracked build output must not ride along
+        assert cmd.endswith("cd /testbed && git --no-pager diff --cached abc123")
+
+    def test_command_quotes_odd_paths(self) -> None:
+        assert "'/work dir'" in patch_extraction_command("/work dir", "deadbeef")
+
+    def test_strip_binary_diffs_drops_only_binary_sections(self) -> None:
+        text = (
+            "diff --git a/a.py b/a.py\nindex 1..2 100644\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+            "diff --git a/img.png b/img.png\nindex 3..4 100644\nBinary files a/img.png and b/img.png differ\n"
+            "diff --git a/b.py b/b.py\nnew file mode 100644\n--- /dev/null\n+++ b/b.py\n@@ -0,0 +1 @@\n+z\n"
+        )
+        out = strip_binary_diffs(text)
+        assert "img.png" not in out and "a/a.py" in out and "b/b.py" in out
+        assert strip_binary_diffs("") == ""
+
+
+VERIFY_BODY = {
     "repo": "astropy/astropy",
-    "instance_id": "astropy__astropy-12907",
-    "base_commit": "base",
-    "patch": "gold patch",
-    "test_patch": "test patch",
-    "problem_statement": "Fix it",
+    "instance_id": "my instance_id",
+    "base_commit": "my base_commit",
+    "patch": "my patch",
+    "test_patch": "my test_patch",
+    "problem_statement": "my problem_statement",
     "hints_text": "",
-    "created_at": "2022-01-01",
+    "created_at": "my created_at",
     "version": "4.3",
     "FAIL_TO_PASS": "[]",
     "PASS_TO_PASS": "[]",
-    "environment_setup_commit": "setup",
-    "difficulty": "easy",
-    "subset": "verified",
-    "split": "test",
+    "environment_setup_commit": "my environment_setup_commit",
+    "difficulty": "my difficulty",
+    "responses_create_params": {"input": []},
+    "response": {
+        "output": [],
+        "id": "",
+        "created_at": 0,
+        "model": "",
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+    "subset": "my subset",
+    "split": "my split",
 }
-_RESPONSE = {
-    "output": [],
-    "id": "",
-    "created_at": 0,
-    "model": "",
-    "object": "response",
-    "parallel_tool_calls": False,
-    "tool_choice": "auto",
-    "tools": [],
-}
-_TEST_SPEC = SimpleNamespace(
-    instance_image_key="img:key", instance_id="astropy__astropy-12907", repo="astropy/astropy"
-)
 
 
-def _session_server(monkeypatch: MonkeyPatch) -> tuple[SwebenchResourcesServer, MagicMock]:
-    """A server whose every sandbox is one mock that runs in the ``/testbed`` image WORKDIR."""
-    sandbox = MagicMock()
-    sandbox.start_with_setup = AsyncMock()
-    sandbox._handle = SandboxHandle(sandbox_id="sb-1", provider_name="test-provider", raw=None)
-    sandbox.exec = AsyncMock(
-        side_effect=lambda command, **kwargs: SandboxExecResult(
-            return_code=0, stdout="/testbed\n" if command == "pwd" else "diff --git a/x b/x\n", stderr=""
+class TestVerdictMasking:
+    """An evaluation that did not complete has no verdict and is masked as a verifier error; a patch the harness
+    could not apply is the model's own graded zero."""
+
+    async def _verify(
+        self, monkeypatch: MonkeyPatch, run_result: dict, *, sandbox_error: str | None = None, golden: bool = True
+    ) -> tuple[SWEBenchVerifyResponse, list]:
+        server = SwebenchResourcesServer(
+            config=SwebenchResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                sandbox_provider="test",
+                sandbox_config=dict(),
+                is_verifying_golden_patch=golden,
+            ),
+            server_client=MagicMock(spec=ServerClient),
         )
-    )
-    sandbox.serialize = AsyncMock(return_value={"sandbox_id": "sb-1", "provider": "test-provider"})
-    sandbox.stop = AsyncMock()
-    monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
-    monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: MagicMock())
-    monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_metadata", lambda *_: {})
-    monkeypatch.setattr("resources_servers.swebench.app.AsyncSandbox", MagicMock(return_value=sandbox))
-    monkeypatch.setattr(SwebenchResourcesServer, "_make_test_spec", lambda self, body: _TEST_SPEC)
-    config = SwebenchResourcesServerConfig(
-        host="0.0.0.0",
-        port=8080,
-        entrypoint="",
-        name="",
-        sandbox_provider="test",
-        sandbox_config={},
-        apply_anti_cheating=False,
-    )
-    return SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient)), sandbox
+        monkeypatch.setattr(
+            "resources_servers.swebench.app.SwebenchResourcesServer._create_sandbox",
+            AsyncMock(
+                return_value=make_sandbox(exec_result=SandboxExecResult(return_code=0, stdout="/testbed\n", stderr=""))
+            ),
+        )
 
+        async def fake_run_instance(*, client, **kwargs):
+            client._sandbox_error_type = sandbox_error
+            return run_result
 
-def _typed_seed(
-    session_id: str = "resources-session", task_id: str = "astropy__astropy-12907"
-) -> ResourcesSeedSessionRequest:
-    return ResourcesSeedSessionRequest(
-        resources_session_id=session_id,
-        episode_id=EpisodeId(rollout_id="rollout"),
-        task_id=TaskId(taskset="swebench_verified", task_id=task_id),
-        task_data=_INSTANCE | {"responses_create_params": {"input": "Fix it"}},
-    )
+        monkeypatch.setattr("resources_servers.swebench.app.run_instance", fake_run_instance)
+        observed = []
+        monkeypatch.setattr("resources_servers.swebench.app.observe_failure", observed.append)
+        if not golden:
+            # The agent's sandbox is gone: extracting the patch raises.
+            server._session_id_to_sandbox["sid"] = make_sandbox(exec_error=RuntimeError("sandbox lost"))
+        response = await server.verify(
+            SimpleNamespace(session={SESSION_ID_KEY: "sid"}), SWEBenchVerifyRequest.model_validate(VERIFY_BODY)
+        )
+        return response, observed
 
+    async def test_a_completed_evaluation_is_a_verdict_with_the_patch_digest(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(monkeypatch, {"completed": True, "resolved": True})
+        assert response.evaluation_completed and response.reward == 1 and not response.mask_sample
+        assert response.failure_kind is None and response.failure_reason is None and observed == []
+        assert response.model_patch_sha256 == hashlib.sha256(b"my patch").hexdigest()
 
-def _close_body(seed: ResourcesSeedSessionRequest) -> dict[str, Any]:
-    return {"resources_session_id": seed.resources_session_id, "episode_id": seed.episode_id.model_dump(mode="json")}
+    async def test_a_patch_that_does_not_apply_is_the_models_graded_zero(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": False, "resolved": False, "patch_apply_failed": True, "error": "EvaluationError: apply"},
+        )
+        assert response.reward == 0 and not response.mask_sample and response.failure_kind is None
+        assert observed == []
 
+    async def test_an_evaluation_error_is_masked_as_a_verifier_error(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(
+            monkeypatch, {"completed": False, "resolved": False, "patch_apply_failed": False, "error": "ValueError: x"}
+        )
+        assert not response.evaluation_completed and response.reward == 0 and response.mask_sample
+        assert response.failure_kind == "verifier_error" and response.failure_reason == "ValueError: x"
+        assert response.model_patch_sha256 == hashlib.sha256(b"my patch").hexdigest()
+        [event] = observed
+        assert event.failure_kind == "verifier_error" and event.failure_reason == "ValueError: x"
 
-def test_typed_seed_hands_the_agent_the_task_sandbox_and_close_stops_it_once(monkeypatch: MonkeyPatch) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    seed = _typed_seed()
+    @pytest.mark.parametrize("apply_failed", [False, True])
+    async def test_a_sandbox_error_is_masked_even_when_the_patch_did_not_apply(
+        self, monkeypatch: MonkeyPatch, apply_failed: bool
+    ) -> None:
+        # A failed sandbox operation can itself make `git apply` or the tests fail, so neither is the model's result.
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": apply_failed is False, "resolved": False, "patch_apply_failed": apply_failed},
+            sandbox_error="TimeoutError",
+        )
+        assert response.mask_sample and response.failure_kind == "verifier_error"
+        assert response.failure_reason == "Verification sandbox error: TimeoutError" and len(observed) == 1
 
-    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
-        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
-        assert seeded.status_code == 200, seeded.text
-        assert seeded.json() == {
-            "resources_session_id": "resources-session",
-            "resources_tools": None,
-            "sandbox_access": {
-                "connection": {
-                    "kind": "direct",
-                    "provider_config_ref": "test",
-                    "descriptor": {"sandbox_id": "sb-1", "provider": "test-provider"},
-                },
-                "workdir": "/testbed",
-            },
-        }
-        assert client.post("/seed_session", json=seed.model_dump(mode="json")).json() == seeded.json()
-        assert sandbox.start_with_setup.await_count == 1
-
-        for _ in range(2):
-            closed = client.post("/close_session", json=_close_body(seed))
-            assert closed.json() == {"resources_session_id": "resources-session"}
-        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 500
-        assert sandbox.start_with_setup.await_count == 1
-
-    sandbox.stop.assert_awaited_once()
-
-
-def test_typed_verify_consumes_the_sandbox_and_close_does_not_stop_it_again(monkeypatch: MonkeyPatch) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    run_instance = AsyncMock(return_value=dict(resolved=True, completed=True))
-    monkeypatch.setattr("resources_servers.swebench.app.run_instance", run_instance)
-    seed = _typed_seed()
-    verify = _INSTANCE | {"responses_create_params": {"input": "Fix it"}, "response": _RESPONSE}
-
-    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
-        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
-        verified = client.post("/verify", json=verify)
-        assert verified.status_code == 200, verified.text
-        assert verified.json()["model_patch"] == "diff --git a/x b/x\n"
-        assert run_instance.await_args.kwargs["pred"]["model_patch"] == "diff --git a/x b/x\n"
-        # A second verify or seed would hand out a sandbox that no longer exists.
-        assert client.post("/verify", json=verify).status_code == 500
-        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 500
-        assert client.post("/close_session", json=_close_body(seed)).status_code == 200
-
-    # Verify stops the task sandbox after extracting the patch; close finds nothing left to stop.
-    sandbox.stop.assert_awaited_once()
-
-
-def test_close_retries_a_stop_that_failed_during_typed_verify(monkeypatch: MonkeyPatch) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    monkeypatch.setattr(
-        "resources_servers.swebench.app.run_instance", AsyncMock(return_value=dict(resolved=True, completed=True))
-    )
-    sandbox.stop = AsyncMock(side_effect=[RuntimeError("stop failed"), None])
-    seed = _typed_seed()
-    verify = _INSTANCE | {"responses_create_params": {"input": "Fix it"}, "response": _RESPONSE}
-
-    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
-        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
-        assert client.post("/verify", json=verify).status_code == 200
-        assert client.post("/close_session", json=_close_body(seed)).status_code == 200
-
-    assert sandbox.stop.await_count == 2
-    assert not server._session_id_to_sandbox
-
-
-async def test_typed_seed_rejects_a_task_id_that_names_another_instance(monkeypatch: MonkeyPatch) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    with pytest.raises(ValueError, match="does not match the task row"):
-        await server.seed_session(MagicMock(session={}), _typed_seed(task_id="other"))
-    sandbox.start_with_setup.assert_not_awaited()
-
-
-@pytest.mark.parametrize("failure", ["serialize", "pwd"])
-async def test_typed_seed_stops_the_sandbox_when_the_handoff_fails(monkeypatch: MonkeyPatch, failure: str) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    if failure == "serialize":
-        sandbox.serialize = AsyncMock(side_effect=RuntimeError("cannot serialize"))
-        expected = "cannot serialize"
-    else:
-        sandbox.exec = AsyncMock(return_value=SandboxExecResult(return_code=1, stdout="", stderr="no shell"))
-        expected = "Could not resolve the task sandbox workdir: no shell"
-
-    with pytest.raises(RuntimeError, match=expected):
-        await server.seed_session(MagicMock(session={}), _typed_seed())
-
-    sandbox.stop.assert_awaited_once()
-    assert not server._session_id_to_sandbox
-    assert not server._task_sessions
-
-
-async def test_typed_sessions_require_a_single_worker_but_legacy_seeds_do_not(monkeypatch: MonkeyPatch) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    server.config.num_workers = 2
-    with pytest.raises(ValueError, match="num_workers=1"):
-        await server.seed_session(MagicMock(session={}), _typed_seed())
-    sandbox.start_with_setup.assert_not_awaited()
-
-    legacy = await server.seed_session(
-        MagicMock(session={SESSION_ID_KEY: "cookie"}), SWEBenchSeedSessionRequest(**_INSTANCE)
-    )
-    assert legacy == SWEBenchSeedSessionResponse(sandbox_handle="sb-1")
-
-
-def test_legacy_seed_body_still_returns_the_sandbox_handle_over_http(monkeypatch: MonkeyPatch) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    with TestClient(server.setup_webserver()) as client:
-        seeded = client.post("/seed_session", json=_INSTANCE | {"responses_create_params": {"input": "Fix it"}})
-        assert seeded.status_code == 200, seeded.text
-        assert seeded.json() == {"sandbox_handle": "sb-1"}
-        sandbox.serialize.assert_not_awaited()
-    # Shutdown stops the legacy session's sandbox, which no verify released.
-    sandbox.stop.assert_awaited_once()
-
-
-async def test_shutdown_stops_sandboxes_no_close_released(monkeypatch: MonkeyPatch) -> None:
-    server, sandbox = _session_server(monkeypatch)
-    await server.seed_session(MagicMock(session={}), _typed_seed())
-    await server.shutdown()
-    sandbox.stop.assert_awaited_once()
-    assert not server._session_id_to_sandbox
-
-
-def test_typed_sessions_meet_the_resources_session_contract(monkeypatch: MonkeyPatch) -> None:
-    server, _ = _session_server(monkeypatch)
-    check_resources_session_contract(server.setup_webserver(), _typed_seed("contract-session"), keeps_state=True)
+    async def test_a_patch_that_could_not_be_extracted_is_masked(self, monkeypatch: MonkeyPatch) -> None:
+        # The empty patch then fails to apply, but the agent's patch was never collected: no verdict on it.
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": False, "resolved": False, "patch_apply_failed": True, "error": "EvaluationError: apply"},
+            golden=False,
+        )
+        assert response.mask_sample and response.failure_kind == "verifier_error"
+        assert response.failure_reason == "Failed to extract the model patch from the agent sandbox"
+        assert response.model_patch_sha256 is None and response.model_patch is None and len(observed) == 1

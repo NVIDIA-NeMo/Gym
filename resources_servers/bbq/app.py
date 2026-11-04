@@ -44,22 +44,22 @@ from util import (
     validate_answer_judgment,
 )
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+)
+from nemo_gym.metrics import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-)
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-)
-from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 logger = logging.getLogger(__name__)
@@ -141,8 +141,6 @@ class BBQVerifyResponse(BaseVerifyResponse):
 
 class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
     """Single-turn comparative-QA verifier with two concurrent LLM checks."""
-
-    ray_enabled = False
 
     config: BBQTwoJudgeConfig
     _prompt_templates: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)

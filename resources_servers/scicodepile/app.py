@@ -15,16 +15,16 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from code_extraction import preprocess_code_completion
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import (
+    compute_pass_majority_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
-)
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    highest_k_metrics,
 )
 
 
@@ -153,8 +153,6 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
     prefix to fall back on, because SciCodePile's ``prompt`` field is display
     text whose docstring is not indented and therefore is not valid Python.
     """
-
-    ray_enabled = False
 
     config: SciCodePileResourcesServerConfig
 

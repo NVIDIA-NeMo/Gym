@@ -21,7 +21,7 @@ import pytest
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall
 from pydantic import BaseModel
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessageForTraining,
@@ -29,6 +29,7 @@ from nemo_gym.openai_utils import (
 )
 from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
+    OutputTokenLimitExceeded,
     PolicyCallBudgetExceeded,
     RolloutLLMState,
     _finish_reason,
@@ -81,7 +82,11 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
 
 
 def make_llm(
-    payload: dict, *, max_policy_calls: int = 2, sampling_overrides: dict | None = None
+    payload: dict,
+    *,
+    max_policy_calls: int | None = 2,
+    sampling_overrides: dict | None = None,
+    context_window: int | None = None,
 ) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
@@ -93,8 +98,55 @@ def make_llm(
         state=state,
         cookies={},
         sampling_overrides=sampling_overrides,
+        context_window=context_window,
     )
     return llm, server_client, state
+
+
+@pytest.mark.asyncio
+async def test_response_progress_fires_after_capture_and_cookies_before_output_validation() -> None:
+    raw = model_response()
+    raw["incomplete_details"] = {"reason": "max_output_tokens"}
+    llm, client, state = make_llm(raw)
+    client.post.return_value.cookies = SimpleCookie("model_state=updated")
+    captured = []
+
+    def capture() -> None:
+        captured.append((state.calls[-1].response.model_dump(mode="json"), dict(llm._cookies)))
+
+    llm._on_response = capture
+    with pytest.raises(OutputTokenLimitExceeded):
+        await llm.acall([{"role": "user", "content": "task"}])
+    assert len(captured) == 1
+    assert captured[0][0]["id"] == "resp-1"
+    assert captured[0][0]["incomplete_details"]["reason"] == "max_output_tokens"
+    assert captured[0][1] == {"model_state": "updated"}
+    client.post.side_effect = ConnectionError("unavailable")
+    with pytest.raises(ConnectionError):
+        await llm.acall([{"role": "user", "content": "task"}])
+    assert len(captured) == 1
+
+
+@pytest.mark.asyncio
+async def test_context_planning_reserves_the_effective_gym_reply_cap() -> None:
+    llm, client, _ = make_llm(model_response(), context_window=262144, sampling_overrides={"max_output_tokens": 32768})
+    overrides = {"max_tokens": 128, "extra_body": {"max_completion_tokens": 64, "custom": True}}
+    limits = llm.get_context_limits(overrides, fallback_reserve=4096)
+    assert llm.context_window == limits.context_window == 262144
+    assert limits.reserved_output_tokens == 32768
+    assert limits.usable_input_tokens == 229376
+    assert not limits.reserve_is_fallback
+    assert overrides == {"max_tokens": 128, "extra_body": {"max_completion_tokens": 64, "custom": True}}
+    await llm.acall([{"role": "user", "content": "hello"}], max_tokens=128)
+    assert client.post.await_args.kwargs["json"].max_output_tokens == limits.reserved_output_tokens
+
+
+def test_context_planning_without_gym_reply_override_keeps_nooa_reserve_semantics() -> None:
+    llm, _, _ = make_llm(model_response(), context_window=262144)
+    explicit = llm.get_context_limits({"max_tokens": 128}, fallback_reserve=4096)
+    assert explicit.reserved_output_tokens == 128 and not explicit.reserve_is_fallback
+    fallback = llm.get_context_limits(fallback_reserve=4096)
+    assert fallback.reserved_output_tokens == 4096 and fallback.reserve_is_fallback
 
 
 @pytest.mark.parametrize(
@@ -330,8 +382,154 @@ async def test_enforces_total_policy_call_budget() -> None:
     client.post.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_unlimited_policy_calls_preserve_request_accounting() -> None:
+    llm, client, state = make_llm(model_response(), max_policy_calls=None)
+    for _ in range(101):
+        await llm.acall([{"role": "user", "content": "continue"}])
+
+    assert client.post.await_count == 101
+    assert state.used == 101
+    assert len(state.calls) == 101
+    assert llm.calls == 101
+    assert state.fatal_error is None
+
+
 def test_rejects_synchronous_policy_calls() -> None:
     llm, _, _ = make_llm(model_response())
 
     with pytest.raises(RuntimeError, match="async"):
         llm.call([])
+
+
+@pytest.mark.asyncio
+async def test_transport_error_clears_after_a_later_success() -> None:
+    llm, client, state = make_llm(model_response())
+    failure = ConnectionError("model disconnected")
+    client.post.side_effect = [failure, FakeHTTPResponse(model_response())]
+    with pytest.raises(ConnectionError, match="disconnected"):
+        await llm.acall([{"role": "user", "content": "task"}])
+    await llm.acall([{"role": "user", "content": "retry"}])
+    assert state.fatal_error is None
+
+
+def output_limit_response(*outputs: object, response_id: str = "partial-response") -> dict:
+    return model_response(*outputs, response_id=response_id) | {
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "metadata": {"upstream_trace": "partial-generation"},
+        "usage": {
+            "input_tokens": 2,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 1,
+            "output_tokens_details": {"reasoning_tokens": 1},
+            "total_tokens": 3,
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [None, '{"code":"print(7)"}', '{"code":'])
+async def test_output_limit_records_exact_response_before_interpreting_output(arguments: str | None) -> None:
+    outputs = [
+        {"type": "reasoning", "id": "reasoning-1", "summary": [{"type": "summary_text", "text": "partial plan"}]},
+        NeMoGymResponseOutputMessageForTraining(
+            id="partial-message",
+            content=[NeMoGymResponseOutputText(annotations=[], text="unfinished JSON", logprobs=[])],
+            prompt_token_ids=[1, 2],
+            generation_token_ids=[3],
+            generation_log_probs=[-0.2],
+        ),
+    ]
+    if arguments is not None:
+        outputs.append(
+            NeMoGymResponseFunctionToolCallForTraining(
+                id="partial-function",
+                call_id="partial-call",
+                name="execute_python",
+                arguments=arguments,
+                prompt_token_ids=[1, 2],
+                generation_token_ids=[4],
+                generation_log_probs=[-0.3],
+            )
+        )
+    payload = output_limit_response(*outputs)
+    llm, client, state = make_llm(payload)
+
+    with pytest.raises(OutputTokenLimitExceeded, match="max_output_tokens"):
+        await llm.acall([{"role": "user", "content": "task"}], output_model=StructuredAnswer)
+
+    client.post.assert_awaited_once()
+    assert state.used == 1
+    assert state.fatal_error is None
+    assert len(state.calls) == 1
+    assert state.calls[0].response.model_dump(mode="json") == payload
+    assert state.model_calls[0].response_id == "partial-response"
+
+
+@pytest.mark.asyncio
+async def test_successful_response_after_output_limit_recovers_normally() -> None:
+    final = NeMoGymResponseOutputMessageForTraining(
+        id="final",
+        content=[NeMoGymResponseOutputText(annotations=[], text="done", logprobs=[])],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    llm, client, state = make_llm(output_limit_response())
+    client.post.side_effect = [FakeHTTPResponse(output_limit_response()), FakeHTTPResponse(model_response(final))]
+    with pytest.raises(OutputTokenLimitExceeded):
+        await llm.acall([{"role": "user", "content": "task"}])
+
+    result = await llm.acall([{"role": "user", "content": "retry"}])
+
+    assert result.content == "done"
+    assert result.finish_reason == "stop"
+    assert state.fatal_error is None
+    assert state.used == len(state.calls) == 2
+    assert state.calls[0].response.incomplete_details.reason == "max_output_tokens"
+    assert state.calls[1].response.incomplete_details is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("gym_cap", [None, 256])
+async def test_reply_cap_alias_matches_planning_and_wire_request(key: str, nested: bool, gym_cap: int | None) -> None:
+    params = {key: 128}
+    if nested:
+        params = {"extra_body": params}
+    llm, client, _ = make_llm(model_response(), context_window=1024, sampling_overrides={"max_output_tokens": gym_cap})
+    limits = llm.get_context_limits(params)
+    await llm.acall([{"role": "user", "content": "hello"}], **params)
+    body = client.post.await_args.kwargs["json"]
+    assert body.max_output_tokens == limits.reserved_output_tokens == (gym_cap or 128)
+    assert limits.usable_input_tokens == 1024 - body.max_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_absent_reply_cap_does_not_send_planning_fallback() -> None:
+    llm, client, _ = make_llm(model_response(), context_window=1024)
+    assert llm.get_context_limits(fallback_reserve=256).reserved_output_tokens == 256
+    await llm.acall([{"role": "user", "content": "hello"}])
+    assert client.post.await_args.kwargs["json"].max_output_tokens is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"max_tokens": 512, "max_completion_tokens": 64},
+        {"extra_body": {"max_tokens": 1024}},
+        {"max_completion_tokens": 0},
+        {"max_output_tokens": True},
+    ],
+)
+async def test_invalid_reply_caps_fail_planning_and_call_before_model_transport(params: dict) -> None:
+    llm, client, state = make_llm(model_response(), context_window=1024)
+    with pytest.raises(ValueError):
+        llm.get_context_limits(params)
+    with pytest.raises(ValueError):
+        await llm.acall([{"role": "user", "content": "hello"}], **params)
+    client.post.assert_not_awaited()
+    assert state.used == 0

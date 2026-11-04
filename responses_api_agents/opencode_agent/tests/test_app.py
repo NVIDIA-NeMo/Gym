@@ -20,10 +20,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-import yaml
+from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import GlobalConfigDictParser, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -31,14 +32,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
@@ -74,9 +74,8 @@ def _compactions(bundle: AgentObservationBundle) -> list[ContextCompactionObserv
 
 
 def _make_agent(**kwargs) -> OpenCodeAgent:
-    with patch("responses_api_agents.opencode_agent.app.OpenCodeAgent.model_post_init"):
-        agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    agent._ensure_local_runtime = AsyncMock()
     return agent
 
 
@@ -415,6 +414,73 @@ class TestParseOpencodeSession:
         assert root.conversation[0].content[0].text == "kept"
         assert any(gap.code == "agent_artifact_record_unowned" and gap.detail == "m0" for gap in bundle.gaps)
 
+    @pytest.mark.parametrize(
+        "message_data",
+        ["not json", json.dumps({"time": {"created": 0, "completed": 1}}), "owner-missing"],
+        ids=["unreadable-message", "message-without-role", "no-session"],
+    )
+    def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(self, tmp_path, message_data) -> None:
+        """Its tool is known but cannot be placed, so the tool history read is not complete."""
+        import sqlite3
+
+        part = {
+            "type": "tool",
+            "callID": "c1",
+            "tool": "bash",
+            "state": {"status": "completed", "time": {"start": 1000040000, "end": 1000050000}},
+        }
+        db = _session_db(tmp_path, [("assistant", [part])])
+        con = sqlite3.connect(db)
+        if message_data == "owner-missing":
+            con.execute("update message set session_id = NULL where id = 'm0'")
+            con.execute("update part set session_id = NULL where id = 'p0'")
+        else:
+            con.execute("update message set data = ? where id = 'm0'", (message_data,))
+        con.commit()
+        con.close()
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _tool_calls(bundle) == []
+        assert ("tool_timing_unavailable", "p0") in [(gap.code, gap.detail) for gap in bundle.gaps]
+
+    @pytest.mark.parametrize("call_id", ["absent", None, ""], ids=["absent", "null", "empty"])
+    def test_a_tool_part_without_a_call_id_leaves_tool_timing_unknown(self, tmp_path, call_id) -> None:
+        """The tool ran but has no observation to time, so the tool history read is not complete."""
+        part = {
+            "type": "tool",
+            "tool": "bash",
+            "state": {"status": "completed", "time": {"start": 1000040000, "end": 1000050000}},
+        }
+        if call_id != "absent":
+            part["callID"] = call_id
+        db = _session_db(tmp_path, [("assistant", [part])])
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _tool_calls(bundle) == []
+        gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
+        assert ("tool_call_identity_unavailable", "p0") in gaps
+        assert ("tool_timing_unavailable", "p0") in gaps
+
+    def test_an_unreadable_part_leaves_tool_timing_unknown(self, tmp_path) -> None:
+        """The part may have been a tool call, so the tool history read is not complete."""
+        import sqlite3
+
+        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "kept"}, {"type": "text", "text": "x"}])])
+        con = sqlite3.connect(db)
+        con.execute("update part set data = 'not json' where id = 'p1'")
+        con.commit()
+        con.close()
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _invocations(bundle)[0].conversation[0].content[0].text == "kept"
+        assert [(gap.code, gap.detail) for gap in bundle.gaps if gap.code != "tool_outcome_unavailable"] == [
+            ("agent_artifact_record_unparseable", None),
+            ("tool_timing_unavailable", "p1"),
+        ]
+
     def test_reports_invalid_timing_and_unresolved_tree_edges(self, tmp_path) -> None:
         db = _session_db(
             tmp_path,
@@ -586,27 +652,38 @@ class TestRolloutObservability:
         assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
         assert agent.config.opencode_config == opencode_config
 
-    def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("mode", ["append", "replace"])
+    def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path, mode) -> None:
         _, usage = parse_opencode_session(tmp_path / "missing.db")
         observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
-        agent = _make_agent(system_prompt="configured system")
+        agent = _make_agent(system_prompt="configured system", system_prompt_mode=mode)
         agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
         body = NeMoGymResponseCreateParamsNonStreaming(
+            instructions="request instructions",
             input=[
                 NeMoGymEasyInputMessage(role="system", content="request system"),
                 NeMoGymEasyInputMessage(role="user", content="old question"),
                 NeMoGymEasyInputMessage(role="assistant", content="old answer"),
                 NeMoGymEasyInputMessage(role="user", content="solve"),
-            ]
+            ],
         )
 
         episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         assert episode.response.output
-        assert agent._run_opencode.await_args.args == ("solve", "configured system\n\nrequest system")
-        assert _invocations(episode.observations)[0].conversation == [
-            NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
-        ]
+        system = "configured system\n\nrequest system"
+        if mode == "replace":
+            system = "configured system\n\nrequest instructions\n\nrequest system"
+        assert agent._run_opencode.await_args.args == ("solve", system)
+        conversation = (
+            [
+                NeMoGymEasyInputMessage(role="system", content=system),
+                NeMoGymEasyInputMessage(role="user", content="solve"),
+            ]
+            if mode == "replace"
+            else [NeMoGymEasyInputMessage(role="user", content=system + "\n\nsolve")]
+        )
+        assert _invocations(episode.observations)[0].conversation == conversation
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
         assert "model_call_ownership_unavailable" in {gap.code for gap in episode.observations.gaps}
 
@@ -713,17 +790,351 @@ class TestRepoDir:
         assert repo_dir.is_dir()
         assert not workspace.exists()
 
+    @pytest.mark.parametrize("system", ["replacement instruction", ""])
+    async def test_replacement_is_an_invocation_override_and_does_not_persist(self, tmp_path: Path, system) -> None:
+        repo = tmp_path / "repo"
+        configured = {"default_agent": "plan", "agent": {"build": {"temperature": 0.25}}, "tools": {"bash": False}}
+        inherited = {"agent": {"build": {"top_p": 0.8}}, "permission": {"edit": "deny"}}
+        agent = _make_agent(
+            repo_dir=str(repo),
+            workspace_root=str(tmp_path / "work"),
+            system_prompt_mode="replace",
+            opencode_config=configured,
+            env={"OPENCODE_CONFIG_CONTENT": json.dumps(inherited)},
+        )
+        process = MagicMock(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+        with (
+            patch.object(agent, "_ensure_local_runtime", AsyncMock()),
+            patch(
+                "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process
+            ) as run,
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            await agent._run_opencode("user task", system, collect_observations=False)
+            first = run.call_args
+            assert first.args[-1] == "user task"
+            assert first.args[first.args.index("--agent") + 1] == "build"
+            override = json.loads(first.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+            expected = {**inherited, "agent": {"build": {"top_p": 0.8, "prompt": system}}} if system else inherited
+            assert override == expected
+            assert json.loads((repo / "opencode.json").read_text()) == configured
+            agent.config.system_prompt_mode = "append"
+            await agent._run_opencode("next task", "next instruction", collect_observations=False)
+            assert run.call_args.args[-1] == "next instruction\n\nnext task"
+            assert json.loads(run.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]) == inherited
+            assert json.loads((repo / "opencode.json").read_text()) == configured
+        assert agent.config.opencode_config == configured
+
+
+@pytest.mark.parametrize("extra_args", [["--agent", "plan"], ["--agent=plan"], ["--agent", "build"]])
+def test_replacement_rejects_explicit_agent_selectors(extra_args) -> None:
+    with pytest.raises(ValueError, match="replacement selects the build agent"):
+        _config(system_prompt_mode="replace", extra_args=extra_args)
+    assert _config(extra_args=extra_args).extra_args == extra_args
+
+
+@pytest.mark.parametrize("extra_args", [["--agent", "plan"], ["--agent=plan"]])
+def test_mutated_replacement_selector_is_rejected_by_the_http_route(extra_args) -> None:
+    from fastapi.testclient import TestClient
+
+    agent = _make_agent(extra_args=extra_args)
+    agent.config.system_prompt_mode = "replace"
+    with patch.object(agent, "_ensure_local_runtime", AsyncMock()) as install:
+        with TestClient(agent.setup_webserver()) as client:
+            response = client.post("/v1/responses", json={"input": "task"})
+    assert response.status_code == 422
+    assert "remove --agent from extra_args" in response.json()["detail"]
+    install.assert_not_awaited()
+
+
+async def test_append_keeps_the_explicit_local_agent_selector(tmp_path) -> None:
+    agent = _make_agent(workspace_root=str(tmp_path), extra_args=["--agent", "plan"])
+    process = MagicMock(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+    with (
+        patch.object(agent, "_ensure_local_runtime", AsyncMock()),
+        patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process) as run,
+        patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+    ):
+        await agent._run_opencode("user task", None, collect_observations=False)
+    assert run.call_args.args[-3:] == ("--agent", "plan", "user task")
+
+
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_system_prompt_mode_is_validated(mode) -> None:
+    assert _config(system_prompt_mode=mode).system_prompt_mode == mode
+    with pytest.raises(ValueError, match="system_prompt_mode"):
+        _config(system_prompt_mode="invalid")
+
 
 class TestConfigYaml:
     def test_module_parses(self) -> None:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    @pytest.mark.parametrize("training_capture", [None, False, True])
+    def test_config_yaml_parses(self, monkeypatch: pytest.MonkeyPatch, training_capture: bool | None) -> None:
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
-        data = yaml.safe_load(cfg_path.read_text())
+        _, configs = GlobalConfigDictParser().load_extra_config_paths([str(cfg_path)])
+        data = OmegaConf.to_container(OmegaConf.merge(*configs, {"policy_model_name": "test-model"}), resolve=True)
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
-        assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 8
-        assert inner["command"] == "opencode"
+        if training_capture is not None:
+            inner["token_id_capture"] = training_capture
+        config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
+        assert config.entrypoint == "app.py"
+        assert "execution_mode" not in type(config).model_fields
+        assert config.thinking is True
+        assert config.timeout == 10800
+        assert config.model == "test-model"
+        assert config.sandbox_provider is None
+        assert config.sandbox_install_timeout_seconds == 600
+        assert config.session_close_timeout_seconds == 60
+        assert config.resources_server is None
+        assert config.model_server.name == "policy_model"
+        assert config.opencode_config["permission"]["bash"]["*"] == "allow"
+        assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
+        assert config.opencode_config["tools"]["webfetch"] is False
+
+        assert config.token_id_capture is (training_capture is True)
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": True, "token_id_capture": {"enabled": True}}
+        agent = OpenCodeAgent(config=config, server_client=client)
+        capture_path = "/training-token-capture" if training_capture else ""
+        assert (
+            agent.base_url_for_run("http://model", {"_ng_task_index": 0, "_ng_rollout_index": 0})
+            == f"http://model/ng-rollout/0-0{capture_path}"
+        )
+
+
+@pytest.mark.parametrize(
+    "exit_code,status", [(0, "completed"), (7, "failed"), (-15, "failed"), (None, "unknown"), (True, "unknown")]
+)
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_bash_exit_code_is_execution_outcome(
+    tmp_path: Path, exit_code: int | None, status: str, sandboxed: bool
+) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                "assistant",
+                [
+                    {
+                        "type": "tool",
+                        "callID": "shell",
+                        "tool": "bash",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "exit 7"},
+                            "output": "stdout",
+                            "metadata": {"exit": exit_code},
+                        },
+                    }
+                ],
+            )
+        ],
+    )
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    tool = _tool_calls(bundle)[0]
+    assert tool.status == status
+    assert tool.error_type == ("tool_error" if status == "failed" else None)
+    assert any(gap.code == "tool_outcome_unavailable" for gap in bundle.gaps) == (status == "unknown")
+
+
+_SHELL_TIMEOUT = (
+    "\n\n<shell_metadata>\nshell tool terminated command after exceeding timeout 120000 ms. If this command is "
+    "expected to take longer and is not waiting for interactive input, retry with a larger timeout value in "
+    "milliseconds.\n</shell_metadata>"
+)
+_SHELL_ABORT = "\n\n<shell_metadata>\nUser aborted the command\n</shell_metadata>"
+
+
+@pytest.mark.parametrize(
+    "output,compacted,status,error_type",
+    [
+        ("partial" + _SHELL_TIMEOUT, False, "timeout", "tool_timeout"),
+        ("partial" + _SHELL_TIMEOUT, True, "timeout", "tool_timeout"),
+        ("partial" + _SHELL_ABORT, False, "cancelled", "tool_aborted"),
+        (_SHELL_TIMEOUT + "\nlater output", False, "unknown", None),
+        ("echo shell tool terminated command after exceeding timeout 5 ms.", False, "unknown", None),
+    ],
+)
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_bash_null_exit_takes_opencode_termination_report(
+    tmp_path: Path, output: str, compacted: bool, status: str, error_type: str | None, sandboxed: bool
+) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    state = {"status": "completed", "input": {"command": "sleep 999"}, "output": output, "metadata": {"exit": None}}
+    if compacted:
+        state["time"] = {"start": 1, "end": 2, "compacted": 3}
+    db = _session_db(tmp_path, [("assistant", [{"type": "tool", "callID": "shell", "tool": "bash", "state": state}])])
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    tool = _tool_calls(bundle)[0]
+    assert (tool.status, tool.error_type) == (status, error_type)
+    assert any(gap.code == "tool_outcome_unavailable" for gap in bundle.gaps) == (status == "unknown")
+    outputs = [item.output for item in _invocations(bundle)[0].conversation if item.type == "function_call_output"]
+    assert outputs == ["[Old tool result content cleared]" if compacted else output]
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_interrupted_tools_keep_only_the_output_opencode_recorded(tmp_path: Path, sandboxed: bool) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    def tool(call_id: str, name: str, state: dict) -> dict:
+        return {"type": "tool", "callID": call_id, "tool": name, "state": {"input": {}, **state}}
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                "assistant",
+                [
+                    tool("running", "bash", {"status": "running", "metadata": {"output": "line 1\n"}}),
+                    tool("pending", "task", {"status": "pending", "metadata": {"model": "policy"}}),
+                    tool(
+                        "aborted",
+                        "bash",
+                        {
+                            "status": "error",
+                            "error": "Tool execution aborted",
+                            "metadata": {"interrupted": True, "output": "streamed"},
+                        },
+                    ),
+                    tool("failed", "read", {"status": "error", "error": "ENOENT"}),
+                ],
+            )
+        ],
+    )
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    outcomes = {tool.tool_call_id: (tool.status, tool.error_type) for tool in _tool_calls(bundle)}
+    assert outcomes == {
+        "running": ("incomplete", None),
+        "pending": ("incomplete", None),
+        "aborted": ("cancelled", "tool_aborted"),
+        "failed": ("failed", "tool_error"),
+    }
+    outputs = {
+        item.call_id: item.output
+        for item in _invocations(bundle)[0].conversation
+        if item.type == "function_call_output"
+    }
+    assert outputs == {"running": "line 1\n", "aborted": "streamed", "failed": "ENOENT"}
+    gaps = {(gap.code, gap.detail) for gap in bundle.gaps if gap.code.startswith("tool_output")}
+    assert gaps == {("tool_output_partial", "running"), ("tool_output_unavailable", "pending")}
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+@pytest.mark.parametrize("child_completed", [False, True])
+@pytest.mark.parametrize(
+    "name,state,tool_status,error_type,child_status,output",
+    [
+        (
+            "task",
+            {
+                "status": "error",
+                "error": "Tool execution aborted",
+                "metadata": {"interrupted": True, "output": "partial"},
+            },
+            "cancelled",
+            "tool_aborted",
+            "incomplete",
+            "partial",
+        ),
+        (
+            "bash",
+            {"status": "completed", "output": "partial" + _SHELL_TIMEOUT, "metadata": {"exit": None}},
+            "timeout",
+            "tool_timeout",
+            "incomplete",
+            "partial" + _SHELL_TIMEOUT,
+        ),
+        ("task", {"status": "error", "error": "failed"}, "failed", "tool_error", "failed", "failed"),
+        ("task", {"status": "completed", "output": "done"}, "completed", None, "completed", "done"),
+        (
+            "task",
+            {"status": "running", "metadata": {"output": "partial"}},
+            "incomplete",
+            None,
+            "incomplete",
+            "partial",
+        ),
+        (
+            "task",
+            {"status": "pending", "metadata": {"output": "partial"}},
+            "incomplete",
+            None,
+            "incomplete",
+            "partial",
+        ),
+        (
+            "bash",
+            {"status": "completed", "output": "partial", "metadata": {"exit": None}},
+            "unknown",
+            None,
+            "unknown",
+            "partial",
+        ),
+    ],
+)
+def test_child_invocation_fallback_preserves_tool_outcome(
+    tmp_path, sandboxed, child_completed, name, state, tool_status, error_type, child_status, output
+):
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    state = {**state, "input": {}, "metadata": {**state.get("metadata", {}), "sessionId": "child"}}
+    messages = [
+        ("root", "assistant", [{"type": "tool", "callID": "spawn", "tool": name, "state": state}]),
+        ("child", "user", [{"type": "text", "text": "work"}]),
+    ]
+    if child_completed:
+        messages.append(("child", "assistant", [{"type": "text", "text": "done"}]))
+    db = _session_db(tmp_path, messages, sessions=[("root", None), ("child", "root")])
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    invocations = {item.invocation_id: item for item in _invocations(bundle)}
+    assert invocations["child"].status == ("completed" if child_completed else child_status)
+    assert invocations["child"].spawned_by_tool_call_id == "spawn"
+    tool = _tool_calls(bundle)[0]
+    assert (tool.status, tool.error_type) == (tool_status, error_type)
+    assert [item.output for item in invocations["root"].conversation if item.type == "function_call_output"] == [
+        output
+    ]
+
+
+@pytest.mark.parametrize("override,expected", [({}, {"field": "reasoning_content"}), ({"interleaved": True}, True)])
+def test_gym_provider_preserves_interleaved_override(override: dict, expected: dict | bool) -> None:
+    agent = _make_agent(
+        model="policy",
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        opencode_config={"provider": {"nemo": {"models": {"policy": override}}}},
+    )
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        config = agent._build_opencode_config("1-2")
+    assert config["provider"]["nemo"]["models"]["policy"]["interleaved"] == expected
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.opencode_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+    ):
+        episode = await agent._create_episode(body, collect_observations=False)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

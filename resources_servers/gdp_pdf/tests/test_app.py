@@ -24,17 +24,19 @@ import pytest
 from pytest import approx, fixture, raises
 
 from benchmarks.gdp_pdf.prepare import (
+    _PROMPT_RESTORES,
     EXAMPLE_PDF_SIZE_WARN_BYTES,
     _prepare_rows,
     _resolve_hf_token,
     build_gym_row,
     extract_criteria,
     fetch_example_media,
+    restore_original_prompt,
     write_example,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -44,8 +46,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
     GdpPdfResourcesServer,
@@ -427,8 +430,9 @@ class TestVerify:
         # wrong answer.
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge down"))
 
-        with raises(JudgeError):
+        with raises(NgFailureEvent) as failure:
             await server.verify(_verify_request("answer"))
+        assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_concurrency_semaphore_disabled(self, config: GdpPdfConfig) -> None:
@@ -737,6 +741,30 @@ class TestPrepare:
         assert [r["verifier_metadata"]["task_id"] for r in rows] == ["good"]
         assert downloaded == ["pdfs/a.pdf"]
 
+    def test_mirror_placeholder_prompt_is_restored(self, monkeypatch, tmp_path: Path) -> None:
+        task_id, (placeholder, original) = next(iter(_PROMPT_RESTORES.items()))
+        downloaded: list = []
+        self._patch_hf(
+            monkeypatch,
+            [{**self._source_row(task_id, "a.pdf"), "prompt": placeholder}, self._source_row("t2", "b.pdf")],
+            downloaded,
+        )
+
+        rows = _prepare_rows(
+            output_path=tmp_path / "out.jsonl", media_dir=tmp_path / "media", documents_dir=tmp_path / "documents"
+        )
+
+        assert rows[0]["verifier_metadata"]["prompt"] == original
+        assert rows[0]["responses_create_params"]["input"][0]["content"][0]["text"] == original
+        assert rows[1]["verifier_metadata"]["prompt"] == PROMPT
+
+    def test_restore_leaves_non_placeholder_prompts_alone(self) -> None:
+        task_id, (_, original) = next(iter(_PROMPT_RESTORES.items()))
+        corrected = {"task_id": task_id, "prompt": "Already fixed upstream."}
+        assert restore_original_prompt(corrected) is corrected
+        unrelated = {"task_id": "other", "prompt": original}
+        assert restore_original_prompt(unrelated) is unrelated
+
     def test_explicit_token_takes_precedence(self, monkeypatch, tmp_path: Path) -> None:
         import benchmarks.gdp_pdf.prepare as prepare_module
 
@@ -759,7 +787,7 @@ class TestPrepare:
         # BaseException) when the script is run with its own CLI flags.
         fake_module = MagicMock()
         fake_module.get_hf_token = MagicMock(side_effect=SystemExit(2))
-        monkeypatch.setitem(__import__("sys").modules, "nemo_gym.global_config", fake_module)
+        monkeypatch.setitem(__import__("sys").modules, "nemo_gym.config.global_config", fake_module)
 
         assert _resolve_hf_token() is None
 

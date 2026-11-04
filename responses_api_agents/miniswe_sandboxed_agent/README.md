@@ -1,8 +1,20 @@
 # Sandboxed mini-SWE
 
+> [!WARNING]
+> **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
+> (for example [`benchmarks/terminal_bench_4/miniswe.yaml`](../../benchmarks/terminal_bench_4/miniswe.yaml)),
+> this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
+> That path will be removed after the environment-server migration, and the agent logs a deprecation
+> warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
+>
+> Episode sessions under an environment server are not deprecated: see [Harbor episodes](#harbor-episodes).
+> Terminal Bench 4 runs that way from its Harbor task folders (`gym eval run terminal_bench_4 --agent
+> miniswe_sandboxed_agent`; see [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)).
+> Terminal-Bench-Science has no session path yet and stays on `/run` until it does.
+
 Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
 native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.
-Use [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
+The legacy `/run` path uses [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
 [TB4 resources](../../resources_servers/terminal_bench_4/README.md).
 
 `harness.py` supplies execution and trajectory conversion; it imports no benchmark
@@ -14,6 +26,35 @@ config and model routing, harness setup, and execution. It neither provisions no
 grades. Retried responses share setup and execution for the same message.
 Retried `/run` calls share one execution and forward the seeded resource cookies.
 
+## Harbor episodes
+
+Harbor tasks run this agent on an episode session instead of `/run`:
+
+```bash
+gym eval run <task folder | harbor:org/name@tag> --agent miniswe_sandboxed_agent --sandbox <provider> ...
+```
+
+The command binds the unbound template in
+[`configs/miniswe_sandboxed_agent.yaml`](configs/miniswe_sandboxed_agent.yaml) to the
+run's model and sandbox provider, and the Harbor environment server drives the session:
+
+1. `/v1/agent_sessions` seeds the session with `sandbox_access` (the sandbox the
+   environment server provisioned and its working directory). The agent connects to it
+   and provisions nothing itself.
+2. `/v1/responses` receives the task instruction as the input. The in-sandbox tool
+   grants (`mcp_servers`, `skills_dir`) come from the `task.json` the environment server
+   left in the sandbox, and are read before the turn is bound, so an overlapping retry
+   of the first request waits for the binding and replays it.
+3. `/v1/agent_sessions/close` releases the transport; the environment server verifies
+   and stops the sandbox.
+
+`resources_server` is optional on this path and is only used by the legacy `/run`
+route, which seeds and verifies against a TB4-style resources server. Two kinds of
+timeout are told apart: a setup failure or a setup timeout (the harness never started,
+the sandbox is untouched) is a `503`, so the environment server masks the episode and
+it is retried, while an execution timeout is the agent's own result, returned with
+`miniswe_termination = "timeout"` and verified like any other answer.
+
 ## Setup and model access
 
 Task images need `bash`, `uname`, `tar`, and `setsid`; preinstalled Python, pip,
@@ -24,7 +65,11 @@ task user. Both archives are downloaded by Gym and cached under
 initial setup requests share the downloads, and Python archives are checksum
 verified. Downloads are pinned separately for x86-64/ARM64 and glibc/musl.
 The sandbox never downloads these assets from GitHub; PyPI access is still needed
-for the isolated mini-SWE environment. LiteLLM uses its bundled model-cost map.
+for the isolated mini-SWE environment. `runtime/requirements.txt` pins mini-SWE
+2.4.6, LiteLLM 1.106.0 with its MCP extra, and MCP 2.2.0. This environment must
+not inherit Gym's MCP v1 SDK: LiteLLM's Responses adapter imports MCP v2 types
+even for ordinary function tools. Task MCP clients remain in their separate
+MCP v1 environment. LiteLLM uses its bundled model-cost map.
 
 The native agent calls Gym's rollout-prefixed `/v1/responses` endpoint directly.
 Gym's model wrapper retains model-call and training-token capture; every request
@@ -62,18 +107,22 @@ Missing aggregate usage stays unknown. Submission is separate from verifier succ
 
 Removing the custom wrapper has these limits:
 
-- Native mini-SWE records tool completion timestamps, but no start times or
-  durations. Gym emits `tool_timing_unavailable` gaps rather than estimating them.
-- Submission exits before a final tool observation is saved. The decision and
-  native submission text remain available; that tool's execution observation is
-  incomplete, with no output or error evidence. This known mini-SWE gap fails
-  TE-5 (`tool.terminal` and `tool.outcome`) and the `gym-p0/v1` conformance gate,
-  even when the task succeeds. mini-SWE needs to persist a terminal tool result
-  correlated with the submit call before exiting; Gym's projection must then
-  retain that evidence. The observability test asserts this gap until it is fixed.
+- Gym’s native Bash execution wrapper records observed start/end timestamps and
+  monotonic durations for supported tool executions. Older or incomplete native
+  records can still lack those facts; Gym records the observation-gap code
+  `tool_timing_unavailable` (not a failure kind) rather than estimating missing
+  timings.
+- A correlated native `Submitted` exit records the submit command as completed,
+  with its observed start/end timestamps and duration. It carries no final
+  tool-output body. Older or partial artifacts without that exit evidence remain
+  incomplete. Submission completion alone does not establish verifier success
+  or full conformance.
 - Native trajectories are saved after each step. A forced kill during a model
   request or command can lose the active step, or leave a partially written
-  trajectory. Gym model-server capture remains independent of that file.
+  trajectory. Gym model-server capture remains independent of that file. A run
+  that exits abnormally with a saved trajectory but no exit status was killed
+  mid-run and is reported as `killed`; without a saved trajectory it stays an
+  infrastructure error.
 - Wrapper-specific runtime metadata and `OutputTokenLimitExceeded` normalization
   are removed. Native termination names and CLI logs are retained.
 - MCP tools remain available through a persistent task-local CLI session, but

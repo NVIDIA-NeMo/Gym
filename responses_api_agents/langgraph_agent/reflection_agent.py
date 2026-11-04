@@ -31,9 +31,9 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 
 
 class ReflectionAgentConfig(LangGraphAgentConfig):
@@ -63,7 +63,6 @@ class ReflectionState(TypedDict):
 
 
 class ReflectionAgent(LangGraphAgentAdapter):
-    ray_enabled = False
     config: ReflectionAgentConfig
 
     def build_graph(self):

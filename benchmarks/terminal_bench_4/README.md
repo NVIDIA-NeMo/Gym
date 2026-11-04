@@ -24,10 +24,6 @@ The following choices remain intentional differences:
   first/last 5,000-character truncation. It is unclear whether AA intended that
   truncation or was unaware of the upstream behavior. No history compaction or
   summarization is applied.
-- **Verifier timeouts:** preserve the current behavior until we understand how
-  often these occur on real workloads. Timeouts remain incomplete evaluations
-  classified as infrastructure failures and excluded from default aggregates,
-  whereas AA describes counting them as failures.
 
 The adapter also keeps `cost_limit=0` and unattended `DefaultAgent` execution.
 Task MCP schemas and CLI invocation instructions are added to the prompt; MCP
@@ -38,6 +34,31 @@ The benchmark defaults can be overridden with `++tb4_max_steps=...` and
 `++tb4_step_timeout_sec=...`. An explicit `++tb4_max_steps=0` disables the step cap.
 The generic Python adapter retains its 600-second command timeout default; the
 benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
+
+## Failure scoring
+
+A verifier that exhausts its own time budget scores zero and stays in the
+pass-rate denominator (`failure_kind: verifier_error`, `mask_sample: false`).
+It retains `evaluation_completed: false` because no official reward was produced.
+Provider/socket timeouts and sandbox startup failures remain infrastructure
+failures; an earlier agent infrastructure failure also keeps that classification.
+
+mini-SWE's `LimitsExceeded` means its step or cost budget was reached. This
+profile permits 500 steps and disables the cost budget. The official verifier
+still grades the artifacts after this exit. It does not indicate a filesystem
+kill. Explicit provider reports that the sandbox exceeded its memory or local
+ephemeral-storage allocation score zero, with `sandbox_resource_limit` recording
+the resource. See the [resource server's failure contract](../../resources_servers/terminal_bench_4/README.md#contract).
+
+## Sandbox request timeouts
+
+OpenSandbox SDK requests use a five-minute timeout for both freshly created
+sandboxes and reconnected agent handles (`create.request_timeout_s` and
+`connection.request_timeout_s`). The created handle retains its creation
+connection settings, so both values must be set. Status polls keep their separate
+20-second cap. These transport budgets do not extend task, command, or verifier
+execution limits; an exhausted transport timeout still reports an infrastructure
+failure, and an uncertain command submission is not replayed.
 
 ## Dataset and deployment
 
@@ -59,6 +80,12 @@ Agent and verifier select the endpoint independently from their official GPU
 requirements. The selected GPU deployment must supply H100s; its unsupported
 `gpu_type` filter is disabled explicitly. Each task retains its CPU, memory,
 storage, GPU count, build budget, agent budget, and verifier deadline.
+
+New agent, verifier, and Compose sandboxes request process-level OOM handling
+with `nemo.nvidia.com/oom-kill: process`. A memory-limit breach can kill a task
+process while leaving the sandbox available for subsequent commands. The agent
+itself can still be selected as the OOM victim. Set this metadata value to `pod`
+to restore whole-sandbox OOM handling.
 
 Compose uses the existing digest-verified `compose-images.json`. It preserves
 startup commands, users, dependency health checks, shared-memory requirements,
@@ -100,6 +127,14 @@ Prepare again without filters for all tasks. The profile defaults to one attempt
 AA reproduction requires explicitly setting `++num_repeats=3` (the official
 Terminal-Bench leaderboard uses a separate five-attempt protocol). Scheduler allocations must cover
 setup, the full official agent budget, and verification.
+
+## Sandbox startup
+
+Each OpenSandbox creation or reconnect attempt has a five-minute client budget
+(`environment.sandbox_provider.opensandbox.create.timeout_s` and
+`connect_attempt_timeout_s`). The task package's overall environment build
+budget still bounds provisioning, including retries and Compose services.
+The 1,200-second readiness setting is an upper bound within those outer budgets.
 
 ## Infra validation
 

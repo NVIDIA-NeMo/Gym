@@ -20,7 +20,8 @@ See the [OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page for the
    map for both ([requests are not limits](#requests-are-not-limits)).
 3. **Check what CPU count your sandbox actually sees** — on many clusters it is the host's cores,
    not your limit, and that varies cluster to cluster. Be mindful of it: leave `derive_cpu_env`
-   on and give agents a bash timeout ([host-core fan-out](#the-host-core-fan-out-trap)).
+   on in the SWE-bench configs (the Harbor environment server always sets the same hints) and give
+   agents a bash timeout ([host-core fan-out](#the-host-core-fan-out-trap)).
 4. **Use background execution** — the shipped default; keep the max poll interval in the tens of
    seconds ([background execution and timeouts](#background-execution-and-timeouts)).
 5. **Retry creates, never commands** — a retried command can run twice
@@ -100,7 +101,10 @@ cap variables derived from `resources.cpu` — `OMP_NUM_THREADS`, `PYTHON_CPU_CO
 `PYTEST_XDIST_AUTO_NUM_WORKERS`, `GOMAXPROCS`, `CARGO_BUILD_JOBS`, `UV_THREADPOOL_SIZE`, and
 others; see `CPU_CAP_ENV_VARS` in `nemo_gym/sandbox/utils.py`. Explicit `sandbox_config.env` keys
 win. Leave it on even where LXCFS is present; it is harmless there and protects you when the same
-config moves to a cluster without it.
+config moves to a cluster without it. The Harbor environment server (`environment_servers/harbor`) has no
+switch: it sets the same variables for every sandbox it creates, from the task's `cpus` (and the verifier
+environment's for a separate verifier), under the task's own `[environment].env`, which wins on a key
+clash. They are hints, not limits; the cgroup limit stays the provider's.
 
 Two things it cannot fix:
 
@@ -136,8 +140,12 @@ Create is synchronous on the server: schedule the pod, lazy-load the image, star
 On a healthy cluster that is p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min. On a full cluster, pods sit
 `Pending` for as long as your timeout allows.
 
-- `create.timeout_s` must exceed `ready_timeout_s`; it bounds the whole create including the
-  readiness wait (the shipped config: 1500 s over 1200 s).
+- `create.request_timeout_s` is capped at `ready_timeout_s` for the create request, so an unplaceable
+  pod fails within one ready timeout; the sandbox it left `Pending` is deleted and the attempt retried
+  (`create.fail_fast_on_pending: true` reports it once instead).
+- `create.timeout_s` bounds one create attempt as configured, the request plus the readiness wait
+  that starts once the request returns; unset, it is the capped request timeout plus `ready_timeout_s`
+  plus 30 s. The shipped 1500 s over 1200 s is below that sum and is logged once as such.
 - `ttl_s` is the server-side backstop if your client dies. Set it above your longest rollout.
 
 <Warning>

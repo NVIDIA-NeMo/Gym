@@ -23,7 +23,7 @@ from app import (
     _grade_string_match,
 )
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 class TestApp:

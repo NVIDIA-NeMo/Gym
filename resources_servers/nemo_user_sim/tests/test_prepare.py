@@ -12,10 +12,10 @@ import pytest
 from omegaconf import OmegaConf
 
 from environments.nemo_user_sim import prepare as prepare_module
-from nemo_gym.config_types import DatasetConfig
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.config import DatasetConfig
+from nemo_gym.data import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
-from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
+from resources_servers.nemo_user_sim.task_data import TaskData
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -51,11 +51,17 @@ def test_environment_config_declares_generated_validation_split() -> None:
     assert validation.taskset == "nemo_user_sim:validation"
 
 
+def test_user_model_has_no_default_endpoint() -> None:
+    resources_config = OmegaConf.load(REPOSITORY_ROOT / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml")
+    for key in ("user_model_base_url", "user_model_api_key", "user_model_name"):
+        assert OmegaConf.is_missing(resources_config, key), key
+
+
 def test_usersim_revision_pins_are_aligned() -> None:
     requirement_paths = (
-        prepare_module.PREPARE_REQUIREMENTS_FPATH,
-        REPOSITORY_ROOT / "environment_servers/nemo_user_sim/requirements.txt",
-        REPOSITORY_ROOT / "resources_servers/nemo_user_sim/requirements.txt",
+        prepare_module.PREPARE_PROJECT_FPATH,
+        REPOSITORY_ROOT / "environment_servers/nemo_user_sim/pyproject.toml",
+        REPOSITORY_ROOT / "resources_servers/nemo_user_sim/pyproject.toml",
     )
     requirement_revisions = []
     for path in requirement_paths:
@@ -230,9 +236,14 @@ def test_write_tasks_removes_temporary_file_after_replace_failure(
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("parent_environment", [None, "/opt/nemo_gym_venv"])
 def test_prepare_materializes_every_registered_probe_with_usersim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parent_environment: str | None
 ) -> None:
+    if parent_environment is None:
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", parent_environment)
     tasks_path = tmp_path / "nemo_user_sim.jsonl"
     managed_assets_path = tmp_path / "verified-managed-assets"
     monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
@@ -242,6 +253,9 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     model_configs: list[str] = []
 
     def fake_materialize(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        isolated_environment = Path(kwargs["env"]["UV_PROJECT_ENVIRONMENT"])
+        assert isolated_environment == Path(kwargs["cwd"]) / ".venv"
+        assert isolated_environment != Path(parent_environment or "/unused")
         calls.append((command, kwargs))
         model_configs.append(Path(command[-2]).read_text())
         output = Path(command[-1])
@@ -296,29 +310,24 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert all("assets_dir" not in row["resolved_row"]["usersim_config"] for row in rows)
     for index, row in enumerate(rows):
         task = materialize_task(row, taskset="nemo_user_sim:validation", task_index=index)
-        request = UserSimEpisodeRequest.model_validate(
-            {"episode_id": {"rollout_id": f"rollout-{index}", "attempt": 0}, "task": task}
-        )
-        assert request.task.task_id.taskset == "nemo_user_sim:validation"
-        assert request.task.task_id.task_id == row["task_id"]
-        assert request.task.task_input.resolved_row == row["resolved_row"]
+        assert task["task_id"] == {"taskset": "nemo_user_sim:validation", "task_id": row["task_id"]}
+        assert TaskData.model_validate(task["task_input"]).resolved_row == row["resolved_row"]
     assert len(calls) == 1
     command, kwargs = calls[0]
-    assert command[:9] == [
+    assert command[:7] == [
         "/bin/uv",
         "run",
-        "--no-config",
-        "--no-project",
-        "--isolated",
-        "--with-requirements",
-        str(prepare_module.PREPARE_REQUIREMENTS_FPATH),
+        "--locked",
+        "--project",
+        str(prepare_module.ENVIRONMENT_DIR),
         "python",
         "-c",
     ]
-    assert command[10] == str(prepare_module.ENVIRONMENT_DIR.parents[1])
+    assert command[8] == str(prepare_module.ENVIRONMENT_DIR.parents[1])
     assert 'alias = "assistant_model", model = "assistant_model"' in model_configs[0]
     assert 'alias = "judge_model", model = "judge_model"' in model_configs[0]
     assert kwargs["env"]["USERSIM_CODE_SHA"] == prepare_module.USERSIM_REVISION
     assert kwargs["env"]["USERSIM_NEMOTRON_PERSONAS_VERSION"] == prepare_module.NEMOTRON_PERSONAS_VERSION
     assert kwargs["env"]["DATA_DESIGNER_MANAGED_ASSETS_PATH"] == str(managed_assets_path)
     assert Path(str(kwargs["cwd"])).name.startswith("usersim-materialize-")
+    assert prepare_module.os.environ.get("UV_PROJECT_ENVIRONMENT") == parent_environment

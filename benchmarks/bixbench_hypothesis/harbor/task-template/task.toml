@@ -1,0 +1,26 @@
+schema_version = "1.0"
+
+[task]
+name = "edison/{id}"
+version = "1.0"
+
+[environment]
+docker_image = "{docker_image}"
+workdir = "/app"
+
+[environment.env]
+RUBRIC_MODEL = "${{RUBRIC_MODEL}}"
+RUBRIC_MODEL_API_BASE = "${{RUBRIC_MODEL_API_BASE}}"
+RUBRIC_MODEL_API_KEY = "${{RUBRIC_MODEL_API_KEY}}"
+RUBRIC_ATTEMPTS = "${{RUBRIC_ATTEMPTS:-2}}"
+RUBRIC_TIMEOUT = "${{RUBRIC_TIMEOUT:-120}}"
+RUBRIC_MAX_TOKENS = "${{RUBRIC_MAX_TOKENS:-16384}}"
+
+[agent]
+timeout_sec = {timeout}
+
+[verifier]
+timeout_sec = 90
+
+[[steps]]
+name = "rollout"
