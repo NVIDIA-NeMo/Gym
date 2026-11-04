@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """History reconstruction, protocol validation and client resynchronization tests."""
 
+import asyncio
 import hashlib
 from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -28,7 +30,7 @@ from nemo_gym.models.model_call_capture import (
     install_model_call_capture,
     install_model_rollout_routing,
 )
-from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims
+from nemo_gym.server_runtime.request_handling.session_routing import RolloutRouter, SessionClaims
 from responses_api_agents.hermes_agent.history_delta import HistoryDeltaClient
 
 
@@ -74,12 +76,18 @@ def worker_socket_dir():
 
 
 @pytest.fixture
-def make_client(read_events, received_headers, worker_socket_dir):
+def model_apps():
+    return {}
+
+
+@pytest.fixture
+def make_client(read_events, received_headers, worker_socket_dir, model_apps):
     """Echo requests through the real middleware; record when the body is consumed."""
     with ExitStack() as stack:
 
         def make(*, enabled=True, protocol=None, num_workers=1, model_name="model", gate=None):
             app = FastAPI()
+            model_apps[model_name] = app
 
             @app.post("/v1/chat/completions")
             @app.post("/v1/responses")
@@ -118,7 +126,9 @@ def make_client(read_events, received_headers, worker_socket_dir):
         yield make
 
 
-def test_reconnected_requests_are_forwarded_to_the_rollout_owner(make_client, worker_socket_dir, received_headers):
+def test_reconnected_requests_are_forwarded_to_the_rollout_owner(
+    make_client, worker_socket_dir, received_headers, envelope
+):
     client_a = make_client(num_workers=2, model_name="worker-a")
     client_b = make_client(num_workers=2, model_name="worker-b")
     claims = SessionClaims(str(worker_socket_dir), "0" * 32, holds=lambda _: True)
@@ -129,10 +139,15 @@ def test_reconnected_requests_are_forwarded_to_the_rollout_owner(make_client, wo
             {"role": "assistant", "content": "answer"},
         ]
     }
+    headers = {"x-gym-history-transport": "v1"}
 
     # The first request assigns worker A; subsequent requests use its private socket.
     assert claims.claimant("rollout-1") is None
-    first_response = client_a.post("/ng-rollout/rollout-1/v1/chat/completions", json=first_request)
+    first_response = client_a.post(
+        "/ng-rollout/rollout-1/v1/chat/completions",
+        json={**first_request, "_gym_history": envelope(first_request["messages"], identity="first")["_gym_history"]},
+        headers=headers,
+    )
     assert first_response.status_code == 200
     assert first_response.json() == first_request
     owner = claims.claimant("rollout-1")
@@ -142,8 +157,8 @@ def test_reconnected_requests_are_forwarded_to_the_rollout_owner(make_client, wo
     # Reconnecting to worker B still serves the request on A, preserving the capture prefix and headers.
     next_response = client_b.post(
         "/ng-rollout/rollout-1/training-token-capture/v1/chat/completions?trace=kept",
-        json=next_request,
-        headers={"x-session-id": "preserved"},
+        json={**next_request, "_gym_history": envelope(next_request["messages"], identity="next")["_gym_history"]},
+        headers={**headers, "x-session-id": "preserved"},
     )
     assert next_response.status_code == 200
     assert next_response.json() == next_request
@@ -152,11 +167,11 @@ def test_reconnected_requests_are_forwarded_to_the_rollout_owner(make_client, wo
     assert received_headers[-1]["x-session-id"] == "preserved"
     assert claims.claimant("rollout-1") == owner
 
-    # A different rollout can independently belong to worker B.
+    # An ordinary request needs no retained ownership after its response completes.
     other_response = client_b.post("/ng-rollout/rollout-2/v1/responses", json={"input": "other task"})
     assert other_response.status_code == 200
     assert other_response.headers["x-test-worker"] == "worker-b"
-    assert claims.claimant("rollout-2") != owner
+    assert claims.claimant("rollout-2") is None
 
 
 def test_unprefixed_model_request_does_not_claim_a_rollout(make_client, worker_socket_dir):
@@ -170,7 +185,146 @@ def test_unprefixed_model_request_does_not_claim_a_rollout(make_client, worker_s
     assert list((worker_socket_dir / "session-claims").iterdir()) == []
 
 
-def test_forwarded_request_enters_only_the_owners_admission_gate(make_client):
+def test_completed_rollouts_leave_only_claims_for_retained_histories(
+    make_client, model_apps, worker_socket_dir, envelope
+):
+    client = make_client(num_workers=2)
+    claims = model_apps["model"].state.nemo_gym_rollout_router.claims
+
+    # Exceed the default 64-history cache; old claims must follow history eviction.
+    for index in range(67):
+        response = client.post(
+            f"/ng-rollout/rollout-{index}/v1/responses",
+            json=envelope([], identity="first", field="input"),
+            headers={"x-gym-history-transport": "v1"},
+        )
+        assert response.status_code == 200
+
+    assert len(claims) == 64
+    assert len(list((worker_socket_dir / "session-claims").iterdir())) == 64
+    assert claims.claimant("rollout-0") is None
+    assert claims.claimant("rollout-66") == claims.routing_id
+
+
+def test_ordinary_model_requests_leave_no_retained_claims(make_client, model_apps, worker_socket_dir):
+    client = make_client(num_workers=2)
+    claims = model_apps["model"].state.nemo_gym_rollout_router.claims
+
+    for rollout in ["one", "two", "three"]:
+        response = client.post(f"/ng-rollout/{rollout}/v1/responses", json={"input": "ordinary request"})
+        assert response.status_code == 200
+
+    assert len(claims) == 0
+    assert list((worker_socket_dir / "session-claims").iterdir()) == []
+
+
+def test_rollout_claim_survives_until_its_last_subagent_history_is_evicted(worker_socket_dir, envelope):
+    buffer = HistoryBuffer(max_entries=2)
+    router = RolloutRouter(str(worker_socket_dir), holds=buffer.retains_rollout)
+    buffer.on_rollout_evicted = router.claims.release
+    router.claims.claim("parent-rollout")
+    buffer.reconstruct("parent-rollout", envelope([], identity="root-call", conversation="root"))
+    buffer.reconstruct("parent-rollout", envelope([], identity="child-call", conversation="child"))
+
+    router.claims.claim("other-rollout")
+    buffer.reconstruct("other-rollout", envelope([], identity="other-call"))
+
+    # Root history is gone, but the child's history still needs the same owner.
+    assert router.claims.claimant("parent-rollout") == router.claims.routing_id
+
+    router.claims.claim("third-rollout")
+    buffer.reconstruct("third-rollout", envelope([], identity="third-call"))
+
+    assert router.claims.claimant("parent-rollout") is None
+    assert len(router.claims) == 2
+    assert len(list((worker_socket_dir / "session-claims").iterdir())) == 2
+
+
+def test_appending_history_retains_ownership_while_idle_rollouts_expire(worker_socket_dir, envelope, monkeypatch):
+    clock = Mock(return_value=0.0)
+    monkeypatch.setattr("nemo_gym.models.history_delta.time", SimpleNamespace(monotonic=clock))
+    buffer = HistoryBuffer(ttl=1)
+    router = RolloutRouter(str(worker_socket_dir), holds=buffer.retains_rollout)
+    buffer.on_rollout_evicted = router.claims.release
+    router.claims.claim("active")
+    buffer.reconstruct("active", envelope([], identity="first"))
+    router.claims.claim("idle")
+    buffer.reconstruct("idle", envelope([], identity="idle-call"))
+
+    clock.return_value = 0.75
+    buffer.reconstruct("active", envelope([], identity="next", base="first", mode="append"))
+    buffer.cleanup_expired_histories(1.25)
+
+    assert router.claims.claimant("active") == router.claims.routing_id
+    assert router.claims.claimant("idle") is None
+    assert len(router.claims) == 1
+    assert len(list((worker_socket_dir / "session-claims").iterdir())) == 1
+
+
+@pytest.mark.parametrize("phase", ["inference", "streaming"])
+async def test_history_eviction_preserves_ownership_until_the_active_response_finishes(
+    worker_socket_dir, envelope, phase
+):
+    buffer = HistoryBuffer(max_entries=1)
+    router = RolloutRouter(str(worker_socket_dir), holds=buffer.retains_rollout)
+    buffer.on_rollout_evicted = router.claims.release
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def blocked_model(scope, receive, send):
+        buffer.reconstruct("active", envelope([], identity="active-call"))
+        if phase == "streaming":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"partial", "more_body": True})
+        started.set()
+        await finish.wait()
+        if phase == "inference":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"done", "more_body": False})
+
+    middleware = _RolloutRoutingMiddleware(blocked_model, router=router)
+    scope = {"type": "http", "method": "POST", "path": "/ng-rollout/active/v1/responses"}
+    request = asyncio.create_task(middleware(scope, AsyncMock(), AsyncMock()))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        buffer.reconstruct("other", envelope([], identity="other-call"))
+        assert not buffer.retains_rollout("active")
+        assert router.claims.claimant("active") == router.claims.routing_id
+    finally:
+        finish.set()
+        await asyncio.wait_for(request, timeout=5)
+
+    assert router.claims.claimant("active") is None
+    assert list((worker_socket_dir / "session-claims").iterdir()) == []
+
+
+def test_append_after_ownership_expiry_resyncs_before_model_dispatch(
+    make_client, model_apps, envelope, read_events
+):
+    client_a = make_client(num_workers=2, model_name="worker-a")
+    client_b = make_client(num_workers=2, model_name="worker-b")
+    url = "/ng-rollout/expired/v1/responses"
+    headers = {"x-gym-history-transport": "v1"}
+    assert client_a.post(url, json=envelope([], identity="first", field="input"), headers=headers).status_code == 200
+    buffer = model_apps["worker-a"].state.nemo_gym_history_buffer
+    client_a.portal.call(buffer.cleanup_expired_histories, float("inf"))
+    read_events.clear()
+
+    response = client_b.post(
+        url, json=envelope([], identity="next", base="first", mode="append", field="input"), headers=headers
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "gym_history_resync"
+    assert "dispatch" not in read_events
+
+    recovered = client_b.post(url, json=envelope([], identity="full-retry", field="input"), headers=headers)
+    assert recovered.status_code == 200
+    assert recovered.headers["x-test-worker"] == "worker-b"
+    assert recovered.json()["input"] == []
+
+
+def test_forwarded_request_enters_only_the_owners_admission_gate(make_client, envelope):
     gate_a = PolicyModelParticipant(None, server_name="worker-a").gate
     gate_b = PolicyModelParticipant(None, server_name="worker-b").gate
     gate_a.admit = AsyncMock(wraps=gate_a.admit)
@@ -180,13 +334,18 @@ def test_forwarded_request_enters_only_the_owners_admission_gate(make_client):
     url = "/ng-rollout/rollout-1/v1/responses"
 
     # The first request establishes A as the owner and enters A's real admission gate.
-    first_response = client_a.post(url, json={"input": "first call"})
+    headers = {"x-gym-history-transport": "v1"}
+    first_response = client_a.post(
+        url, json=envelope([{"role": "user", "content": "first call"}], identity="first", field="input"), headers=headers
+    )
     assert first_response.status_code == 200
     gate_a.admit.assert_awaited_once_with("rollout-1")
     gate_a.admit.reset_mock()
 
     # A reconnect to B enters A's gate exactly once and never enters B's gate.
-    next_response = client_b.post(url, json={"input": "next call"})
+    next_response = client_b.post(
+        url, json=envelope([{"role": "user", "content": "next call"}], identity="next", field="input"), headers=headers
+    )
     assert next_response.status_code == 200
     assert next_response.headers["x-test-worker"] == "worker-a"
     gate_a.admit.assert_awaited_once_with("rollout-1")

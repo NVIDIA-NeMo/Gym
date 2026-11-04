@@ -672,9 +672,9 @@ class WorkerForwarder:
 class RolloutRouter(WorkerForwarder):
     """Claim a rollout on its first model call and forward later calls to that worker."""
 
-    def __init__(self, socket_dir: str) -> None:
+    def __init__(self, socket_dir: str, *, holds: Callable[[str], bool]) -> None:
         super().__init__(socket_dir)
-        self.claims = SessionClaims(socket_dir, uuid4().hex, holds=lambda _: True)
+        self.claims = SessionClaims(socket_dir, uuid4().hex, holds=holds)
 
     async def route(self, rollout_id: str, scope: Scope, receive: Receive, send: Send) -> bool:
         """Return True if the request was forwarded or refused; False if it belongs here."""
@@ -689,9 +689,11 @@ class RolloutRouter(WorkerForwarder):
         return True
 
 
-def install_rollout_routing(app: FastAPI, *, socket_dir: str, backlog: int = DEFAULT_UVICORN_BACKLOG) -> RolloutRouter:
+def install_rollout_routing(
+    app: FastAPI, *, socket_dir: str, holds: Callable[[str], bool], backlog: int = DEFAULT_UVICORN_BACKLOG
+) -> RolloutRouter:
     """Serve forwarded model requests on this worker's private socket for the app's lifetime."""
-    router = RolloutRouter(socket_dir)
+    router = RolloutRouter(socket_dir, holds=holds)
     original_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
