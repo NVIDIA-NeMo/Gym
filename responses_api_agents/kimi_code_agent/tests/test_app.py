@@ -15,8 +15,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.agents import AgentSeedSessionRequest, SandboxSession, check_agent_seed_rejected
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentSeedSessionRequest,
+    SandboxSession,
+    check_agent_seed_rejected,
+)
 from nemo_gym.agents.base_responses_api_agent import ModelEndpoint
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
