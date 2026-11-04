@@ -1,7 +1,7 @@
 # Example MCP Weather
 
 A minimal example of serving a Resources Server's tools over the **Model Context Protocol (MCP)**.
-The server extends `StatefulResourcesServer` with one typed HTTP tool route (`POST /get_weather`) —
+The server extends `SimpleResourcesServer` with one typed HTTP tool route (`POST /get_weather`) —
 no MCP imports, no decorators. The base class handles seed, close, and checkpoint retirement; the example
 provides its weather state and scoring. Setting `expose_tools_over_mcp: true` in its YAML config serves that
 same route over a Streamable-HTTP MCP endpoint at `/mcp` on the same FastAPI app as `/seed_session`

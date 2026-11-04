@@ -21,18 +21,20 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from time import monotonic
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
     PrivateAttr,
     SerializerFunctionWrapHandler,
     TypeAdapter,
+    ValidationError,
     field_validator,
     model_serializer,
 )
@@ -581,7 +583,19 @@ class _FenceLock:
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
+    """Resources server with HTTP/MCP tools, verification, and an optional shared session lifecycle.
+
+    Implement all three state hooks to inherit seed, close, and checkpoint retirement. Servers that keep no
+    state need only ``verify``; existing custom lifecycle endpoints may still override the protocol methods.
+    """
+
     config: BaseResourcesServerConfig
+    # Override the three state hooks to use the built-in lifecycle; unchanged hooks keep the stateless defaults.
+    seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = BaseSeedSessionRequest
+    _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
+    # The identity is protocol state; the retained verification payload is owned and interpreted by each verifier.
+    _verified_sessions: ClosedResourcesSessionRecords[tuple[tuple[EpisodeId, TaskId] | None, Any]] = PrivateAttr()
+    _fence: ResourcesSessionFence = PrivateAttr()
     # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement the
     # ResourcesSessionHooks methods.
     # The default fails closed: its sessions' rollouts are restarts, which never hold up a checkpoint,
@@ -598,6 +612,40 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        hooks = ("has_session_state", "initialize_session_state", "release_session_state")
+        implemented = [name for name in hooks if getattr(type(self), name) is not getattr(SimpleResourcesServer, name)]
+        if implemented:
+            missing = set(hooks) - set(implemented)
+            if missing:
+                raise ValueError(
+                    f"{type(self).__name__} must implement all session state hooks; missing {sorted(missing)}"
+                )
+            self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+            self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+
+    def _manages_session_state(self) -> bool:
+        return type(self).initialize_session_state is not SimpleResourcesServer.initialize_session_state
+
+    def has_session_state(self, session_id: str) -> bool:
+        """Whether live state exists; implement with initialization and release to use the shared lifecycle."""
+        return False
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Create state from validated task data, replacing a previous legacy run if needed.
+
+        A typed retry with an existing binding never calls this hook. Publish live state only after construction
+        succeeds. Keep partial resources separately, reachable by ``release_session_state``, if cleanup fails.
+        """
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Release live and partially created resources; succeed if none remain.
+
+        Raise on cleanup failure and retain what a later call needs to retry. This base removes the active
+        identity and records a close only after the hook succeeds.
+        """
 
     def claimed_session_routing(self) -> dict[str, Any]:
         return {
@@ -633,7 +681,23 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def register_protocol_routes(self, app: FastAPI) -> None:
         """Register the episode routes ``/seed_session``, ``/close_session`` and ``/verify``."""
-        app.post("/seed_session")(self.seed_session)
+        if type(self).seed_session is SimpleResourcesServer.seed_session:
+            # Inject Request at the HTTP boundary while keeping seed_session(body) valid for direct callers.
+            legacy_body = (
+                Annotated[self.seed_request_model, BeforeValidator(reject_typed_resources_seed)]
+                if self._manages_session_state()
+                else BaseSeedSessionRequest
+            )
+            seed_body = ResourcesSeedSessionRequest | legacy_body
+
+            async def seed_endpoint(
+                request: Request, body: seed_body
+            ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+                return await self.seed_session(body, request=request)
+
+            app.post("/seed_session", name="seed_session")(seed_endpoint)
+        else:
+            app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
         config = getattr(self.server_client, "global_config_dict", {})
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
@@ -665,7 +729,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if self.checkpoint_mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
-                name for name in _SESSION_HOOKS if getattr(type(self), name) is getattr(SimpleResourcesServer, name)
+                name
+                for name in _SESSION_HOOKS
+                if getattr(type(self), name) is getattr(SimpleResourcesServer, name)
+                and not (name == "retire_session_state" and self._manages_session_state())
             ]
             if missing:
                 raise ValueError(
@@ -762,12 +829,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         raise NotImplementedError
 
     async def retire_session_state(self, session_id: str) -> None:
-        """Discard a session whose attempt was retired; called in every checkpoint mode.
-
-        The default does nothing.
-        A server that keeps per-session state frees it here, since a retired session's late requests,
-        a terminal step among them, are refused.
-        """
+        """Release a retired attempt, retaining its identity if cleanup fails."""
+        if not self._manages_session_state():
+            return
+        async with self._fence.locked(session_id):
+            identity = self._session_episodes.get(session_id)
+            await self.release_session_state(session_id)
+            self._session_episodes.pop(session_id, None)
+            if identity is not None:
+                self._fence.mark_closed(session_id, identity[0])
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
@@ -791,50 +861,73 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def seed_session(
         self,
         body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
+        *,
+        request: Request | None = None,
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Seed per-rollout state; the default keeps none.
+        """Seed a session through the state hooks, or acknowledge a stateless request.
 
-        An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and gets its caller-assigned
-        ``resources_session_id`` back. An Agent's ``/run`` seeds with its legacy body and gets an empty
-        response. Servers that keep per-rollout state override this method.
-
-        An override refuses a seed that no retry can make succeed with a final 4xx, never a plain exception
-        (HTTP 500), which the Environment Server retries by dispatching the whole episode again:
-
-        - ``ResourcesSeedRejectedError`` (422) for input that fails validation, such as ``task_data`` or a
-          ``TaskId`` that does not match the task row;
-        - ``ResourcesSessionConflictError`` (409) for an ID bound to another episode or task, or a closed session.
-
-        A failure that a retry may fix, such as an unavailable sandbox provider, stays a 5xx.
+        ``seed_session(body)`` remains valid for stateless callers. Servers using the state hooks also pass
+        ``request`` so the cookie can be bound after successful initialization. HTTP routes supply it automatically.
+        Invalid task data raises ``ResourcesSeedRejectedError`` (422); ownership conflicts raise
+        ``ResourcesSessionConflictError`` (409). Resource construction failures remain retryable server errors.
         """
-        if isinstance(body, ResourcesSeedSessionRequest):
-            return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
-        return BaseSeedSessionResponse()
+        if not self._manages_session_state():
+            if isinstance(body, ResourcesSeedSessionRequest):
+                return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
+            return BaseSeedSessionResponse()
+        if request is None:
+            raise TypeError("Stateful seed_session requires request= to bind the session cookie")
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            session_id = request.session[SESSION_ID_KEY]
+            async with self._fence.locked(session_id):
+                verified = self._verified_sessions.get(session_id)
+                session_id = self._fence.legacy_seed_session_id(
+                    session_id,
+                    identity=self._session_episodes.get(session_id) or (verified[0] if verified is not None else None),
+                    verified=verified is not None,
+                )
+                await self.initialize_session_state(session_id, body)
+                request.session[SESSION_ID_KEY] = session_id
+            return BaseSeedSessionResponse()
+
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            if self._fence.check_typed_seed(
+                body,
+                identity=self._session_episodes.get(session_id),
+                has_state=self.has_session_state(session_id),
+                verified=session_id in self._verified_sessions,
+            ):
+                try:
+                    task = self.seed_request_model.model_validate(body.task_data)
+                except ValidationError as error:
+                    raise ResourcesSeedRejectedError(
+                        f"task_data is not a valid {self.seed_request_model.__name__}: {error}"
+                    ) from error
+                await self.initialize_session_state(session_id, task)
+                self._session_episodes[session_id] = (body.episode_id, body.task_id)
+            # Bind only after initialization succeeds. MCP auto-exposure signs this same session ID.
+            request.session[SESSION_ID_KEY] = session_id
+        return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Close state an Environment Server seeded; the default keeps none.
+        """Release by ID, including a close without a cookie, then fence late requests.
 
-        Served at ``/close_session``. Servers that keep per-rollout state override this method, and may accept
-        other close bodies by overriding it with a different signature. The name differs from the
-        ``close_session`` helpers some servers already define for their own state.
-
-        An override must:
-
-        - succeed when the session is already closed or was never seeded;
-        - keep a seed that arrives after the close from creating the session again, for a bounded time
-          (``ResourcesSessionFence`` does this for ``session_close_retry_window_seconds``);
-        - release the session's state by ``resources_session_id`` even when the request carries no session cookie;
-        - raise when releasing fails rather than recording the session as closed, so the caller can retry.
-
-        A served resources server routes sessions (see ``nemo_gym.server_runtime.request_handling.session_routing``): a typed seed's session cookie
-        carries ``resources_session_id`` as its ``SESSION_ID_KEY``, and a typed close that carries no cookie, as when
-        the seed's reply was lost, is given that ID too, so a server may key state by either; they name the same
-        session. An app built without session routing, such as one under ``TestClient``, gives a new session a random
-        ID instead, so release by ``body.resources_session_id`` to be correct either way.
-
-        ``nemo_gym.server_runtime.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
+        Stateless servers acknowledge the close. Custom overrides must release by ``resources_session_id``,
+        tolerate unknown or already-closed sessions, reject another episode's close, and keep failed cleanup
+        retryable. Use ``check_resources_session_contract`` to check the HTTP contract.
         """
-        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+        if not self._manages_session_state():
+            return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+        session_id = body.resources_session_id
+        async with self._fence.locked(session_id):
+            verified = self._verified_sessions.get(session_id)
+            identity = self._session_episodes.get(session_id) or (verified[0] if verified is not None else None)
+            self._fence.check_close(body, identity=identity)
+            await self.release_session_state(session_id)
+            self._session_episodes.pop(session_id, None)
+            self._fence.mark_closed(session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:

@@ -28,7 +28,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionLostError,
-    StatefulResourcesServer,
+    SimpleResourcesServer,
     lost_session_verification,
     reject_typed_resources_seed,
 )
@@ -95,7 +95,7 @@ class ExampleMCPWeatherVerifyResponse(BaseVerifyResponse):
     final_response_mentions_weather: bool
 
 
-class ExampleMCPWeatherResourcesServer(StatefulResourcesServer[frozenset[str]]):
+class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
     config: ExampleMCPWeatherResourcesServerConfig
     # The weather calls of each live session, keyed by the session cookie's SESSION_ID_KEY. Every tool call reaches
     # the same key: over HTTP the cookie carries it, and over MCP the signed session token minted at seed time does.
@@ -113,7 +113,7 @@ class ExampleMCPWeatherResourcesServer(StatefulResourcesServer[frozenset[str]]):
         body: ResourcesSeedSessionRequest
         | Annotated[ExampleMCPWeatherSeedSessionRequest, BeforeValidator(reject_typed_resources_seed)],
     ) -> ResourcesSeedSessionResponse | ExampleMCPWeatherSeedSessionResponse:
-        response = await super().seed_session(request, body)
+        response = await super().seed_session(body, request=request)
         return (
             response if isinstance(response, ResourcesSeedSessionResponse) else ExampleMCPWeatherSeedSessionResponse()
         )
