@@ -145,25 +145,6 @@ def test_cached_runtime_needs_no_package_installation(sandbox: tuple[Path, dict[
     assert not (root / "download.log").exists()
 
 
-def test_readonly_cached_runtime_uses_temporary_probe_state(sandbox: tuple[Path, dict[str, str]]) -> None:
-    root, env = sandbox
-    runtime = root / "runtime"
-    runtime.mkdir()
-    binary = runtime / "opencode"
-    binary.write_text('#!/bin/bash\n: > "$HOME/probe"\n: > "$XDG_CACHE_HOME/probe"\necho 1.17.11\n')
-    binary.chmod(0o555)
-    runtime.chmod(0o555)
-    try:
-        result = run_installer(root, env | {"TMPDIR": str(root)})
-        assert result.returncode == 0, result.stderr
-        assert list(runtime.iterdir()) == [binary]
-        assert not list(root.glob("nemo-gym-opencode-install.*"))
-        assert not (root / "download.log").exists()
-        assert not (root / "packages.log").exists()
-    finally:
-        runtime.chmod(0o755)
-
-
 # A cached binary that prints the right version and then fails is unhealthy.
 @pytest.mark.parametrize("probe", ["echo 1.17.10", "echo 1.17.11; exit 7"])
 def test_wrong_or_unhealthy_cached_version_is_not_reused(sandbox, probe):

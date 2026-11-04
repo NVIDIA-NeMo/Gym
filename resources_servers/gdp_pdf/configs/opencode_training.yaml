@@ -23,6 +23,7 @@ gdp_pdf_opencode:
 policy_model:
   responses_api_models:
     vllm_model:
+      # Match these values in the trainer; OpenCode delegates sampling to this server.
       sampling_overrides:
         temperature: 1.0
         top_p: 1.0

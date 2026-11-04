@@ -271,7 +271,9 @@ JSONL and replace its `TBD` license. The existing GDP.pdf row format applies:
 Never train on benchmark questions.
 
 The overlay enables shared token capture and disables history compaction/pruning.
-The trainer owns capture storage and policy sampling. For NeMo RL, enable
+It pins sampling on Gym's model server to temperature 1.0, top-p 1.0 and top-k -1
+(disabled). Configure the same distribution in your trainer; change both together
+when using another recipe. The trainer owns capture storage. For NeMo RL, enable
 `token_capture.enabled` and `token_capture.forest_training`, select
 `returned_history`, and keep `skip_tokenizer_init: false`. See the
 [shared capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml).
