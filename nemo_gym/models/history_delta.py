@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,12 +64,23 @@ class HistoryBuffer:
     def __init__(self, *, max_bytes: int = 256 * 1024 * 1024, max_entries: int = 64, ttl: float = 1800) -> None:
         self._entries: OrderedDict[tuple[str, str, str], _History] = OrderedDict()
         self._max_bytes, self._max_entries, self._ttl = max_bytes, max_entries, ttl
+        self.on_rollout_evicted: Callable[[str], None] | None = None
+
+    def retains_rollout(self, rollout_id: str) -> bool:
+        """Whether any conversation history for the rollout remains in this bounded cache."""
+        return any(key[0] == rollout_id for key in self._entries)
+
+    def _remove_history(self, key: tuple[str, str, str]) -> None:
+        del self._entries[key]
+        rollout_id = key[0]
+        if self.on_rollout_evicted is not None and not self.retains_rollout(rollout_id):
+            self.on_rollout_evicted(rollout_id)
 
     def cleanup_expired_histories(self, now: float) -> None:
         """Remove histories inactive beyond the TTL, as a fallback for abandoned rollouts."""
         for key in list(self._entries):
             if now - self._entries[key].touched > self._ttl:
-                del self._entries[key]
+                self._remove_history(key)
 
     def reconstruct(self, rollout_id: str, body: dict[str, Any], *, history_field: str = "messages") -> dict[str, Any]:
         """Apply once before model dispatch; duplicate transport delivery never appends twice.
@@ -107,7 +119,7 @@ class HistoryBuffer:
         self._entries[key].touched = now
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries or sum(v.size for v in self._entries.values()) > self._max_bytes:
-            self._entries.popitem(last=False)
+            self._remove_history(next(iter(self._entries)))
         return {k: v for k, v in body.items() if k != "_gym_history"} | {history_field: complete}
 
 

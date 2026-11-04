@@ -392,8 +392,14 @@ class _RolloutRoutingMiddleware:
             if match is not None:
                 path = match.group("rest")
                 if path in _OBSERVED_PATHS and ("POST", path) not in self._non_generating_requests:
-                    if await self._router.route(match.group("rollout_id"), scope, receive, send):
+                    rollout_id = match.group("rollout_id")
+                    if await self._router.route(rollout_id, scope, receive, send):
                         return
+                    # Hold ownership through admission, inference, streaming, and
+                    # capture finalization, even if this request's history is evicted.
+                    with self._router.claims.serving(rollout_id):
+                        await self._app(scope, receive, send)
+                    return
         await self._app(scope, receive, send)
 
 
@@ -405,7 +411,12 @@ def install_model_rollout_routing(
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
 ) -> None:
     """Install delta rollout routing after admission/capture so it executes before them."""
-    router = install_rollout_routing(app, socket_dir=socket_dir, backlog=backlog)
+    buffer = getattr(app.state, "nemo_gym_history_buffer", None)
+    if buffer is None:
+        raise ValueError("Model rollout routing requires an installed history buffer")
+    router = install_rollout_routing(app, socket_dir=socket_dir, holds=buffer.retains_rollout, backlog=backlog)
+    buffer.on_rollout_evicted = router.claims.release
+    app.state.nemo_gym_rollout_router = router
     app.add_middleware(_RolloutRoutingMiddleware, router=router, non_generating_requests=non_generating_requests)
 
 
@@ -813,6 +824,7 @@ class _CaptureMiddleware:
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
         history_delta_enabled: bool = False,
+        history_buffer: HistoryBuffer | None = None,
         history_transport_protocol: HistoryTransportProtocol | None = None,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
@@ -832,7 +844,9 @@ class _CaptureMiddleware:
         self._delta_records = delta_records
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
-        self._history_buffer = HistoryBuffer() if history_delta_enabled else None
+        self._history_buffer = history_buffer
+        if history_delta_enabled and self._history_buffer is None:
+            self._history_buffer = HistoryBuffer()
         self._history_transport_protocol = (
             history_transport_protocol if history_transport_protocol is not None else HistoryTransportProtocol()
         )
@@ -1310,6 +1324,9 @@ def install_model_call_capture(
     history_delta_enabled = bool(
         global_config_dict is not None and global_config_dict.get("history_delta_enabled", False)
     )
+    # Routing and reconstruction must observe the same worker-local cache.
+    history_buffer = HistoryBuffer() if history_delta_enabled else None
+    app.state.nemo_gym_history_buffer = history_buffer
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
@@ -1324,6 +1341,7 @@ def install_model_call_capture(
             capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
         ),
         history_delta_enabled=history_delta_enabled,
+        history_buffer=history_buffer,
         history_transport_protocol=history_transport_protocol,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
