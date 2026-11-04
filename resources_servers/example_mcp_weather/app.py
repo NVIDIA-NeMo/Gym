@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from typing import Annotated, Any, Optional
-from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, ValidationError
@@ -33,11 +32,11 @@ from nemo_gym.server_runtime import (
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-    ResourcesSessionConflictError,
     ResourcesSessionFence,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
+    reject_typed_resources_seed,
 )
 
 
@@ -59,12 +58,6 @@ def _extract_assistant_text(body: BaseVerifyRequest) -> str:
         elif isinstance(content, str):
             texts.append(content)
     return "\n".join(texts).strip()
-
-
-def _reject_typed_seed(value: object) -> object:
-    if isinstance(value, dict) and ResourcesSeedSessionRequest.model_fields.keys() & value.keys():
-        raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
-    return value
 
 
 class ExampleMCPWeatherResourcesServerConfig(BaseResourcesServerConfig):
@@ -134,19 +127,18 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         self,
         request: Request,
         body: ResourcesSeedSessionRequest
-        | Annotated[ExampleMCPWeatherSeedSessionRequest, BeforeValidator(_reject_typed_seed)],
+        | Annotated[ExampleMCPWeatherSeedSessionRequest, BeforeValidator(reject_typed_resources_seed)],
     ) -> ResourcesSeedSessionResponse | ExampleMCPWeatherSeedSessionResponse:
         if not isinstance(body, ResourcesSeedSessionRequest):
             # An Agent's /run seeds with the row's own fields, under the session its cookie names.
             session_id = request.session[SESSION_ID_KEY]
             async with self._fence.locked(session_id):
-                self._fence.raise_if_closed(session_id)
                 verified = self._verified_sessions.get(session_id)
-                if session_id in self._session_episodes or (verified is not None and verified[0] is not None):
-                    raise ResourcesSessionConflictError("A legacy seed cannot replace a typed session")
-                if verified is not None:
-                    # A new /run may reuse its caller's cookie; keep the completed cookie valid for verify retries.
-                    session_id = str(uuid4())
+                session_id = self._fence.legacy_seed_session_id(
+                    session_id,
+                    identity=self._session_episodes.get(session_id) or (verified[0] if verified is not None else None),
+                    verified=verified is not None,
+                )
                 self.session_id_to_state[session_id] = {"weather_calls": []}
                 request.session[SESSION_ID_KEY] = session_id
             return ExampleMCPWeatherSeedSessionResponse()
@@ -155,13 +147,12 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         # return the open session unchanged, so a retried seed keeps the weather calls already recorded.
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
-            if session_id in self._verified_sessions:
-                raise ResourcesSessionConflictError("resources session has already been verified")
-            identity = self._session_episodes.get(session_id)
-            if identity is None:
-                if session_id in self.session_id_to_state:
-                    raise ResourcesSessionConflictError("A typed seed cannot replace a legacy session")
+            if self._fence.check_typed_seed(
+                body,
+                identity=self._session_episodes.get(session_id),
+                has_state=session_id in self.session_id_to_state,
+                verified=session_id in self._verified_sessions,
+            ):
                 # task_data holds the row's own fields, the body an Agent's /run seed sends. Input that fails
                 # validation gets a final 422: retrying the episode would send the same input again.
                 try:
@@ -172,8 +163,6 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
                     ) from error
                 self.session_id_to_state[session_id] = {"weather_calls": []}
                 self._session_episodes[session_id] = (body.episode_id, body.task_id)
-            elif identity != (body.episode_id, body.task_id):
-                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
             # Bind the cookie to the session. MCP auto-exposure signs this same ID into the session token it adds to
             # the reply as resources_tools, so tool calls over HTTP and over MCP both find the state stored here.
             request.session[SESSION_ID_KEY] = session_id
@@ -183,13 +172,9 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         # The body names the session, so a close that carries no cookie (the seed's reply was lost) still releases it.
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
-            closed_episode = self._fence.closed_episode(session_id)
-            if closed_episode is not None and closed_episode != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             verified = self._verified_sessions.get(session_id)
             identity = self._session_episodes.get(session_id) or (verified[0] if verified is not None else None)
-            if identity is not None and identity[0] != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            self._fence.check_close(body, identity=identity)
             # Releasing in-memory state cannot fail. A server that holds an external resource releases it here and
             # lets a failure raise before mark_closed, so the caller can retry the close.
             self.session_id_to_state.pop(session_id, None)

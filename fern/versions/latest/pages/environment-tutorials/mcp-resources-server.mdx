@@ -115,6 +115,8 @@ On the typed-session path:
 
 The [weather README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather#sessions-under-an-environment-server) has more on this path.
 
+The example uses the shared [`ResourcesSessionFence`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/base_resources_server.py) for seed conflicts, completed-cookie rotation, and close ownership checks. `reject_typed_resources_seed` prevents malformed typed requests from falling through to the permissive legacy request model. The weather server owns task validation, weather history, cleanup, and the evidence needed to retry verification. Keep cleanup before `mark_closed` so a failed release can be retried.
+
 <Accordion title="Why the implementation uses both Field and PrivateAttr">
 `session_id_to_state` retains the original example's public Pydantic `Field`. The added `_session_episodes`, `_verified_sessions`, and `_fence` hold internal runtime bookkeeping and use `PrivateAttr`. Pydantic treats these underscore-prefixed attributes as private state, excluding them from model-field validation and serialization.
 </Accordion>

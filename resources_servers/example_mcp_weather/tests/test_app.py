@@ -29,8 +29,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     TaskId,
 )
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherGetWeatherRequest,
     ExampleMCPWeatherResourcesServer,
