@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -229,6 +230,53 @@ async def test_the_real_grading_script_stops_at_a_setup_patch_that_does_not_appl
     assert exits[-1] == 0 and "TESTS_RAN" in graded.test_output
     assert graded.completed is True and graded.error is None
     assert (repo / "b.py").read_text() == "def f():\n    return 2\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
+async def test_a_failed_probe_does_not_count_as_a_pruned_original(error_type):
+    class ProbeFails:
+        async def exec(self, command, cwd=None, timeout_s=None):
+            if "rev-parse" in command:
+                return SimpleNamespace(stdout="seeded\n", stderr="", return_code=0)
+            return SimpleNamespace(stdout=None, stderr="provider error", return_code=-1, error_type=error_type)
+
+    with pytest.raises(RuntimeError, match=f"Could not verify.*{error_type}"):
+        await start_state.assert_unreachable(ProbeFails(), "/w", "original")
+
+
+@pytest.mark.asyncio
+async def test_seeding_gives_every_directory_the_tracked_files_time(tmp_path, monkeypatch):
+    """Applying the setup patch touches the directories it edits or creates; none may stand out."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / ".gitconfig"))
+    monkeypatch.setattr(start_state, "SETUP_PATCH_PATH", str(tmp_path / "setup.diff"))
+    repo = tmp_path / "repo"
+    (repo / "pkg" / "old").mkdir(parents=True)
+    (repo / "pkg" / "edit").mkdir()
+    (repo / "pkg" / "old" / "x.py").write_text("a\n")
+    (repo / "pkg" / "edit" / "y.py").write_text("b\n")
+    git(repo, "init", "-q")
+    git(repo, "add", ".")
+    commit(repo, "base", "2021-06-01T12:00:00+0000", "Base Author")
+    (repo / "pkg" / "edit" / "y.py").write_text("b\nc\n")
+    (repo / "pkg" / "new" / "sub").mkdir(parents=True)
+    (repo / "pkg" / "new" / "sub" / "a.py").write_text("n\n")
+    git(repo, "add", ".")
+    (tmp_path / "setup.diff").write_text(git(repo, "diff", "--cached"))
+    git(repo, "reset", "-q", "--hard")
+    shutil.rmtree(repo / "pkg" / "new", ignore_errors=True)
+    for path in [repo, *repo.rglob("*")]:
+        if ".git" not in path.relative_to(repo).parts:
+            os.utime(path, (1_000_000_000, 1_000_000_000))
+
+    await seed(repo, squash=True)
+
+    assert (repo / "pkg" / "new" / "sub" / "a.py").read_text() == "n\n"
+    assert git(repo, "status", "--porcelain") == ""
+    stamp = (repo / "pkg" / "old" / "x.py").stat().st_mtime
+    directories = [repo, *(p for p in repo.rglob("*") if p.is_dir() and ".git" not in p.relative_to(repo).parts)]
+    assert {d.stat().st_mtime for d in directories} == {stamp}
 
 
 @pytest.mark.asyncio

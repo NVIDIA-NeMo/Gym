@@ -22,8 +22,8 @@ the agent must finish it. The applied part must not point at where to work, so s
    root commit (``git show HEAD`` / ``git log -p`` then reveal nothing);
 2. leaves the anti-cheat scrub (run next by the caller) to expire the reflog and prune the
    original commit and every now-unreachable object;
-3. gives every tracked file one modification time and deletes Python and pytest caches, so
-   ``stat``, ``ls -t`` and ``find -newer`` reveal nothing either.
+3. gives every tracked file and every directory one modification time and deletes Python and
+   pytest caches, so ``stat``, ``ls -t`` and ``find -newer`` reveal nothing either.
 
 Rows that only set ``squash_history`` get the same treatment without a patch, so parents and
 start-state tasks in one curriculum look alike. Rows with neither field are untouched.
@@ -70,6 +70,8 @@ rm -rf .pytest_cache
 git ls-files -z --deleted | xargs -0 -r git checkout --
 stamp=$(date +%s)
 git ls-files -z | xargs -0 -r touch -h -d "@$stamp"
+# Applying the patch and deleting caches touched their directories; untouched ones keep image times.
+find . -path ./.git -prune -o -type d -exec touch -d "@$stamp" {} + 2>/dev/null || true
 git update-index -q --refresh || true
 """
 
@@ -117,6 +119,12 @@ async def assert_unreachable(sandbox: Any, workdir: str, original: str) -> None:
     if await seeded_head(sandbox, workdir) == original:
         return
     result = await sandbox.exec(f"git -C {shlex.quote(workdir)} cat-file -e {shlex.quote(original)}^{{commit}}")
+    # A provider failure carries a non-process return code; it proves nothing about absence.
+    if getattr(result, "error_type", None) is not None:
+        raise RuntimeError(
+            f"Could not verify that the original base commit is gone: "
+            f"{result.error_type}: {result.stderr or result.stdout}"
+        )
     if result.return_code == 0:
         raise RuntimeError("The original base commit survived the anti-cheat scrub")
 
