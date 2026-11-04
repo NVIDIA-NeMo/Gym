@@ -53,10 +53,14 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
+from nemo_gym.core.episode_context import (
+    agent_instance_context,
+    current_agent_instance,
+)
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
 )
@@ -227,6 +231,7 @@ async def call_judge(
     json: Any,
     response_model: Type[ResponseT],
     timeout: ClientTimeout | None = None,
+    agent_instance: str | None = None,
 ) -> ResponseT:
     """POST to a judge model server and parse the reply; report failure as a ``judge_failed`` event.
 
@@ -234,8 +239,10 @@ async def call_judge(
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
     status check comes before parsing so an auth or server error reports the HTTP
     failure itself, not a validation error against the error body.
-    The enclosing verify execution supplies the invocation identity; all its judge
-    calls and retries share that identity. Standalone calls do not invent a verifier execution.
+
+    The call is made as an agent instance: ``agent_instance`` when given, else the name already set in context
+    (inside ``verify()`` that is the verifier run ``verify.<id>``, so all its judge calls and retries share
+    it), else ``judge``. Several judges in one episode pass ``judge.<n>``.
 
     A 408, 429 or 5xx reply, a timeout or a lost connection is tried again, up to
     ``JUDGE_CALL_MAX_ATTEMPTS`` attempts with full-jitter exponential backoff, before the
@@ -246,14 +253,13 @@ async def call_judge(
     """
 
     async def _call() -> ResponseT:
-        invocation_id = current_verifier_invocation_id()
-        http_response = await server_client.post(
-            server_name=server_name,
-            url_path=url_path,
-            json=json,
-            **({"timeout": timeout} if timeout is not None else {}),
-            **({"headers": {VERIFIER_INVOCATION_HEADER: invocation_id}} if invocation_id else {}),
-        )
+        with agent_instance_context(agent_instance or current_agent_instance() or "judge"):
+            http_response = await server_client.post(
+                server_name=server_name,
+                url_path=url_path,
+                json=json,
+                **({"timeout": timeout} if timeout is not None else {}),
+            )
         await raise_for_status(http_response)
         parsed = response_model.model_validate(await get_response_json(http_response))
         grading = _judge_grading.get()
@@ -328,3 +334,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             return JSONResponse(content=jsonable_encoder(data))
 
     return wrapper
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

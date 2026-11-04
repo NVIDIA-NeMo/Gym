@@ -28,7 +28,6 @@ from pydantic import BaseModel, Field
 from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -1827,8 +1826,8 @@ async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observ
         await middleware(
             {
                 "type": "http",
-                "path": "/ng-rollout/judge-retry/v1/responses",
-                "headers": [(VERIFIER_INVOCATION_HEADER.encode("ascii"), b"verification-1")],
+                "path": "/ng-rollout/judge-retry/ng-agent-instance/verify.verification-1/v1/responses",
+                "headers": [],
             },
             receive,
             send,

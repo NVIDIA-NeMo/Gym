@@ -48,9 +48,8 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.correlation import TRACEPARENT_PATTERN, CorrelationContext, encode
 from nemo_gym.core.episode_context import (
-    VERIFIER_INVOCATION_HEADER,
+    current_agent_instance,
     current_rollout_id,
-    current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
@@ -232,13 +231,9 @@ class ServerClient(BaseModel):
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
-            url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
-            verifier_invocation_id = current_verifier_invocation_id()
-            if verifier_invocation_id is not None:
-                kwargs["headers"] = {
-                    **(kwargs.get("headers") or {}),
-                    VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
-                }
+            # The agent instance a caller named with ``agent_instance_context`` travels with the prefix this
+            # client adds. A caller that builds its own prefix passes ``agent_instance`` to ``rollout_path_prefix``.
+            url_path = f"{rollout_path_prefix(rollout_id, agent_instance=current_agent_instance())}{url_path}"
 
         return await request(
             method=method,
@@ -347,11 +342,19 @@ def get_server_url(server_name: str) -> str:
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
 
 
-def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = False) -> str:
-    """Return the leading model-server path prefix for a rollout, if available."""
+def rollout_path_prefix(
+    rollout_id: Optional[str], *, token_capture: bool = False, agent_instance: Optional[str] = None
+) -> str:
+    """Return the leading model-server path prefix for a rollout, if available.
+
+    ``agent_instance`` names the agent instance making the calls (``/ng-agent-instance/<name>``); it is
+    dropped when there is no rollout to attach it to.
+    """
     if not rollout_id:
         return ""
-    return encode(CorrelationContext(capture_key=rollout_id, token_capture=token_capture))
+    return encode(
+        CorrelationContext(capture_key=rollout_id, agent_instance=agent_instance, token_capture=token_capture)
+    )
 
 
 def trace_context_path_segment() -> str:
@@ -372,7 +375,12 @@ def trace_context_path_segment() -> str:
 
 
 def apply_rollout_prefix(
-    base_url: str, rollout_id: Optional[str], *, token_capture: bool = False, trace_context: bool = True
+    base_url: str,
+    rollout_id: Optional[str],
+    *,
+    token_capture: bool = False,
+    trace_context: bool = True,
+    agent_instance: Optional[str] = None,
 ) -> str:
     """Append the rollout prefix and, while traces export, the current span's trace context to a model-server root URL.
 
@@ -384,7 +392,11 @@ def apply_rollout_prefix(
     URL that is built once and reused across rollouts (a cached client): otherwise every later
     rollout's calls would be parented to the first one's span.
     """
-    prefix = rollout_path_prefix(rollout_id, token_capture=token_capture) if rollout_id else ""
+    prefix = (
+        rollout_path_prefix(rollout_id, token_capture=token_capture, agent_instance=agent_instance)
+        if rollout_id
+        else ""
+    )
     if trace_context:
         prefix += trace_context_path_segment()
     if not prefix:

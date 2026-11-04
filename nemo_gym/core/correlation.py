@@ -82,6 +82,18 @@ def agent_kind_of(agent_instance: str) -> str:
     return agent_instance.partition(".")[0]
 
 
+# A verifier run is the agent instance ``verify.<invocation id>``.
+VERIFIER_AGENT_KIND = "verify"
+
+
+def verifier_invocation_id_of(agent_instance: str | None) -> str | None:
+    """Return the verifier invocation id an agent instance of kind ``verify`` names, else ``None``."""
+    if agent_instance is None:
+        return None
+    kind, _, invocation_id = agent_instance.partition(".")
+    return invocation_id if kind == VERIFIER_AGENT_KIND and invocation_id else None
+
+
 @dataclass(frozen=True)
 class CorrelationContext:
     """The identity a request path carries.

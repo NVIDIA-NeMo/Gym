@@ -536,6 +536,12 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
     },
+    "nemo_gym.judge": {
+        # judge imported these and they stay importable through it.
+        **_names(
+            "nemo_gym.core.episode_context", "0.8.0", "VERIFIER_INVOCATION_HEADER current_verifier_invocation_id"
+        ),
+    },
     "nemo_gym.health.types": {
         **_names(
             "nemo_gym.artifacts.run_files",

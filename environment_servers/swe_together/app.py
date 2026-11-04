@@ -62,8 +62,10 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    agent_instance_context,
     verifier_invocation_context,
 )
+from nemo_gym.core.correlation import VERIFIER_AGENT_KIND
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -356,7 +358,12 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             await agent_cleanup.close()
             stage = "verification"
             # Interaction scoring is part of grading, so its captured calls belong to this verifier invocation.
-            with verifier_invocation_context(f"verify-{uuid4().hex}"):
+            # The run is the agent instance ``verify.<id>``: the model server records the id from the path.
+            invocation_id = uuid4().hex
+            with (
+                verifier_invocation_context(invocation_id),
+                agent_instance_context(f"{VERIFIER_AGENT_KIND}.{invocation_id}"),
+            ):
                 verification = await self._verify(state, initial, activations)
             trajectory = agent_close.trajectory
             if verification.get("judge_capture_episode"):
