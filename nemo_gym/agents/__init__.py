@@ -69,6 +69,7 @@ if TYPE_CHECKING:
         RUNNER_FILE,
         SandboxCommand,
         SandboxSession,
+        prefer_oom_kill_setup,
         shell_assignments,
     )
     from nemo_gym.agents.utils.supervisor_client import (
@@ -138,6 +139,7 @@ _PUBLIC_API = {
     "is_harness_termination_failure": "utils.supervisor_client",
     "lifecycle_observation": "utils.sandbox_observation",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "prefer_oom_kill_setup": "utils.sandbox_session",
     "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_timeout": "utils.task_timeout",
     "restricted_network_policy": "agent_tools",

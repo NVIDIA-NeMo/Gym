@@ -1,0 +1,104 @@
+# Terminal-Bench-Science v0.1 with Claude Code running inside each task sandbox.
+#
+# The same composition as the Codex profile: the TB4 resources server owns the task and verifier
+# sandboxes and lends the task sandbox through SandboxAccess, claude_code_agent installs its pinned
+# CLI there and runs it, and single_agent_turn_legacy seeds both, closes Claude Code before
+# grading, then closes Resources. Claude Code starts as Harbor 0.24's claude-code agent starts it
+# (the leaderboard's harness): Harbor's system-dependency step first, the instruction on stdin, no
+# turn limit and no --bare, the task image's environment and HOME, the task's working directory
+# (also /) and its 8-hour budget. Claude Code calls an Anthropic Messages endpoint directly
+# (tbsci_anthropic_base_url, without /v1), which the task sandbox must reach; the model and its
+# client settings come from the run config. Rows carry the official instruction as their prompt
+# (prepare_codex.py). See README.md, "Claude Code in the task sandbox".
+config_paths:
+  - benchmarks/terminal_bench_science/resources.yaml
+  - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The provider block Claude Code reconnects through to borrow the task sandbox. It must reach the
+# same OpenSandbox deployment as the resources server's environment.sandbox_provider.
+terminal_bench_science_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # Claude Code's supervisor runs for the whole 8-hour budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_science_claude_code_resources_server:
+  _inherit_from: terminal_bench_science
+  resources_servers:
+    terminal_bench_4:
+      description: Pinned Terminal-Bench-Science v0.1 tasks lent to Claude Code in the task sandbox, with separate offline verification.
+      sandbox_provider_ref: terminal_bench_science_sandbox
+      datasets:
+        - name: terminal_bench_science
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
+          prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
+          # One trial per task, as the mini-SWE profile. The leaderboard's protocol is three trials
+          # per task (210 in all): ++num_repeats=3.
+          num_repeats: 1
+          license: Apache 2.0
+
+terminal_bench_science_claude_code_agent:
+  _inherit_from: claude_code_agent
+  responses_api_agents:
+    claude_code_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_claude_code_resources_server
+      # Claude Code calls the endpoint's own /v1/messages (the URL without /v1), which the task
+      # sandbox must reach. Set model_server to a Gym model server instead (and anthropic_base_url to
+      # null) to route the calls through Gym.
+      model_server: null
+      anthropic_base_url: ${oc.select:tbsci_anthropic_base_url,null}
+      # The endpoint's key, from the variable the run names (POLICY_API_KEY by default); any
+      # non-empty string for an endpoint without auth.
+      anthropic_api_key: ${oc.env:${oc.select:tbsci_model_api_key_env,POLICY_API_KEY},EMPTY}
+      # The name Claude Code sends as ANTHROPIC_MODEL and its tier aliases, e.g. deepseek-flash[1m].
+      model: ${oc.select:tbsci_claude_model,${policy_model_name}}
+      claude_code_version: ${oc.select:tbsci_claude_code_version,2.1.207}
+      reasoning_effort: ${oc.select:tbsci_reasoning_effort,null}
+      max_output_tokens: ${oc.select:tbsci_claude_max_output_tokens,null}
+      # Client environment such as API_TIMEOUT_MS or CLAUDE_CODE_AUTO_COMPACT_WINDOW.
+      extra_env: ${oc.select:tbsci_claude_env,{}}
+      # Harbor's defaults: no turn limit, no --bare, all tools.
+      max_turns: null
+      bare: false
+      # As Harbor 0.24 starts it: its dependency step first and the instruction piped on stdin.
+      harbor_system_dependencies: true
+      instruction_on_stdin: true
+      # Images without a WORKDIR start in /.
+      allow_root_workdir: true
+      # Every v0.1 task has an 8-hour agent budget (prepare_codex.py checks it).
+      timeout: ${oc.select:tbsci_agent_timeout_sec,28800}
+      # Trials in flight at once; keep it at least the run's --concurrency.
+      concurrency: ${oc.select:tbsci_agent_concurrency,1024}
+      sandbox_install_timeout_seconds: 1200
+      # Closing an 8-hour session stops its process tree and copies its transcripts.
+      session_close_timeout_seconds: 300
+
+terminal_bench_science_claude_code:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_claude_code_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_science_claude_code_agent
+      # Provisioning, the dependency step and Claude Code installation, the 8-hour agent budget,
+      # and verification (up to 12000 seconds for the slowest verifier, plus its startup).
+      default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
+      cleanup_timeout_seconds: 600

@@ -5,6 +5,7 @@
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_SCRIPT, shell_assignments
+from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_SCRIPT, prefer_oom_kill_setup, shell_assignments
 
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
@@ -99,6 +100,40 @@ def test_events_keep_numeric_times_and_crlf_lines_without_epochrealtime(tmp_path
     assert all(isinstance(seen, (int, float)) and seen > 0 for seen, _ in events)
 
 
+def test_events_leave_out_lines_matching_an_exclusion(tmp_path: Path) -> None:
+    lines = ['{"type":"start"}', '{"type":"update","n":1}', '{"type": "update","n":2}', '{"type":"updated"}']
+    script = "printf '%s\\n' " + " ".join(shlex.quote(line) for line in lines)
+    params = _params(
+        tmp_path,
+        command=["bash", "-c", script],
+        events=str(tmp_path / "events.jsonl"),
+        events_exclude=['{"type":?( )"update"*'],
+    )
+    result = _run(params)
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line)[1] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert events == [{"type": "start"}, {"type": "updated"}]
+    # stdout keeps every line.
+    assert (tmp_path / "stdout.log").read_text().splitlines() == lines
+
+
+@pytest.mark.parametrize(("before", "after"), [("0", "1000"), ("-997", "0"), ("500", "1000")])
+def test_oom_preference_setup_raises_the_score(tmp_path: Path, before: str, after: str) -> None:
+    score = tmp_path / "oom_score_adj"
+    score.write_text(f"{before}\n")
+    result = subprocess.run(["bash", "-c", prefer_oom_kill_setup(str(score))], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert result.stderr == f"oom_score_adj: {before} -> {after}\n"
+    assert score.read_text() == f"{after}\n"
+
+
+def test_oom_preference_setup_leaves_an_unavailable_score_alone(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["bash", "-c", prefer_oom_kill_setup(str(tmp_path / "missing"))], capture_output=True, text=True
+    )
+    assert (result.returncode, result.stderr) == (0, "oom_score_adj: unchanged\n")
+
+
 def test_events_mode_stamps_long_lines_in_linear_time(tmp_path: Path) -> None:
     # Pi's agent_end event carries the whole conversation; a quadratic strip would outlast the deadline.
     code = "import json; print(json.dumps({'text': 'a' * 2_000_000})); print('b' * 1_000_000)"
@@ -153,7 +188,12 @@ def test_runner_failures_are_told_apart_from_the_command_status(
 
 def test_inherited_runner_names_neither_configure_the_runner_nor_reach_the_cli(tmp_path: Path) -> None:
     params = _params(tmp_path, command=["bash", "-c", 'echo "${stdout-unset}|${setup-unset}"'])
-    inherited = {"setup": f"touch {tmp_path}/evaluated", "events": str(tmp_path / "events.jsonl"), "stdout": "leak"}
+    inherited = {
+        "setup": f"touch {tmp_path}/evaluated",
+        "events": str(tmp_path / "events.jsonl"),
+        "events_exclude": "*",
+        "stdout": "leak",
+    }
     result = _run(params, env=os.environ | inherited)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "stdout.log").read_text() == "unset|unset\n"

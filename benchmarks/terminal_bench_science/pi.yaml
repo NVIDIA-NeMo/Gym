@@ -1,0 +1,134 @@
+# Terminal-Bench-Science v0.1 with Pi running inside each task sandbox.
+#
+# The same composition as the Codex profile: the TB4 resources server owns the task and verifier
+# sandboxes and lends the task sandbox through SandboxAccess, pi_agent installs its pinned CLI there
+# (a private Node, outside the task's PATH) and runs it, and single_agent_turn_legacy seeds both,
+# closes Pi before grading, then closes Resources. Pi runs as a plain launch inside the task
+# container would: its own tools and system prompt, `--print --mode json --no-session`, an
+# `openai-completions` provider, Pi's default compaction, the task image's environment and HOME.
+# The instruction reaches Pi on stdin. Pi calls an OpenAI-compatible chat-completions endpoint
+# directly (tbsci_pi_base_url, with /v1), which the task sandbox must reach. The defaults serve
+# DeepSeek V4.1 Flash as `deepseek-flash` at effort max. Rows carry the official instruction as
+# their prompt (prepare_codex.py). See README.md, "Pi in the task sandbox".
+config_paths:
+  - benchmarks/terminal_bench_science/resources.yaml
+  - responses_api_agents/pi_agent/configs/pi_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The provider block Pi reconnects through to borrow the task sandbox. It must reach the same
+# OpenSandbox deployment as the resources server's environment.sandbox_provider.
+terminal_bench_science_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # Pi's supervisor runs for the whole 8-hour budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_science_pi_resources_server:
+  _inherit_from: terminal_bench_science
+  resources_servers:
+    terminal_bench_4:
+      description: Pinned Terminal-Bench-Science v0.1 tasks lent to Pi in the task sandbox, with separate offline verification.
+      sandbox_provider_ref: terminal_bench_science_sandbox
+      datasets:
+        - name: terminal_bench_science
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
+          prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
+          # One trial per task, as the mini-SWE profile. The leaderboard's protocol is three trials
+          # per task (210 in all): ++num_repeats=3.
+          num_repeats: 1
+          license: Apache 2.0
+
+terminal_bench_science_pi_agent:
+  _inherit_from: pi_agent
+  responses_api_agents:
+    pi_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_pi_resources_server
+      # Pi calls the endpoint's own /v1/chat/completions, which the task sandbox must reach. Set
+      # model_server to a Gym model server instead (and model_base_url to null) to route the calls
+      # through Gym.
+      model_server: null
+      model_base_url: ${oc.select:tbsci_pi_base_url,null}
+      # The endpoint's key, from the variable the run names (POLICY_API_KEY by default); any
+      # non-empty string for an endpoint without auth.
+      model_api_key: ${oc.env:${oc.select:tbsci_model_api_key_env,POLICY_API_KEY},EMPTY}
+      model: ${oc.select:tbsci_pi_model,deepseek-flash}
+      pi_version: ${oc.select:tbsci_pi_version,0.80.10}
+      # DeepSeek's "max" effort: `--thinking max` with a thinkingLevelMap entry for it makes Pi send
+      # chat `reasoning_effort: "max"`, which is what Codex's effort max becomes on chat completions.
+      thinking: ${oc.select:tbsci_pi_thinking,max}
+      thinking_level_map: ${oc.select:tbsci_pi_thinking_level_map,{max:max}}
+      # Compat flags for a plain OpenAI-compatible chat server (no store, developer role, strict
+      # tool schemas or long cache retention; the cap sent as max_tokens), with reasoning_effort
+      # allowed.
+      provider_compat:
+        supportsStore: false
+        supportsDeveloperRole: false
+        supportsReasoningEffort: true
+        maxTokensField: max_tokens
+        supportsStrictMode: false
+        supportsLongCacheRetention: false
+      # The served model's context and the endpoint's output cap (vLLM --max-model-len 1048576 and
+      # max_new_tokens 393216). Pi sends max_tokens = min(this cap, context left) on every call and
+      # compacts near the context window.
+      context_window: ${oc.select:tbsci_pi_context_window,1048576}
+      max_output_tokens: ${oc.select:tbsci_pi_max_output_tokens,393216}
+      # Every v0.1 task has an 8-hour agent budget (prepare_codex.py checks it).
+      timeout: ${oc.select:tbsci_agent_timeout_sec,28800}
+      # Trials in flight at once; keep it at least the run's --concurrency.
+      concurrency: ${oc.select:tbsci_agent_concurrency,1024}
+      # Pi's own tools and system prompt, with no per-call bash cap, as a plain launch runs it.
+      sandbox_runtime_guards: false
+      # Pi's offline mode (no startup network checks), and no pagers or git prompts.
+      sandbox_env:
+        PI_OFFLINE: "1"
+        GIT_PAGER: cat
+        PAGER: cat
+        SYSTEMD_PAGER: cat
+        GIT_TERMINAL_PROMPT: "0"
+      # Pi retries a failed model call 3 times within ~14 s by default; ride out a gateway or
+      # replica restart (~34 minutes of backoff) rather than end an 8-hour trial.
+      settings:
+        retry:
+          maxRetries: ${oc.select:tbsci_pi_max_retries,10}
+      # One prompt_cache_key per trial, so a gateway that routes on it keeps the trial on one replica.
+      session_prompt_cache_key: true
+      # Harbor's agent log directory; the resources server copies it into the trial directory.
+      sandbox_logs_dir: /logs/agent
+      log_requests: true
+      # As Harbor does: grade a Pi run that died (for example the kernel's OOM kill picked Pi)
+      # while its sandbox still runs, instead of retrying it, and make Pi and its tools, not the
+      # exec daemon, the OOM killer's preferred victims.
+      verify_after_agent_error: ${oc.select:tbsci_verify_after_agent_error,true}
+      raise_oom_score_adj: ${oc.select:tbsci_raise_oom_score_adj,true}
+      sandbox_install_timeout_seconds: 1200
+      # Closing an 8-hour session stops its process tree and copies its event log.
+      session_close_timeout_seconds: 300
+
+terminal_bench_science_pi:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_pi_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_science_pi_agent
+      # Provisioning, Pi installation, the 8-hour agent budget, and verification (up to 12000
+      # seconds for the slowest verifier, plus its startup).
+      default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
+      cleanup_timeout_seconds: 600
