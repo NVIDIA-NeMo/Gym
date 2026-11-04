@@ -122,6 +122,34 @@ To inspect the protocol without an LLM, see the [weather README's MCP round-trip
 
 An Environment Server such as `single_agent_turn` can own seed, verification, and close directly. This requires an agent that accepts per-session MCP tool grants. The Claude Code agent's session path does not consume those grants yet, so the runnable configuration above uses its `/run` path.
 
+With a compatible agent and `resources_tool_transports: [mcp]`, the successful episode follows this sequence. The agent lifeline groups the Agent Server and its harness runtime; model calls are omitted.
+
+```mermaid
+sequenceDiagram
+    participant Env as Environment<br/>Server
+    participant Agent as Agent + harness
+    participant Weather as Weather server
+
+    Env->>Weather: POST /seed_session<br/>Session, episode, task IDs + task_data
+    Weather-->>Env: Cookie + resources_tools
+    Env->>Agent: POST /v1/agent_sessions<br/>MCP tool grant
+    Agent-->>Env: Agent session ready
+    Env->>Agent: Activate with task input
+    Agent->>Weather: POST /mcp: tools/call<br/>get_weather(city) + token
+    Weather-->>Agent: Weather sentence
+    Agent-->>Env: Final response
+    Env->>Agent: Close agent session
+    Agent-->>Env: Observations + final cookies
+    Env->>Weather: POST /verify<br/>Final response + resources cookie
+    Note over Weather: Free live state<br/>Keep retry data
+    Weather-->>Env: Reward
+    Env->>Weather: POST /close_session<br/>Session + episode IDs
+    Note over Weather: Refuse later<br/>requests
+    Weather-->>Env: Closed
+```
+
+The Environment Server assigns the resources session ID and owns cleanup. It converts the seed's `resources_tools` metadata into the agent session's `tool_accesses`, including the MCP URL and token. Closing the agent session disconnects its tool clients; the Resources Server keeps running. Resources cleanup is registered before seeding, so it is also attempted if the episode fails before verification.
+
 On the typed-session path:
 
 - `/seed_session` accepts `ResourcesSeedSessionRequest` with `resources_session_id`, `episode_id`, `task_id`, and the row's fields in `task_data`. It returns MCP connection metadata in `resources_tools`, which the Environment Server grants to the agent.
