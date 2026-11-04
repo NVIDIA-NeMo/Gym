@@ -4,7 +4,7 @@ description: "Define tasks as JSONL rows served by a Resources Server: the row f
 position: 2
 ---
 
-A JSONL dataset holds one task per row, for evaluation or training. Each row runs on an Environment Server, which drives an Agent Server (runs the agent harness) and calls a Resources Server to set up the task and score the attempt (it provides the tools and computes the reward).
+Each line of a JSONL dataset is one task: the prompt the agent sees, plus anything your verifier needs to score the answer. A Resources Server, a Python server you write or reuse, provides the tools and the scoring code that every task shares.
 
 JSONL rows fit many tasks that share one verifier and toolset, such as math, instruction following or tool calling. Tasks that each need their own software environment, such as terminal and coding tasks, fit [Harbor Task Folders](/main/data/task-folders) better.
 
