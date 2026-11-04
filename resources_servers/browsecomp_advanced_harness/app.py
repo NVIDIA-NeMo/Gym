@@ -15,6 +15,7 @@
 import asyncio
 import functools
 import json
+import logging
 import os
 import re
 import shutil
@@ -23,26 +24,35 @@ from asyncio import sleep
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import time
 from typing import Any, ClassVar, Dict, List, Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pocketshell import run as pocketshell_run
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
+from pydantic import BaseModel, Field, JsonValue, PrivateAttr, ValidationError, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
+from nemo_gym.agents import SandboxSession
 from nemo_gym.client import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES, SESSION_ID_KEY, raise_for_status, request
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
     EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     TaskId,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -64,6 +74,11 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
+from resources_servers.browsecomp_advanced_harness.sandbox import BrowsecompShellSandbox, shell_source_files
+from resources_servers.browsecomp_advanced_harness.shell_output import format_shell_output
+
+
+LOG = logging.getLogger(__name__)
 
 
 # Exa /search "type" values. The deep variants run Exa's multi-step research path:
@@ -99,6 +114,14 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     workspace_root: Optional[str] = None  # default: $BROWSECOMP_WS_ROOT or /tmp/browsecomp_ws
     bash_timeout_s: float = 60.0  # match the reference harness's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, JsonValue] = Field(
+        default_factory=lambda: {"image": "python:3.13-slim", "workdir": "/workspace", "ttl_s": 7200}
+    )
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0)
+    sandbox_close_timeout_seconds: float = Field(default=60, gt=0)
+    # Development-only opt-in. Never selected after a sandbox setup/execution failure.
+    allow_host_execution: bool = False
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
     # Results returned per search query (both providers). The reference Exa
     # reference uses 10; its Tavily path (and this harness historically) uses 5.
@@ -593,9 +616,6 @@ class ExaAIOHTTPClient(BaseModel):
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _URL_RE = re.compile(r"https?://([^/]+)(/.*)?")
 
-_BASH_HEAD_BYTES = 8192
-_BASH_TAIL_BYTES = 4096
-
 
 def _slugify(text: str, max_len: int = 40) -> str:
     s = (text or "").lower()
@@ -611,17 +631,6 @@ def _slug_from_url(url: str) -> str:
     host = (m.group(1) or "").replace("www.", "")
     tail = (m.group(2) or "").rstrip("/").rsplit("/", 1)[-1]
     return _slugify(f"{host} {tail}")
-
-
-def _bash_truncate(s: str) -> str:
-    if len(s) <= _BASH_HEAD_BYTES + _BASH_TAIL_BYTES + 64:
-        return s
-    omitted = len(s) - _BASH_HEAD_BYTES - _BASH_TAIL_BYTES
-    return (
-        f"{s[:_BASH_HEAD_BYTES]}\n"
-        f"[...truncated {omitted} bytes; head shown above, tail follows...]\n"
-        f"{s[-_BASH_TAIL_BYTES:]}"
-    )
 
 
 # --- bash_command guards (ported byte-for-byte from an internal reference
@@ -958,6 +967,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _fence: Optional[ResourcesSessionFence] = PrivateAttr(default=None)
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
+    _shell_sessions: dict[str, BrowsecompShellSandbox] = PrivateAttr(default_factory=dict)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
     JUDGE_MAX_ATTEMPTS: ClassVar[int] = 15
@@ -1024,16 +1034,26 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
-            async with main_app_lifespan(app) as maybe_state:
-                yield maybe_state
+            async def close_shell(sid: str) -> None:
+                try:
+                    async with asyncio.timeout(self.config.sandbox_close_timeout_seconds * 5):
+                        async with self._fence.locked(sid):
+                            await self._release_session(sid)
+                except Exception:
+                    LOG.exception("Could not release BrowseComp shell session %s at shutdown", sid)
 
-            if self.config.dump_session_id_to_metrics_on_exit:
-                out_file = Path(__file__).parent / "session_id_metrics.json"
-                print(f"Dumping session_id metrics to {out_file}")
+            try:
+                async with main_app_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                await asyncio.gather(*(close_shell(sid) for sid in list(self._shell_sessions)))
+                if self.config.dump_session_id_to_metrics_on_exit:
+                    out_file = Path(__file__).parent / "session_id_metrics.json"
+                    print(f"Dumping session_id metrics to {out_file}")
 
-                to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
-                with out_file.open("w") as f:
-                    json.dump(to_dump, f)
+                    to_dump = {k: v.model_dump(mode="json") for k, v in self._session_id_to_metrics.items()}
+                    with out_file.open("w") as f:
+                        json.dump(to_dump, f)
 
         app.router.lifespan_context = lifespan_wrapper
 
@@ -1042,11 +1062,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        if self.config.workspace == "per_session":
+            self._validate_shell_config()
         if not isinstance(body, ResourcesSeedSessionRequest):
-            # An agent's /run seeds with its row; the session is the cookie's, and /verify cleans it up.
-            if self.config.workspace == "per_session":
-                sid = request.session[SESSION_ID_KEY]
-                self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
+            # An agent's /run seeds with its row; /verify owns its eventual cleanup.
+            sid = request.session[SESSION_ID_KEY]
+            async with self._fence.locked(sid):
+                if self.config.workspace == "per_session":
+                    await self._release_session(sid)
+                    self._session_workspaces[sid] = _PageWriter(Path(self._workspace_root) / sid)
+                    await self._ensure_shell(sid)
             return BaseSeedSessionResponse()
 
         sid = body.resources_session_id
@@ -1067,6 +1092,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 self._typed_sessions[sid] = (body.episode_id, body.task_id)
             elif identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            if self.config.workspace == "per_session":
+                await self._ensure_shell(sid)
         # Tool calls and /verify find the session by the cookie. A served app's session router already names it
         # resources_session_id; an app without one (a test's) does not.
         request.session[SESSION_ID_KEY] = sid
@@ -1090,11 +1117,75 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _release_session(self, sid: str) -> None:
         """Remove the session's workspace and metrics. A failed removal raises and keeps the workspace for a retry."""
-        page_writer = self._session_workspaces.get(sid)
-        if page_writer is not None:
-            await asyncio.to_thread(_remove_workspace, page_writer.workspace)
-            self._session_workspaces.pop(sid, None)
+        shell = self._shell_sessions.get(sid)
+        if shell is not None:
+            await shell.close(timeout=self.config.sandbox_close_timeout_seconds)
+            self._shell_sessions.pop(sid, None)
+        if self.config.workspace == "per_session":
+            await asyncio.to_thread(self._cleanup_workspace, sid)
         self._release_metrics(sid)
+
+    def _validate_shell_config(self) -> None:
+        """Refuse a missing isolation boundary before creating a workspace or provider."""
+        if self.config.sandbox_provider is None:
+            if not self.config.allow_host_execution:
+                raise ResourcesSeedRejectedError(
+                    "BrowseComp workspace tools require sandbox_provider; "
+                    "allow_host_execution=true is only for development"
+                )
+            return
+        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        if "local" in provider_config and not self.config.allow_host_execution:
+            raise ResourcesSeedRejectedError("The local provider does not isolate BrowseComp workspace tools")
+        workdir = self.config.sandbox_config.get("workdir", "/workspace")
+        if not isinstance(workdir, str) or not PurePosixPath(workdir).is_absolute() or workdir == "/":
+            raise ResourcesSeedRejectedError(
+                "BrowseComp sandbox_config.workdir must be an absolute non-root directory"
+            )
+
+    async def _ensure_shell(self, sid: str) -> BrowsecompShellSandbox | None:
+        """Create the Resources-owned tool sandbox once; retain failed cleanup for close."""
+        self._validate_shell_config()
+        if self.config.sandbox_provider is None:
+            return None
+        shell = self._shell_sessions.get(sid)
+        if shell is not None:
+            if not shell.ready or shell.session.closing:
+                raise RuntimeError("BrowseComp shell setup/close is incomplete; close this resources session")
+            return shell
+        global_config = get_global_config_dict()
+        provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config))
+        sandbox = AsyncSandbox(provider)
+        config = {"image": "python:3.13-slim", "workdir": "/workspace", "ttl_s": 7200, **self.config.sandbox_config}
+        config["metadata"] = (
+            resolve_provider_metadata(self.config.sandbox_provider, global_config)
+            | (config.get("metadata") or {})
+            | {"nemo_gym_resources": self.config.name[:63], "resources_session_id": sid[:63]}
+        )
+        config["files"] = (config.get("files") or {}) | shell_source_files()
+        shell = BrowsecompShellSandbox(
+            session=SandboxSession(
+                sandbox=sandbox,
+                session_dir=f"/tmp/nemo-gym-browsecomp-shell/{uuid4().hex}",
+                workdir=config["workdir"],
+                harness="BrowseComp read-only shell",
+                owns_sandbox=True,
+            )
+        )
+        # Store ownership before the first await, including a partially completed start.
+        self._shell_sessions[sid] = shell
+        try:
+            await sandbox.start(SandboxSpec(**config))
+            await shell.install(timeout=self.config.sandbox_install_timeout_seconds)
+        except BaseException:
+            try:
+                await shell.close(timeout=self.config.sandbox_close_timeout_seconds)
+            except BaseException:
+                LOG.exception("BrowseComp shell setup cleanup failed for %s; retaining it for close", sid)
+            else:
+                self._shell_sessions.pop(sid, None)
+            raise
+        return shell
 
     def _release_metrics(self, sid: str) -> None:
         # With the dump on, the entries are kept for it; otherwise one entry per rollout would accumulate.
@@ -1118,37 +1209,45 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return pw
 
     def _cleanup_workspace(self, sid: str) -> None:
-        pw = self._session_workspaces.pop(sid, None)
+        pw = self._session_workspaces.get(sid)
         if pw is not None:
-            shutil.rmtree(pw.workspace, ignore_errors=True)
+            _remove_workspace(pw.workspace)
+            self._session_workspaces.pop(sid, None)
 
     async def bash_command(self, request: Request, body: BashCommandRequest) -> BashCommandResponse:
         sid = self._open_session_id(request)
-        page_writer = self._get_page_writer(sid)
-        if page_writer is None:
-            return BashCommandResponse(
-                results_string="[bash error: terminal workspace is not enabled for this server]"
-            )
-        duration = max(1.0, min(self.config.bash_timeout_s, float(body.duration or 10)))
-        out = await self._run_bash_readonly(body.keystrokes or "", duration, str(page_writer.workspace))
-        return BashCommandResponse(results_string=out)
+        async with self._fence.locked(sid):
+            self._open_session_id(request)
+            page_writer = self._get_page_writer(sid)
+            if page_writer is None:
+                return BashCommandResponse(
+                    results_string="[bash error: terminal workspace is not enabled for this server]"
+                )
+            shell = await self._ensure_shell(sid)
+            command = body.keystrokes or ""
+            blocked = _bash_denylisted(command) or _bash_allowlisted(command)
+            if blocked is not None:
+                return BashCommandResponse(results_string=f"[blocked: {blocked}]\n[exit_code=-3]")
+            duration = max(1.0, min(self.config.bash_timeout_s, float(body.duration or 10)))
+            if shell is None:
+                out = await self._run_bash_readonly(command, duration, str(page_writer.workspace))
+            else:
+                async with self._bash_semaphore:
+                    out = await shell.execute(
+                        command=command,
+                        duration=duration,
+                        workspace=page_writer.workspace,
+                        close_timeout=self.config.sandbox_close_timeout_seconds,
+                    )
+            return BashCommandResponse(results_string=out)
 
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
-        """Run the command IN-PROCESS via pocketshell -- no subprocess, no sandbox.
+        """Development-only pocketshell execution; HTTP routes require explicit host opt-in.
 
-        Replaces `asyncio.create_subprocess_exec("bash", "-c", ...)`. The old
-        design relied on a command-NAME deny/allow list plus `ulimit -f 0`, which
-        never inspected path arguments (so `cat /etc/passwd` passed the guard) and
-        which its own comment described as "NOT a security boundary". pocketshell
-        cannot execute anything it does not implement, and confines every path to
-        the sample workspace, so the protection is structural.
-
-        The legacy guard is deliberately kept IN FRONT so that anything it used to
-        reject still returns the identical `[blocked: ...]` string -- existing
-        synthetic-data corpora, and models trained on them, saw those exact responses.
-
-        Output shape (stdout / --- stderr --- / [exit_code=N]) is unchanged.
+        Production routes use a Resources-owned sandbox, with the same interpreter and output format.
         """
+        if not self.config.allow_host_execution:
+            raise RuntimeError("BrowseComp host shell execution requires allow_host_execution=true")
         blocked = _bash_denylisted(keystrokes) or _bash_allowlisted(keystrokes)
         if blocked is not None:
             print(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}", flush=True)
@@ -1174,17 +1273,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print(f"🚨 [browsecomp][bash] pocketshell error: {e!r}", flush=True)
             return f"[bash error: {e}]\n[exit_code=-2]"
 
-        stdout = _bash_truncate(result.stdout)
-        stderr = _bash_truncate(result.stderr)
-        truncated = (len(result.stdout) + len(result.stderr)) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
-        parts = []
-        if stdout:
-            parts.append(stdout)
-        if stderr:
-            parts.append("--- stderr ---")
-            parts.append(stderr)
-        parts.append(f"[exit_code={result.exit_code}{' truncated' if truncated else ''}]")
-        return "\n".join(parts)
+        return format_shell_output(result.stdout, result.stderr, result.exit_code)
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
         client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
@@ -1424,6 +1513,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return "\n".join(blocks)
 
     async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+            self._open_session_id(request)
+            return await self._search(request, body)
+
+    async def _search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
         sid = self._open_session_id(request)
         metrics = self._session_id_to_metrics[sid]
 
@@ -1463,6 +1557,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchResponse(results_string="\n\n".join(results))
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
+        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+            self._open_session_id(request)
+            return await self._browse(request, body)
+
+    async def _browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
         sid = self._open_session_id(request)
         metrics = self._session_id_to_metrics[sid]
 
@@ -1559,6 +1658,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return BrowseResponse(results_string=results_string)
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
+        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+            return await self._verify(request, body)
+
+    async def _verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
         # num_tool_calls now comes from the agent loop (counts ALL tool calls,
         # including those made before context resets). Fall back to the old
         # final-output count only if the agent didn't surface it.
@@ -1606,10 +1709,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
 
         # The verify response carries the session's metrics, and an agent's /run sends no close, so release here.
-        self._release_metrics(sid)
-        # terminal mode: clean up this session's disk workspace
-        if self.config.workspace == "per_session":
-            self._cleanup_workspace(sid)
+        await self._release_session(sid)
 
         if judge_error is not None:
             raise judge_error
