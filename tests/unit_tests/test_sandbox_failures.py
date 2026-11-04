@@ -178,10 +178,129 @@ async def test_expired_evidence_deadline_does_not_start_another_request():
     provider._control_plane_inspect_oom_evidence.assert_not_awaited()
 
 
+@pytest.mark.parametrize("operation", ["status", "endpoint", "network_address"])
+@pytest.mark.parametrize("action", ["retry", "fail"])
+async def test_idempotent_lifecycle_reads_recover_wrapped_timeouts(operation, action):
+    import httpx
+    from opensandbox.exceptions import SandboxInternalException
+
+    cause = httpx.ReadTimeout("read timed out")
+    wrapped = SandboxInternalException("SDK read failed", cause=cause)
+    response = (
+        SimpleNamespace(status=SimpleNamespace(state="Running"))
+        if operation == "status"
+        else SimpleNamespace(endpoint="http://10.0.0.5:44772", headers={})
+    )
+    read = AsyncMock(side_effect=[wrapped, response])
+    provider = module.OpenSandboxProvider(
+        networking={"enabled": True},
+        operations={
+            "retries": 1,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+            "outcome_policy": {"by_failure_kind": {PROVIDER_IO_TIMEOUT: action}},
+        },
+    )
+    handle = SandboxHandle(
+        "sb",
+        "opensandbox",
+        SimpleNamespace(
+            get_info=read,
+            get_endpoint=read,
+            _sandbox_service=SimpleNamespace(get_sandbox_endpoint=read),
+        ),
+    )
+    with RequestFailureLog.capture() as log:
+        call = (
+            getattr(provider, operation)(handle, 44772)
+            if operation == "endpoint"
+            else getattr(provider, operation)(handle)
+        )
+        if action == "fail":
+            with pytest.raises(NgFailureEvent) as caught:
+                await call
+            assert caught.value.__cause__ is wrapped
+        else:
+            result = await call
+            if operation == "status":
+                assert result == module.SandboxStatus.RUNNING
+            elif operation == "endpoint":
+                assert result.endpoint == "http://10.0.0.5:44772"
+            else:
+                assert result == "10.0.0.5"
+        assert read.await_count == (2 if action == "retry" else 1)
+        event = next(iter(log.report.events.values()))
+        assert event.failure_kind == PROVIDER_IO_TIMEOUT
+        assert event.details.sandbox_id == "sb"
+        assert event.foreign_error.exception_type.endswith("SandboxInternalException")
+
+
+@pytest.mark.parametrize("expire_outer_cap", [True, False])
+async def test_foreground_diagnostics_cannot_extend_the_execution_deadline(monkeypatch, expire_outer_cap):
+    monkeypatch.setattr(module, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object))
+
+    async def run(*args, **kwargs):
+        if expire_outer_cap:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                # A wedged SDK ignores its request deadline; the outer cap still owns diagnosis.
+                await asyncio.sleep(60)
+        raise TimeoutError("provider read timed out")
+
+    commands = SimpleNamespace(run=AsyncMock(side_effect=run))
+    lifecycle_read = AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state="Running", reason=None)))
+    provider = module.OpenSandboxProvider(
+        operations={"background_exec": False, "command_timeout_headroom_s": 0, "exec_hard_cap_slack_s": 0},
+        diagnostics={"timeout_s": 5, "request_timeout_s": 1, "poll_interval_s": 0.001},
+    )
+    handle = SandboxHandle("sb", "opensandbox", SimpleNamespace(commands=commands, get_info=lifecycle_read))
+    with pytest.raises(NgFailureEvent) as caught:
+        async with asyncio.timeout(0.3):
+            await provider.exec(handle, "one command", timeout_s=0.01)
+    assert caught.value.failure_kind == PROVIDER_IO_TIMEOUT
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    commands.run.assert_awaited_once()
+    if expire_outer_cap:
+        lifecycle_read.assert_not_awaited()
+    else:
+        lifecycle_read.assert_awaited()
+
+
+@pytest.mark.parametrize("background", [True, False])
+@pytest.mark.parametrize("state,reason", [("Failed", "Evicted"), ("Stopped", "Expired")])
+async def test_confirmed_non_oom_terminal_state_preserves_the_original_failure(monkeypatch, background, state, reason):
+    request_error = HttpError(502)
+    commands = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(id="exec-1"))
+        if background
+        else AsyncMock(side_effect=request_error),
+        get_command_status=AsyncMock(side_effect=request_error),
+    )
+    provider, handle = provider_and_handle(
+        monkeypatch, commands, background_exec=background, status_recovery_timeout_s=0.025
+    )
+    handle.raw.get_info = AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state=state, reason=reason)))
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await provider.exec(handle, "one command", timeout_s=1)
+        report = log.reply_report(caught.value)
+    failure = caught.value
+    assert failure.failure_kind == PROVIDER_UNAVAILABLE
+    assert failure.details.provider_status_reason == reason
+    assert isinstance(failure.__cause__, NgFailureEvent)
+    assert failure.__cause__.__cause__ is request_error
+    assert failure.__cause__.http_status == 502
+    assert report.events[failure.event_id].cause_id == failure.__cause__.event_id
+    commands.run.assert_awaited_once()
+    if background:
+        commands.get_command_status.assert_awaited_once_with("exec-1")
+
+
 @pytest.mark.parametrize(
     "state,reason,message,kind",
     [
-        ("Failed", "ContainerFailed", "sandbox OOMKilled", PROVIDER_COMMAND_OUTCOME_UNKNOWN),
+        ("Failed", "ContainerFailed", "sandbox OOMKilled", PROVIDER_UNAVAILABLE),
         ("Running", "OOMKilled", "", PROVIDER_COMMAND_OUTCOME_UNKNOWN),
         ("Failed", "OOMKilled", "", PROVIDER_OOM_KILLED),
     ],

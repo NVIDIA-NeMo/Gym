@@ -107,7 +107,7 @@ logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSa
 @dataclass(frozen=True)
 class _SandboxDeathNotice:
     message: str
-    outcome: Literal["oom", "other_terminal"]
+    failure_kind: str
     provider_status_reason: str | None = None
 
 
@@ -1075,6 +1075,7 @@ class OpenSandboxProvider:
             operation="get_network_address",
             sandbox_id=handle.sandbox_id,
             timeout_s=self._connection.request_timeout_s,
+            replay_safe=True,
         )
         endpoint = str(resolved.endpoint or "")
         parsed = urlsplit(endpoint if "://" in endpoint else f"http://{endpoint}")
@@ -1782,6 +1783,7 @@ class OpenSandboxProvider:
             timeout_s=(
                 float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
             ),
+            replay_safe=True,
         )
         endpoint_url = str(getattr(resolved, "endpoint", "") or "")
         if not endpoint_url:
@@ -2150,6 +2152,7 @@ class OpenSandboxProvider:
             timeout_s=float(self._connection.request_timeout_s)
             if self._connection.request_timeout_s is not None
             else None,
+            replay_safe=True,
         )
         raw_status = getattr(info, "status", None)
         return _to_sandbox_status(getattr(raw_status, "state", None) if raw_status is not None else None)
@@ -2230,6 +2233,7 @@ class OpenSandboxProvider:
         # Backstop for wedges the inner deadlines miss. Background exec polls, so
         # sdk_timeout_s bounds a single request rather than the command: without
         # timeout_s there is nothing to cap against.
+        operation_deadline: float | None = None
         try:
             if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
                 return await _dispatch()
@@ -2239,6 +2243,7 @@ class OpenSandboxProvider:
             # cap would also catch timeouts raised INSIDE the dispatch (e.g. an
             # SDK request timeout) and relabel them as a hard-cap trip.
             hard_cap = asyncio.timeout(hard_cap_s)
+            operation_deadline = hard_cap.when()
             try:
                 async with hard_cap:
                     return await _dispatch()
@@ -2260,13 +2265,15 @@ class OpenSandboxProvider:
             ):
                 raise
             deadline = asyncio.get_running_loop().time() + self._diagnostics.timeout_s
+            if operation_deadline is not None:
+                deadline = min(deadline, operation_deadline)
             evidence = await self._sandbox_death_evidence(handle, deadline=deadline)
-            if evidence is not None and evidence.outcome == "oom":
+            if evidence is not None:
                 raise opensandbox_failure(
                     operation="exec",
                     sandbox_id=handle.sandbox_id,
                     cause=error,
-                    failure_kind=PROVIDER_OOM_KILLED,
+                    failure_kind=evidence.failure_kind,
                     reason=evidence.message,
                     provider_status_reason=evidence.provider_status_reason,
                 ) from error
@@ -2303,7 +2310,7 @@ class OpenSandboxProvider:
                         terminal_notice = _SandboxDeathNotice(
                             f"Sandbox {'was OOM-killed' if oom else 'is unavailable'}; lifecycle status: "
                             f"state={state!r}, reason={str(reason)[:256]!r}",
-                            outcome="oom" if oom else "other_terminal",
+                            failure_kind=PROVIDER_OOM_KILLED if oom else PROVIDER_UNAVAILABLE,
                             provider_status_reason=reason if isinstance(reason, str) else None,
                         )
                         if oom:
@@ -2320,7 +2327,7 @@ class OpenSandboxProvider:
                 if evidence is not None:
                     return _SandboxDeathNotice(
                         f"Sandbox was OOM-killed: inspect confirms {evidence}",
-                        outcome="oom",
+                        failure_kind=PROVIDER_OOM_KILLED,
                     )
             if terminal_notice is not None or get_info is None or not poll:
                 return terminal_notice
@@ -2369,9 +2376,7 @@ class OpenSandboxProvider:
             operation="pty",
             sandbox_id=handle.sandbox_id,
             cause=cause,
-            failure_kind=PROVIDER_OOM_KILLED
-            if evidence is not None and evidence.outcome == "oom"
-            else PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+            failure_kind=evidence.failure_kind if evidence is not None else PROVIDER_COMMAND_OUTCOME_UNKNOWN,
             reason=evidence.message if evidence is not None else "PTY connection lost; command outcome is unknown",
             provider_status_reason=evidence.provider_status_reason if evidence is not None else None,
         )
@@ -2475,12 +2480,12 @@ class OpenSandboxProvider:
                     diagnostic_deadline = min(status_failure_deadline, loop.time() + self._diagnostics.timeout_s)
                 status_failure_error = failure
                 evidence = await self._sandbox_death_evidence(handle, deadline=diagnostic_deadline, poll=False)
-                if evidence is not None and evidence.outcome == "oom":
+                if evidence is not None:
                     raise opensandbox_failure(
                         operation="command status",
                         sandbox_id=handle.sandbox_id,
                         execution_id=execution_id,
-                        failure_kind=PROVIDER_OOM_KILLED,
+                        failure_kind=evidence.failure_kind,
                         cause=failure,
                         reason=evidence.message,
                         provider_status_reason=evidence.provider_status_reason,

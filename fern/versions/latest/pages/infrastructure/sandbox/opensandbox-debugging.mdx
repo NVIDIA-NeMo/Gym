@@ -91,6 +91,12 @@ The diagnostic reason identifies the evidence source. Without that evidence, a d
 does not establish OOM. See [Failure reporting and recovery](./opensandbox#failure-reporting-and-recovery)
 for OpenSandbox timeouts and retry settings, and [Error Handling](./index#error-handling) for the shared contract.
 
+If lifecycle status does not confirm OOM and inspect is disabled or cannot finish within the diagnostic budget,
+Gym retains the observed request or command-outcome failure. A confirmed stopped or failed sandbox without
+OOM evidence is `provider_unavailable`, retaining the original request failure as its cause.
+An unconfirmed OOM does not qualify for an OOM-specific `count_as_zero` rule: retries and terminal handling
+follow the owning caller's outcome policy and budgets, so repeated failures can remain ungraded instead of scoring zero.
+
 ### Inspect fallback
 
 `diagnostics.inspect_oom` defaults to `false`. Enable it only for a deployment with the OpenSandbox **1.1.0**

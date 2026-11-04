@@ -1838,9 +1838,11 @@ async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbo
         AsyncMock(side_effect=RuntimeError("status unavailable"))
         if control_status == "unavailable"
         else AsyncMock(
-            return_value=SimpleNamespace(
-                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="reason not final")
-            )
+            side_effect=[
+                SimpleNamespace(status=SimpleNamespace(state="Running", reason=None)),
+                SimpleNamespace(status=SimpleNamespace(state="Running", reason=None)),
+                SimpleNamespace(status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="ended")),
+            ]
         )
     )
     raw = SimpleNamespace(commands=commands, get_info=get_info)
@@ -1858,13 +1860,13 @@ async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbo
         assert exc_info.value.details.provider_status_reason is None
         assert exc_info.value.details.provider == "opensandbox"
     else:
-        with raises_failure(PROVIDER_UNAVAILABLE, match="outcome is unknown") as exc_info:
+        with raises_failure(PROVIDER_UNAVAILABLE) as exc_info:
             await provider.exec(handle, "allocate memory", timeout_s=30)
-        assert (
-            isinstance(exc_info.value.__cause__.__cause__, Backend410Error)
-            if oom_confirmed
-            else isinstance(exc_info.value.__cause__, Backend410Error)
-        )
+        if control_status == "container_failed":
+            assert exc_info.value.details.provider_status_reason == "ContainerFailed"
+            assert isinstance(exc_info.value.__cause__.__cause__, Backend410Error)
+        else:
+            assert isinstance(exc_info.value.__cause__, Backend410Error)
 
     assert commands.run_calls == 1
     assert commands.status_calls == ["exec-oom", "exec-oom", "exec-oom"]
@@ -2099,9 +2101,11 @@ async def test_exec_background_inspect_confirms_only_current_sandbox_oom_after_t
         assert isinstance(exc_info.value.__cause__.__cause__, Backend502Error)
         assert evidence in str(exc_info.value)
     else:
-        with raises_failure(PROVIDER_STATUS_UNAVAILABLE) as exc_info:
+        with raises_failure(PROVIDER_UNAVAILABLE) as exc_info:
             await provider.exec(handle, "allocate memory", timeout_s=30)
         assert exc_info.value.failure_kind != PROVIDER_OOM_KILLED
+        assert exc_info.value.details.provider_status_reason == "ContainerFailed"
+        assert isinstance(exc_info.value.__cause__.__cause__, Backend502Error)
 
     assert raw.get_info.await_count >= 1
     assert request.await_count >= 1
@@ -2419,9 +2423,9 @@ async def test_status_loss_recovery_ends_before_long_agent_command_deadline(monk
 @pytest.mark.parametrize(
     "reason,message,expected",
     [
-        ("ContainerFailed", "sandbox out of memory", "other_terminal"),
-        ("ContainerFailed", "not OOMKilled; exit 137", "other_terminal"),
-        ("OOMKilled", "", "oom"),
+        ("ContainerFailed", "sandbox out of memory", PROVIDER_UNAVAILABLE),
+        ("ContainerFailed", "not OOMKilled; exit 137", PROVIDER_UNAVAILABLE),
+        ("OOMKilled", "", PROVIDER_OOM_KILLED),
     ],
 )
 async def test_exec_and_pty_require_explicit_oom_evidence(reason, message, expected):
@@ -2433,10 +2437,10 @@ async def test_exec_and_pty_require_explicit_oom_evidence(reason, message, expec
     )
     handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
     evidence = await provider._sandbox_death_evidence(handle, deadline=asyncio.get_running_loop().time() + 1)
-    assert evidence.outcome == expected
+    assert evidence.failure_kind == expected
     assert evidence.provider_status_reason == reason
     failure = await provider._pty_failure(handle, ConnectionError("socket lost"))
-    assert failure.failure_kind == (PROVIDER_OOM_KILLED if expected == "oom" else PROVIDER_COMMAND_OUTCOME_UNKNOWN)
+    assert failure.failure_kind == expected
     assert failure.details.provider_status_reason == reason
     assert "lifecycle status" in failure.failure_reason
 
