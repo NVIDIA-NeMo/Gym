@@ -60,11 +60,11 @@ def test_folder_config_is_public_docker_only() -> None:
     assert "docker_image" not in json.dumps(agent)
 
 
-def test_pinned_snapshot_has_1749_tasks_and_five_committed_examples() -> None:
+def test_pinned_snapshot_has_2010_tasks_and_five_committed_examples() -> None:
     examples = [json.loads(line) for line in (BENCH_DIR / "data" / "example.jsonl").read_text().splitlines()]
     expected_ids = {f"legal_agent_bench::{flatten_task_id(source_id)}" for source_id in SMOKE_TASK_IDS}
 
-    assert EXPECTED_TASK_COUNT == 1749
+    assert EXPECTED_TASK_COUNT == 2010
     assert len(examples) == 5
     assert {row["instance_id"] for row in examples} == expected_ids
 

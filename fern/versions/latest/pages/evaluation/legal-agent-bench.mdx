@@ -14,5 +14,21 @@ Policy calls pass through the selected Gym Model Server with rollout identity.
 Harbor owns verification, ATIF conversion, concurrency, and cleanup. An agent
 timeout remains a graded outcome under the shared Harbor bridge's rules.
 
-This migration retains the pinned 1,749-task dataset and existing single-judge
-scoring. Historical example artifacts describe that dataset and protocol.
+Benchmark version 0.2.0 pins Harvey LAB commit
+`9e9fa7fe126103de1fceb2227b7c70bf59b67f73`: 2,010 tasks, including nested
+scenarios and 250 firm-knowledge tasks backed by a shared document corpus.
+Skills come from `lab_core/harness/skills`. This source update retains the
+existing single-judge scoring until the grading layer is applied. Historical
+example rollouts describe the former 1,749-task snapshot; they are not new
+validation evidence.
+
+Preparation verifies the source revision and archive checksum, rejects corpus
+paths outside the source asset tree, and caches each shared corpus once.
+Generated indexes contain no harness binding. The selected harness is assigned
+when Gym collates the dataset. Existing flattened task IDs remain stable.
+
+To prepare a subset, pass `+prepare_script_args.input=/absolute/path/tasks.jsonl`.
+The selected rows keep their sampling parameters and the full benchmark index
+is left untouched. Preparation fetches only missing tasks and required shared
+corpora, with atomic replacement and cross-process cache locking. Cache markers
+include the source revision, so old caches cannot silently serve the new pin.
