@@ -290,7 +290,7 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
     ]
     failed_tool = _record(9, 0)
     failed_tool["ng_trajectory"]["tool_calls"] = [
-        {"invocation_id": "root", "tool_call_id": "t1", "output": "ripgrep execution failed: x"}
+        {"invocation_id": "root", "tool_call_id": "t1", "output": "ripgrep execution failed: x", "tool_name": "grep"}
     ]
     rows.append((failed_tool, [_call()]))
     rows.append(deepcopy(rows[0]))
@@ -3874,6 +3874,23 @@ def test_tool_outputs_that_report_the_harness_tool_could_not_run_are_one_counted
     assert list(finding.subject.values()) == [0, 0]
     # The finding labels the rollout; the reward the record carries is not read or changed.
     assert record["reward"] == 0.0
+
+
+def test_a_completed_tool_call_that_prints_the_marker_is_not_a_tool_failure(tmp_path: Path) -> None:
+    # A command that ran and succeeded can print the marker, for example when it reads a log.
+    completed = _tool_call(1, "ripgrep execution failed: example from a log file") | {
+        "tool_name": "bash",
+        "status": "completed",
+    }
+    failed = _tool_call(2, "ripgrep execution failed: spawn rg ENOENT") | {"status": "failed"}
+    other_tool = _tool_call(3, "ripgrep execution failed: quoted") | {"tool_name": "bash", "status": "failed"}
+
+    _, findings = _tool_call_failed_findings(tmp_path, [completed])
+    assert findings == []
+
+    _, findings = _tool_call_failed_findings(tmp_path, [completed, failed, other_tool])
+    [finding] = findings
+    assert finding.detail["count"] == 1
 
 
 def test_a_trajectory_without_failed_tool_outputs_has_no_tool_call_failed_finding(tmp_path: Path) -> None:

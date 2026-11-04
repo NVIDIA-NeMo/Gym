@@ -910,7 +910,9 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
 # Prefixes of the text a harness returns to the model in place of a tool's result when the tool itself could not
 # run, lower-case. A tool that ran and reported an error of its own is not listed. Add a prefix here once a harness
 # is known to return one.
-_TOOL_FAILURE_MARKERS: tuple[str, ...] = ("ripgrep execution failed",)
+# Each marker with the tools that return it: OpenCode's built-in grep and glob return this text when they cannot
+# run ripgrep.
+_TOOL_FAILURE_MARKERS: dict[str, frozenset[str]] = {"ripgrep execution failed": frozenset({"grep", "glob"})}
 
 
 def _tool_output_text(output: Any) -> str | None:
@@ -924,11 +926,20 @@ def _tool_output_text(output: Any) -> str | None:
 
 
 def _rollout_tool_call_failed(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
-    """One finding per rollout, counting the tool outputs that open with a harness tool-failure marker."""
+    """One finding per rollout, counting the tool outputs that open with a harness tool-failure marker.
+
+    A marker counts only from a tool that returns it (``_TOOL_FAILURE_MARKERS``), and a call recorded as ``completed``
+    is not counted: a command that succeeded can print the same text, for example when it reads a log."""
     failed = 0
     for call in trajectory.get("tool_calls") or []:
-        text = _tool_output_text(call.get("output")) if isinstance(call, dict) else None
-        if text is not None and text.lstrip().lower().startswith(_TOOL_FAILURE_MARKERS):
+        if not isinstance(call, dict) or call.get("status") == "completed":
+            continue
+        text = _tool_output_text(call.get("output"))
+        opening = text.lstrip().lower() if text is not None else ""
+        if any(
+            opening.startswith(marker) and call.get("tool_name") in tools
+            for marker, tools in _TOOL_FAILURE_MARKERS.items()
+        ):
             failed += 1
     if not failed:
         return []
