@@ -479,6 +479,24 @@ def test_stream_error_events_are_terminal():
     assert _consume_terminal_sse_event(bytearray(b"data:[DONE]\n\n"), "chat") == "complete"
 
 
+@pytest.mark.parametrize(
+    "event_type,terminal",
+    [
+        ("response.completed", "complete"),
+        ("response.incomplete", "incomplete"),
+        ("response.failed", "error"),
+        ("error", "error"),
+        ("response.output_item.done", None),
+    ],
+)
+def test_data_only_responses_events_are_terminal(event_type, terminal):
+    """OpenAI-compatible gateways may omit `event:` lines, sending only `data:` payloads and `[DONE]`."""
+    from nemo_gym.models.model_call_capture import _consume_terminal_sse_event
+
+    stream = f'data: {{"type":"{event_type}","response":{{}}}}\n\ndata: [DONE]\n\n'.encode()
+    assert _consume_terminal_sse_event(bytearray(stream), "responses") == terminal
+
+
 def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
     from fastapi.responses import StreamingResponse
 
