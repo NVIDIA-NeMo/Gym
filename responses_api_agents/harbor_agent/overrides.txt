@@ -1,3 +1,0 @@
-# Harbor imports dirhash -> scantree -> pathspec when starting a job.
-# Restore this required dependency, which Gym otherwise disables globally.
-pathspec
