@@ -532,11 +532,13 @@ class TestRewardProfile:
         profile_rows = profiler.prepare_for_serialization(group_level_metrics)
         summary = profiler.profile_completion_summary(rows, results)
 
-        assert [row["_ng_task_index"] for row in profile_rows] == [0, 1]
+        # Task 2 saved no rollout: its row names it with counts only.
+        assert [row["_ng_task_index"] for row in profile_rows] == [0, 1, 2]
         assert [
             (row["num_rollouts"], row["expected_num_rollouts"], row["missing_num_rollouts"]) for row in profile_rows
-        ] == [(2, 2, 0), (1, 2, 1)]
-        assert [row["reward_profile_completion_pct"] for row in profile_rows] == [100.0, 50.0]
+        ] == [(2, 2, 0), (1, 2, 1), (0, 2, 2)]
+        assert [row["reward_profile_completion_pct"] for row in profile_rows] == [100.0, 50.0, 0.0]
+        assert "mean/reward" not in profile_rows[2] and "rollout_infos" not in profile_rows[2]
 
         assert summary == {
             "expected_rollout_rows": 6,
@@ -549,6 +551,31 @@ class TestRewardProfile:
             "partial_input_rows": 1,
             "missing_input_rows": 1,
         }
+
+    def test_a_task_without_any_saved_rollout_keeps_its_row_and_the_scores(self) -> None:
+        # 66 tasks, one repeat each; one task saved nothing (a run whose last task never finished).
+        rows = [_row(task_idx, 0) for task_idx in range(66)]
+        results = [_result(task_idx, 0, reward=float(task_idx % 2)) for task_idx in range(66) if task_idx != 40]
+
+        profiler = RewardProfiler()
+        group, agent, _ = profiler.profile_from_data(rows, results, allow_partial_rollouts=True)
+        complete_group, complete_agent, _ = profiler.profile_from_data(
+            [row for row in rows if row["_ng_task_index"] != 40], results
+        )
+
+        assert [g["_ng_task_index"] for g in group] == list(range(66))
+        [missing] = [g for g in group if g["missing_num_rollouts"]]
+        assert missing == {
+            "_ng_task_index": 40,
+            "num_rollouts": 0,
+            "expected_num_rollouts": 1,
+            "missing_num_rollouts": 1,
+            "reward_profile_completion_pct": 0.0,
+        }
+        # The other rows and the agent statistics are those of the 65 saved tasks (histograms aside).
+        serialize = profiler.prepare_for_serialization
+        assert serialize([g for g in group if g["_ng_task_index"] != 40]) == serialize(complete_group)
+        assert serialize(agent) == serialize(complete_agent)
 
     def test_profile_from_data_allow_partial_rejects_extra_rollout_rows(self) -> None:
         rows = [_row(0, 0)]

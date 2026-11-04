@@ -102,9 +102,27 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
     if observability_enabled:
         records = extra["ng_agent_observations"]["records"]
         assert records[0]["status"] == "completed"
-        assert [r["status"] for r in records[1:]] == ["completed", "timeout", "incomplete"]
-        assert all(r["duration_ms"] is None for r in records[1:])
+        assert [r["status"] for r in records[1:]] == ["completed", "timeout", "completed"]
+        # The submission has no tool output, but its successful command has an exit record with real timing.
+        saved = json.loads((harness.directory / "trajectory.json").read_text())
+        executions = {
+            message.get("call_id") or message["extra"].get("tool_call_id"): message["extra"]
+            for message in saved["messages"]
+            if message.get("type") == "function_call_output" or message.get("role") == "exit"
+        }
+        assert set(executions) == {"call_0", "call_1", "call_2"}
+        assert executions["call_2"]["exit_status"] == "Submitted"
+        for record in records[1:]:
+            execution = executions[record["tool_call_id"]]
+            for field in ("started_at", "completed_at", "duration_ms"):
+                assert record[field] == execution[field]
+                assert isinstance(record[field], float)
+            assert record["started_at"] <= record["completed_at"]
+            assert record["duration_ms"] >= 0
+            assert record["timing_source"] == "artifact"
         assert [t["step_count"] for t in extra["ng_trajectory"]["turns"]] == [1, 2, 2]
-        assert len(extra["ng_trajectory"]["gaps"]) == (3 if response_id else 6)
+        assert [gap["code"] for gap in extra["ng_trajectory"]["gaps"]] == (
+            [] if response_id else ["model_call_reference_unavailable"] * 3
+        )
     else:
         assert "ng_agent_observations" not in extra and "ng_trajectory" not in extra

@@ -33,7 +33,13 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
-from scicode_integration.runner import build_test_program, preflight_grading_interpreter, run_substep, sanitize_test
+from scicode_integration.runner import (
+    build_test_program,
+    preflight_grading_interpreter,
+    process_exit,
+    run_substep,
+    sanitize_test,
+)
 from scicode_integration.sandbox_runner import ScicodeSandboxConfig, run_sandbox_substep
 
 from nemo_gym import PARENT_DIR
@@ -123,6 +129,10 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     # is on too. The record describes the grading run that decided the step: the environment that passed
     # under the OR rule, else the last one tried; `environment` is None for a sentinel step that never ran.
     step_outputs: Optional[List[dict]] = None
+    # Per scored sub-step, aligned with step_results, always recorded: how the grading run that decided the step
+    # ended, {returncode, timed_out, exit}, `exit` typed by process_exit (`killed:<SIGNAL>` for a negative return
+    # code; `not_run` for an out-of-context or empty step). Unlike step_outputs it carries no model output.
+    step_exits: List[dict] = Field(default_factory=list)
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
@@ -267,6 +277,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 "passed": passed,
                 "returncode": result.get("returncode"),
                 "timed_out": bool(result.get("timed_out", False)),
+                "exit": process_exit(result),
                 "duration_s": result.get("duration_s"),
                 "exception_class": result.get("exception_class"),
                 "stdout_tail": result.get("stdout_tail", ""),
@@ -276,12 +287,19 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 output["code"] = code
             return output
 
-        async def _run_substep(i: int) -> tuple[bool, Dict[str, bool], Dict[str, str], Optional[dict]]:
+        def _step_exit(result: dict) -> dict:
+            return {
+                "returncode": result.get("returncode"),
+                "timed_out": bool(result.get("timed_out", False)),
+                "exit": process_exit(result),
+            }
+
+        async def _run_substep(i: int) -> tuple[bool, Dict[str, bool], Dict[str, str], Optional[dict], dict]:
             sub_step = body.sub_steps[i]
             code = solutions[f"{body.problem_id}.{i + 1}"]
             if not code or code == _OUT_OF_CONTEXT:
                 status = "out_of_context" if code == _OUT_OF_CONTEXT else "empty"
-                return False, {}, {}, _step_output(i, status, False) if record else None
+                return False, {}, {}, _step_output(i, status, False) if record else None, _step_exit({})
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
             program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
             per_environment = {}
@@ -324,12 +342,10 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 if per_environment[name] and not self.config.run_all_grading_interpreters:
                     break
             passed = any(per_environment.values())
-            output = None
-            if record:
-                # The run that decided the step: the environment that passed under the OR rule, else the last tried.
-                name, result = next(((n, r) for n, r in attempts if r["passed"]), attempts[-1])
-                output = _step_output(i, "executed", passed, result, code=code, environment=name)
-            return passed, per_environment, per_environment_errors, output
+            # The run that decided the step: the environment that passed under the OR rule, else the last tried.
+            name, result = next(((n, r) for n, r in attempts if r["passed"]), attempts[-1])
+            output = _step_output(i, "executed", passed, result, code=code, environment=name) if record else None
+            return passed, per_environment, per_environment_errors, output, _step_exit(result)
 
         tasks = [asyncio.create_task(_run_substep(i)) for i in scored]
         try:
@@ -342,10 +358,10 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
             raise
-        step_results = [passed for passed, _, _, _ in evaluated_steps]
-        step_environment_results = [per_environment for _, per_environment, _, _ in evaluated_steps]
-        step_environment_errors = [per_environment_errors for _, _, per_environment_errors, _ in evaluated_steps]
-        step_outputs = [output for _, _, _, output in evaluated_steps] if record else None
+        step_results = [passed for passed, _, _, _, _ in evaluated_steps]
+        step_environment_results = [per_environment for _, per_environment, _, _, _ in evaluated_steps]
+        step_environment_errors = [per_environment_errors for _, _, per_environment_errors, _, _ in evaluated_steps]
+        step_outputs = [output for _, _, _, output, _ in evaluated_steps] if record else None
         scored_step_ids = [body.sub_steps[i]["step_number"] for i in scored]
         num_passed = sum(step_results)
         all_passed = num_passed == len(scored)
@@ -362,6 +378,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             step_environment_results=step_environment_results,
             step_environment_errors=step_environment_errors,
             step_outputs=step_outputs,
+            step_exits=[step_exit for _, _, _, _, step_exit in evaluated_steps],
         )
 
 
