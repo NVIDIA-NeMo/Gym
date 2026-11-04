@@ -256,6 +256,11 @@ NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 # An ``agent_timeout`` whose window held a recorded server-side fault (``is_infrastructure_agent_timeout`` in
 # ``nemo_gym.rollouts.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
 AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
+# A scored zero whose cause is the agent's own sandbox ended at its memory limit while the agent ran: the row's
+# selected kind is ``PROVIDER_OOM_KILLED`` and its own agent sandbox observation is an ``oom`` in the ``agent``
+# role. The benchmark counted it as zero under its policy, so it is the model's result, not a provider fault.
+# A verifier or environment sandbox OOM keeps its provider kind.
+AGENT_SANDBOX_OOM = "agent_sandbox_oom"
 INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 INVALID_REQUEST_PARAMETER = "invalid_request_parameter"
 GATE_DERIVED_KINDS: frozenset[str] = frozenset(
@@ -266,6 +271,7 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
         MODEL_SERVER_ERROR,
         NON_POLICY_MODEL_REJECTION,
         AGENT_TIMEOUT_INFRASTRUCTURE,
+        AGENT_SANDBOX_OOM,
         INVALID_OUTPUT_BUDGET,
         INVALID_REQUEST_PARAMETER,
     }
@@ -276,7 +282,8 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
 # A model fault is the evaluated model's own outcome under the benchmark protocol: its request rejected or timed out
 # (``MODEL_POLICY_RESPONSE_TIMEOUT``: a deployment's slowness is on the model's side by default; the acceptance gate's
 # ``policy_timeout_counts_as_model`` setting can move it to the server class), its context limit, its agent's limit, timeout, invalid output or a command the
-# harness refused (the model issued it), or an answer it left cut off, empty or malformed. The evaluation gate counts
+# harness refused (the model issued it), an answer it left cut off, empty or malformed, or a scored zero after its
+# agent's own sandbox ended at its memory limit (``AGENT_SANDBOX_OOM``). The evaluation gate counts
 # these by kind and never fails health on them; RL treats them as the policy's own failures. A server fault is a
 # server that did not start, a model transport error, a model server's 5xx reply or an agent timeout whose window held
 # such a fault (``AGENT_TIMEOUT_INFRASTRUCTURE``): evaluation-side. Any other kind is
@@ -293,6 +300,7 @@ MODEL_FAULT_KINDS: frozenset[str] = frozenset(
         TRUNCATED_ANSWER,
         EMPTY_ANSWER,
         MALFORMED_ANSWER,
+        AGENT_SANDBOX_OOM,
     }
 )
 SERVER_FAULT_KINDS: frozenset[str] = frozenset(

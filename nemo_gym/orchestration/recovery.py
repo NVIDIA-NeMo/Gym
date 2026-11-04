@@ -63,6 +63,7 @@ from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_s
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
+    AGENT_SANDBOX_OOM,
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
@@ -82,6 +83,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
     NON_POLICY_MODEL_REJECTION,
+    PROVIDER_OOM_KILLED,
     ROLLOUT_ALLOCATION_ENDED,
     SERVER_FAULT_KINDS,
     SERVER_START_FAILED,
@@ -4600,11 +4602,39 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
+def _agent_sandbox_oom(row: Mapping[str, Any]) -> bool:
+    """Whether the row's own agent sandbox observation is an OOM in the ``agent`` role during agent execution, tied to
+    the row's selected failure event when both name one."""
+    from pydantic import ValidationError
+
+    from nemo_gym.trajectory.trajectory_record import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+
+    response = row.get("response")
+    metadata = response.get("metadata") if isinstance(response, Mapping) else None
+    raw = metadata.get(NG_AGENT_SANDBOX_OBSERVATION_KEY) if isinstance(metadata, Mapping) else None
+    if not isinstance(raw, str):
+        return False
+    try:
+        observed = SandboxObservation.model_validate_json(raw)
+    except ValidationError:
+        return False
+    selected = row.get(FAILURE_ID)
+    return (observed.role, observed.outcome, observed.phase) == ("agent", "oom", "agent_execution") and (
+        observed.failure_id is None or not isinstance(selected, str) or observed.failure_id == selected
+    )
+
+
 def _scored_kind(row: Mapping[str, Any]) -> str | None:
     """The registered failure kind a scored result row records as its own outcome, keyed on its recorded HTTP status
-    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result."""
+    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result.
+
+    A scored ``provider_oom_killed`` zero whose own agent sandbox observation is an agent OOM (``_agent_sandbox_oom``)
+    is ``AGENT_SANDBOX_OOM``, the model's result; any other sandbox OOM keeps its provider kind."""
     kind, status = _policy_evidence(row)
-    return status_fault_kind(kind, status) if _known_kind(kind) else None
+    if not _known_kind(kind):
+        return None
+    kind = status_fault_kind(kind, status)
+    return AGENT_SANDBOX_OOM if kind == PROVIDER_OOM_KILLED and _agent_sandbox_oom(row) else kind
 
 
 def _scored_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
