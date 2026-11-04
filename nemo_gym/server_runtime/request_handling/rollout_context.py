@@ -14,7 +14,7 @@
 # limitations under the License.
 """The middleware that strips a rollout prefix from a request path and sets the current episode for the request.
 
-Tracking the current episode lives in `nemo_gym.core.episode`.
+Tracking the current episode lives in `nemo_gym.core.episode_context`.
 """
 
 import re
@@ -22,7 +22,7 @@ from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     ROLLOUT_ID_PATTERN,
     rollout_context,
 )

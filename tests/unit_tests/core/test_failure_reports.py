@@ -12,9 +12,8 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.core.episode_types import (
-    BaseEpisodeResponse,
+from nemo_gym.core.episode_types import BaseEpisodeResponse, EpisodeId, TaskId
+from nemo_gym.core.failure_records import (
     EpisodeFailure,
     FailureBoundary,
     FailureEvent,
@@ -189,10 +188,10 @@ def test_the_request_log_forwards_a_recovered_attempt_without_a_failure_id() -> 
 def test_the_request_log_keeps_a_bounded_sample_and_counts_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
     """A retry loop can fail without end: the log keeps the first events, counts the rest, and never re-checks
     the whole history on each insert."""
-    import nemo_gym.core.episode_types as episode_types
+    import nemo_gym.core.failure_records as failure_records
 
     checked: list[int] = []
-    validate = episode_types.validate_failure_event_map
+    validate = failure_records.validate_failure_event_map
 
     def counting(events):
         checked.append(len(events))
@@ -200,7 +199,7 @@ def test_the_request_log_keeps_a_bounded_sample_and_counts_the_rest(monkeypatch:
 
     attempts = [_model(operation_id="call", attempt_id=f"call-{n}", http_status=503) for n in range(500)]
     reports = [failure_report_for(attempt) for attempt in attempts]
-    monkeypatch.setattr(episode_types, "validate_failure_event_map", counting)
+    monkeypatch.setattr(failure_records, "validate_failure_event_map", counting)
     with RequestFailureLog.capture() as log:
         for report in reports:
             log.add(report)

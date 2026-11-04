@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -216,8 +217,9 @@ def test_every_shipped_preset_has_a_sandbox_runtime_profile(preset):
 
 
 def test_sandbox_runtime_pins_match_the_host_requirements():
-    # The sandbox installs what the host venv's requirements.txt pins, so a bump in one cannot silently skip the other.
-    host = Path(sandbox_runtime.__file__).with_name("requirements.txt").read_text()
+    # Keep the sandbox runtime pins aligned with the managed host project.
+    project = tomllib.loads(Path(sandbox_runtime.__file__).with_name("pyproject.toml").read_text())
+    host = "\n".join(project["project"]["dependencies"])
     installed = runtime_requirements("nvidia.fabric.hermes", relay=False) + runtime_requirements(
         "nvidia.fabric.openhands", relay=False
     )
