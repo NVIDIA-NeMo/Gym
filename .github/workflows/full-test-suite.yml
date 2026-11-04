@@ -32,9 +32,7 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.21+ supports Python 3.13.14; 0.13.4 removes the compromised CA root.
-  # 0.11.20 had a regression dropping pinned deps (fixed in 0.11.21).
-  # 
+  # Managed lockfiles require uv 0.13.4+, including the corrected certificate trust store.
   UV_INSTALL_URL: "https://astral.sh/uv/0.13.4/install.sh"
 
 jobs:

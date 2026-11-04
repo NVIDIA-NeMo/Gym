@@ -39,6 +39,18 @@ _VERIFIER_MODEL_REQUESTS: ContextVar[Optional[list[str]]] = ContextVar(
 # Exclude leading dots because stores also use the id as a filename component.
 # Middleware uses the same pattern.
 ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The capture key, a rollout id with its attempt suffix, also names the model server's capture files, of which
+# `<key>.capture.incomplete` is the longest, and a file name holds at most 255 bytes. Room is kept for `-a9999`.
+MAX_ROLLOUT_ID_LENGTH = 255 - len(".capture.incomplete") - len("-a9999")
+
+
+def check_rollout_id_length(rollout_id: str) -> None:
+    """Refuse a rollout id whose capture files would pass the 255-byte file name limit at some attempt."""
+    if len(rollout_id.encode()) > MAX_ROLLOUT_ID_LENGTH:
+        raise ValueError(
+            f"Rollout id {rollout_id!r} is {len(rollout_id.encode())} bytes, more than the {MAX_ROLLOUT_ID_LENGTH} "
+            "its capture file names allow with an attempt suffix; use a shorter _ng_rollout_id"
+        )
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
