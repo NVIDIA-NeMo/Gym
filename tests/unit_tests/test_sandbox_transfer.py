@@ -21,6 +21,7 @@ from nemo_gym.sandbox.transfer import (
     download_path,
     exec_as_root,
     remote_kind,
+    remote_size_bytes,
     tar_extract_command,
     upload_archive,
     upload_dir,
@@ -923,3 +924,137 @@ async def test_a_file_restore_into_a_parent_the_user_cannot_chmod_succeeds(tmp_p
         "if [ -d /tmp ]; then chmod a+rwx /tmp 2>/dev/null || test -w /tmp; else mkdir -p /tmp && chmod 777 /tmp; fi"
     )
     assert sandbox.uploads and any("tar -xzf" in c and "-C /tmp;" in c for c in sandbox.commands)
+
+
+class RecordingSandbox(LocalSandbox):
+    """LocalSandbox that records every upload target and every exec's command and deadline."""
+
+    def __init__(self, skip_upload: str | None = None, du_kib: int | None = None):
+        self.uploaded, self.execs, self.skip_upload, self.du_kib = [], [], skip_upload, du_kib
+
+    async def upload(self, local, remote):
+        self.uploaded.append(remote)
+        if self.skip_upload is None or not remote.endswith(self.skip_upload):
+            await super().upload(local, remote)
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        self.execs.append((command, timeout_s))
+        if self.du_kib is not None and command.startswith("du -sk -- "):
+            return SandboxExecResult(stdout=f"{self.du_kib}\t{command.split()[-1]}\n", stderr="", return_code=0)
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+async def test_an_archive_past_the_part_size_is_uploaded_in_parts_and_joined_before_extraction(tmp_path, monkeypatch):
+    # Exercise chunking with synthetic bytes and a small part boundary.
+    monkeypatch.setattr("nemo_gym.sandbox.transfer.UPLOAD_PART_BYTES", 4096)
+    source, target = tmp_path / "payload", tmp_path / "restored"
+    source.mkdir()
+    target.mkdir()
+    weights = os.urandom(5 * 4096 + 17)  # random bytes: the gzip archive is as large, so it spans six parts
+    (source / "data.bin").write_bytes(weights)
+    sandbox = RecordingSandbox()
+
+    await upload_dir(sandbox, source, str(target))
+
+    assert (target / "data.bin").read_bytes() == weights
+    remote = sandbox.uploaded[0].rsplit(".part", 1)[0]
+    assert sandbox.uploaded == [f"{remote}.part{index:05d}" for index in range(len(sandbox.uploaded))]
+    assert len(sandbox.uploaded) >= 5
+    join, extract = [command for command, _ in sandbox.execs if remote in command][:2]
+    assert join.startswith(f": > {remote} && for part in ") and "tar -xzf" in extract
+    assert not os.path.exists(remote) and not [path for path in sandbox.uploaded if os.path.exists(path)]
+
+
+async def test_a_part_that_never_arrived_fails_the_join_and_leaves_nothing_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr("nemo_gym.sandbox.transfer.UPLOAD_PART_BYTES", 4096)
+    source = tmp_path / "payload"
+    source.mkdir()
+    (source / "data.bin").write_bytes(os.urandom(3 * 4096))
+    sandbox = RecordingSandbox(skip_upload=".part00001")
+
+    with pytest.raises(SandboxTransferError, match="Failed to join the .* upload parts"):
+        await upload_dir(sandbox, source, str(tmp_path / "restored"))
+
+    remote = sandbox.uploaded[0].rsplit(".part", 1)[0]
+    assert not os.path.exists(remote) and not [path for path in sandbox.uploaded if os.path.exists(path)]
+
+
+async def test_a_small_archive_is_still_one_upload(tmp_path):
+    source = tmp_path / "tests"
+    source.mkdir()
+    (source / "test.sh").write_text("#!/bin/sh\n")
+    sandbox = RecordingSandbox()
+
+    await upload_dir(sandbox, source, str(tmp_path / "target"))
+
+    assert len(sandbox.uploaded) == 1 and sandbox.uploaded[0].endswith(".tar.gz")
+
+
+async def test_the_archive_deadline_grows_with_what_the_tree_holds(tmp_path):
+    # Exercise size-based deadlines without allocating a large fixture.
+    source = tmp_path / "artifacts"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    sandbox = RecordingSandbox(du_kib=20 * 1024 * 1024)
+
+    kind = await download_path(sandbox, str(source), tmp_path / "host", seconds_per_gib=120)
+
+    assert kind == "dir" and (tmp_path / "host" / "config.json").read_text() == "{}"
+    (archive_timeout,) = [timeout for command, timeout in sandbox.execs if "tar -czf" in command]
+    assert archive_timeout == 600 + 20 * 120
+    # Without the option nothing is measured and the deadline stays as given.
+    plain = RecordingSandbox(du_kib=20 * 1024 * 1024)
+    await download_path(plain, str(source), tmp_path / "plain")
+    assert not [command for command, _ in plain.execs if command.startswith("du ")]
+    assert [timeout for command, timeout in plain.execs if "tar -czf" in command] == [600]
+
+
+async def test_the_restore_deadline_grows_with_the_archive(tmp_path, monkeypatch):
+    source = tmp_path / "payload"
+    source.mkdir()
+    (source / "data.bin").write_bytes(os.urandom(8192))
+    archive = tmp_path / "artifact.tar.gz"
+    _pack(source, archive)
+    (tmp_path / "restored").mkdir()
+    sandbox = RecordingSandbox()
+    monkeypatch.setattr("nemo_gym.sandbox.transfer.GIB", 1024)  # each KiB of archive counts as one GiB
+
+    assert await upload_archive(sandbox, archive, "dir", str(tmp_path / "restored"), seconds_per_gib=2)
+
+    (extract_timeout,) = [timeout for command, timeout in sandbox.execs if "tar -xzf" in command]
+    assert extract_timeout == pytest.approx(600 + archive.stat().st_size / 1024 * 2)
+
+
+async def test_remote_size_bytes_reads_the_du_total_or_raises(tmp_path):
+    (tmp_path / "tree").mkdir()
+    (tmp_path / "tree" / "w.bin").write_bytes(b"x" * 10000)
+    assert await remote_size_bytes(LocalSandbox(), str(tmp_path / "tree")) >= 10000
+
+    class NoTotal:
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            return SandboxExecResult(stdout="", stderr="du: not found", return_code=127)
+
+    with pytest.raises(SandboxProbeError, match="Could not measure .*: 127: du: not found"):
+        await remote_size_bytes(NoTotal(), str(tmp_path / "tree"))
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("upload failed"), asyncio.CancelledError("upload cancelled")])
+async def test_interrupted_part_upload_removes_all_attempted_parts(tmp_path, monkeypatch, failure):
+    monkeypatch.setattr("nemo_gym.sandbox.transfer.UPLOAD_PART_BYTES", 4096)
+    source = tmp_path / "payload"
+    source.mkdir()
+    (source / "data.bin").write_bytes(os.urandom(3 * 4096))
+
+    class FailingUpload(RecordingSandbox):
+        async def upload(self, local, remote):
+            await super().upload(local, remote)
+            if len(self.uploaded) == 2:
+                raise failure
+
+    sandbox = FailingUpload()
+    with pytest.raises(type(failure), match=str(failure)) as caught:
+        await upload_dir(sandbox, source, str(tmp_path / "restored"))
+    assert caught.value is failure
+    assert len(sandbox.uploaded) == 2
+    assert all(not os.path.exists(path) for path in sandbox.uploaded)
+    assert any(command.startswith("rm -f -- ") for command, _ in sandbox.execs)
