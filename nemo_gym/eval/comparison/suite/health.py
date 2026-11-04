@@ -77,7 +77,7 @@ def check_rollout_file_health(
             summary_path=result.summary_path.resolve() if output_dir is not None else None,
             verdicts_path=result.verdicts_path.resolve() if output_dir is not None else None,
         )
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, TypeError) as error:
         reason = " ".join(str(error).split())
         logger.warning(
             "Rollout file health unavailable: %s (%.1f seconds elapsed): %s", path, monotonic() - started, reason
