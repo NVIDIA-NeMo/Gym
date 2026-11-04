@@ -111,8 +111,13 @@ def _restore_tool_env(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _legacy_seed_only(value: object) -> object:
-    # The permissive /run body must not swallow a malformed typed seed and allocate an unrelated cookie session.
-    if isinstance(value, dict) and ResourcesSeedSessionRequest.model_fields.keys() & value.keys():
+    # The permissive /run body must not swallow a malformed typed seed and allocate an unrelated cookie session. A body
+    # that names a resources_session_id, or carries typed episode_id and task_id objects, is such a seed; a dataset
+    # row's own scalar task_id does not make a body typed.
+    if isinstance(value, dict) and (
+        "resources_session_id" in value
+        or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
+    ):
         raise ValueError("typed session fields require a valid ResourcesSeedSessionRequest")
     return value
 
@@ -258,6 +263,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
+        # Nothing below awaits, so a seed or close for this session cannot interleave between the checks and the
+        # release. Hold self._fence.locked(session_id) across them if scoring ever awaits.
         if self._fence.closed_episode(session_id) is not None or (
             session_id not in self.session_id_to_tool_env and session_id not in self._verified_sessions
         ):

@@ -23,8 +23,12 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, ResourcesSeedSessionRequest, maybe_auto_expose
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+    maybe_auto_expose,
+)
 from resources_servers.workplace_assistant import app
 from resources_servers.workplace_assistant.app import WorkbenchResourcesServer, WorkbenchResourcesServerConfig
 
@@ -260,6 +264,16 @@ def test_malformed_typed_seed_cannot_fall_back_to_legacy(payload: dict[str, Any]
     assert client.post("/seed_session", json=payload).status_code == 422
     assert server.session_id_to_tool_env == {} and server._session_episodes == {}
     assert client.post("/seed_session", json=seed_json()).status_code == 200
+
+
+def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
+    # A dataset row's scalar task_id is a row field, not a typed seed's TaskId.
+    server = make_server()
+    client = TestClient(server.setup_webserver())
+    body = {"responses_create_params": {"input": "hi"}, **TASK_DATA, "task_id": "wb-0007"}
+    assert client.post("/seed_session", json=body).status_code == 200
+    assert client.post("/email_send_email", json=SEND).status_code == 200
+    assert server._session_episodes == {}
 
 
 @pytest.mark.parametrize("completed", ["active", "verified", "closed"])
