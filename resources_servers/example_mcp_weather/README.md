@@ -67,7 +67,7 @@ calls `/close_session`, which fences verification retries. From then on:
 
 - a `/get_weather` call for the session, over HTTP or with its MCP token, fails with 404 (`failure_kind: session_lost`);
 - `/verify` returns a masked sample (`mask_sample: true`, `failure_kind: session_lost`) instead of a reward of 0;
-- a seed that reuses the closed `resources_session_id` is refused with 409.
+- a seed that reuses the closed `resources_session_id` is refused with 409 for `session_close_retry_window_seconds`.
 
 Running the example under `single_agent_turn` with the `mcp` tool transport needs an agent that accepts per-session
 MCP tool grants. The Claude Code agent's session path does not consume those grants yet, so this example uses `/run`.

@@ -27,7 +27,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSeedSessionRequest,
     ResourcesSessionConflictError,
     ResourcesSessionFence,
-    reject_typed_resources_seed,
+    reject_partial_typed_seed,
 )
 
 
@@ -36,15 +36,23 @@ TASK = TaskId(taskset="tasks", task_id="task")
 IDENTITY = (EPISODE, TASK)
 SEED = ResourcesSeedSessionRequest(resources_session_id="session", episode_id=EPISODE, task_id=TASK, task_data={})
 SEED_BODY = TypeAdapter(
-    ResourcesSeedSessionRequest | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_typed_resources_seed)]
+    ResourcesSeedSessionRequest | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)]
 )
 
 
-@pytest.mark.parametrize("field", ["resources_session_id", "episode_id", "task_id", "task_data"])
-def test_partial_typed_seed_cannot_fall_back_to_legacy(field: str) -> None:
+@pytest.mark.parametrize("missing", ["resources_session_id", "episode_id", "task_id", "task_data"])
+def test_partial_typed_seed_cannot_fall_back_to_cookie_seed(missing: str) -> None:
     body = SEED.model_dump(mode="json")
+    del body[missing]
     with pytest.raises(ValidationError):
-        SEED_BODY.validate_python({field: body[field]})
+        SEED_BODY.validate_python(body)
+
+
+@pytest.mark.parametrize("field", ["episode_id", "task_id", "task_data"])
+def test_cookie_seed_keeps_dataset_fields_that_share_a_typed_seed_name(field: str) -> None:
+    # A /run seed posts the whole dataset row, whose own columns may be named like the typed seed's fields.
+    body = {"verifier_metadata": {"city": "Paris"}, field: "row-1"}
+    assert isinstance(SEED_BODY.validate_python(body), BaseSeedSessionRequest)
 
 
 def test_seed_union_accepts_both_complete_wire_formats() -> None:

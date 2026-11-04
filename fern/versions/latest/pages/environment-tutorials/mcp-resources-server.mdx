@@ -158,7 +158,7 @@ On the typed-session path:
 
 The [weather README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather#sessions-under-an-environment-server) has more on this path.
 
-[`SimpleResourcesServer`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/base_resources_server.py) owns the seed, close, and checkpoint-retirement flow, including request validation, identity checks, cookie rotation, and retry bookkeeping. Stateless servers keep the default no-op lifecycle. A stateful environment supplies three hooks: `has_session_state`, `initialize_session_state`, and `release_session_state`. Cleanup must succeed before the base class drops the identity or marks the session closed. The weather example also keeps a thin seed wrapper to preserve its original HTTP request and response schemas.
+[`SimpleResourcesServer`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/base_resources_server.py) owns the seed, close, and checkpoint-retirement flow, including request validation, identity checks, cookie rotation, and retry bookkeeping. Stateless servers keep the default no-op lifecycle. A stateful environment supplies three hooks: `has_session_state`, `initialize_session_state`, and `release_session_state`, and sets `seed_request_model` to the model that validates a typed seed's `task_data` (invalid data receives `422`; without it any task data is accepted). Cleanup must succeed before the base class drops the identity or marks the session closed. A verifier that frees its state at `/verify`, as the weather example does, also masks a closed session and retains the identity and result that a retried verification needs; see its `verify` for the exact steps.
 
 The cookie-based seed path is deprecated and logs a migration warning once per server instance. The runnable Claude Code example still uses this compatibility path; migrating it requires per-session MCP tool-grant support in the agent.
 
@@ -206,6 +206,8 @@ def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
 The names are signed into the session token. `tools/list` advertises only those tools, and `tools/call` rejects others.
 
 ## workplace_assistant with Claude Code
+
+`workplace_assistant` is a real environment with 27 tools (five toolkits plus an always-included company-directory lookup).
 
 Some servers dispatch every tool through `POST /{path}`. For those servers, override `mcp_tools(self, harvested, catchall)` to supply each tool's schema. `harvested` contains the tools found from typed routes; `catchall.tool(...)` creates a tool that dispatches through the catch-all route.
 

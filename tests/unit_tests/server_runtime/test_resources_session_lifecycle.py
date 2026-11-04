@@ -22,6 +22,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
 )
 
@@ -82,6 +83,70 @@ async def _release(server: AsyncResourceServer, operation: str) -> None:
         await server.close_resources_session(CLOSE)
     else:
         await server.retire_session_state("session")
+
+
+class FlakyInitializationServer(AsyncResourceServer):
+    """Initialization fails after creating part of its resources, as a sandbox provider outage would."""
+
+    _fail_initialization: bool = PrivateAttr(default=True)
+    partial: dict[str, int] = Field(default_factory=dict)
+    initializations: int = 0
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        self.initializations += 1
+        if self._fail_initialization:
+            # Kept apart from live state (has_session_state) and reachable only by release_session_state.
+            self.partial[session_id] = -1
+            raise RuntimeError("provider unavailable")
+        await super().initialize_session_state(session_id, body)
+
+    async def release_session_state(self, session_id: str) -> None:
+        self.partial.pop(session_id, None)
+        await super().release_session_state(session_id)
+
+
+def _flaky_server() -> FlakyInitializationServer:
+    return FlakyInitializationServer(config=_server().config, server_client=MagicMock(spec=ServerClient))
+
+
+async def test_failed_typed_initialization_binds_nothing_and_a_retry_initializes_again() -> None:
+    server = _flaky_server()
+    request = _request()
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await server.seed_session(SEED, request=request)
+    assert request.session[SESSION_ID_KEY] == "caller-cookie"
+    assert server._session_episodes == {}
+
+    server._fail_initialization = False
+    await server.seed_session(SEED, request=request)
+    assert server.initializations == 2
+    assert server.state == {"session": 42}
+    assert request.session[SESSION_ID_KEY] == "session"
+
+
+async def test_close_releases_what_a_failed_initialization_left_behind() -> None:
+    server = _flaky_server()
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await server.seed_session(SEED, request=_request())
+    assert server.partial == {"session": -1}
+
+    await server.close_resources_session(CLOSE)
+
+    assert server.partial == {}
+    assert server._fence.closed_episode("session") == SEED.episode_id
+
+
+async def test_typed_seed_after_verification_is_refused_and_does_not_reinitialize() -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    # What a verifier does: release the live state, keep the identity with its receipt.
+    server.state.clear()
+    server._session_episodes.pop("session")
+    server._verified_sessions.remember("session", ((SEED.episode_id, SEED.task_id), "receipt"))
+
+    with pytest.raises(ResourcesSessionConflictError):
+        await server.seed_session(SEED, request=_request())
+    assert server.state == {}
 
 
 @pytest.mark.parametrize("operation", ["close", "retire"])

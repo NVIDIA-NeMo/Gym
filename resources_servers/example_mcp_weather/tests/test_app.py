@@ -98,7 +98,8 @@ def _verify_request(expected_city: str, final_text: str) -> ExampleMCPWeatherVer
 async def test_verify_rewards_tool_call_from_same_session() -> None:
     server = _server()
     await server.seed_session(
-        _request("session-1"), ExampleMCPWeatherSeedSessionRequest(verifier_metadata={"expected_city": "Paris"})
+        ExampleMCPWeatherSeedSessionRequest(verifier_metadata={"expected_city": "Paris"}),
+        request=_request("session-1"),
     )
 
     tool_response = await server.get_weather(_request("session-1"), ExampleMCPWeatherGetWeatherRequest(city="Paris"))
@@ -119,7 +120,8 @@ async def test_verify_accepts_differently_cased_city() -> None:
     # A correct tool call that used different casing than the seed city must still be rewarded.
     server = _server()
     await server.seed_session(
-        _request("session-1"), ExampleMCPWeatherSeedSessionRequest(verifier_metadata={"expected_city": "Paris"})
+        ExampleMCPWeatherSeedSessionRequest(verifier_metadata={"expected_city": "Paris"}),
+        request=_request("session-1"),
     )
     server.session_id_to_state["session-1"]["weather_calls"].append(
         {"city": "PARIS", "weather": "The weather in PARIS is sunny and 72 F."}
@@ -139,10 +141,10 @@ async def test_verify_accepts_differently_cased_city() -> None:
 async def test_verify_rejects_tool_call_from_different_session() -> None:
     server = _server()
     await server.seed_session(
-        _request("session-1"), ExampleMCPWeatherSeedSessionRequest(verifier_metadata={"expected_city": "Paris"})
+        ExampleMCPWeatherSeedSessionRequest(verifier_metadata={"expected_city": "Paris"}),
+        request=_request("session-1"),
     )
     server.session_id_to_state["session-2"] = {
-        "expected_city": "Paris",
         "weather_calls": [{"city": "Paris", "weather": "The weather in Paris is sunny and 72 F."}],
     }
 
@@ -403,6 +405,74 @@ def test_malformed_typed_seed_does_not_fall_back_to_legacy(mcp: bool) -> None:
         assert client.post("/seed_session", json=malformed).status_code == 422
     assert server.session_id_to_state == {}
     assert server._session_episodes == {}
+
+
+def test_typed_seed_after_verification_is_refused_and_does_not_reopen_the_session() -> None:
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
+        verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
+        assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
+
+        # A seed retried after the verdict must not hand a new, empty history to a verified session.
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 409
+        assert server.session_id_to_state == {}
+        assert server._session_episodes == {}
+        assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
+
+
+def test_tool_call_after_verification_is_refused_and_the_verdict_stays_retryable() -> None:
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
+        verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
+        assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
+
+        late_call = client.post("/get_weather", json={"city": "Tokyo"})
+
+        assert late_call.status_code == 404
+        assert late_call.json()["detail"]["failure_kind"] == "session_lost"
+        retry = client.post("/verify", json=verify_body).json()
+        assert retry["reward"] == 1.0 and retry["mask_sample"] is False
+
+
+def test_verify_after_verify_and_close_is_masked_not_replayed() -> None:
+    # The retained verification receipt must not outlive the close.
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
+        verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
+        assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
+
+        assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        late = client.post("/verify", json=verify_body).json()
+        assert late["mask_sample"] is True
+        assert late["failure_kind"] == "session_lost"
+        assert late["reward"] == 0.0
+
+
+@pytest.mark.parametrize("mcp", [False, True])
+def test_cookie_seed_accepts_dataset_row_with_task_id_column(mcp: bool) -> None:
+    # /run seeds with the whole dataset row, and a row's own task_id column is not a typed seed's task_id.
+    server = _server()
+    row = {"verifier_metadata": {"expected_city": "Paris"}, "task_id": "weather-1"}
+    with _mcp_client(server) if mcp else TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=row).status_code == 200
+    assert list(server.session_id_to_state.values()) == [{"weather_calls": []}]
+
+
+def test_cookie_reseed_of_a_live_session_starts_a_fresh_history() -> None:
+    server = _server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
+        assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
+        assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
+
+    assert list(server.session_id_to_state.values()) == [{"weather_calls": []}]
 
 
 @pytest.mark.parametrize("typed", [False, True])

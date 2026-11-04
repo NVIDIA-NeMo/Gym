@@ -295,13 +295,18 @@ class ResourcesSeedSessionResponse(BaseModel):
         return result
 
 
-def reject_typed_resources_seed(value: object) -> object:
-    """Keep a malformed typed seed from falling through to a permissive legacy request model.
+def reject_partial_typed_seed(value: object) -> object:
+    """Keep a malformed typed seed from falling through to a permissive cookie-seed request model.
 
-    Use as a Pydantic ``BeforeValidator`` on the legacy arm of a seed request union. A body containing any
-    typed-session field must validate as ``ResourcesSeedSessionRequest`` instead of creating a cookie session.
+    Use as a Pydantic ``BeforeValidator`` on the cookie-seed arm of a seed request union. A body that names a
+    ``resources_session_id``, which is how the session router recognises a typed seed, or carries both typed
+    ``episode_id`` and ``task_id`` objects, must validate as ``ResourcesSeedSessionRequest`` instead of creating a
+    cookie session. A dataset row's own scalar ``task_id`` does not make a body typed.
     """
-    if isinstance(value, dict) and ResourcesSeedSessionRequest.model_fields.keys() & value.keys():
+    if isinstance(value, dict) and (
+        "resources_session_id" in value
+        or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
+    ):
         raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
     return value
 
@@ -469,6 +474,11 @@ class ResourcesSessionFence:
     record lasts exactly as long as the session's routing claim with several workers. A per-session lock exists only
     while a request holds or waits for it.
 
+    It also decides what a seed or close may do: ``check_typed_seed`` says whether a typed seed reuses, creates or is
+    refused, ``check_close`` checks which episode owns the session, and ``legacy_seed_session_id`` says whether a cookie
+    seed keeps its session ID or takes a new one. They take the caller's identity and verification facts as arguments
+    and keep none, so the owning server stays the single place that stores them.
+
     TODO: also expire sessions that are never closed, as when the Environment Server dies before its close. Planned
     rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next request
     and at shutdown; an expired session is released, fenced, and verifies as ``SESSION_EXPIRED``.
@@ -590,10 +600,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     """
 
     config: BaseResourcesServerConfig
-    # Override the three state hooks to use the built-in lifecycle; unchanged hooks keep the stateless defaults.
+    # Validates a typed seed's ``task_data`` and a cookie seed's body. Only servers that implement the three state
+    # hooks use it; a stateless server's seed accepts any body.
     seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = BaseSeedSessionRequest
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     # The identity is protocol state; the retained verification payload is owned and interpreted by each verifier.
+    # A verifier that releases its state at ``/verify`` first masks a session ``_fence`` has closed, then ``remember``s
+    # its identity (popped from ``_session_episodes``) and payload here, so a retried verify still scores.
     _verified_sessions: ClosedResourcesSessionRecords[tuple[tuple[EpisodeId, TaskId] | None, Any]] = PrivateAttr()
     _fence: ResourcesSessionFence = PrivateAttr()
     # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement the
@@ -634,7 +647,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         return type(self).initialize_session_state is not SimpleResourcesServer.initialize_session_state
 
     def has_session_state(self, session_id: str) -> bool:
-        """Whether live state exists; implement with initialization and release to use the shared lifecycle."""
+        """Whether live state exists for ``session_id``; keep it synchronous and cheap.
+
+        The base uses it only to refuse a typed seed that would replace the live state of a cookie session it holds
+        no identity for. Implement it together with initialization and release to use the shared lifecycle.
+        """
         return False
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
@@ -688,7 +705,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if type(self).seed_session is SimpleResourcesServer.seed_session:
             # Inject Request at the HTTP boundary while keeping seed_session(body) valid for direct callers.
             legacy_body = (
-                Annotated[self.seed_request_model, BeforeValidator(reject_typed_resources_seed)]
+                Annotated[self.seed_request_model, BeforeValidator(reject_partial_typed_seed)]
                 if self._manages_session_state()
                 else BaseSeedSessionRequest
             )
@@ -835,7 +852,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         raise NotImplementedError
 
     async def retire_session_state(self, session_id: str) -> None:
-        """Release a retired attempt, retaining its identity if cleanup fails."""
+        """Discard a session whose attempt was retired; called in every checkpoint mode.
+
+        A retired session's late requests, a terminal step among them, are refused, so nothing else frees its state.
+        A server that uses the state hooks inherits this: it releases the session through ``release_session_state``,
+        then drops the active identity and records the close only if that succeeded, so a failed release can be
+        retried. Other servers that keep per-session state override it; the default does nothing.
+        """
         if not self._manages_session_state():
             return
         async with self._fence.locked(session_id):
@@ -876,6 +899,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         ``request`` so the cookie can be bound after successful initialization. HTTP routes supply it automatically.
         Invalid task data raises ``ResourcesSeedRejectedError`` (422); ownership conflicts raise
         ``ResourcesSessionConflictError`` (409). Resource construction failures remain retryable server errors.
+
+        A server that overrides this method instead of using the hooks must refuse a seed that no retry can make
+        succeed with a final 4xx, never a plain exception (HTTP 500), which the Environment Server retries by
+        dispatching the whole episode again: ``ResourcesSeedRejectedError`` (422) for input that fails validation,
+        such as ``task_data`` or a ``TaskId`` that does not match the task row, and ``ResourcesSessionConflictError``
+        (409) for an ID bound to another episode or task, or a closed session. A failure that a retry may fix, such as
+        an unavailable sandbox provider, stays a 5xx.
         """
         if not self._manages_session_state():
             if isinstance(body, ResourcesSeedSessionRequest):
@@ -921,7 +951,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         Stateless servers acknowledge the close. Custom overrides must release by ``resources_session_id``,
         tolerate unknown or already-closed sessions, reject another episode's close, and keep failed cleanup
-        retryable. Use ``check_resources_session_contract`` to check the HTTP contract.
+        retryable; one that must accept other close bodies overrides this method with a different signature.
+        Use ``check_resources_session_contract`` to check the HTTP contract.
         """
         if not self._manages_session_state():
             return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)

@@ -13,24 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Annotated, Any, Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
-    reject_typed_resources_seed,
 )
 
 
@@ -66,13 +62,6 @@ class ExampleMCPWeatherSeedSessionRequest(BaseSeedSessionRequest):
     verifier_metadata: Optional[dict[str, Any]] = None
 
 
-class ExampleMCPWeatherSeedSessionResponse(BaseSeedSessionResponse):
-    # When expose_tools_over_mcp is on, the response JSON also carries an "mcp" key
-    # (server name, /mcp URL path, per-rollout session-token header) added at startup.
-    # A typed seed returns ResourcesSeedSessionResponse instead, which carries the same metadata in resources_tools.
-    pass
-
-
 class ExampleMCPWeatherGetWeatherRequest(BaseModel):
     city: str
 
@@ -106,17 +95,6 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         app.post("/get_weather")(self.get_weather)
         return app
-
-    async def seed_session(
-        self,
-        request: Request,
-        body: ResourcesSeedSessionRequest
-        | Annotated[ExampleMCPWeatherSeedSessionRequest, BeforeValidator(reject_typed_resources_seed)],
-    ) -> ResourcesSeedSessionResponse | ExampleMCPWeatherSeedSessionResponse:
-        response = await super().seed_session(body, request=request)
-        return (
-            response if isinstance(response, ResourcesSeedSessionResponse) else ExampleMCPWeatherSeedSessionResponse()
-        )
 
     def has_session_state(self, session_id: str) -> bool:
         return session_id in self.session_id_to_state
