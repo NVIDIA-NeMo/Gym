@@ -76,7 +76,7 @@ installs the runtime, or reuses a healthy one, and uploads the runner.
 
 **Runtime installation** (`install_openhands_runtime.sh`) needs Linux x86_64 or aarch64 with glibc, bash,
 tar, gzip, sha256sum, flock, tee, `mv -T`, a writable `/tmp`, and access to PyPI: pip downloads the locked
-packages (about 1.1 GB installed). A cold install took 32 s on an EOS compute node. The runtime is keyed by a
+packages (about 1.1 GB installed). A cold install took 32 s on a Slurm compute node. The runtime is keyed by a
 fingerprint of the Python build, the installer and the lock file, published atomically under
 `/tmp/nemo-gym-openhands-runtime/`, and reused by later seeds in the same sandbox. The task image's Python is
 never used or changed.
