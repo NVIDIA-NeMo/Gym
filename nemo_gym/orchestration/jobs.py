@@ -24,7 +24,7 @@ k8s or a local runner later. Two consequences, both enforced by
 `test_jobs_module_is_executor_agnostic`:
 
 * Nothing here imports from `executors/`, so a reader -- today EFB's collect,
-  tomorrow `gym eval status` -- can load a record without pulling Slurm, SSH and
+  `gym eval status` -- can load a record without pulling Slurm, SSH and
   the sbatch templates into its import path.
 * No field is typed or named after one executor's vocabulary. Where a docstring
   explains a value by example, it says which executor the example comes from.

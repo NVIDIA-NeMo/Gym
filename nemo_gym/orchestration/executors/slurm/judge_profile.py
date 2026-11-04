@@ -28,7 +28,7 @@ job takes ``--judge-qos``, else the saved CPU pool's own QOS, else the QOS the r
 for that partition, else the partition's default.
 
 A run that serves its judge as a service of its own, on a node pool of its own beside the policy's (a vLLM judge its
-judge server reaches at ``${GYM_POOL_<POOL>_NODES}``), gets the served-judge profile: those services on their saved
+judge server reaches through ``GYM_POOL_*_NODES``), gets the served-judge profile: those services on their saved
 node pools, with their saved shape and partition, and no policy service, policy model or policy pool. It is a GPU job
 like the run, so it keeps the run's job-level QOS; ``--judge-partition`` and ``--judge-qos`` name a CPU placement and
 are not used (a launcher that passes them on every recovery would put the GPU pool on a CPU partition or QOS). A
@@ -85,6 +85,11 @@ class JudgeProfileUnsupported(ValueError):
     one."""
 
 
+# The QOS source of a job that names no QOS. A named constant, so the reference docs show its name rather than a
+# quoted default the page generator cannot embed.
+PARTITION_DEFAULT_QOS = "the partition's default"
+
+
 @dataclass(frozen=True)
 class JudgeExecutionProfile:
     """Where and for how long a judge-only job of a run grades its saved answers again, and what it starts."""
@@ -99,7 +104,7 @@ class JudgeExecutionProfile:
     compute: SlurmComputeConfig
     # The QOS the job asks for and where it came from; None takes the partition's default.
     qos: str | None = None
-    qos_source: str = "the partition's default"
+    qos_source: str = PARTITION_DEFAULT_QOS
     # CPU_PROFILE or SERVED_JUDGE_PROFILE, the node pools the job runs on and the saved services it starts.
     kind: str = CPU_PROFILE
     pools: tuple[str, ...] = (JUDGE_POOL_NAME,)
@@ -248,7 +253,7 @@ def judge_execution_profile(
         extra_args=dict(saved_pool.extra_args) if saved_pool is not None else {},
     )
     extra_args = {k: v for k, v in compute.extra_args.items() if k not in _ALLOCATION_SHAPE_DIRECTIVES}
-    qos_source = "the partition's default"
+    qos_source = PARTITION_DEFAULT_QOS
     if qos:
         qos_source = "--judge-qos"
         extra_args["qos"] = qos
@@ -332,7 +337,7 @@ def served_judge_profile(
     elif pool_qos:
         job_qos, qos_source = pool_qos, "the saved node pool's QOS"
     else:
-        job_qos, qos_source = None, "the partition's default"
+        job_qos, qos_source = None, PARTITION_DEFAULT_QOS
     judge_compute = compute.model_copy(update={"walltime": walltime, "node_pools": pools, "extra_args": extra_args})
     return JudgeExecutionProfile(
         partition=",".join(sorted({pool.partition for pool in pools.values()})),
