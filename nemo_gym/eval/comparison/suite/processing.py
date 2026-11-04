@@ -16,7 +16,9 @@
 
 from dataclasses import asdict
 
-from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import (
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     BenchmarkSamples,
     MetricScale,
     SampleSummary,
@@ -25,8 +27,8 @@ from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import (
     normalize_score,
     summarize_sample,
 )
-from nemo_gym.comparison.suite.loading import LoadedSuiteRun
-from nemo_gym.comparison.suite.schema import (
+from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun
+from nemo_gym.eval.comparison.suite.schema import (
     SuiteAggregateResult,
     SuiteCellResult,
     SuiteCoverage,
@@ -35,8 +37,6 @@ from nemo_gym.comparison.suite.schema import (
     SuiteSampleSummary,
     SuiteStatistics,
 )
-from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
 def _task_sets(run: LoadedSuiteRun) -> tuple[dict[int, frozenset[int]], list[str], bool]:

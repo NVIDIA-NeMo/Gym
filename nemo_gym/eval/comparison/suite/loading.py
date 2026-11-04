@@ -14,6 +14,7 @@
 # limitations under the License.
 """Read suite manifests and recorded artifacts without reconstructing repeat metrics."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -22,19 +23,17 @@ import orjson
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym.comparison.loading import _read_agent_entries
-from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import MetricScale, normalize_score
-from nemo_gym.comparison.suite.schema import (
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.eval.comparison.loading import _read_agent_entries
+from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import MetricScale, normalize_score
+from nemo_gym.eval.comparison.suite.schema import (
     SuiteBenchmarkDefinition,
     SuiteManifest,
     SuiteMetricResult,
     SuiteRunSource,
 )
-from nemo_gym.config_types import ConfigError
-from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.path_utils import aggregate_metrics_path_for, materialized_path_for
-from nemo_gym.registry import resolve_catalog_entry
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_path_for
 
 
 @dataclass(frozen=True)
@@ -61,8 +60,13 @@ def load_suite_manifest(path: Path) -> SuiteManifest:
         raise ConfigError(f"Cannot load suite manifest '{path}': {error}") from error
 
 
-def resolve_metric_definitions(benchmark: str, definition: SuiteBenchmarkDefinition) -> list[SuiteMetricResult]:
-    """Resolve only mean/reward from Gym's theoretical reward definition."""
+def resolve_metric_definitions(
+    benchmark: str,
+    definition: SuiteBenchmarkDefinition,
+    *,
+    reward_metric_resolver: Callable[[str], SuiteMetricResult] | None = None,
+) -> list[SuiteMetricResult]:
+    """Validate explicit metric scales, using supplied catalog metadata for mean/reward."""
     resolved = []
     for metric in definition.metrics:
         if metric.low is not None and metric.high is not None and metric.higher_is_better is not None:
@@ -74,19 +78,22 @@ def resolve_metric_definitions(benchmark: str, definition: SuiteBenchmarkDefinit
                     f"Benchmark '{benchmark}' metric '{metric.name}' has no general Gym scale definition. "
                     "Specify theoretical low, high, and higher_is_better in the suite manifest."
                 )
+            if reward_metric_resolver is None:
+                raise ConfigError(
+                    f"Benchmark '{benchmark}' metric '{metric.name}' has no catalog reward resolver. "
+                    "Specify theoretical low, high, and higher_is_better in the suite manifest, "
+                    "or supply reward_metric_resolver when calling build_suite_comparison."
+                )
             try:
-                entry = resolve_catalog_entry(benchmark, kind="benchmark")
-                if entry.manifest_path is None:
-                    raise ConfigError(f"Benchmark '{benchmark}' has no reward manifest.")
-                manifest = load_manifest(entry.manifest_path)
+                reward = reward_metric_resolver(benchmark)
             except ConfigError as error:
                 raise ConfigError(
                     f"Cannot resolve bounds for '{benchmark}/{metric.name}': {error} "
                     "Specify theoretical low, high, and higher_is_better in the suite manifest."
                 ) from error
-            low, high = manifest.reward.range
-            direction = manifest.reward.higher_is_better
-            source = str(entry.manifest_path.resolve()) + ":reward"
+            low, high = reward.low, reward.high
+            direction = reward.higher_is_better
+            source = reward.definition_source
         try:
             normalize_score(low, MetricScale(low=low, high=high, higher_is_better=direction))
         except ValueError as error:

@@ -18,9 +18,9 @@ from pathlib import Path
 
 import orjson
 
-from nemo_gym.comparison.schema import ReportFormat
-from nemo_gym.comparison.suite.schema import SuiteComparisonResult, SuiteStatistics
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.eval.comparison.schema import ReportFormat
+from nemo_gym.eval.comparison.suite.schema import SuiteComparisonResult, SuiteStatistics
 
 
 def _number(value: float | None) -> str:

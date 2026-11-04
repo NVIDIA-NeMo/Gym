@@ -16,15 +16,16 @@
 
 import shlex
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from nemo_gym.comparison.suite.loading import load_suite_manifest, load_suite_run, resolve_metric_definitions
-from nemo_gym.comparison.suite.processing import aggregate_suite_cells, compare_suite_cell
-from nemo_gym.comparison.suite.schema import SuiteComparisonConfig, SuiteComparisonResult
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.secret_utils import hide_secrets_in_overrides
+from nemo_gym.eval.comparison.suite.loading import load_suite_manifest, load_suite_run, resolve_metric_definitions
+from nemo_gym.eval.comparison.suite.processing import aggregate_suite_cells, compare_suite_cell
+from nemo_gym.eval.comparison.suite.schema import SuiteComparisonConfig, SuiteComparisonResult, SuiteMetricResult
 from nemo_gym.package_info import __version__
-from nemo_gym.secret_utils import hide_secrets_in_overrides
 
 
 def invoked_command() -> str:
@@ -32,12 +33,17 @@ def invoked_command() -> str:
     return shlex.join(["gym", "eval", "compare-suite", *hide_secrets_in_overrides(sys.argv[1:])])
 
 
-def build_suite_comparison(config: SuiteComparisonConfig, command: str) -> SuiteComparisonResult:
-    """Build typed suite results without mutating source artifacts or rendering reports."""
+def build_suite_comparison(
+    config: SuiteComparisonConfig,
+    command: str,
+    *,
+    reward_metric_resolver: Callable[[str], SuiteMetricResult] | None = None,
+) -> SuiteComparisonResult:
+    """Build typed results, optionally resolving catalog reward scales through the supplied callback."""
     path = Path(config.suite_fpath).resolve()
     manifest = load_suite_manifest(path)
     definitions = {
-        benchmark: resolve_metric_definitions(benchmark, definition)
+        benchmark: resolve_metric_definitions(benchmark, definition, reward_metric_resolver=reward_metric_resolver)
         for benchmark, definition in manifest.benchmarks.items()
     }
     cells = []

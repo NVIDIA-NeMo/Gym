@@ -23,8 +23,8 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 
 import nemo_gym.cli.eval as cli_eval
 from nemo_gym.cli.main import build_parser, main
-from nemo_gym.comparison.suite.report import render_suite_markdown, render_suite_summary
-from nemo_gym.comparison.suite.schema import SuiteComparisonResult
+from nemo_gym.eval.comparison.suite.report import render_suite_markdown, render_suite_summary
+from nemo_gym.eval.comparison.suite.schema import SuiteComparisonResult
 
 
 def _saved_run(directory: Path, values: list[float]) -> str:
@@ -152,6 +152,29 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     assert existing.read_text() == "existing run report"
     stdout = capsys.readouterr().out
     assert "model-a: candidate=65.00 baseline=50.00 delta=15.00" in stdout
+
+
+def test_real_cli_resolves_catalog_reward_bounds(suite_path: Path, monkeypatch) -> None:
+    manifest = yaml.safe_load(suite_path.read_text())
+    manifest["benchmarks"]["birdbench"] = {"metrics": [{"name": "mean/reward"}]}
+    del manifest["benchmarks"]["first"]
+    model = manifest["models"]["model-a"]
+    model["birdbench"] = model.pop("first")
+    suite_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+    output = suite_path.parent / "reports"
+    monkeypatch.setattr(
+        "sys.argv", ["gym", "eval", "compare-suite", "--suite", str(suite_path), "--output-dir", str(output)]
+    )
+    main()
+
+    result = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
+    birdbench = next(cell for cell in result.cells if cell.benchmark == "birdbench")
+    metric = birdbench.metrics[0]
+    assert (metric.low, metric.high, metric.higher_is_better) == (0, 1, True)
+    assert metric.definition_source.endswith("benchmarks/birdbench/manifest.yaml:reward")
+    assert birdbench.statistics.delta == pytest.approx(20)
+    assert result.overall.statistics.delta == pytest.approx(15)
+    assert (output / "suite_compare_report.md").is_file()
 
 
 def test_markdown_uses_four_significant_digits_without_rounding_json(tmp_path: Path, monkeypatch) -> None:

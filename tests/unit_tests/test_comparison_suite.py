@@ -21,17 +21,18 @@ import orjson
 import pytest
 import yaml
 
-from nemo_gym.comparison.suite.loading import load_suite_run
-from nemo_gym.comparison.suite.processing import compare_suite_cell
-from nemo_gym.comparison.suite.runner import build_suite_comparison
-from nemo_gym.comparison.suite.schema import (
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
+from nemo_gym.eval.comparison.suite.loading import load_suite_run
+from nemo_gym.eval.comparison.suite.processing import compare_suite_cell
+from nemo_gym.eval.comparison.suite.runner import build_suite_comparison
+from nemo_gym.eval.comparison.suite.schema import (
     SuiteComparisonConfig,
     SuiteComparisonResult,
     SuiteMetricResult,
     SuiteRunSource,
 )
-from nemo_gym.config_types import ConfigError
-from nemo_gym.path_utils import aggregate_metrics_path_for, materialized_path_for
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_path_for
 
 
 AGENT = "benchmark_agent"
@@ -97,7 +98,9 @@ def _manifest(tmp_path: Path, *, benchmarks: dict, models: dict) -> Path:
 
 def _compare(path: Path, confidence: float = 0.90) -> SuiteComparisonResult:
     return build_suite_comparison(
-        SuiteComparisonConfig(suite_fpath=str(path), confidence_level=confidence), "gym eval compare-suite"
+        SuiteComparisonConfig(suite_fpath=str(path), confidence_level=confidence),
+        "gym eval compare-suite",
+        reward_metric_resolver=resolve_benchmark_reward_metric,
     )
 
 
@@ -195,11 +198,21 @@ def test_complete_scale_override_reverses_lower_is_better_metric(tmp_path: Path)
         benchmarks={"birdbench": {"metrics": [_scale(low=0, high=10, higher=False)]}},
         models={"model": {"birdbench": _pair(tmp_path, "run", _values(4, 6), _values(2, 4))}},
     )
-    cell = _compare(path).cells[0]
+    cell = build_suite_comparison(SuiteComparisonConfig(suite_fpath=str(path)), "direct comparison").cells[0]
     assert cell.baseline.repeat_scores == pytest.approx([60, 40])
     assert cell.candidate.repeat_scores == pytest.approx([80, 60])
     assert cell.statistics.delta == pytest.approx(20)
     assert cell.metrics[0].definition_source == "suite manifest override"
+
+
+def test_direct_comparison_requires_scale_or_catalog_resolver(tmp_path: Path) -> None:
+    path = _manifest(
+        tmp_path,
+        benchmarks={"birdbench": {"metrics": [{"name": "mean/reward"}]}},
+        models={"model": {"birdbench": _pair(tmp_path, "run", _values(0.2, 0.4), _values(0.4, 0.6))}},
+    )
+    with pytest.raises(ConfigError, match="no catalog reward resolver.*theoretical low, high, and higher_is_better"):
+        build_suite_comparison(SuiteComparisonConfig(suite_fpath=str(path)), "direct comparison")
 
 
 def test_adjustable_confidence_changes_interval_only_and_supports_unequal_repeats(tmp_path: Path) -> None:
