@@ -132,7 +132,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
     runs-on: nemo-ci-aws-cpu-4-16
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
       NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
@@ -333,7 +333,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_full == 'true'
     runs-on: nemo-ci-aws-cpu-4-16
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
       NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data

@@ -4,7 +4,7 @@ The adapter runs four in-process LangGraph workflows: iterative reflection,
 subagent orchestration, parallel thinking, and ReWOO. The workflows use only the
 Gym Model Server; they do not execute environment tools or use task sandboxes.
 The Agent Server installs LangGraph 1.2.18 and langchain-core 1.7.3 from
-`requirements.txt`; there is no per-task runtime installation.
+`pyproject.toml` and `uv.lock`; there is no per-task runtime installation.
 
 ## Sessions and capabilities
 

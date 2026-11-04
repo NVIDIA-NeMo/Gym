@@ -18,6 +18,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import re
 import sys
 import tomllib
@@ -31,6 +32,7 @@ from packaging.requirements import Requirement
 
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
+from nemo_gym.sandbox import attribution
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
 from nemo_gym.sandbox.providers.base import (
@@ -835,6 +837,7 @@ class TestCreateAndLifecycle:
         provider = E2BProvider(
             connection={"api_key": "k", "api_url": "http://gw:8080", "request_timeout_s": 30.0},
             create={"template": "base", "allow_internet_access": False},
+            attribution={"enabled": False},
         )
         handle = await provider.create(
             _spec(ttl_s=120, env={"FOO": "bar"}, metadata={"run": "1"}),
@@ -941,6 +944,7 @@ class TestCreateAndLifecycle:
         provider = E2BProvider(
             connection={"api_key": "secret-key", "api_url": "http://gw:8080", "request_timeout_s": 30.0},
             create={"template": "base", "network": _NETWORK, "custom_extension_params": {"sandbank": "all"}},
+            attribution={"team": "t", "user": "u", "workload": "w", "run": "r"},
         )
         handle = await provider.create(
             _spec(ttl_s=120, ready_timeout_s=90, env={"FOO": "bar"}, metadata={"run": "1"}),
@@ -957,7 +961,13 @@ class TestCreateAndLifecycle:
             "allow_internet_access": True,
             "network": {"denyOut": ["0.0.0.0/0"], "allowOut": ["pypi.org", "deb.debian.org"]},
             "envVars": {"FOO": "bar"},
-            "metadata": {"run": "1"},
+            "metadata": {
+                "nemo-gym.nvidia.com/team": "t",
+                "nemo-gym.nvidia.com/user": "u",
+                "nemo-gym.nvidia.com/workload": "w",
+                "nemo-gym.nvidia.com/run": "r",
+                "run": "1",
+            },
             "customExtensionParams": {"sandbank": "all"},
             "autoPause": False,
             "autoResume": {"enabled": False},
@@ -1224,6 +1234,89 @@ class TestRetries:
         with pytest.raises(E2BCreateError):
             await provider.create(_spec())
         assert calls["n"] == 1
+
+
+# --------------------------------------------------------------------------
+# Job attribution
+# --------------------------------------------------------------------------
+
+_ATTRIBUTION_ENV_VARS = (
+    "NEMO_GYM_TEAM",
+    "NEMO_GYM_USER",
+    "NEMO_GYM_WORKLOAD",
+    "NEMO_GYM_RUN_ID",
+    "NEMO_GYM_CONFIG_PATH",
+    "SLURM_JOB_ACCOUNT",
+    "SLURM_JOB_USER",
+    "SLURM_JOB_NAME",
+)
+
+
+class TestAttribution:
+    @pytest.fixture(autouse=True)
+    def attribution_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in _ATTRIBUTION_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("NEMO_GYM_TEAM", "gym-team")
+        monkeypatch.setenv("NEMO_GYM_USER", "alice")
+        monkeypatch.setenv("NEMO_GYM_WORKLOAD", "swe-bench")
+        monkeypatch.setenv("NEMO_GYM_RUN_ID", "run-123")
+
+    async def test_create_sends_attribution_by_default_and_logs_it_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(attribution, "_logged_attribution", False)
+        provider = E2BProvider(connection={"api_key": "secret-key"}, create={"template": "base"})
+        with caplog.at_level(logging.INFO, logger=attribution.LOGGER.name):
+            first = await provider.create(_spec(metadata={"purpose": "test"}))
+            second = await provider.create(_spec())
+
+        expected = {
+            "nemo-gym.nvidia.com/team": "gym-team",
+            "nemo-gym.nvidia.com/user": "alice",
+            "nemo-gym.nvidia.com/workload": "swe-bench",
+            "nemo-gym.nvidia.com/run": "run-123",
+        }
+        assert first.raw.create_kwargs["metadata"] == {**expected, "purpose": "test"}
+        assert second.raw.create_kwargs["metadata"] == expected
+        [record] = [r for r in caplog.records if "Sandbox attribution metadata" in r.getMessage()]
+        assert "run-123" in record.getMessage()
+        assert "secret-key" not in caplog.text
+
+    async def test_explicit_metadata_wins_over_attribution(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, attribution={"team": "cfg-team", "run": "cfg-run"})
+        handle = await provider.create(_spec(metadata={"nemo-gym.nvidia.com/team": "explicit-team"}))
+        assert handle.raw.create_kwargs["metadata"] == {
+            "nemo-gym.nvidia.com/team": "explicit-team",
+            "nemo-gym.nvidia.com/user": "alice",
+            "nemo-gym.nvidia.com/workload": "swe-bench",
+            "nemo-gym.nvidia.com/run": "cfg-run",
+        }
+
+    async def test_disabled_attribution_sends_only_spec_metadata(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, attribution={"enabled": False, "team": "cfg-team"})
+        explicit = await provider.create(_spec(metadata={"purpose": "test"}))
+        bare = await provider.create(_spec())
+        assert explicit.raw.create_kwargs["metadata"] == {"purpose": "test"}
+        assert "metadata" not in bare.raw.create_kwargs
+
+    async def test_key_prefix_names_the_keys(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, attribution={"key_prefix": ""})
+        handle = await provider.create(_spec())
+        assert handle.raw.create_kwargs["metadata"] == {
+            "team": "gym-team",
+            "user": "alice",
+            "workload": "swe-bench",
+            "run": "run-123",
+        }
+
+    @pytest.mark.parametrize(
+        ("config", "message"),
+        [({"key_prefix": "Bad Prefix/"}, "key_prefix"), ({"tean": "typo"}, "Unknown AttributionConfig keys")],
+    )
+    def test_invalid_attribution_config_is_rejected(self, config: dict[str, object], message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            E2BProvider(attribution=config)
 
 
 # --------------------------------------------------------------------------

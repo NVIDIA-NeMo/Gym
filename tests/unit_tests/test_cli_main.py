@@ -2209,3 +2209,132 @@ class TestModelTypeKeepsBenchmarkPolicySettings:
         for key, value in self.POLICY_SETTINGS.items():
             assert vllm_model[key] == value, key
         assert vllm_model["entrypoint"] == "app.py"  # the model-type config still applied
+
+
+@pytest.mark.parametrize("as_job_id", [False, True])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_eval_status_reads_saved_progress(tmp_path, monkeypatch, capsys, as_job_id, json_output):
+    from nemo_gym.orchestration import jobs
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    status = {
+        "schema_version": "1",
+        "members": {
+            "a": {"completed_rollout_count": 2, "remaining_rollout_count": 1, "failures_by_class": {"judge_failed": 1}}
+        },
+    }
+    (artifacts / "batch_status.json").write_text(json.dumps(status))
+    target = str(artifacts)
+    if as_job_id:
+        monkeypatch.setattr(jobs, "local_index_dir", lambda: tmp_path)
+        target = "gym-job-test"
+        record = jobs.SubmissionRecord(
+            gym_job_id=target,
+            gym_version="test",
+            submitted_at="now",
+            run_dir=str(tmp_path),
+            cluster="local",
+            executor="local",
+            submitted_by="test",
+            benchmarks=[jobs.BenchmarkJob(benchmark="benchmark", job_dir=str(tmp_path), job_id="123")],
+        )
+        (tmp_path / f"{target}.json").write_text(record.dumps())
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", target, *(["--json"] if json_output else [])])
+    cli_main.main()
+    output = capsys.readouterr().out
+    if json_output:
+        assert list(json.loads(output).values()) == [{**status, "export": {}}]
+    else:
+        assert "2 completed, 1 remaining" in output
+        assert '"judge_failed": 1' in output
+        assert "export receipt: missing" in output
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_eval_status_reports_each_exporter_receipt_and_live_run_id(tmp_path, monkeypatch, capsys, json_output):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    status = {
+        "schema_version": "1",
+        "tracking": "enabled",
+        "members": {"a": {"completed_rollout_count": 1, "remaining_rollout_count": 0, "failures_by_class": {}}},
+    }
+    (artifacts / "rollouts_batch_status.json").write_text(json.dumps(status))
+    (artifacts / "rollouts_mlflow_export_done").write_text("")
+    (artifacts / "rollouts_mlflow_run_id").write_text("run-123\n")
+    (artifacts / "rollouts_wandb_run_id").write_text("w-7")
+    # Another output's markers in the same directory belong to that output, not to this status, including an
+    # output whose stem starts with this one.
+    (artifacts / "other_mlflow_export_done").write_text("")
+    (artifacts / "rollouts_x_mlflow_export_done").write_text("")
+    (artifacts / "rollouts_x_wandb_run_id").write_text("x-9")
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(artifacts), *(["--json"] if json_output else [])])
+    cli_main.main()
+    output = capsys.readouterr().out
+    expected = {"mlflow": {"receipt": True, "run_id": "run-123"}, "wandb": {"receipt": False, "run_id": "w-7"}}
+    if json_output:
+        [entry] = json.loads(output).values()
+        assert entry["export"] == expected
+    else:
+        assert "export receipt: mlflow present (run id run-123), wandb missing (run id w-7)" in output
+
+
+def test_eval_status_missing_artifact_is_actionable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(tmp_path)])
+    with pytest.raises(SystemExit) as error:
+        cli_main.main()
+    assert error.value.code == 2
+    assert "No batch_status.json or Gym job record found" in capsys.readouterr().err
+
+
+def test_review_eval_status_lists_stem_files_and_expected_aggregation(tmp_path, monkeypatch, capsys):
+    member = {
+        "expected_rollout_count": 3,
+        "completed_rollout_count": 2,
+        "remaining_rollout_count": 1,
+        "failures_by_class": {},
+        "aggregation_status": "deferred",
+    }
+    for stem in ("math", "gsm8k"):
+        (tmp_path / f"{stem}_batch_status.json").write_text(json.dumps({"members": {stem: member}}))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(tmp_path)])
+    cli_main.main()
+    output = capsys.readouterr().out
+    assert "math_batch_status.json" in output and "gsm8k_batch_status.json" in output
+    assert "expected: 3" in output and "aggregation: deferred" in output
+
+
+def test_review_eval_status_rejects_a_file_as_a_run_directory(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("")
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(path)])
+    with pytest.raises(SystemExit):
+        cli_main.main()
+    assert "Run directory expected" in capsys.readouterr().err
+
+
+def test_eval_status_prints_disabled_tracking_and_update_time(tmp_path, monkeypatch, capsys) -> None:
+    status = {"tracking": "disabled", "reason": "ConfigError", "updated_at": "2026-10-16T12:34:56Z", "members": {}}
+    (tmp_path / "run_batch_status.json").write_text(json.dumps(status))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(tmp_path)])
+    cli_main.main()
+    output = capsys.readouterr().out
+    assert "tracking: disabled" in output
+    assert "ConfigError" in output
+    assert "2026-10-16T12:34:56Z" in output
+
+
+class TestEvalResubmitFractionFlagsHelp:
+    def test_the_fraction_flags_are_described_as_reported_not_as_gates(
+        self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        # Only evaluation health decides the gate; the help must not promise that these flags change the verdict.
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["eval", "resubmit", "--help"])
+        help_text = " ".join(capsys.readouterr().out.split())
+
+        assert "response gate passes" not in help_text
+        assert "trial gate fails" not in help_text
+        assert help_text.count("reported under criteria with applied: false") == 2
+        assert "reported in warnings; it does not change the verdict" in help_text
