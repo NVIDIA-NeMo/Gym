@@ -40,10 +40,6 @@ from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRe
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 HLE_ENVIRONMENT = "hle_equivalence_llm_judge_environment_server"
-# The override each adapter README gives for HLE: its judge grants the agent no tools.
-HLE_PAIRING = {
-    HLE_ENVIRONMENT: {"environment_servers": {"single_agent_turn_legacy": {"resources_tool_transports": []}}}
-}
 IMAGE = "registry.example.invalid/sandbox:1"
 
 # Adapter directory name -> (agent class, its config class).
@@ -58,8 +54,14 @@ HARNESSES = {
 
 
 def _compose(
-    agent: str, monkeypatch: pytest.MonkeyPatch, *, pairing: bool = True, image: bool = True, cli_args: tuple = ()
+    agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    transports: list[str] | None = None,
+    image: bool = True,
+    cli_args: tuple = (),
 ) -> DictConfig:
+    """Compose the profile onto HLE as shipped, or with `transports` set on HLE's Environment Server."""
     monkeypatch.chdir(REPO_ROOT)
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")
     composed = f"hle_equivalence_llm_judge_{agent}"
@@ -82,7 +84,17 @@ def _compose(
                     "policy_base_url": "http://unused.invalid/v1",
                     "policy_api_key": "unused",
                     "policy_model_name": "test-model",
-                    **(HLE_PAIRING if pairing else {}),
+                    **(
+                        {
+                            HLE_ENVIRONMENT: {
+                                "environment_servers": {
+                                    "single_agent_turn_legacy": {"resources_tool_transports": transports}
+                                }
+                            }
+                        }
+                        if transports is not None
+                        else {}
+                    ),
                 }
             ),
         )
@@ -174,7 +186,8 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
         assert settings.model_server.name == "policy_model"
     environment = get_first_server_config_dict(config, HLE_ENVIRONMENT)
     assert environment.agent_server.name == composed
-    assert list(environment.resources_tool_transports) == []
+    # HLE's judge serves no tools, so its Environment Server sets no transports and grants none.
+    assert list(environment.get("resources_tool_transports", [])) == []
     # Sandboxes reach the servers at the caller's address; the head server's config endpoint stays on loopback.
     assert config.head_server.host == "127.0.0.1"
     assert settings.host == "192.0.2.30"
@@ -186,22 +199,23 @@ def test_profile_without_an_image_fails_at_resolve(agent: str, monkeypatch: pyte
         _compose(agent, monkeypatch, image=False)
 
 
-@pytest.mark.parametrize("pairing", [True, False], ids=["with_override", "without_override"])
+@pytest.mark.parametrize("transports", [None, ["direct_http"]], ids=["as_shipped", "direct_http_granted"])
 @pytest.mark.parametrize("agent", HARNESSES)
-async def test_hle_seed_reaches_the_agents_own_sandbox_only_with_the_pairing_override(
-    agent: str, pairing: bool, monkeypatch: pytest.MonkeyPatch
+async def test_hle_seed_reaches_the_agents_own_sandbox_unless_a_direct_http_grant_is_required(
+    agent: str, transports: list[str] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if agent == "hermes_agent":
         pytest.importorskip("model_tools", reason="hermes_agent imports hermes-agent, which its own venv installs")
-    config = _compose(agent, monkeypatch, pairing=pairing)
+    config = _compose(agent, monkeypatch, transports=transports)
     seed, reply, created_sandbox = await _seed_through_hle(agent, config, monkeypatch)
     assert seed["sandbox_access"] is None
-    if pairing:
+    if transports is None:
+        # HLE's judge serves no tools, so its Environment Server grants none.
         assert seed["tool_accesses"] == []
         # The agent accepts the seed and goes on to create its own sandbox.
         assert created_sandbox, reply and reply.text
     else:
-        # HLE's judge grants its Resources server over direct HTTP, which no session harness can use.
+        # A pairing whose Environment Server grants direct HTTP access, which no session harness can use.
         assert [(access["kind"], access["name"], access["required"]) for access in seed["tool_accesses"]] == [
             ("direct_http", "hle_equivalence_llm_judge_resources_server.direct_http", True)
         ]
