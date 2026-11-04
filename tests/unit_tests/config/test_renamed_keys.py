@@ -109,6 +109,52 @@ def test_an_old_key_on_the_command_line_overrides_an_old_key_in_a_config(tmp_pat
     assert parsed["new_block"] == BLOCK
 
 
+@pytest.mark.parametrize("source", ["cli", "initial"])
+def test_an_old_key_overrides_the_new_key_from_a_lower_precedence_config(
+    tmp_path: Path, expected: dict, source: str
+) -> None:
+    # A shipped config already uses the new keys; an override that still uses the old ones must win, not conflict.
+    config_path = tmp_path / "new_keys.yaml"
+    shipped = {
+        "new_block": {"enabled": False},
+        "my_agent": {"responses_api_agents": {"simple_agent": {"new_flag": False}}},
+    }
+    config_path.write_text(OmegaConf.to_yaml(OmegaConf.merge(NEW, shipped)))
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(config_paths=[str(config_path)], **{source: OLD})
+    parsed.pop("config_paths")
+    expected.pop("config_paths")
+    assert parsed == expected
+
+
+def test_an_old_key_overrides_the_new_key_it_inherits() -> None:
+    shipped = {"shipped": {"responses_api_agents": {"simple_agent": {"entrypoint": "app.py", "new_flag": False}}}}
+    mine = {"_inherit_from": "shipped.responses_api_agents.simple_agent", "old_flag": True}
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(initial={**NEW, **shipped, "mine": {"responses_api_agents": {"simple_agent": mine}}})
+    agent = parsed["mine"]["responses_api_agents"]["simple_agent"]
+    assert agent["new_flag"] is True and "old_flag" not in agent
+
+
+def test_an_old_key_fills_a_new_key_a_config_leaves_unset(tmp_path: Path, expected: dict) -> None:
+    config_path = tmp_path / "required.yaml"
+    config_path.write_text(OmegaConf.to_yaml({"new_block": "???", **_servers("new_flag")}))
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(config_paths=[str(config_path)], cli={"old_block": BLOCK})
+    parsed.pop("config_paths")
+    expected.pop("config_paths")
+    assert parsed == expected
+
+
+def test_a_config_that_refers_to_another_config_is_renamed_without_resolving(tmp_path: Path) -> None:
+    # On its own, this config cannot resolve its reference; only the merged config can.
+    config_path = tmp_path / "refers.yaml"
+    config_path.write_text(OmegaConf.to_yaml({**OLD, "block_dir": "${defined_elsewhere}"}))
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(config_paths=[str(config_path)], initial={"defined_elsewhere": "/tmp/elsewhere"})
+    assert parsed["new_block"] == BLOCK and parsed["block_dir"] == "${defined_elsewhere}"
+
+
 @pytest.mark.parametrize(
     "conflict",
     [
@@ -116,9 +162,16 @@ def test_an_old_key_on_the_command_line_overrides_an_old_key_in_a_config(tmp_pat
         {"my_agent": {"responses_api_agents": {"simple_agent": {"new_flag": False}}}},
     ],
 )
-def test_an_old_and_a_new_key_set_to_different_values_is_an_error(conflict: dict) -> None:
+@pytest.mark.parametrize("source", ["cli", "initial"])
+def test_an_old_and_a_new_key_set_to_different_values_in_one_config_is_an_error(conflict: dict, source: str) -> None:
     with pytest.raises(ConflictingRenamedKeyError, match="keep only"):
-        _parse(initial=OLD, cli=conflict)
+        _parse(**{source: OmegaConf.to_container(OmegaConf.merge(OLD, conflict))})
+
+
+def test_a_new_key_on_the_command_line_overrides_an_old_key_in_the_initial_config(expected: dict) -> None:
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(initial={"old_block": {**BLOCK, "enabled": False}, **_servers("old_flag")}, cli=NEW)
+    assert parsed == expected
 
 
 def test_an_old_and_a_new_key_set_to_the_same_value_parse_like_the_new_key(expected: dict) -> None:

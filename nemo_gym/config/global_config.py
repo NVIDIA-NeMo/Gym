@@ -1576,6 +1576,10 @@ For example, on the command line:
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
+        # Each source is renamed on its own, before any merge, so an old key in one source and the new key in another
+        # are decided by precedence like any other key, rather than meeting in the merged config as a conflict.
+        self._rename_deprecated_keys(cli_global_config_dict)
+        self._rename_deprecated_keys(initial_global_config_dict)
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
@@ -1607,6 +1611,8 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
+        for extra_config in extra_configs:
+            self._rename_deprecated_keys(extra_config)
 
         # Merge config dicts
         # global_config_dict is the last config arg here since we want command line args to override everything else.
@@ -1641,7 +1647,8 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
-        # After every merge and composition, so an old key from any source, held overrides included, is moved.
+        # Each source was renamed before the merge. This catches an old key that only appears in the merged config,
+        # such as one copied in by `${copy:...}` from a block that is not a server instance.
         self._rename_deprecated_keys(global_config_dict)
         # NOTE(martas): this is for catching agents not attached to an environment server
         self._front_agents_without_environment_server(global_config_dict)
