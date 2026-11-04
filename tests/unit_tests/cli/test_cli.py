@@ -1847,7 +1847,7 @@ class TestListEnvironments:
             "agent:\n  responses_api_agents:\n    simple_agent: {datasets: 1}\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr("nemo_gym.registry.component_search_roots", lambda: [tmp_path])
+        monkeypatch.setattr("nemo_gym.environment.registry.component_search_roots", lambda: [tmp_path])
 
         monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", lambda: OmegaConf.create({"json": True}))
         list_environments()
