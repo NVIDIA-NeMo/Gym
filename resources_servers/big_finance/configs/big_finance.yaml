@@ -8,11 +8,16 @@ big_finance_resources_server:
       verified: false
       description: Pinned BigFinanceBench web, EDGAR, fetch, Python, and final-answer tools
       value: Run the public BigFinanceBench scaffold in NeMo Gym
+      # false: pair with rows from `prepare.py --no-web-search`.
+      web_search: ${oc.select:big_finance_web_search,true}
       serp_api_key: ${oc.select:serp_api_key,${oc.env:SERP_API_KEY,null}}
       tavily_api_key: ${oc.select:tavily_api_key,${oc.env:TAVILY_API_KEY,null}}
       sec_edgar_user_agent: ${oc.select:sec_edgar_user_agent,${oc.env:SEC_EDGAR_USER_AGENT,null}}
       use_cache: ${oc.select:big_finance_use_cache,false}
       cache_dir: ${oc.select:big_finance_cache_dir,null}
+      # Set: edgar_search and fetch_url read this downloaded corpus, never call SEC, and
+      # hide filings made after each row's as_of_date.
+      sec_corpus_metadata_path: ${oc.select:big_finance_sec_corpus_metadata_path,null}
       web_search_timeout_s: 30
       edgar_timeout_s: 20
       fetch_timeout_s: 30

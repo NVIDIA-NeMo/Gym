@@ -407,6 +407,65 @@ def test_web_search_backend_selection_failure_restores_environment(monkeypatch: 
     assert "TAVILY_API_KEY" not in os.environ
 
 
+def test_web_search_off_builds_no_backend_and_reports_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "host-tavily")
+    monkeypatch.setattr(WebSearchTool, "__init__", MagicMock(side_effect=AssertionError("built a search tool")))
+    server = _server(web_search=False, tavily_api_key="config-tavily")
+
+    assert server._tools["web_search"] is None
+    assert os.environ["TAVILY_API_KEY"] == "host-tavily"
+    response = TestClient(server.setup_webserver()).post("/web_search", json={"query": "revenue"})
+    assert response.headers["x-nemo-gym-tool-error"] == "true"
+    assert response.text == "Tool 'web_search' is not configured."
+
+
+@pytest.mark.parametrize("override,expected", [({}, True), ({"big_finance_web_search": False}, False)])
+def test_yaml_web_search_switch(override: dict, expected: bool) -> None:
+    config = OmegaConf.merge(OmegaConf.load(_CONFIG_FPATH), override)
+
+    assert config.big_finance_resources_server.resources_servers.big_finance.web_search is expected
+
+
+def test_offline_corpus_serves_upstream_shapes_clamped_to_the_row_as_of_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from resources_servers.big_finance.tests.test_as_of_tools import _ARCHIVE, _corpus
+
+    monkeypatch.setattr("big_finance_harness.tools.fetch_url._check_url_safe", lambda url: None)
+    _corpus(tmp_path)
+    server = _server(sec_corpus_metadata_path=str(tmp_path / "step-0-download" / "sec_metadata.parquet"))
+    server._tools["edgar_search"]._get = AsyncMock(side_effect=AssertionError("offline edgar_search requested SEC"))
+    client = TestClient(server.setup_webserver())
+    row = {"responses_create_params": {"input": []}, "as_of_date": "2023-11-03"}
+
+    unseeded = client.post("/edgar_search", json={"ticker": "AAPL"})
+    assert unseeded.headers["x-nemo-gym-tool-error"] == "true"
+    assert client.post("/seed_session", json=row).status_code == 200
+
+    listing = client.post("/edgar_search", json={"ticker": "aapl"})
+    assert listing.headers["x-nemo-gym-tool-error"] == "false"
+    payload = json.loads(listing.text)
+    assert set(payload) == {"ticker", "cik", "filings"}
+    assert payload["filings"] == [
+        {
+            "form": "10-K",
+            "filing_date": "2023-11-03",
+            "accession": "0000320193-23-000106",
+            "primary_document_url": f"{_ARCHIVE}/000032019323000106/aapl-20230930.htm",
+        }
+    ]
+    document = client.post("/fetch_url", json={"url": f"{_ARCHIVE}/000032019323000106/aapl-20230930.htm"})
+    assert "Net sales were 383,285." in document.text
+    later = client.post("/fetch_url", json={"url": f"{_ARCHIVE}/000032019324000006/q1.htm"})
+    assert later.headers["x-nemo-gym-tool-error"] == "true"
+    assert "filed on 2024-02-02" in later.text
+
+
+def test_offline_corpus_requires_a_sec_user_agent(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires sec_edgar_user_agent"):
+        _server(sec_edgar_user_agent=None, sec_corpus_metadata_path=str(tmp_path / "sec_metadata.parquet"))
+
+
 def test_packaged_tool_surface_matches_pinned_snapshot() -> None:
     spec = json.loads((_REPO_ROOT / "benchmarks/big_finance/upstream_spec.json").read_text(encoding="utf-8"))
     tools = [
@@ -900,6 +959,84 @@ async def test_rubric_points_reward_mode_uses_weighted_fraction() -> None:
     assert result.final_answer_correct is False
     assert result.reward == pytest.approx(2 / 3)
     assert result.rubric_points_fraction == pytest.approx(2 / 3)
+
+
+def _final_answer_call(answer: str) -> dict:
+    return {
+        "id": "call",
+        "call_id": "call-1",
+        "type": "function_call",
+        "name": "final_answer",
+        "arguments": json.dumps({"answer": answer}),
+        "status": "completed",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correct", [True, False])
+async def test_answer_match_judges_only_question_reference_and_answer(correct: bool) -> None:
+    server = _server(reward_mode="answer_match")
+    raw = MagicMock(ok=True)
+    raw.read = AsyncMock(return_value=_judge_response(json.dumps({"explanation": "compared", "correct": correct})))
+    server.server_client.post = AsyncMock(return_value=raw)
+    response = _response(
+        [
+            {
+                "id": "lookup",
+                "call_id": "call-0",
+                "type": "function_call",
+                "name": "fetch_url",
+                "arguments": '{"url": "https://www.sec.gov/trace-only"}',
+                "status": "completed",
+            },
+            {"type": "function_call_output", "call_id": "call-0", "output": "TRACE-ONLY TOOL RESULT"},
+            _final_answer_call("$10.0 million"),
+        ]
+    )
+
+    result = await server.verify(MagicMock(), _request(response))
+
+    assert result.reward == float(correct)
+    assert result.final_answer == "$10.0 million"
+    assert result.final_answer_correct is correct
+    assert result.rubric_verdicts == [] and result.rubric_points_possible == 0
+    params = server.server_client.post.await_args.kwargs["json"]
+    assert params.text["format"]["name"] == "answer_grading"
+    prompt = params.input[1].content
+    assert "What was revenue?" in prompt and "$10 million" in prompt and "$10.0 million" in prompt
+    assert "trace-only" not in prompt and "TRACE-ONLY" not in prompt and "Finds revenue." not in prompt
+
+
+@pytest.mark.asyncio
+async def test_answer_match_scores_a_missing_final_answer_zero_without_the_judge() -> None:
+    server = _server(reward_mode="answer_match")
+
+    result = await server.verify(MagicMock(), _request(_response([])))
+
+    assert result.reward == 0.0
+    assert result.final_answer is None
+    assert result.final_answer_correct is False
+    server.server_client.post.assert_not_called()
+
+
+def test_answer_match_without_a_boolean_verdict_is_a_judge_failure() -> None:
+    server = _server(reward_mode="answer_match")
+    raw = MagicMock(ok=True)
+    raw.read = AsyncMock(return_value=_judge_response('{"explanation": "unsure"}'))
+    server.server_client.post = AsyncMock(return_value=raw)
+    request = _request(_response([_final_answer_call("$10 million")]))
+
+    result = TestClient(server.setup_webserver()).post("/verify", json=request.model_dump(mode="json")).json()
+
+    assert result["mask_sample"] is True
+    assert result["failure_kind"] == "judge_failed"
+    assert "boolean 'correct'" in result["failure_reason"]
+
+
+def test_yaml_reward_mode_can_select_answer_match() -> None:
+    config = OmegaConf.merge(OmegaConf.load(_CONFIG_FPATH), {"big_finance_reward_mode": "answer_match"})
+
+    assert config.big_finance_resources_server.resources_servers.big_finance.reward_mode == "answer_match"
 
 
 @pytest.mark.parametrize("failure", ["timeout", "http_500", "unparseable_text"])

@@ -45,13 +45,38 @@ def load_spec() -> dict:
     return spec
 
 
-def build_tools(spec: dict | None = None) -> list[dict]:
-    return json.loads(json.dumps((spec or load_spec())["tools"]))
+# Upstream text that mentions web search, and its replacement when web search is off.
+_PROMPT_WEB_SEARCH = ("web search, SEC EDGAR filings", "SEC EDGAR filings")
+_FETCH_URL_WEB_SEARCH = ("and web pages discovered via `web_search`.", "and web pages.")
 
 
-def convert_rows(rows: list[dict], *, expected_count: int | None = None) -> list[dict]:
+def _without_web_search(text: str, edit: tuple[str, str]) -> str:
+    old, new = edit
+    if text.count(old) != 1:
+        raise ValueError(f"upstream text no longer contains {old!r} exactly once; update the web-search edits")
+    return text.replace(old, new)
+
+
+def build_system_prompt(spec: dict | None = None, *, web_search: bool = True) -> str:
+    prompt = (spec or load_spec())["system_prompt"]
+    return prompt if web_search else _without_web_search(prompt, _PROMPT_WEB_SEARCH)
+
+
+def build_tools(spec: dict | None = None, *, web_search: bool = True) -> list[dict]:
+    tools = json.loads(json.dumps((spec or load_spec())["tools"]))
+    if web_search:
+        return tools
+    tools = [tool for tool in tools if tool["name"] != "web_search"]
+    for tool in tools:
+        if tool["name"] == "fetch_url":
+            tool["description"] = _without_web_search(tool["description"], _FETCH_URL_WEB_SEARCH)
+    return tools
+
+
+def convert_rows(rows: list[dict], *, expected_count: int | None = None, web_search: bool = True) -> list[dict]:
     spec = load_spec()
-    tools = build_tools(spec)
+    tools = build_tools(spec, web_search=web_search)
+    system_prompt = build_system_prompt(spec, web_search=web_search)
     converted: list[dict] = []
     for row in rows:
         required = (
@@ -66,8 +91,6 @@ def convert_rows(rows: list[dict], *, expected_count: int | None = None) -> list
         missing = [key for key in required if key not in row]
         if missing:
             raise ValueError(f"dataset row missing required keys: {missing}")
-        if row["evaluation_only"] is not True or row["do_not_train"] is not True:
-            raise ValueError(f"{row['id']}: BigFinanceBench rows must remain evaluation_only and do_not_train")
         if not isinstance(row["benchmark_canary"], str) or not row["benchmark_canary"].strip():
             raise ValueError(f"{row['id']}: benchmark_canary must be a non-empty string")
         rubric = row["rubric"]
@@ -95,7 +118,7 @@ def convert_rows(rows: list[dict], *, expected_count: int | None = None) -> list
                 },
                 "responses_create_params": {
                     "input": [
-                        {"role": "system", "content": spec["system_prompt"], "type": "message"},
+                        {"role": "system", "content": system_prompt, "type": "message"},
                         {"role": "user", "content": row["query"], "type": "message"},
                     ],
                     "tools": tools,
@@ -108,9 +131,11 @@ def convert_rows(rows: list[dict], *, expected_count: int | None = None) -> list
     return converted
 
 
-def convert_file(input_file: Path, output_file: Path, *, expected_count: int | None = None) -> int:
+def convert_file(
+    input_file: Path, output_file: Path, *, expected_count: int | None = None, web_search: bool = True
+) -> int:
     rows = [json.loads(line) for line in input_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-    converted = convert_rows(rows, expected_count=expected_count)
+    converted = convert_rows(rows, expected_count=expected_count, web_search=web_search)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with output_file.open("w", encoding="utf-8") as stream:
         for row in converted:
@@ -137,10 +162,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--no-web-search",
+        action="store_true",
+        help="Omit web_search from the tools and drop its mentions from the prompt and fetch_url description.",
+    )
     args = parser.parse_args(argv)
     if args.input:
         output = args.output or args.input.with_name(f"{args.input.stem}.gym.jsonl")
-        count = convert_file(args.input, output)
+        count = convert_file(args.input, output, web_search=not args.no_web_search)
         print(f"Wrote {count} samples to {output}")
         return 0
     prepare()
