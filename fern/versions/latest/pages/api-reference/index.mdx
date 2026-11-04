@@ -113,12 +113,18 @@ run's config and the other servers' addresses.
 ### What is stable
 
 Import everything from `nemo_gym.environment`: `plan_benchmark`, `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`,
-`TaskResult` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`. Signatures and the fields of the result
+`TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`. Signatures and the fields of the result
 types change only additively: a new parameter is optional and keyword-only, and a parameter is deprecated before it is
 removed or renamed. A test pins them.
 
-`TaskResult.results` holds Gym's raw `/run` responses. Their keys are not part of the contract: read `rewards`, and
-use `results` for debugging.
+A `TaskResult` has one `RolloutOutcome` per rollout in `outcomes`: the `reward`, a `TaskFailure` when the rollout
+failed, whether it was `masked`, and the `prompt` and `output` as JSON text for display. A failure has Gym's `kind`,
+its `domain` (the layer that observed it: the part of the kind before the first `_` or `:`, such as `agent`, `judge`,
+`session` or `provider`) and the occurrence's `reason`. Group failures by `domain` and a new kind under an existing
+domain needs no change from you.
+
+`TaskResult.results` holds Gym's raw `/run` responses. Their keys are not part of the contract: depend on `rewards`
+and `outcomes`, and use `results` for debugging.
 
 ### Constraints
 

@@ -11,7 +11,14 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
 from nemo_gym.config.global_config import maybe_get_global_config_dict, scoped_global_config_dict
 from nemo_gym.environment import in_process
-from nemo_gym.environment.in_process import PlannedBenchmark, TaskRunner, plan_benchmark, serve_benchmark
+from nemo_gym.environment.in_process import (
+    PlannedBenchmark,
+    RolloutOutcome,
+    TaskFailure,
+    TaskRunner,
+    plan_benchmark,
+    serve_benchmark,
+)
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
@@ -73,6 +80,58 @@ class _FakeRuns:
 
         self.completions = _Completions([completed(index, row) for index, row in enumerate(rows)])
         return self.completions
+
+
+class _FakeResults:
+    """Stands in for `run_examples`: returns the given `/run` results, one per row."""
+
+    def __init__(self, *results: dict) -> None:
+        self.results = results
+
+    def __call__(self, rows, head_server_config):
+        async def completed(row, result):
+            return row, result
+
+        return _Completions([completed(row, result) for row, result in zip(rows, self.results)])
+
+
+class TestOutcomes:
+    async def test_each_rollout_has_a_typed_outcome_beside_the_raw_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        passed = {
+            "reward": 1.0,
+            "responses_create_params": {"input": [{"role": "user", "content": "solve it"}]},
+            "response": {"output": [{"type": "message", "content": "done"}]},
+        }
+        failed = {"reward": 0.0, "failure_kind": "judge_failed", "failure_reason": "no verdict"}
+        masked = {"reward": 0.0, "mask_sample": True}
+        runner = TaskRunner([_row("a")], registry_server=HEAD)
+        monkeypatch.setattr(RolloutCollectionHelper, "run_examples", _FakeResults(passed, failed, masked))
+
+        result = await runner.run_task("a", num_repeats=3)
+
+        assert result.rewards == [1.0, 0.0, 0.0]
+        assert result.results == [passed, failed, masked]
+        assert result.outcomes == [
+            RolloutOutcome(
+                reward=1.0,
+                prompt='[{"role": "user", "content": "solve it"}]',
+                output='[{"type": "message", "content": "done"}]',
+            ),
+            RolloutOutcome(reward=0.0, failure=TaskFailure(kind="judge_failed", domain="judge", reason="no verdict")),
+            RolloutOutcome(reward=0.0, masked=True),
+        ]
+
+    async def test_a_failure_without_a_reason_has_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([_row("a")], registry_server=HEAD)
+        monkeypatch.setattr(
+            RolloutCollectionHelper, "run_examples", _FakeResults({"reward": 0.0, "failure_kind": "session_lost"})
+        )
+
+        outcome = (await runner.run_task("a")).outcomes[0]
+
+        assert outcome.failure == TaskFailure(kind="session_lost", domain="session", reason=None)
 
 
 class TestTaskRunner:

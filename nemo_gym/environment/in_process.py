@@ -27,9 +27,11 @@ The registry server is the server that serves the run's config and the other ser
 talks to it.
 
 This is the API for callers outside Gym. They import the names `nemo_gym.environment` exports (`plan_benchmark`,
-`serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult` and `EvalPlan`) and `ConfigError` from
+`serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`)
+and `ConfigError` from
 `nemo_gym.config`. Signatures and result fields change only additively, and tests pin them. `TaskResult.results`
-holds Gym's raw `/run` responses, whose keys can change: depend on `rewards`, and use `results` for debugging.
+holds Gym's raw `/run` responses, whose keys can change: depend on `rewards` and `outcomes`, and use `results` for
+debugging.
 """
 
 import json
@@ -37,7 +39,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -52,6 +54,7 @@ from nemo_gym.config.global_config import (
     scoped_global_config_dict,
 )
 from nemo_gym.core.episode_types import is_materialized_task_row
+from nemo_gym.core.failure_kinds import failure_domain
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
@@ -92,12 +95,47 @@ class PlannedBenchmark:
 
 
 @dataclass(frozen=True)
+class TaskFailure:
+    """Why a rollout failed: Gym's failure `kind`, its `domain` and the occurrence's `reason`.
+
+    The domain is the layer that observed the failure.
+
+    The domain is the part of the kind before its first `_` or `:`, such as `agent`, `judge`, `session` or
+    `provider`. A new kind under an existing domain needs no change from a caller that groups failures by domain.
+    """
+
+    kind: str
+    domain: str
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RolloutOutcome:
+    """One rollout's outcome: its reward as the verifier returned it, and the failure if it failed.
+
+    `masked` is True when Gym excludes the rollout from training statistics. `prompt` and `output` are the input
+    and output items as JSON text, for display and debugging, or None when the rollout has none.
+    """
+
+    reward: float
+    failure: Optional[TaskFailure] = None
+    masked: bool = False
+    prompt: Optional[str] = None
+    output: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class TaskResult:
-    """One task's rollouts: a reward per repeat and Gym's raw `/run` results, in the same order."""
+    """One task's rollouts, in the same order in each list.
+
+    `rewards` and `outcomes` are the contract. `results` is Gym's raw `/run` responses, whose keys can change: use it
+    for debugging only.
+    """
 
     task_id: str
     rewards: list[float]
     results: list[dict[str, Any]]
+    outcomes: list[RolloutOutcome] = field(default_factory=list)
 
 
 def plan_benchmark(
@@ -263,7 +301,30 @@ class TaskRunner:
         finally:
             await completions.aclose()
         results = [result for _, result in completed]
-        return TaskResult(task_id=task_id, rewards=[result["reward"] for result in results], results=results)
+        return TaskResult(
+            task_id=task_id,
+            rewards=[result["reward"] for result in results],
+            results=results,
+            outcomes=[_outcome(result) for result in results],
+        )
+
+
+def _outcome(result: Mapping[str, Any]) -> RolloutOutcome:
+    kind, reason = result.get("failure_kind"), result.get("failure_reason")
+    failure = None
+    if kind:
+        failure = TaskFailure(
+            kind=str(kind), domain=failure_domain(str(kind)), reason=None if reason is None else str(reason)
+        )
+    prompt = (result.get("responses_create_params") or {}).get("input")
+    output = (result.get("response") or {}).get("output")
+    return RolloutOutcome(
+        reward=result["reward"],
+        failure=failure,
+        masked=bool(result.get("mask_sample")),
+        prompt=None if prompt is None else json.dumps(prompt, default=str),
+        output=None if output is None else json.dumps(output, default=str),
+    )
 
 
 def _first_row_of_each_task(rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
