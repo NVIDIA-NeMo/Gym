@@ -107,26 +107,3 @@ opencode_search_resources_server:              # instance name — how agents/CL
         # judge graded at 0.0 (search_opencode_judge.yaml) because grading is classification, not
         # generation, and a sampled grader adds variance to every published number.
         temperature: 0.0
-
-# Example-dataset agent. Exists so `gym env test` can run its resources-server data validation,
-# which requires data/example.jsonl (5 rows), data/example_metrics.json and
-# data/example_rollouts.jsonl (5 rows) and resolves the dataset through an agent instance -- see
-# nemo_gym/cli/env.py `_validate_data_single`. Same shape as simpleqa_simple_agent.
-#
-# Deliberately a SEPARATE instance from opencode_sandboxed_search_agent: adding a `datasets` entry
-# to that one would put the 5 example rows into every benchmark run that composes it, because
-# OmegaConf replaces a `datasets` list wholesale rather than merging it.
-opencode_search_example_agent:
-  responses_api_agents:
-    opencode_sandboxed_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: opencode_search
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/opencode_search/data/example.jsonl

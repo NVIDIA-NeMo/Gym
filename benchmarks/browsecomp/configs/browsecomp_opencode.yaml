@@ -207,9 +207,10 @@ opencode_sandboxed_search_agent:
           # they belong in an explicit A/B arm with a measurement behind them.
       datasets:
         # The UPSTREAM BrowseComp dataset, not a second copy of it. Both harnesses now send
-        # the identical user turn (question + simple-evals QUERY_SUFFIX), and this agent reads
-        # only the user message -- it skips system messages and never looks at `tools` -- so
-        # the extra fields browsecomp's rows carry for its own harness are inert here.
+        # the identical user turn (question + simple-evals QUERY_SUFFIX). Beyond the user message
+        # this agent takes only temperature/top_p from responses_create_params (when set); it skips
+        # system messages and never looks at `tools`, so the extra fields browsecomp's rows carry
+        # for its own harness are inert here.
         # OmegaConf replaces lists wholesale, so this entry is always restated in full.
         - name: browsecomp
           type: benchmark
@@ -226,9 +227,17 @@ opencode_sandboxed_search_agent:
 # through a path that composes no such file ran genuinely capped against
 # comparators that were not. Stating it here makes the guarantee a property of the benchmark
 # instead of a property of which launcher you used.
+#
+# `entrypoint` makes this block count as a model server instance. The benchmark listing
+# (nemo_gym/environment/benchmarks.py) skips its placeholder model whenever a `policy_model` key is
+# present, so without it the listing cannot resolve the agent's model_server reference. It does not
+# make the block a usable model on its own: base_url, api_key and model still come from the model
+# config you compose. With vllm_model.yaml, which sets the same entrypoint, the run-time config is
+# unchanged.
 policy_model:
   responses_api_models:
     vllm_model:
+      entrypoint: app.py
       sampling_overrides:
         max_output_tokens: null
         max_tokens: null
