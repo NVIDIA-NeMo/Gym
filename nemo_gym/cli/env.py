@@ -1197,7 +1197,7 @@ def _entry_servers(
 ) -> Tuple[Optional[str], Optional[str]]:
     """The resources server and agent an entry runs with, as the catalog views show them.
 
-    The manifest says when there is one. Otherwise the config's wiring is resolved as a manifest would mirror it. A
+    The manifest says when there is one. Otherwise the config's runtime routes select the servers. A
     config that needs values only a run supplies, such as a judge model server, or that is malformed does not
     resolve; then the names written in the config file are used, each only when the file names exactly one, since a
     file naming several does not say which one runs. ``details`` is the config's ``read_environment_details``

@@ -26,8 +26,10 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     dataset_agent_pins,
+    environment_server_agent_names,
     get_first_server_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
     translate_interpolation_error,
 )
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -373,22 +375,69 @@ _CONFIG_LOOKUP_ERRORS = (
 )
 
 
+def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
+    """The resources binding selected by all dataset routes, or unknown when they do not identify one instance."""
+    if wiring.dataset_rs is not None:
+        return _implementation_name(wiring.dataset_rs)
+
+    environments = {
+        name: server for name, server in wiring.by_instance.items() if server.SERVER_TYPE == "environment_servers"
+    }
+    fronting = [
+        name
+        for name, server in environments.items()
+        if wiring.selected_agent.name in environment_server_agent_names(server.get_inner_run_server_config_dict())
+    ]
+    resource_names: set[str] = set()
+    for dataset in wiring.selected_agent.datasets:
+        # Match collection's route precedence: tasksets, explicit flat-row route, then the unique agent route.
+        if dataset.taskset is not None:
+            environment_name = taskset_environment_server_name(wiring.resolved, dataset.taskset)
+        else:
+            mode = wiring.resolved.get("environment_routing_mode", "agent")
+            if mode == "legacy":
+                environment_name = wiring.resolved.get("environment_server_name")
+            elif mode == "agent" and len(fronting) == 1:
+                environment_name = fronting[0]
+            else:
+                return None
+        if not isinstance(environment_name, str) or environment_name not in environments:
+            return None
+        environment = environments[environment_name]
+        config = environment.get_inner_run_server_config_dict()
+        if wiring.selected_agent.name not in environment_server_agent_names(config):
+            return None
+        if _implementation_name(environment) == "legacy_agent":
+            # This relay delegates the whole episode to the agent, including its resources binding.
+            resources = wiring.resources_instance
+        else:
+            reference = config.get("resources_server")
+            resources = (
+                wiring.by_instance.get(reference.get("name"))
+                if isinstance(reference, DictConfig)
+                and reference.get("type", "resources_servers") == "resources_servers"
+                else None
+            )
+        if resources is None or resources.SERVER_TYPE != "resources_servers":
+            return None
+        resource_names.add(resources.name)
+    return _implementation_name(wiring.by_instance[next(iter(resource_names))]) if len(resource_names) == 1 else None
+
+
 def resolve_config_servers(config_path: Path) -> tuple[str | None, str | None] | None:
-    """The resources server and agent server a workload config wires, as a manifest would mirror them.
+    """The resources server and agent selected by a workload config's runtime routes.
 
     Only the wiring is resolved, so datasets need not meet manifest rules, and nothing is printed. Returns ``None``
     when the config does not resolve on its own: for example, it references a judge model or an environment
-    variable that only a run supplies, or the file is malformed.
+    variable that only a run supplies, or the file is malformed. A resolved config with ambiguous or
+    differing resources routes returns ``(None, agent)`` so the catalog does not guess from raw names.
     """
     try:
         wiring = _resolve_config_wiring(config_path, parser=_ServerLookupParser())
+        resources_server = _catalog_resources_server(wiring)
     except _CONFIG_LOOKUP_ERRORS:
         return None
-    resources_instance = wiring.resources_instance
-    return (
-        _implementation_name(resources_instance) if resources_instance is not None else None,
-        _implementation_name(wiring.selected_agent),
-    )
+    return resources_server, _implementation_name(wiring.selected_agent)
 
 
 def _mirror_values(composition: ResolvedComposition) -> dict[str, Any]:

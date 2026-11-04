@@ -1874,6 +1874,49 @@ class TestListEnvironments:
         assert "resources servers: paths_not_a_list" in out
         assert "resources servers: datasets_not_a_list" in out
 
+    @pytest.mark.parametrize("case", ["environment_only", "stale_agent_binding", "ambiguous"])
+    def test_catalog_views_follow_environment_resources(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, capsys, case: str
+    ) -> None:
+        agent = {
+            "entrypoint": "app.py",
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            "datasets": [{"name": "example", "type": "example", "jsonl_fpath": "unused.jsonl"}],
+        }
+        environment = {
+            "entrypoint": "app.py",
+            "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+            "resources_server": {"type": "resources_servers", "name": "demo_resources"},
+        }
+        config = {
+            "demo_resources": {"resources_servers": {"demo": {"entrypoint": "app.py", "domain": "math"}}},
+            "demo_agent": {"responses_api_agents": {"simple_agent": agent}},
+            "demo_environment": {"environment_servers": {"single_agent_turn_legacy": environment}},
+        }
+        if case == "stale_agent_binding":
+            config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+            agent["resources_server"] = {"type": "resources_servers", "name": "other_resources"}
+        elif case == "ambiguous":
+            config["second_environment"] = config["demo_environment"]
+            agent["resources_server"] = {"type": "resources_servers", "name": "demo_resources"}
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(json.dumps(config))
+        entry = replace(self._BETA, name="demo", path=tmp_path, config_path=config_path)
+        expected = None if case == "ambiguous" else "demo"
+        self._mock_catalog(monkeypatch, entries=(entry,), overrides={"json": True})
+
+        list_environments()
+
+        [payload] = json.loads(capsys.readouterr().out)
+        assert (payload["resources_server"], payload["agent_server"]) == (expected, "simple_agent")
+        self._mock_catalog(monkeypatch, entries=(entry,), overrides={"json": True, "component_name": "demo"})
+
+        list_environments()
+
+        details = json.loads(capsys.readouterr().out)["details"]
+        assert details.get("resources servers") == expected
+        assert details["agent"] == "simple_agent"
+
     def test_json_output_without_manifest_has_null_manifest_path(
         self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
     ) -> None:

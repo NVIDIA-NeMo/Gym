@@ -130,6 +130,95 @@ def test_resolve_config_servers_reads_the_wiring_of_a_config(tmp_path: Path) -> 
     assert resolve_config_servers(config_path) == ("demo", "simple_agent")
 
 
+@pytest.mark.parametrize("route", ["agent", "taskset", "legacy"])
+@pytest.mark.parametrize("agent_resources", [None, "other_resources"])
+def test_resolve_config_servers_uses_selected_environment_resources(
+    tmp_path: Path, route: str, agent_resources: str | None
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    agent = config["demo_agent"]["responses_api_agents"]["simple_agent"]
+    agent.pop("resources_server")
+    if agent_resources:
+        agent["resources_server"] = {"type": "resources_servers", "name": agent_resources}
+    config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+    environment = {
+        "entrypoint": "app.py",
+        "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+        "resources_server": {"type": "resources_servers", "name": "demo_resources"},
+    }
+    implementation = "single_agent_turn" if route == "taskset" else "single_agent_turn_legacy"
+    config["demo_environment_server"] = {"environment_servers": {implementation: environment}}
+    if route != "agent":
+        # A second environment fronts the same agent, so only the explicit route identifies the binding.
+        config["a_decoy_environment_server"] = {
+            "environment_servers": {
+                implementation: environment
+                | {"resources_server": {"type": "resources_servers", "name": "other_resources"}}
+            }
+        }
+    if route == "taskset":
+        agent["datasets"][0]["taskset"] = "demo:test"
+        config["environment_server_routes"] = {"demo:test": "demo_environment_server"}
+        # A materialized taskset takes precedence even over the flat-row route.
+        config.update(environment_routing_mode="legacy", environment_server_name="a_decoy_environment_server")
+    elif route == "legacy":
+        config.update(environment_routing_mode="legacy", environment_server_name="demo_environment_server")
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
+    # Catalog correction must not silently change the manifest's existing composition contract.
+    assert _resolve_manifest_composition(config_path).resources_server == ("other" if agent_resources else None)
+
+
+@pytest.mark.parametrize("second_resources", ["demo_resources", "other_resources"])
+def test_resolve_config_servers_checks_every_taskset_binding(tmp_path: Path, second_resources: str) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    agent = config["demo_agent"]["responses_api_agents"]["simple_agent"]
+    dataset = agent["datasets"][0]
+    agent["datasets"] = [dict(dataset, name=taskset, taskset=taskset) for taskset in ("demo:first", "demo:second")]
+    config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+    for name, resources in (("demo_environment_server", "demo_resources"), ("second_environment", second_resources)):
+        config[name] = {
+            "environment_servers": {
+                "single_agent_turn": {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+                    "resources_server": {"type": "resources_servers", "name": resources},
+                }
+            }
+        }
+    config["environment_server_routes"] = {
+        "demo:first": "demo_environment_server",
+        "demo:second": "second_environment",
+    }
+    config_path.write_text(yaml.safe_dump(config))
+
+    expected = "demo" if second_resources == "demo_resources" else None
+    assert resolve_config_servers(config_path) == (expected, "simple_agent")
+
+
+def test_resolve_config_servers_does_not_guess_between_environment_routes(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    config["second_environment"] = config["demo_environment_server"]
+    config_path.write_text(yaml.safe_dump(config))
+
+    # Both relays front the same agent and even share its resource binding, but flat-row routing is ambiguous.
+    assert resolve_config_servers(config_path) == (None, "simple_agent")
+
+
+def test_resolve_config_servers_keeps_self_contained_agent_without_resources(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    del config["demo_agent"]["responses_api_agents"]["simple_agent"]["resources_server"]
+    config_path.write_text(yaml.safe_dump(config))
+
+    # The unrelated resources block in the file must not become the self-contained agent's binding.
+    assert resolve_config_servers(config_path) == (None, "simple_agent")
+
+
 def test_resolve_config_servers_is_unknown_when_the_config_needs_run_time_servers(tmp_path: Path) -> None:
     config_path = _asset(tmp_path).with_name("config.yaml")
     # A judge model server that only a run defines, as in environments/abstention.
@@ -251,6 +340,7 @@ def test_manifest_resolves_taskset_datasets_through_environment(tmp_path: Path, 
     report = validate_environment(path, sync=True)
     assert next(c.name for c in report.components if c.role == "agent_server") == "demo_agent"
     assert len(report.datasets) == len(tasksets)
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
 
     # Every declared taskset must be checked, even if another route already resolved.
     del config["environment_server_routes"]["demo:test"]
