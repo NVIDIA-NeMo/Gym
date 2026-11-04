@@ -118,6 +118,8 @@ class RolloutStore:
         self.progress_outcomes_recorded: int = 0
         # Whether start_or_resume prepared a new run rather than resuming saved outcomes.
         self.started_fresh: bool = False
+        # Temporary throughput experiment: persist reservations at reporting/close instead of dispatch.
+        self.defer_reservation_writes: bool = False
 
     @staticmethod
     def _unverified_manifest(output: Path) -> RunManifest:
@@ -353,8 +355,9 @@ class RolloutStore:
             reservations.append((row, identity, attempt))
             next_attempt[identity] = attempt + 1
         manifest = self.manifest.model_copy(update={"next_attempt": next_attempt})
-        manifest.write(manifest_path_for(self.output))
-        # Publish in memory only after all reservations are durable.
+        if not self.defer_reservation_writes:
+            manifest.write(manifest_path_for(self.output))
+        # Deferred reservations are lost if the controller dies before reporting/close.
         self.manifest = self._state.manifest = manifest
         for row, identity, attempt in reservations:
             self._state.latest[identity] = attempt
@@ -515,6 +518,8 @@ class RolloutStore:
         return self._state.coverage()
 
     def write_coverage(self, **reporting: int) -> None:
+        if self.defer_reservation_writes:
+            self.manifest.write(manifest_path_for(self.output))
         atomic_write_json(
             coverage_path_for(self.output),
             self.coverage()

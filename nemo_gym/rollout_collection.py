@@ -3739,6 +3739,9 @@ class RolloutCollectionHelper(BaseModel):
             allow_unsafe=config.allow_unsafe_resume,
             resubmit=config.resubmit,
         )
+        # TEMP: disable per-dispatch durable reservations from #3302 for throughput comparison.
+        # Keep in-memory attempt tracking; an abrupt exit can leave outcomes without reservations.
+        store.defer_reservation_writes = True
         if config.resume_from_cache and store.started_fresh:
             # The exporters reopened the run recorded next to this output, which starts anew: so does that run.
             for exporter in get_exporters():
