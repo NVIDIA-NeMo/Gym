@@ -154,7 +154,7 @@ def test_a_seed_whose_task_data_is_not_a_task_is_refused_and_records_nothing() -
     response = client.post("/seed_session", json=seed_json(task_data={"ground_truth": GROUND_TRUTH}))
 
     assert response.status_code == 422
-    assert "task_data is not a workplace_assistant task" in response.json()["detail"]
+    assert "task_data is not a valid WorkbenchSeedSessionRequest" in response.json()["detail"]
     assert server.session_id_to_tool_env == {} and server._session_episodes == {}
     # The refusal records nothing, so a corrected seed for the same ID succeeds.
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -258,9 +258,12 @@ def test_mcp_tool_calls_reach_the_tables_seeded_under_the_callers_id() -> None:
         seed_json(task_data=[]),
     ],
 )
-def test_malformed_typed_seed_cannot_fall_back_to_legacy(payload: dict[str, Any]) -> None:
-    server = make_server()
-    client = TestClient(server.setup_webserver())
+@pytest.mark.parametrize("over_mcp", [False, True])
+def test_malformed_typed_seed_cannot_fall_back_to_legacy(payload: dict[str, Any], over_mcp: bool) -> None:
+    server = make_server(expose_tools_over_mcp=over_mcp)
+    webserver = server.setup_webserver()
+    maybe_auto_expose(server, webserver)
+    client = TestClient(webserver)
     assert client.post("/seed_session", json=payload).status_code == 422
     assert server.session_id_to_tool_env == {} and server._session_episodes == {}
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -395,3 +398,20 @@ def test_typed_seed_cannot_adopt_a_live_legacy_session() -> None:
     assert server._session_episodes == {}
     found = legacy.post("/email_search_emails", json={"query": SEND["body"]}).json()
     assert found["output"]["pagination"]["total_emails"] == 1
+
+
+def test_failed_cookie_reseed_preserves_verification_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json={}).status_code == 200
+    [session_id] = server.session_id_to_tool_env
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    receipt = server._verified_sessions.get(session_id)
+    with monkeypatch.context() as patch:
+        patch.setattr(app, "get_tools", MagicMock(side_effect=OSError("tables unavailable")))
+        assert client.post("/seed_session", json={}).status_code == 500
+    assert server._verified_sessions.get(session_id) == receipt
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    assert client.post("/seed_session", json={}).status_code == 200
+    assert list(server.session_id_to_tool_env) == [session_id]
+    assert session_id not in server._verified_sessions
