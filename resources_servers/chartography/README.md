@@ -1,31 +1,42 @@
 # Chartography resources server
 
-Professional chart reading: one chart image and one question per row, graded against a reference answer by
-an LLM judge. Numeric parts of a reference answer carry an acceptable range, for example
+Professional chart reading: one chart image and one question per row, graded against a golden answer by the
+benchmark's own judge. Numeric parts of a golden answer carry an acceptable range, for example
 `Head: 34.5 m (acceptable range 33.5 to 35.5 m)`. This is the answer format of the
-[Chartography](https://github.com/surge-ai/chartography) benchmark (Surge AI), and the grading follows its
-protocol: a response passes only when every part of the reference answer is matched.
+[Chartography](https://github.com/surge-ai/chartography) benchmark (Surge AI): a response passes only when every
+part of the golden answer is matched.
 
 ## Grading
 
-- One judge call per response, with the prompt in `prompt_templates/judge.txt` and a JSON schema that asks
-  for one verdict per reference part (`correct` true or false, the matching piece of the answer, a reason).
-- The judge sees the question, the reference answer and the response's final answer. It never sees the
-  reasoning (separate `reasoning` items when the policy server runs with a reasoning parser) or the chart.
-- A numeric part is correct when the answer lies inside its acceptable range (endpoints included); a part
-  without a range must match at the requested precision. Labels must name the same item; lists must have
-  exactly the reference items (in order when the reference says so).
-- Judge output that does not parse is retried up to `judge_max_attempts` times (default 5); after that the
-  row goes to the failures sidecar instead of scoring 0.
+Mirrors [Surge AI's own scorer](https://github.com/surge-ai/chartography/blob/3f1bf837232d3918c2cc35c6e2418c9e70d2a57b/src/chartography/scorer.py)
+(`src/chartography/scorer.py`, see `scorer.py`):
+
+- One judge call per response with the upstream prompt (`prompt_templates/judge.txt`, unchanged; a test checks
+  its hash) and the upstream JSON schema: a `scores` array with one 0/1 entry per criterion, each with the
+  extracted answer and a rationale. No temperature or token limit is set, as upstream.
+- The judge sees the question, the golden answer and the response's final answer. It never sees the reasoning
+  (separate `reasoning` items when the policy server runs with a reasoning parser) or the chart.
+- Strict parsing (markdown fences stripped, schema validated, score coerced to Decimal) with up to
+  `judge_max_attempts` attempts (default 5, upstream `MAX_RETRIES=4`). A criterion passes iff its score,
+  rounded half-up to four decimals, is at least 1.
 
 `reward_mode`:
 
-- `strict_pass` (default): 1 when every part is correct, else 0. This is the benchmark metric.
-- `mean_criteria`: the fraction of correct parts (partial credit for multi-part answers).
+- `strict_pass` (default): 1 when every criterion passes, else 0. This is the benchmark metric.
+- `mean_criteria`: the fraction of criteria that pass (partial credit for multi-part answers).
 
-Every verify response also reports `all_pass`, `mean_criterion_pass`, the per-part verdicts and the judge's
-raw output. An empty answer scores 0. A row without a question or reference answer is masked
-(`mask_sample`, `failure_kind: chartography:invalid_reference`), since it cannot be measured.
+Every verify response also reports `all_pass`, `mean_criterion_pass`, the per-criterion verdicts and the judge's
+raw output. A row without a question or golden answer is masked (`mask_sample`,
+`failure_kind: chartography:invalid_reference`), since it cannot be measured.
+
+Two deliberate divergences from upstream, as in `gdp_pdf`:
+
+- **An empty answer scores 0 without a judge call.** Upstream sends it to the judge, which scores it 0.
+- **Unparseable judge output fails the row.** Upstream marks it "unscored"; here `JudgeError` routes the row to
+  the failures sidecar, so it is excluded from the metrics rather than scored 0.
+
+The judge model is whatever you configure. The benchmark's leaderboard standard is Gemini 3.5 Flash with ten
+runs per task.
 
 ## Data format
 
@@ -39,7 +50,7 @@ raw output. An empty answer scores 0. A row without a question or reference answ
     "task_id": "<id>",
     "domain": "<chart or question type, used for per-domain metrics>",
     "prompt": "<question>",
-    "golden_answer": "<reference answer, one part per line>"
+    "golden_answer": "<golden answer, one part per line>"
   }
 }
 ```

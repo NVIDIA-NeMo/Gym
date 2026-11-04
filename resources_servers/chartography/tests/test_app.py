@@ -14,7 +14,9 @@
 # limitations under the License.
 """Tests for the chartography resources server (judge mocked; no network)."""
 
+import hashlib
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -37,18 +39,19 @@ from nemo_gym.core import (
     NgFailureEvent,
 )
 from nemo_gym.verification import JudgeError, is_judge_failure
+from resources_servers.chartography import scorer
 from resources_servers.chartography.app import (
-    JUDGE_RESPONSE_JSON_SCHEMA,
     ChartographyConfig,
     ChartographyResourcesServer,
     ChartographyVerifyRequest,
-    ParseError,
     extract_final_answer,
-    parse_judge_output,
 )
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
+JUDGE_PROMPT_FPATH = SERVER_DIR / "prompt_templates/judge.txt"
+# sha256 of upstream JUDGE_PROMPT_TEMPLATE (surge-ai/chartography src/chartography/scorer.py @ 3f1bf837).
+UPSTREAM_JUDGE_PROMPT_SHA256 = "fecef1ea1ef988cfd125573d41494a27c61fe6125bb740064bed47084ead537a"
 QUESTION = "At a flow of 35 L/s, what head does the 225 mm impeller deliver? Give the value in m."
 GOLDEN = "Head: 34.5 m (acceptable range 33.5 to 35.5 m)"
 
@@ -61,7 +64,7 @@ def config() -> ChartographyConfig:
         entrypoint="",
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
         judge_chat_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
-        judge_prompt_template_fpath=str(SERVER_DIR / "prompt_templates/judge.txt"),
+        judge_prompt_template_fpath=str(JUDGE_PROMPT_FPATH),
     )
 
 
@@ -115,13 +118,13 @@ def _request(answer_output: list, golden: Any = GOLDEN, prompt: Any = QUESTION) 
     )
 
 
-def _judge_content(*correct: bool) -> str:
+def _judge_content(*scores: int) -> str:
     return json.dumps(
         {
-            "final_answer": "34.8 m",
-            "parts": [
-                {"part": f"part {i + 1}", "answer": "34.8", "correct": c, "reason": "r"} for i, c in enumerate(correct)
-            ],
+            "scores": [
+                {"criterion_id": f"criterion_{i + 1}", "extracted_answer": "34.8 m", "score": s, "rationale": "r"}
+                for i, s in enumerate(scores)
+            ]
         }
     )
 
@@ -158,47 +161,66 @@ def _mock_judge(server: ChartographyResourcesServer, *contents: str) -> AsyncMoc
     return mock
 
 
+def test_judge_prompt_is_the_upstream_prompt() -> None:
+    template = JUDGE_PROMPT_FPATH.read_text().rstrip("\n")
+    assert hashlib.sha256(template.encode()).hexdigest() == UPSTREAM_JUDGE_PROMPT_SHA256
+
+
+def test_render_fills_all_placeholders() -> None:
+    template = JUDGE_PROMPT_FPATH.read_text().rstrip("\n")
+    rendered = scorer.render_judge_prompt(template, QUESTION, GOLDEN, "Head: 34.8 m")
+    assert "{{" not in rendered and QUESTION in rendered and GOLDEN in rendered and "Head: 34.8 m" in rendered
+
+
 def test_extract_final_answer_skips_reasoning() -> None:
     reasoning = NeMoGymResponseReasoningItem(id="r", summary=[], type="reasoning")
     assert extract_final_answer(_response([reasoning, _assistant_msg("34.8 m")])) == "34.8 m"
     assert extract_final_answer(_response([reasoning])) == ""
 
 
-class TestParseJudgeOutput:
+class TestScorer:
     def test_valid_output(self) -> None:
-        final, verdicts = parse_judge_output(_judge_content(True, False))
-        assert final == "34.8 m" and [v.correct for v in verdicts] == [True, False]
+        verdicts = scorer.parse_verdict(_judge_content(1, 0))
+        assert [v["criterion_id"] for v in verdicts] == ["criterion_1", "criterion_2"]
+        assert [v["score"] for v in verdicts] == [Decimal(1), Decimal(0)]
 
     def test_markdown_fences_are_stripped(self) -> None:
-        _, verdicts = parse_judge_output("```json\n" + _judge_content(True) + "\n```")
-        assert [v.correct for v in verdicts] == [True]
+        assert len(scorer.parse_verdict("```json\n" + _judge_content(1) + "\n```")) == 1
 
     @pytest.mark.parametrize(
         "raw",
         [
             "not json",
             "[]",
-            '{"parts": [{"correct": true}]}',
-            '{"final_answer": "x", "parts": []}',
-            '{"final_answer": "x", "parts": [{"part": "a", "correct": "true"}]}',
+            '{"scores": []}',
+            '{"scores": [{"criterion_id": "criterion_1", "score": 1, "rationale": "r"}]}',
+            '{"scores": [{"criterion_id": "c", "extracted_answer": "x", "score": true, "rationale": "r"}]}',
+            '{"scores": [{"criterion_id": "c", "extracted_answer": "x", "score": "high", "rationale": "r"}]}',
+            '{"scores": [{"criterion_id": "c", "extracted_answer": "x", "score": "NaN", "rationale": "r"}]}',
         ],
     )
     def test_invalid_output_raises(self, raw: str) -> None:
-        with raises(ParseError):
-            parse_judge_output(raw)
+        with raises(scorer.ParseError):
+            scorer.parse_verdict(raw)
+
+    @pytest.mark.parametrize(
+        "score,passes", [("1", True), ("0.99995", True), ("0.9999", False), ("0", False), ("1.0", True)]
+    )
+    def test_pass_rule_rounds_to_four_decimals(self, score: str, passes: bool) -> None:
+        assert scorer.verdict_passes(Decimal(score)) is passes
 
 
 class TestVerify:
     @pytest.mark.asyncio
-    async def test_all_parts_correct(self, server: ChartographyResourcesServer) -> None:
-        _mock_judge(server, _judge_content(True, True))
+    async def test_all_criteria_pass(self, server: ChartographyResourcesServer) -> None:
+        _mock_judge(server, _judge_content(1, 1))
         result = await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
         assert result.reward == 1.0 and result.all_pass == 1.0 and result.num_criteria == 2
-        assert result.final_answer == "34.8 m" and [v.correct for v in result.verdicts] == [True, True]
+        assert [v.passed for v in result.verdicts] == [True, True]
 
     @pytest.mark.asyncio
-    async def test_strict_pass_fails_on_any_part(self, server: ChartographyResourcesServer) -> None:
-        _mock_judge(server, _judge_content(True, False))
+    async def test_strict_pass_fails_on_any_criterion(self, server: ChartographyResourcesServer) -> None:
+        _mock_judge(server, _judge_content(1, 0))
         result = await server.verify(_request([_assistant_msg("Head: 31 m")]))
         assert result.reward == 0.0 and result.all_pass == 0.0
         assert result.mean_criterion_pass == approx(0.5)
@@ -209,43 +231,44 @@ class TestVerify:
             config=config.model_copy(update={"reward_mode": "mean_criteria"}),
             server_client=MagicMock(spec=ServerClient),
         )
-        _mock_judge(server, _judge_content(True, False))
+        _mock_judge(server, _judge_content(1, 0))
         result = await server.verify(_request([_assistant_msg("Head: 31 m")]))
         assert result.reward == approx(0.5) and result.all_pass == 0.0
 
     @pytest.mark.asyncio
-    async def test_judge_sees_question_reference_and_final_answer_only(
-        self, server: ChartographyResourcesServer
-    ) -> None:
-        mock = _mock_judge(server, _judge_content(True))
+    async def test_judge_request_matches_upstream(self, server: ChartographyResourcesServer) -> None:
+        mock = _mock_judge(server, _judge_content(1))
         reasoning = NeMoGymResponseReasoningItem(id="r", summary=[], type="reasoning")
         await server.verify(_request([reasoning, _assistant_msg("Head: 34.8 m")]))
         sent = mock.await_args.kwargs["json"]
         assert mock.await_args.kwargs["server_name"] == "judge"
-        [message] = sent.messages
-        assert QUESTION in message["content"] and GOLDEN in message["content"]
-        assert "Head: 34.8 m" in message["content"]
-        assert sent.response_format["json_schema"]["schema"] == JUDGE_RESPONSE_JSON_SCHEMA
+        template = JUDGE_PROMPT_FPATH.read_text().rstrip("\n")
+        expected = scorer.render_judge_prompt(template, QUESTION, GOLDEN, "Head: 34.8 m")
+        assert sent.messages == [{"role": "user", "content": expected}]
+        assert sent.response_format["json_schema"] == {
+            "name": scorer.RESPONSE_SCHEMA_NAME,
+            "schema": scorer.RESPONSE_JSON_SCHEMA,
+        }
 
     @pytest.mark.asyncio
     async def test_empty_answer_scores_zero_without_judging(self, server: ChartographyResourcesServer) -> None:
-        mock = _mock_judge(server, _judge_content(True))
+        mock = _mock_judge(server, _judge_content(1))
         reasoning = NeMoGymResponseReasoningItem(id="r", summary=[], type="reasoning")
         result = await server.verify(_request([reasoning]))
         assert result.reward == 0.0 and mock.await_count == 0 and not result.mask_sample
 
     @pytest.mark.asyncio
     async def test_parse_failure_is_retried(self, server: ChartographyResourcesServer) -> None:
-        mock = _mock_judge(server, "not json", _judge_content(True))
+        mock = _mock_judge(server, "not json", _judge_content(1))
         result = await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
         assert result.reward == 1.0 and result.judge_attempts == 2 and mock.await_count == 2
 
     @pytest.mark.asyncio
     async def test_parse_failure_exhausts_attempts(self, server: ChartographyResourcesServer) -> None:
-        mock = _mock_judge(server, '{"final_answer": "x", "parts": []}')
+        mock = _mock_judge(server, '{"scores": []}')
         with raises(JudgeError):
             await server.verify(_request([_assistant_msg("Head: 34.8 m")]))
-        assert mock.await_count == 5
+        assert mock.await_count == scorer.MAX_ATTEMPTS
 
     @pytest.mark.asyncio
     async def test_judge_transport_failure_is_reported(self, server: ChartographyResourcesServer) -> None:
@@ -259,7 +282,7 @@ class TestVerify:
     async def test_invalid_reference_is_masked(
         self, server: ChartographyResourcesServer, golden: Any, prompt: Any
     ) -> None:
-        mock = _mock_judge(server, _judge_content(True))
+        mock = _mock_judge(server, _judge_content(1))
         result = await server.verify(_request([_assistant_msg("Head: 34.8 m")], golden=golden, prompt=prompt))
         assert result.mask_sample and result.reward == 0.0 and mock.await_count == 0
         assert result.failure_kind == "chartography:invalid_reference"

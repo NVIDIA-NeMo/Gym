@@ -4,8 +4,8 @@ chartography:
       entrypoint: app.py
       domain: other
       verified: false
-      description: 'Professional chart reading: one chart image and one question, graded against a reference answer
-        (numeric parts carry an acceptable range) by an LLM judge, following the Chartography benchmark protocol'
+      description: 'Professional chart reading: one chart image and one question, graded against a golden answer
+        (numeric parts carry an acceptable range) by the Chartography benchmark''s own LLM judge'
       value: Train and measure careful, precise reading of specialized charts
       judge_model_server:
         type: responses_api_models
@@ -13,7 +13,7 @@ chartography:
       judge_chat_create_params:
         messages: []
       judge_prompt_template_fpath: prompt_templates/judge.txt
-      reward_mode: strict_pass  # strict_pass (all parts correct; the benchmark metric) | mean_criteria (partial credit)
+      reward_mode: strict_pass  # strict_pass (all criteria pass; the benchmark metric) | mean_criteria (partial credit)
       judge_max_attempts: 5
       judge_endpoint_max_concurrency: 64
 chartography_simple_agent:

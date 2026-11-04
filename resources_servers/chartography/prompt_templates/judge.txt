@@ -1,21 +1,42 @@
-You are grading one answer to a chart-reading question against a reference answer.
+Read the following prompt and response pair and evaluate it against the golden answer.
 
-Question:
-{question}
+Prompt: {{ rubric.response_generation_prompt }}
+Response: {{ rubric.response_to_grade }}
+Golden answer: {{ rubric.all_criteria }}
 
-Reference answer (one part per line or per label; a numeric part may give an acceptable range):
-{golden_answer}
+Return a JSON object according to the specified format. The score must be either 0 or 1. Use "1" if the response matches all parts of the golden answer (see below for more detail). Use "0" if any part of the response does not match the golden answer.  Do not use any other values or decimals.
 
-Answer to grade:
-{response}
+STEP 1: EXTRACT THE MODEL'S FINAL ANSWER
+- Identify the answer the model is actually committing to. The answer may appear at the start or end of the response.
+- If the model states one answer and later revises to a different one, use its LAST/final stated answer.
+- Ignore all reasoning, explanation, hedging, and formatting. Grade only the substantive answer.
 
-How to grade:
-1. Find the final answer the response commits to. If it settles on one answer after earlier attempts, grade the last one it settles on. Ignore working, reasoning, restatements and formatting. If it gives different answers for the same part without settling on one, that part is incorrect.
-2. Split the reference answer into its parts and grade each part on its own, in the reference order.
-3. A number with an acceptable range is correct when the response's value lies inside the range, endpoints included. A number without a range must match the reference at the precision the question asks for, or else at the precision of the reference. Equivalent forms count as equal (for example 0.25 and 25% for a share, 1.2 thousand and 1,200), and so do conversions to other units that give the same quantity. A missing value is incorrect.
-4. A label or name is correct when it names the same item as the reference, ignoring case, spacing and obvious abbreviations. A different item is incorrect.
-5. A list is correct when it contains exactly the reference items, and in the reference order when the reference says the order matters. Extra or missing items make it incorrect.
-6. Yes/no and category answers must match the reference.
-7. The reference answer decides. Do not use your own reading of the chart, and give no credit for a correct method that ends in a wrong value.
+STEP 2: COMPARE TO THE GOLDEN ANSWER
+Apply the rule that matches the answer type:
 
-Reply with JSON only: an object with "final_answer" (the answer you graded, as a short string) and "parts" (a list with one object per reference part, in order, each with "part" (the reference part), "answer" (the matching piece of the final answer, or an empty string), "correct" (true or false) and "reason" (one short sentence)).
+Numerical answer:
+- If an acceptable range is given, the model is CORRECT if its value falls within that range (inclusive), INCORRECT otherwise.
+- If no range is given (the value is exact/printed), the model is CORRECT only if it matches the golden value (allow trivial rounding and equivalent notation, e.g., "$4.2M" = "4.2 million" = "4,200,000"; "31 percentage points" = "31 pp").
+- Do not give credit for being "close" if the value is outside the range. Do not penalize a more precise value that still falls inside the range (e.g., 3.850 is correct for an acceptable range of "3.8 to 3.9").
+- Do not penalize models for different formatting, as long as the actual answer is the same
+
+Categorical answer (one or more categories, e.g., a single item or a top-N list):
+- CORRECT only if the model identifies exactly the right set: every required category is present and no extra/incorrect ones are added. Order does not matter unless the prompt asked for a ranking (e.g., "Give me the top 3 in order"). If the prompt does ask for an answer in a specific order / ranking, then the order should be an exact match. Accept minor wording/label variants that clearly refer to the same item.
+- Do not penalize models for different formatting, as long as the actual answer is the same
+
+Multi-part answer:
+- Every part must be correct (all-or-nothing). If any part is wrong, missing, or outside its range, the whole answer is INCORRECT.
+- Do not penalize models for different formatting, as long as the actual answer is the same
+
+"Cannot be determined" answers:
+- If the golden answer is a value/category but the model says the prompt is unanswerable or refuses, that is INCORRECT.
+- If the golden answer is itself "cannot be determined from the chart," the model is CORRECT only if it reaches that same conclusion.
+
+STEP 3: OUTPUT
+Return a JSON object with a 'scores' array. Each entry has a 'criterion_id', an 'extracted_answer', a 'score', and a 'rationale'.
+- 'criterion_id': use "criterion_n" where n is an integer in order of appearance ("criterion_1", "criterion_2", ...).
+- 'extracted_answer': the model's final answer, verbatim or lightly normalized.
+- 'score': must be either 1 or 0. Use 1 if the response matches all parts of the golden answer (CORRECT per the rules above). Use 0 if any part of the response does not match the golden answer (INCORRECT per the rules above). Do not use any other values or decimals.
+- 'rationale': one or two sentences explaining the comparison and which rule applied.
+
+Be strict and literal about the substantive value, but lenient about formatting, units, phrasing, extra explanation, and equivalent notation. When the golden answer and the model's answer refer to the same value/category within the allowed tolerance, mark it correct.
