@@ -45,6 +45,12 @@ preserved. Outputs from older versions without these answer bindings also requir
 re-scoring. A source grade changing on the same attempt and answer does not invalidate its cached re-score.
 `--limit` reads selected answers on demand instead of loading all selected trajectories.
 
+For managed-source re-scoring, a completed verifier reply must include a response object and a finite numeric
+reward. A malformed completed reply stops the pass before that reply is saved; scores already written remain
+saved. Correct the verifier and use `--resume` to retry unfinished rows. Resuming without correcting it can fail
+again on the same row. HTTP and connection errors also stop the pass. Replies explicitly marked as failures
+continue through the existing failure-output handling.
+
 Managed judge-only recovery uses `--judge-failed-only --settle-into-source`, as described in
 [evaluation resume](/main/evaluation/resume). It keeps the original attempt identity and admits each re-judgment
 against the saved failure budget before dispatch. Ordinary re-scoring does not settle results into the source run.

@@ -353,6 +353,9 @@ Cached scores and failure-budget entries bind to the source run, selected attemp
 Resume refuses changed or missing bindings before judging or appending, and asks for a fresh output path.
 Older re-scoring outputs without these bindings need a fresh output too; legacy JSONL cache behavior is unchanged.
 A grade-only settlement that retains the same attempt and answer leaves its separate cached re-score valid.
+Malformed completed verifier replies stop an ordinary managed-source re-scoring pass before the invalid reply is
+saved. Scores already written remain saved; correct the verifier before resuming unfinished rows. HTTP and connection
+errors also stop the pass; explicitly marked failures retain the existing failure-output handling.
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
 same rollout file. Readers also accept older runs whose companions exist only beside the alias, when neither location
