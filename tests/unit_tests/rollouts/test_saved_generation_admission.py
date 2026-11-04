@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.core.failure_records import ModelFailureDetails
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.server_runtime.episode_types import ModelFailureDetails
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
 
@@ -200,7 +200,7 @@ async def test_failed_agent_partial_output_keeps_the_selected_policy(tmp_path, m
 async def test_selected_model_body_delivery_blocks_collection_resume(tmp_path, monkeypatch, route, status, blocked):
     import json
 
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
     failure = NgFailureEvent(
         boundary="model",

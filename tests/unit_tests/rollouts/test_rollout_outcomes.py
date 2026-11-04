@@ -6,9 +6,9 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import BaseEpisodeResponse, EpisodeId, TaskId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailure, RolloutFailureRecord
-from nemo_gym.server_runtime.episode_types import BaseEpisodeResponse, EpisodeFailure
 
 
 def test_same_failure_survives_wire_and_persisted_record_json() -> None:

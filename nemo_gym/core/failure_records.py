@@ -1,12 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""What a failure records: the events Gym servers observe, the report that forwards them, and the episode failure.
 
-"""Wire contracts for environment servers."""
+Failure kinds live in ``nemo_gym.core.failure_kinds``; ``nemo_gym.core.failure_transport`` carries reports over HTTP.
+"""
 
 import uuid
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Generic, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -20,19 +33,7 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage, require_failure_kind, validate_failure_kind
-
-
-def is_materialized_task_row(row: Mapping[str, object]) -> bool:
-    """Return whether a row has a materialized-task envelope.
-
-    This identifies the routing shape, not whether the envelope is valid. A malformed
-    ``task_input`` must still route as a materialized task and fail task validation instead
-    of falling through to the legacy run-request path.
-    """
-    return isinstance(row.get("task_id"), Mapping) and "task_input" in row
 
 
 class FailureBoundary(StrEnum):
@@ -177,7 +178,7 @@ class FailureReport(BaseModel):
     observed while serving the request, each with its explicit causes.
 
     ``omitted`` says that a report on the way here was too large to send, so events are missing.
-    ``nemo_gym.failure_transport`` carries it in one HTTP header; Collection saves it beside the outcome.
+    ``nemo_gym.core.failure_transport`` carries it in one HTTP header; Collection saves it beside the outcome.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -253,57 +254,3 @@ class EpisodeFailure(BaseModel):
             if result.get(key) is None:
                 result.pop(key, None)
         return result
-
-
-TaskInputT = TypeVar("TaskInputT", bound=BaseModel)
-EpisodeResultT = TypeVar("EpisodeResultT")
-
-
-class MaterializedTask(BaseModel, Generic[TaskInputT]):
-    """Carry durable task identity and protocol-shaped task input."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    task_id: TaskId
-    task_input: TaskInputT
-
-
-class BaseEpisodeRequest(BaseModel, Generic[TaskInputT]):
-    """Carry environment-neutral identity and typed task input."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    episode_id: EpisodeId
-    task: MaterializedTask[TaskInputT]
-
-
-class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
-    """Return either a typed result or a handled failure."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    episode_id: EpisodeId
-    task_id: TaskId
-    result: EpisodeResultT | None = None
-    failure: EpisodeFailure | None = None
-    failure_report: FailureReport | None = Field(
-        default=None, description="Diagnostic failures of this attempt, beside ``failure`` or a recovered result."
-    )
-
-    @model_validator(mode="after")
-    def validate_result(self) -> Self:
-        if (self.result is None) == (self.failure is None):
-            raise ValueError("exactly one of result or failure is required")
-        return self
-
-    # A return annotation would replace the public JSON Schema with that type.
-    @model_serializer(mode="wrap")
-    def _serialize_response(self, handler: SerializerFunctionWrapHandler):
-        result = handler(self)
-        if result.get("failure_report") is None:
-            result.pop("failure_report", None)
-        return result
-
-
-# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
-__getattr__ = moved_names_getattr(__name__)

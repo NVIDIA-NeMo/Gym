@@ -39,7 +39,8 @@ from typing import Any, Literal, Optional, Protocol
 
 from pydantic import JsonValue
 
-from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
     PARSED_JSON_CONTEXT,
     CheckpointParticipant,

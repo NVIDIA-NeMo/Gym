@@ -76,7 +76,8 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
@@ -13437,7 +13438,7 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     """An Environment Server's failure kind (Harbor's ``harbor:task_deadline``) reaches the sidecar row as it left
     the wire, under the key the metrics label reads; a failure that names no kind adds no key."""
     import nemo_gym.rollouts.rollout_collection as rollout_collection
-    from nemo_gym.server_runtime.episode_types import EpisodeFailure
+    from nemo_gym.core.failure_records import EpisodeFailure
 
     failure = EpisodeFailure(
         failure_reason="Episode exceeded the time budget",
