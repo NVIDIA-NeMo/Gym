@@ -367,7 +367,8 @@ measured.
   of the expected trials and every trial's grading is traceable; `FAIL` at or above 2%; `UNVERIFIED`
   below 2% when some grading is not traceable (the count is a lower bound). The 2% is fixed in Gym; no
   flag changes it. The classes are in `nemo_gym/core/failure_kinds.py`; every `provider_*` kind, any 5xx
-  and another model's 4xx are evaluation-side. A verifier-timeout row can count as measured and healthy in
+  and another model's 4xx are evaluation-side, except an agent-stage memory kill the stack made a final
+  zero (`agent_sandbox_oom_killed`), which is the model's. A verifier-timeout row can count as measured and healthy in
   `rollouts_coverage.json` and `quality_summary.json` while the recovery evidence marks it masked: trust the
   recovery evidence.
 - A trial counts as observed when its server recorded the grading operation or saved a grading artifact
@@ -391,12 +392,18 @@ measured.
 A Gym run reports what it recorded. These outcomes are scored or retried in a way you must correct or
 report yourself.
 
-- **A sandbox killed for memory.** A kill during the agent's own command is the model's outcome, not a
-  fault to rerun. Where the stack retries it (harness-agent rows, kind `provider_oom_killed`, the provider
-  text in `failure_reason`) or scores it 0 (Terminal-Bench 4.0: read `sandbox_resource_limit`, resource
-  `memory`, with the provider text in `detail`), count it as the model's. In Terminal-Bench 4.0,
-  a process killed inside a live sandbox (exit 137) is a scored 0 marked interrupted. SWE-family and
-  SkillsBench keep nothing typed about it.
+- **A sandbox killed for memory.** When the provider reports the agent's own sandbox container
+  OOMKilled while the agent's command ran (failure event kind `provider_oom_killed` at stage `agent`),
+  the stack makes the rollout a final zero: it stays in the denominator as the model's failure, is never
+  retried, and evaluation health counts it as a model fault (`agent_sandbox_oom_killed`), not toward the
+  2% evaluation-side limit. That holds for the Harbor general agent (SkillsBench) and the sandboxed
+  OpenCode agent. A memory kill of a helper (sidecar or init) container, one during setup or
+  verification, any other provider ending (an eviction, an `Error` ending) and an exit status without a
+  provider report stay infrastructure and are retried within the attempt cap. Two cases are still yours
+  to count as the model's: a masked harness-agent row is retried as before, and the SWE-family agents
+  keep nothing typed about it. In Terminal-Bench 4.0 read `sandbox_resource_limit` (resource `memory`,
+  the provider text in `detail`): that zero is unchanged, and a process killed inside a live sandbox
+  (exit 137) is a scored 0 marked interrupted.
 - **A sandbox that ended for its own limit.** Terminal-Bench 4.0 scores 0 only when the provider text
   names the sandbox's own memory or storage limit; read `sandbox_resource_limit` before you accept that
   zero. Other sandbox deaths there are `infrastructure_error` and are retried. In SkillsBench a sandbox
