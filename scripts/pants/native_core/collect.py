@@ -89,12 +89,27 @@ def main() -> None:
     command.extend(
         ["python", "-m", "pytest", "--collect-only", "-q", "-m", marker, "-p", "scripts.pants.native_core.collect"]
     )
+    # Baseline CI instruments collection before marker/shard deselection. Preserve
+    # actual collection skips and import coverage, which session.items cannot express.
+    command.extend(
+        [
+            "--junitxml=" + str(args.output.with_suffix(".xml").resolve()),
+            "--cov=.",
+            "--cov-report=",
+            "--cov-fail-under=0",
+            "-o",
+            "junit_family=" + ("xunit1" if args.resolve == "core" else "xunit2"),
+        ]
+    )
+    if args.resolve == "core":
+        command.append("--junit-prefix=nemo_gym.core")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ)
     # Do not inherit selection overrides; match the CI scripts' collection.
     for key in ("PYTEST_ADDOPTS", "PYTHONPATH", "NEMO_GYM_EXTRA_ROOTS", "NEMO_GYM_CONFIG_DICT"):
         environment.pop(key, None)
     environment.update(GYM_NATIVE_COLLECTION_OUTPUT=str(args.output.resolve()), GYM_NATIVE_COLLECTION_MARKER=marker)
+    environment["COVERAGE_FILE"] = str(args.output.with_suffix(".coverage").resolve())
     result = subprocess.run(command, cwd=args.repo, env=environment)
     if result.returncode or not args.output.exists():
         raise SystemExit(result.returncode or 1)

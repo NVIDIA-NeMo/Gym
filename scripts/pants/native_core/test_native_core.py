@@ -6,15 +6,89 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree
 
 from collect import targets
 from prepare import requirement_pins, snapshot_git, validate_lock
+from run import combine_junit
 
 
 class NativeCoreTest(unittest.TestCase):
+    def test_real_collection_skip_is_preserved_once_in_each_shard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "test_optional.py").write_text(
+                "import pytest\npytest.importorskip('native_fixture_missing_dependency')\n"
+            )
+            (root / "test_regular.py").write_text("def test_regular():\n    assert True\n")
+            reports = root / "reports"
+            reports.mkdir()
+            collection = root / "collection.xml"
+            environment = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+            common = [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-c",
+                "/dev/null",
+                "-q",
+                "--junit-prefix=nemo_gym.core",
+                "-o",
+                "junit_family=xunit1",
+            ]
+            subprocess.run(
+                common + ["--collect-only", "--junitxml=" + str(collection), str(root)],
+                cwd=root,
+                env=environment,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                common + ["--junitxml=" + str(reports / "executed.xml"), str(root / "test_regular.py")],
+                cwd=root,
+                env=environment,
+                check=True,
+                capture_output=True,
+            )
+            for shard in range(4):
+                output = root / f"shard-{shard}.xml"
+                combine_junit(reports, output, collection=collection)
+                cases = list(ElementTree.parse(output).getroot().iter("testcase"))
+                self.assertEqual(len(cases), 2)
+                self.assertEqual(sum(case.find("skipped") is not None for case in cases), 1)
+                self.assertEqual(sum(case.get("name") == "test_regular" for case in cases), 1)
+            # A runner that also reports the collection event must not duplicate it.
+            shutil.copy2(collection, reports / "duplicate-skip.xml")
+            combine_junit(reports, root / "deduplicated.xml", collection=collection)
+            self.assertEqual(len(list(ElementTree.parse(root / "deduplicated.xml").getroot().iter("testcase"))), 2)
+
+    def test_collection_cannot_supply_unexecuted_passing_outcomes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reports = root / "reports"
+            reports.mkdir()
+            (reports / "run.xml").write_text('<testsuite><testcase name="executed" /></testsuite>')
+            collection = root / "collection.xml"
+            collection.write_text('<testsuite><testcase name="collected-only" /></testsuite>')
+            with self.assertRaisesRegex(ValueError, "unexpectedly contains"):
+                combine_junit(reports, root / "result.xml", collection=collection)
+
+    def test_repeated_collection_skip_identities_retain_their_multiplicity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reports = root / "reports"
+            reports.mkdir()
+            case = '<testcase name="same-module"><skipped /></testcase>'
+            (reports / "run.xml").write_text("<testsuite>" + case + "</testsuite>")
+            collection = root / "collection.xml"
+            collection.write_text("<testsuite>" + case * 2 + "</testsuite>")
+            combine_junit(reports, root / "result.xml", collection=collection)
+            self.assertEqual(len(list(ElementTree.parse(root / "result.xml").getroot().iter("testcase"))), 2)
+
     def test_declared_git_snapshot_preserves_tree_and_commit_without_parent_checkout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

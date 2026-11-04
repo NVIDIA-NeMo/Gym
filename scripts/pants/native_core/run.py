@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree
@@ -26,7 +27,7 @@ def verify_inputs(repo: Path, assets: Path) -> None:
             raise ValueError(f"Native dependency locks are stale for {name}; regenerate and validate both resolves")
 
 
-def combine_junit(reports: Path, output: Path) -> None:
+def combine_junit(reports: Path, output: Path, *, collection: Path | None = None) -> None:
     """Preserve every testcase occurrence while matching the baseline artifact name."""
     combined = ElementTree.Element("testsuites")
     paths = sorted(reports.rglob("*.xml"))
@@ -40,6 +41,26 @@ def combine_junit(reports: Path, output: Path) -> None:
             combined.extend(root)
         else:
             raise ValueError(f"Unexpected JUnit root in {path}: {root.tag}")
+    if collection is not None:
+        collected = ElementTree.parse(collection).getroot()
+        collection_suite = ElementTree.Element("testsuite", name="collection", errors="0", failures="0")
+        seen = Counter(
+            tuple(case.get(key, "") for key in ("file", "classname", "name"))
+            for case in combined.iter("testcase")
+            if case.find("skipped") is not None
+        )
+        for case in collected.iter("testcase"):
+            if case.find("skipped") is None:
+                raise ValueError("Collect-only JUnit unexpectedly contains an executed or failed testcase")
+            identity = tuple(case.get(key, "") for key in ("file", "classname", "name"))
+            if seen[identity]:
+                seen[identity] -= 1
+            else:
+                collection_suite.append(case)
+        if len(collection_suite):
+            collection_suite.set("tests", str(len(collection_suite)))
+            collection_suite.set("skipped", str(len(collection_suite)))
+            combined.append(collection_suite)
     output.parent.mkdir(parents=True, exist_ok=True)
     ElementTree.ElementTree(combined).write(output, encoding="utf-8", xml_declaration=True)
 
@@ -166,11 +187,32 @@ def run(args: argparse.Namespace) -> int:
             metadata["command_exit_code"] = result.returncode
             reports = checkout / "results/native-junit"
             if reports.exists():
-                combine_junit(reports, output / "junit" / f"{args.group}.xml")
+                combine_junit(
+                    reports, output / "junit" / f"{args.group}.xml", collection=manifest_path.with_suffix(".xml")
+                )
             raw = checkout / "results/native-coverage/.coverage"
             if raw.exists():
                 coverage_name = f".coverage.core-{args.shard}" if args.group == "core" else ".coverage.sandbox"
-                shutil.copy2(raw, output / coverage_name)
+                collection_coverage = manifest_path.with_suffix(".coverage")
+                if not collection_coverage.is_file():
+                    raise ValueError("Global collection did not return raw coverage")
+                coverage_environment = dict(environment, COVERAGE_FILE=str(output / coverage_name))
+                subprocess.run(
+                    [
+                        str(checkout / ".venv/bin/python"),
+                        "-m",
+                        "coverage",
+                        "combine",
+                        "--keep",
+                        str(collection_coverage),
+                        str(raw),
+                    ],
+                    cwd=checkout,
+                    env=coverage_environment,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
             if result.returncode:
                 raise subprocess.CalledProcessError(result.returncode, command)
             if not raw.is_file() or not list((output / "junit").rglob("*.xml")):
