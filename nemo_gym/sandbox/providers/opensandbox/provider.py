@@ -111,6 +111,41 @@ class _SandboxDeathNotice:
     provider_status_reason: str | None = None
 
 
+# OpenSandbox answers any call on a sandbox it ended with HTTP 410, code ``SANDBOX::ENDED``, and a fixed report that
+# names the reason and the container that ended, for example ``Sandbox <id> has ended (OOMKilled): ... sample
+# detail=Pod <pod> container sandbox exited with code 137 (OOMKilled)``.
+_ENDED_CODE = "SANDBOX::ENDED"
+_ENDED_USER_CONTAINER_OOM = re.compile(
+    r"has ended \(OOMKilled\).*\bcontainer sandbox exited with code (?P<exit>\d+) \(OOMKilled\)", re.DOTALL
+)
+
+
+def _ended_report_evidence(error: BaseException) -> _SandboxDeathNotice | None:
+    """The provider's own report that it ended the sandbox because its user container was OOM-killed, else None.
+
+    Only a ``SANDBOX::ENDED`` error whose report names the current user container (``sandbox``) as OOM-killed counts:
+    a sidecar or another reason is not the agent's memory kill. After the kill the lifecycle reason may say only
+    ``FAILED``, so this report is the remaining structured proof.
+    """
+    cause = error.__cause__ if isinstance(error, NgFailureEvent) else error
+    if cause is None:
+        return None
+    sdk_error = getattr(cause, "error", None)
+    text = str(cause)
+    if getattr(sdk_error, "code", None) != _ENDED_CODE and f'"code":"{_ENDED_CODE}"' not in text:
+        return None
+    report = getattr(sdk_error, "message", None)
+    match = _ENDED_USER_CONTAINER_OOM.search(report if isinstance(report, str) and report else text)
+    if match is None:
+        return None
+    return _SandboxDeathNotice(
+        f"Sandbox was OOM-killed: the provider ended it (container sandbox exited with code {match['exit']}, "
+        "OOMKilled)",
+        failure_kind=PROVIDER_OOM_KILLED,
+        provider_status_reason="OOMKilled",
+    )
+
+
 # The runtime's refusal when the exec daemon runs as the image's user and cannot switch identity (the markers
 # ``nemo_gym.sandbox.transfer`` degrades on, kept in step with it).
 _NO_ROOT_MARKERS = ("CAP_SETUID", "identity switch", "switching to uid=0", "operation not permitted")
@@ -2481,7 +2516,9 @@ class OpenSandboxProvider:
                         status_failure_deadline = min(status_failure_deadline, deadline)
                     diagnostic_deadline = min(status_failure_deadline, loop.time() + self._diagnostics.timeout_s)
                 status_failure_error = failure
-                evidence = await self._sandbox_death_evidence(handle, deadline=diagnostic_deadline, poll=False)
+                evidence = _ended_report_evidence(error) or await self._sandbox_death_evidence(
+                    handle, deadline=diagnostic_deadline, poll=False
+                )
                 if evidence is not None:
                     raise opensandbox_failure(
                         operation="command status",

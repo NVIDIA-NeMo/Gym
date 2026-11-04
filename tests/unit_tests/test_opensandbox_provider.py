@@ -1691,6 +1691,65 @@ async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_ou
     assert commands.log_calls == (1 if log_error == DELETED_OUTPUT_LOG_ERROR else 3)
 
 
+# What OpenSandbox returned for a command-status read after it OOM-killed an agent's sandbox, in a real run.
+_ENDED_OOM_410 = (
+    'Get command status failed: HTTP 410: {"code":"SANDBOX::ENDED","message":"Sandbox sandbox-oom has ended '
+    "(OOMKilled): 1/1 observed pods failed; primary reason=ContainerFailed; sample pod=sandbox-oom-0; sample "
+    'detail=Pod sandbox-oom-0 container sandbox exited with code 137 (OOMKilled)"} | request_id=req-1'
+)
+
+
+@pytest.mark.parametrize(
+    ("message", "kind"),
+    [
+        (_ENDED_OOM_410, PROVIDER_OOM_KILLED),
+        # A sidecar's memory kill is not the agent's.
+        (_ENDED_OOM_410.replace("container sandbox exited", "container egress exited"), PROVIDER_UNAVAILABLE),
+        (_ENDED_OOM_410.replace("(OOMKilled)", "(Evicted)"), PROVIDER_UNAVAILABLE),
+    ],
+    ids=["agent_oom", "sidecar_oom", "evicted"],
+)
+async def test_exec_background_types_the_ended_report_of_a_command_status_410(
+    monkeypatch: pytest.MonkeyPatch, message: str, kind: str
+) -> None:
+    """The container is gone, so the lifecycle reason says only FAILED; the 410's ended report still names the OOM."""
+    from opensandbox.exceptions import SandboxApiException
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise SandboxApiException(message, status_code=410)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+        async def get_info(self) -> Any:
+            return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="FAILED", message="pod failed"))
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=FakeRaw())
+
+    with raises_failure(kind) as caught:
+        await provider.exec(handle, "allocate memory", timeout_s=30)
+
+    if kind == PROVIDER_OOM_KILLED:
+        assert caught.value.details.container == "agent"
+        assert caught.value.details.provider_status_reason == "OOMKilled"
+        assert "exited with code 137" in str(caught.value)
+        assert isinstance(caught.value.__cause__.__cause__, SandboxApiException)
+
+
 @pytest.mark.asyncio
 async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
     class Backend502Error(Exception):
