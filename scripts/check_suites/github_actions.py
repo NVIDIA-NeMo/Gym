@@ -5,6 +5,9 @@
 
 Workflows import this module with bare `python3` before Gym is installed, so it must not import `nemo_gym` or
 third-party packages.
+
+`download_artifacts`, `artifact_download_urls` and `post_check_run` run the `gh` CLI, which reads `GH_TOKEN`. The
+token needs `actions: read` to download and list artifacts, and `checks: write` to publish a check run.
 """
 
 import json
