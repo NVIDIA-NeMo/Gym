@@ -2408,21 +2408,57 @@ async def test_network_access_with_borrowed_sandbox_is_rejected(setup):
     sandbox.exec.assert_not_awaited()
 
 
-async def test_network_access_and_explicit_policy_conflict_before_creation(setup):
+@pytest.mark.parametrize(
+    ("provider_name", "provider_options", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, "not both"),
+        ("docker", {}, "requires the OpenSandbox network-policy provider"),
+    ],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(setup, provider_name, provider_options, reason):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
-    agent.config.sandbox_config = {"image": "test-image", "provider_options": {"network_policy": {}}}
+    agent.config.sandbox_config = {"image": "test-image", "provider_options": provider_options}
     agent.config.network_access = "model_only"
-    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    provider = SimpleNamespace(name=provider_name, aclose=AsyncMock())
+    body = owned_seed_with_search_grant()
     module = "responses_api_agents.pi_agent.app"
     with (
         patch(f"{module}.AsyncSandbox") as factory,
         patch(f"{module}.create_provider", return_value=provider),
-        pytest.raises(ValueError, match="not both"),
+        TestClient(agent.setup_webserver()) as client,
     ):
-        await agent.seed_agent_session(Request({"type": "http", "session": {}}), owned_seed_with_search_grant())
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
     factory.assert_not_called()
     provider.aclose.assert_awaited_once()
+    assert body.agent_session_id not in agent._session_records
+
+
+async def test_tool_egress_leaves_out_the_mcp_grants_pi_skips(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_and_tools"
+    sandbox.start = AsyncMock()
+    skipped = mcp_grant("resources.mcp", required=False)
+    skipped["connection"]["url"] = "http://127.0.0.1:7000/mcp"
+    body = seed_with_tools(mcp_grant("resources"), skipped)
+    body.sandbox_access = None
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    # The optional grant Pi leaves out at activation neither blocks the seed nor opens its loopback host.
+    policy = sandbox.start.await_args.args[0].provider_options["network_policy"]
+    assert policy == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": host} for host in ["model.example", "resources.example"]],
+    }
 
 
 @pytest.mark.parametrize("reported", ["0.80.2", "0.79.0"])
