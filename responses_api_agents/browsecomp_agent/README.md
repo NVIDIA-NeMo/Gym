@@ -1,21 +1,34 @@
-# Description
+# BrowseComp agent
 
-The BrowseComp research agent, paired with the [`browsecomp_advanced_harness`](../../resources_servers/browsecomp_advanced_harness) resources server. Its loop calls the harness's `search`, `browse` and `bash_command` tools. It compacts old tool results (`keep_rounds`) and resets the context past a token threshold (`context_reset_tokens`). With `progress: true` it keeps a progress board that survives the resets. With `rollout_timeout_s` set, it stops at a wall-clock limit.
+The repository-native research loop runs inside a task sandbox through an agent session. Its version is the Gym source revision: seed uploads that exact source and a private Python 3.13.14 runtime with dependencies pinned to the Agent Server environment. It preserves the progress board, tool-result compaction, context resets, empty-answer retries, and Responses API model calls.
 
-It runs an episode in one of two ways:
+## Execution and composition
 
-- **Through an Environment Server** (`benchmarks/browsecomp/config_single_agent_turn.yaml`). `single_agent_turn_legacy` seeds the harness session and an agent session, calls `/v1/responses` once, closes the agent session, then verifies and closes the harness session.
-  - The seed must grant exactly one direct HTTP tool access to the harness (`resources_tool_transports: [direct_http]`), and no sandbox or required MCP access. Any other seed is refused with a final 422.
-  - Tool calls go to the grant's URL with its headers and cookies. The close returns the harness cookies, which the Environment Server sends to `/verify`.
-  - `max_run_retries` retries an empty final answer (after `<think>` stripping) inside the one activation, keeping the harness session, as `/run` does.
-  - A model call that fails with an HTTP error returns a `failed` response that names the status (`model_request_error`). The Environment Server's outcome policy then verifies 400, 413 and 422, records 408, 425, 429 and 5xx as non-terminal failures that a resume retries, and fails the episode on any other status. Other errors, such as a dropped connection, fail the activation with a 500, which is also recorded as a non-terminal failure.
-- **Through its own `/run`** (`benchmarks/browsecomp/config.yaml`, behind the `legacy_agent` relay). `/run` seeds the harness, retries an empty answer, and verifies. A rollout stopped at `rollout_timeout_s` scores 0 without a verify. An error scores 0 with `agent_error`, except an infrastructure failure (5xx, a dropped connection, a timeout), which is set aside unscored for resume.
+`benchmarks/browsecomp/config.yaml` runs `single_agent_turn_legacy`: resources seed → agent seed → one activation → agent close → verify → resources close. `config_single_agent_turn.yaml` remains an alias. Docker is the default provider; compose another provider config to use Enroot or OpenSandbox. Both the Model Server and granted Resources endpoints must be reachable from the agent sandbox (`use_absolute_ip: true`).
 
-On both paths, a rollout stopped at `rollout_timeout_s` scores 0 without a judge call and reports `timed_out: 1`.
+The agent borrows `sandbox_access` when supplied. Otherwise `sandbox_provider` and `sandbox_config` create an owned sandbox. Missing sandbox configuration, the unisolated Local provider, required MCP grants, and more than one direct HTTP grant are refused. No sandbox error falls back to host execution. Close stops the harness through `SandboxSession`, captures output, then disconnects a borrowed sandbox or destroys an owned one.
 
-# Licensing information
-Code: Apache 2.0
-Data: N/A
+The Resources Server remains independent. A direct HTTP grant supplies its tools with per-session headers/cookies; the updated cookie jar returns at agent close. BrowseComp resources execute `bash_command` in their own sandbox, separate from the agent container. This uses two containers per BrowseComp episode and does not require a provider to serialize/connect an existing sandbox. Search credentials, ground truth and verifier code stay on the Resources Server. The model upstream API key stays on the Model Server.
 
-Dependencies
-- nemo_gym: Apache 2.0
+For a compatible tool-free benchmark, use `resources_tool_transports: []` and change only the Environment Server's resources binding and dataset. Set `progress: false` when the pairing does not use the progress board. The adapter does not depend on BrowseComp task fields or its verifier. No SWE-bench Pro or Terminal-Bench support is claimed.
+
+## Capability and limits
+
+The sandbox path declares **Evaluation** capability. It returns an observation bundle even after failure, with `native_turn_evidence_unavailable` or `observation_capture_failed`. Raw Responses output and model-call captures remain available, but native invocation/turn/tool observations are not emitted. Strict evidence checks are expected to report these gaps; this is not an Observability or Training qualification. Function-calling shell conformance is applicable but optional at this capability level and has not been registered or qualified. Component tests and real pairing runs cover the resources-owned pocketshell boundary.
+
+- Sampling controls in the request go unchanged to every model call. `max_output_tokens` is per call; `max_steps` and `rollout_timeout_s` bound the loop. `sandbox_runner_timeout_seconds` bounds the full activation, including retries.
+- Token IDs/logprobs already returned by the Model Server are preserved; the sandbox path has not been qualified for training.
+- With `save_model_call_using_vllm_tokenize_endpoint: true`, a session-authenticated adapter endpoint counts prompts without copying the upstream key into the sandbox. Hosted endpoints without `/tokenize` must explicitly set this option to `false`, using the existing post-call token-count reset path.
+- `snap_dir` is rejected for sandbox sessions. Use captured model calls and rollout output; snapshots remain available in explicit host compatibility mode.
+- Harness source, runtime and session files live under `/tmp/nemo-gym-*`, outside the task workdir. The runner deletes its staged input after loading scoped grants. The runtime needs no Python or package download access in the task image; seed builds its archives on the Agent Server.
+- Agent sessions use one worker, bind the attempt-qualified rollout URL, and replay identical activation retries. A different activation returns 409. Disconnecting an HTTP waiter does not cancel the harness; close owns cancellation.
+
+## Failure semantics and compatibility
+
+A native rollout timeout retains partial output, sets `timed_out`, and scores zero without a judge call. Model HTTP errors retain their status in `ng_agent_outcome`; the Environment Server decides verification, failure or retry. Its default policy verifies 400/413/422, retries 408/425/429/5xx, and excludes other model failures from scoring. Read failure rows and coverage alongside accuracy: this differs from the old `/run` path, which counted some errors as zero-reward answers.
+
+Host `/v1/responses` and `/run` are disabled by default. Development-only compatibility requires `allow_host_execution: true`; `/run` also requires an explicit `resources_server`. The resources server independently requires its own host-execution opt-in if its tool sandbox is disabled. These options do not provide isolation.
+
+## License
+
+Apache-2.0. Dependencies: NeMo Gym (Apache-2.0).

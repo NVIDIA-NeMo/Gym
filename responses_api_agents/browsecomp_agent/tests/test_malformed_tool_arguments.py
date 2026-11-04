@@ -59,6 +59,7 @@ MALFORMED_ARGS = '{"queries":["who won the 1998 prize","runner up 1998 prize""go
 
 def _make_config(**kwargs) -> BrowsecompAgentConfig:
     defaults = dict(
+        allow_host_execution=True,
         host="0.0.0.0",
         port=8080,
         entrypoint="",

@@ -14,6 +14,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     OutcomeAction,
+    SandboxSession,
     agent_outcome_policy,
 )
 from nemo_gym.client import ServerClient
@@ -26,10 +27,10 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     TaskId,
 )
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
+from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession
 
 
 EPISODE = EpisodeId(rollout_id="7-0", attempt=0)
@@ -41,6 +42,7 @@ GRANT = DirectHTTPToolAccess(
     headers={"x-grant": "1"},
 )
 QUESTION = {"input": [{"role": "user", "content": "What is the capital of France?"}]}
+ROUTE = f"/ng-rollout/{EPISODE.capture_key}/v1/responses"
 
 
 def _seed(**overrides) -> AgentSeedSessionRequest:
@@ -116,6 +118,31 @@ def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tu
     server_client.post = AsyncMock(side_effect=post)
     harness = _Harness()
     monkeypatch.setattr("responses_api_agents.browsecomp_agent.app.http_request", harness)
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.app.get_global_config_dict", lambda: {})
+    monkeypatch.setattr(
+        "responses_api_agents.browsecomp_agent.app.resolve_provider_config", lambda *args: {"docker": {}}
+    )
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.app.resolve_provider_metadata", lambda *args: {})
+    monkeypatch.setattr(
+        "responses_api_agents.browsecomp_agent.app.create_provider", lambda *args: MagicMock(aclose=AsyncMock())
+    )
+    sandbox = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(
+        "responses_api_agents.browsecomp_agent.app.AsyncSandbox",
+        MagicMock(return_value=sandbox, connect=AsyncMock(return_value=sandbox)),
+    )
+    monkeypatch.setattr(BrowsecompSandboxSession, "install_runtime", AsyncMock())
+    monkeypatch.setattr(SandboxSession, "close", AsyncMock())
+    monkeypatch.setattr(BrowsecompAgent, "resolve_model_base_url", lambda *args: "http://model:9001/v1")
+
+    # Exercise the original loop and HTTP grants independently from provider transport; the runner
+    # subprocess and supervisor lifecycle have separate tests and real EOS smoke coverage.
+    async def execute_loop(self, request, body, state):
+        from fastapi import Response
+
+        return await self._run_session_loop(request, Response(), body, state)
+
+    monkeypatch.setattr(BrowsecompAgent, "_sandbox_responses", execute_loop)
     agent = BrowsecompAgent(
         config=BrowsecompAgentConfig(
             host="0.0.0.0",
@@ -125,7 +152,7 @@ def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tu
             resources_server=ResourcesServerRef(type="resources_servers", name="configured_harness"),
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
             nudge_steps=False,
-            **config,
+            **({"sandbox_provider": "sandbox"} | config),
         ),
         server_client=server_client,
     )
@@ -135,10 +162,9 @@ def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tu
 @pytest.mark.parametrize(
     ("unsupported", "reason"),
     [
-        ({"tool_accesses": []}, "needs exactly one direct HTTP tool access to its resources server, got 0"),
         (
             {"tool_accesses": [GRANT, GRANT.model_copy(update={"name": "other.direct_http"})]},
-            "needs exactly one direct HTTP tool access to its resources server, got 2",
+            "supports at most one direct HTTP tool access",
         ),
         (
             {
@@ -152,15 +178,6 @@ def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tu
                 ]
             },
             "does not support required MCP tool access: resources",
-        ),
-        (
-            {
-                "sandbox_access": SandboxAccess(
-                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
-                    workdir="/work",
-                )
-            },
-            "does not support sandbox access",
         ),
     ],
 )
@@ -177,7 +194,7 @@ def test_tool_calls_use_the_grant_and_close_returns_the_resources_cookies(monkey
     )
     assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
 
-    reply = client.post("/v1/responses", json=QUESTION)
+    reply = client.post(ROUTE, json=QUESTION)
 
     assert reply.status_code == 200, reply.text
     assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["policy_model"] * 2
@@ -211,7 +228,7 @@ def test_an_empty_answer_is_retried_inside_the_activation(monkeypatch: pytest.Mo
     )
     assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
 
-    reply = client.post("/v1/responses", json=QUESTION)
+    reply = client.post(ROUTE, json=QUESTION)
 
     assert reply.status_code == 200, reply.text
     assert reply.json()["output"][-1]["content"][0]["text"] == "Exact Answer: Paris"
@@ -224,7 +241,7 @@ def test_the_last_attempt_returns_its_empty_answer(monkeypatch: pytest.MonkeyPat
     client, server_client, _ = _agent([_model_response(_message("<think>no answer</think>"))], monkeypatch)
     assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
 
-    reply = client.post("/v1/responses", json=QUESTION)
+    reply = client.post(ROUTE, json=QUESTION)
 
     assert reply.status_code == 200, reply.text
     assert reply.json()["output"][-1]["content"][0]["text"] == "<think>no answer</think>"
@@ -241,7 +258,7 @@ def test_a_model_http_error_is_a_failed_response_for_the_outcome_policy(
     client, _, _ = _agent([_model_response(_tool_call("ls")), status], monkeypatch)
     assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
 
-    reply = client.post("/v1/responses", json=QUESTION)
+    reply = client.post(ROUTE, json=QUESTION)
 
     assert reply.status_code == 200, reply.text
     response = NeMoGymResponse.model_validate(reply.json())
