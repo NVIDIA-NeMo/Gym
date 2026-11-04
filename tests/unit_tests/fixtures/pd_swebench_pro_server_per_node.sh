@@ -13,7 +13,10 @@
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
 head_node_hostname=${nodes_array[0]}
-head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
+if ! head_node_ip=$(set -o pipefail; getent ahostsv4 "$head_node_hostname" | awk 'NR == 1 {print $1}') || [ -z "$head_node_ip" ]; then
+    echo "ERROR: could not resolve an IPv4 address for $head_node_hostname." >&2
+    exit 1
+fi
 export HEAD_NODE_IP="$head_node_ip"
 export RAY_HEAD_NODE_IP="$head_node_ip:6379"
 echo "Head node IP address: $HEAD_NODE_IP"

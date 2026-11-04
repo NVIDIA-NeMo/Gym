@@ -34,6 +34,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
     render_gym_cmd,
+    render_ray_prelude,
 )
 from nemo_gym.orchestration.executors.slurm_script import (
     _RAY_SERVE_GATEWAY_SOURCE_PATH,
@@ -2445,7 +2446,8 @@ def _comet_like(tmp_path, pools=None, **ray):
 
 def test_a_ray_service_starts_its_head_beside_the_driver(tmp_path):
     script = _comet_like(tmp_path)
-    assert 'export GYM_RAY_ADDRESS_RAY="$(getent hosts ${gym_nodes[0]}' in script
+    assert 'getent ahostsv4 "${gym_nodes[0]}"' in script
+    assert 'export GYM_RAY_ADDRESS_RAY="$head_node_ip:6380"' in script
     assert ':6380"' in script
     head = script.split("# service: ray\n")[1].split("\n\n")[0]
     assert '--nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1' in head
@@ -2495,7 +2497,7 @@ def test_the_ray_head_follows_the_driver_to_a_later_pool(tmp_path):
     )
     script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
     assert '--nodelist="${gym_nodes[1]}"' in script.split("# service: ray\n")[1].split("\n\n")[0]
-    assert 'export GYM_RAY_ADDRESS_RAY="$(getent hosts ${gym_nodes[1]}' in script
+    assert 'getent ahostsv4 "${gym_nodes[1]}"' in script
     assert 'export GYM_RAY_RAY_GPU_WORKERS="$(IFS=,; echo "${gym_nodes[*]:0:1}")"' in script
     assert "GYM_RAY_RAY_AUX_WORKERS" not in script
 
@@ -2505,13 +2507,69 @@ def test_a_single_node_ray_service_is_just_a_head(tmp_path):
     script = _render(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["gpu"]}}, one)
     assert "_workers" not in script
     assert "--nodelist" not in script
-    assert 'export GYM_RAY_ADDRESS_RAY="$(getent hosts ${gym_nodes[0]}' in script
+    assert 'getent ahostsv4 "${gym_nodes[0]}"' in script
 
 
 def test_a_rendered_ray_service_is_valid_bash(tmp_path):
     script = _comet_like(tmp_path, pre_command="echo 'quoted'", extra_args="--temp-dir=/tmp/ray-$SLURM_JOB_ID")
     result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("kind", ["vllm", "ray"])
+@pytest.mark.parametrize(
+    ("hosts", "ipv4"),
+    [
+        ("192.0.2.10 node-a\n", "192.0.2.10 STREAM node-a\n"),
+        (
+            "192.0.2.10 node-a\n192.0.2.11 node-a\n",
+            "192.0.2.10 STREAM node-a\n192.0.2.10 DGRAM\n192.0.2.11 STREAM\n",
+        ),
+        ("fe80::1 node-a\nfe80::2 node-a\n192.0.2.10 node-a\n", "192.0.2.10 STREAM node-a\n"),
+        ("fe80::1 node-a\n", "192.0.2.10 STREAM node-a\n" * 8192),
+    ],
+    ids=["single-ipv4", "multiple-ipv4", "ipv6-first", "large-resolver-output"],
+)
+def test_ray_head_address_uses_one_ipv4_address(tmp_path, kind, hosts, ipv4):
+    prelude = render_ray_prelude() if kind == "vllm" else _comet_like(tmp_path).split("# service:", 1)[0]
+    address = "$RAY_HEAD_NODE_IP" if kind == "vllm" else "$GYM_RAY_ADDRESS_RAY"
+    port = 6379 if kind == "vllm" else 6380
+    script = f"""\
+set -euo pipefail
+scontrol() {{ printf '%s\\n' node-a node-b; }}
+getent() {{
+    printf '%s\\n' "$@" > resolver-args
+    if [ "$1" = ahostsv4 ]; then
+        printf '%s' {shlex.quote(ipv4)}
+    else
+        printf '%s' {shlex.quote(hosts)}
+    fi
+}}
+export SLURM_JOB_NODELIST=node-a,node-b
+{prelude}
+printf 'resolved=%s\\n' "{address}"
+"""
+    result = subprocess.run(["bash"], input=script, cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == f"resolved=192.0.2.10:{port}"
+    assert (tmp_path / "resolver-args").read_text().splitlines() == ["ahostsv4", "node-a"]
+
+
+@pytest.mark.parametrize("kind", ["vllm", "ray"])
+@pytest.mark.parametrize(("resolver_output", "resolver_status"), [("", 0), ("", 2), ("192.0.2.10 STREAM node-a", 2)])
+def test_ray_head_address_fails_before_startup_without_ipv4(tmp_path, kind, resolver_output, resolver_status):
+    prelude = render_ray_prelude() if kind == "vllm" else _comet_like(tmp_path).split("# service:", 1)[0]
+    script = f"""\
+scontrol() {{ printf '%s\\n' node-a node-b; }}
+getent() {{ printf '%s' {shlex.quote(resolver_output)}; return {resolver_status}; }}
+export SLURM_JOB_NODELIST=node-a,node-b
+{prelude}
+touch started
+"""
+    result = subprocess.run(["bash"], input=script, cwd=tmp_path, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert "IPv4" in result.stderr and "node-a" in result.stderr
+    assert not (tmp_path / "started").exists()
 
 
 def test_the_driver_goes_to_the_policys_node_when_services_are_pinned(tmp_path):

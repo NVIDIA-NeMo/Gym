@@ -21,17 +21,6 @@ from pathlib import Path
 from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
 
 
-_RAY_PRELUDE = """\
-# Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
-nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
-nodes_array=($nodes)
-head_node_hostname=${nodes_array[0]}
-head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
-export HEAD_NODE_IP="$head_node_ip"
-export RAY_HEAD_NODE_IP="$head_node_ip:6379"
-echo "Head node IP address: $HEAD_NODE_IP\""""
-
-
 ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
 
 # Default node-join wait (30s) is too short for slow image pulls. Also bounds a worker's wait for the head.
@@ -117,8 +106,25 @@ def bash_var(name: str) -> str:
     return re.sub(r"[^A-Z0-9]", "_", name.upper())
 
 
+def render_head_node_ip(hostname: str) -> str:
+    """Resolve a Bash hostname expression to one IPv4 address, or stop the job."""
+    return f"""\
+if ! head_node_ip=$(set -o pipefail; getent ahostsv4 "{hostname}" | awk 'NR == 1 {{print $1}}') || [ -z "$head_node_ip" ]; then
+    echo "ERROR: could not resolve an IPv4 address for {hostname}." >&2
+    exit 1
+fi"""
+
+
 def render_ray_prelude() -> str:
-    return _RAY_PRELUDE
+    return f"""\
+# Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+nodes_array=($nodes)
+head_node_hostname=${{nodes_array[0]}}
+{render_head_node_ip("$head_node_hostname")}
+export HEAD_NODE_IP="$head_node_ip"
+export RAY_HEAD_NODE_IP="$head_node_ip:6379"
+echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
 def escape_for_single_quoted_block(body: str) -> str:
