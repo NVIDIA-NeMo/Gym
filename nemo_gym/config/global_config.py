@@ -1305,14 +1305,17 @@ For example, on the command line:
         """Move config keys set under their names from before a rename to their current names, with a warning."""
         with open_dict(global_config_dict):
             rename_deprecated_keys(global_config_dict, RENAMED_TOP_LEVEL_KEYS)
-            for server_name, server_type_config_dict in global_config_dict.items():
+            # Nodes rather than values, so an interpolation is not resolved here.
+            for server_name in global_config_dict.keys():
+                server_type_config_dict = global_config_dict._get_node(server_name)
                 if not isinstance(server_type_config_dict, DictConfig):
                     continue
                 for server_type, renamed in RENAMED_SERVER_INSTANCE_KEYS.items():
-                    instances = server_type_config_dict.get(server_type)
+                    instances = server_type_config_dict._get_node(server_type)
                     if not isinstance(instances, DictConfig):
                         continue
-                    for instance_name, instance_config in instances.items():
+                    for instance_name in instances.keys():
+                        instance_config = instances._get_node(instance_name)
                         if isinstance(instance_config, DictConfig):
                             rename_deprecated_keys(
                                 instance_config, renamed, where=f"{server_name}.{server_type}.{instance_name}"

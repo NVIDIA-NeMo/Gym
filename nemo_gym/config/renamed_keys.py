@@ -26,6 +26,8 @@ import warnings
 from collections.abc import Callable, Mapping, MutableMapping
 from typing import Any, TypeVar
 
+from omegaconf import DictConfig, OmegaConf
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +55,12 @@ def rename_deprecated_keys(config: MutableMapping, renamed: Mapping[str, str], *
     for old, new in renamed.items():
         if old not in config:
             continue
-        old_value = config[old]
-        if new in config and config[new] != old_value:
+        # Unresolved, so an interpolation moves as written and a reference to another source does not fail here.
+        if isinstance(config, DictConfig):
+            values = OmegaConf.to_container(OmegaConf.masked_copy(config, [old, new]), resolve=False)
+        else:
+            values = config
+        if new in config and values[new] != values[old]:
             raise ConflictingRenamedKeyError(
                 f"Config sets both '{prefix}{old}' and '{prefix}{new}' to different values. '{old}' was renamed "
                 f"'{new}'; remove '{prefix}{old}' and keep only '{prefix}{new}'."
@@ -66,7 +72,8 @@ def rename_deprecated_keys(config: MutableMapping, renamed: Mapping[str, str], *
         warnings.warn(message, DeprecationWarning, stacklevel=2)
         # Python hides DeprecationWarning outside __main__ by default, and a config author needs to see this one.
         logger.warning(message)
-        config[new] = old_value
+        if new not in config:
+            config[new] = values[old]
         del config[old]
 
 

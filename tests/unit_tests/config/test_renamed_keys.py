@@ -133,6 +133,22 @@ def test_an_instance_key_of_another_server_type_is_left_alone() -> None:
     assert parsed["policy_model"]["responses_api_models"]["vllm_model"]["old_flag"] is True
 
 
+def test_an_old_key_set_to_an_interpolation_keeps_it_unresolved() -> None:
+    # A child server resolves the config itself, so a reference such as ${oc.env:...} must reach it as written.
+    servers = {"my_agent": {"responses_api_agents": {"simple_agent": {"old_flag": "${flag_source}"}}}}
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(initial={"new_block": BLOCK, **servers, "flag_source": True})
+    agent = parsed["my_agent"]["responses_api_agents"]["simple_agent"]
+    assert agent["new_flag"] == "${flag_source}" and "old_flag" not in agent
+
+
+def test_an_old_and_a_new_key_set_to_equal_values_keep_the_new_value() -> None:
+    config = {"old": 1, "new": True}
+    with pytest.warns(DeprecationWarning):
+        rename_deprecated_keys(config, {"old": "new"})
+    assert config == {"new": True} and config["new"] is True
+
+
 def test_renaming_moves_each_old_key_and_leaves_other_keys_alone() -> None:
     config = {"old": 1, "unrelated": 2}
     with pytest.warns(DeprecationWarning, match="'server.old' was renamed 'server.new'"):
