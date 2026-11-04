@@ -137,7 +137,7 @@ async def test_run_ssa_raises_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_pa
         pid = 123
         returncode = 1
 
-        async def communicate(self):
+        async def communicate(self, input=None):
             return b"", b"failed"
 
     async def create_subprocess_exec(*args, **kwargs):
@@ -146,7 +146,7 @@ async def test_run_ssa_raises_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
     agent = SimpleNamespace(config=SimpleNamespace(timeout=1))
     with pytest.raises(RuntimeError, match="SSA failed: failed"):
-        await SimpleStrandsAgent._run_ssa(agent, {"work_dir": str(tmp_path)})
+        await SimpleStrandsAgent._run_ssa(agent, {}, tmp_path)
 
 
 @pytest.mark.asyncio
@@ -155,7 +155,7 @@ async def test_run_ssa_raises_on_missing_result(monkeypatch: pytest.MonkeyPatch,
         pid = 123
         returncode = 0
 
-        async def communicate(self):
+        async def communicate(self, input=None):
             return b"", b""
 
     async def create_subprocess_exec(*args, **kwargs):
@@ -164,7 +164,7 @@ async def test_run_ssa_raises_on_missing_result(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
     agent = SimpleNamespace(config=SimpleNamespace(timeout=1))
     with pytest.raises(RuntimeError, match="SSA did not produce a result"):
-        await SimpleStrandsAgent._run_ssa(agent, {"work_dir": str(tmp_path)})
+        await SimpleStrandsAgent._run_ssa(agent, {}, tmp_path)
 
 
 @pytest.mark.asyncio
@@ -177,7 +177,7 @@ async def test_run_ssa_terminates_on_cancellation(monkeypatch: pytest.MonkeyPatc
             self.started = asyncio.Event()
             self.stopped = asyncio.Event()
 
-        async def communicate(self):
+        async def communicate(self, input=None):
             self.started.set()
             await self.stopped.wait()
             return b"", b""
@@ -197,7 +197,7 @@ async def test_run_ssa_terminates_on_cancellation(monkeypatch: pytest.MonkeyPatc
         config=SimpleNamespace(timeout=60),
         _terminate_process=SimpleStrandsAgent._terminate_process,
     )
-    task = asyncio.create_task(SimpleStrandsAgent._run_ssa(agent, {"work_dir": str(tmp_path)}))
+    task = asyncio.create_task(SimpleStrandsAgent._run_ssa(agent, {}, tmp_path))
     await process.started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -224,6 +224,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "pi_agent",
         "pool_agent",
         "simple_agent",
+        "simple_strands_agent",
         "stirrup_agent",
         "terminus_2_sandboxed_agent",
     }

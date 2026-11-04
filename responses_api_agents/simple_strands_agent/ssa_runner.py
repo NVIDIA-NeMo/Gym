@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import asyncio
 import importlib
 import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
+import threading
 import traceback
 from pathlib import Path
+from shlex import quote
 from typing import Any
 
 import ssa
@@ -17,13 +21,14 @@ from omegaconf import OmegaConf
 from ssa.agent import StrandsResolverAgent
 from ssa.callbacks.throttling import ThrottlingCallback
 from ssa.conversation_manager.conversation_manager import AdaptiveConversationManager
-from ssa.environments import LocalEnvironment, create_environment
+from ssa.environments import Environment, LocalEnvironment, create_environment
 from ssa.hooks import initialize_hooks
 from ssa.metrics import MetricsCollector
 from ssa.models import sr_model
 from ssa.prompts.prompt_gen import PromptGenerator
 from ssa.tools import load_tools
 from strands.handlers.callback_handler import CompositeCallbackHandler
+from strands.types.exceptions import EventLoopException
 
 
 importlib.import_module("ssa.utils.monkey_patch")
@@ -74,6 +79,99 @@ def _portable_execute_bash(
         "output": output,
         "error": "" if process.returncode == 0 else output,
     }
+
+
+class SandboxEnvironment(Environment):
+    """Run SSA's tools in a Gym task sandbox: every command and file operation goes through the sandbox provider.
+
+    The agent loop and its model calls stay in this process; the sandbox is borrowed from the Resources Server (or
+    owned by the agent server), and this process only connects to it.
+    """
+
+    def __init__(self, spec: dict[str, Any], workdir: str, default_timeout: float | None):
+        from nemo_gym.sandbox import AsyncSandbox, create_provider
+
+        self._workdir = workdir
+        self._default_timeout = default_timeout
+        # The environment the task's owner resolved for harness commands, over the sandbox's own.
+        self._env = spec.get("env") or None
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, daemon=True).start()
+        provider = create_provider(spec["provider"])
+        self._sandbox = self._call(AsyncSandbox.connect(spec["descriptor"], provider=provider))
+
+    def _call(self, coroutine):
+        return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result()
+
+    @property
+    def workdir(self) -> str:
+        return self._workdir
+
+    @property
+    def timeout(self) -> float | None:
+        return self._default_timeout
+
+    def execute_bash(self, command, workdir: str | None = None, timeout: float | None = None, verbose: bool = False):
+        timeout = self.timeout if timeout is None else timeout
+        # Like LocalEnvironment: SIGTERM at the deadline, SIGKILL 30 s later, and exit 124, where the image has
+        # coreutils timeout; the provider deadline bounds the command either way.
+        script = f"bash -c {quote(command)}"
+        if timeout:
+            script = (
+                f"if command -v timeout >/dev/null 2>&1; then exec timeout -k 30s {float(timeout)}s {script}; "
+                f"else exec {script}; fi"
+            )
+        try:
+            result = self._call(
+                self._sandbox.exec(
+                    f"bash -c {quote(script)}",
+                    cwd=workdir or self.workdir,
+                    env=self._env,
+                    timeout_s=float(timeout) + 60 if timeout else None,
+                )
+            )
+        except Exception as error:
+            return {"command": command, "status": "error", "exit_code": 1, "output": str(error), "error": str(error)}
+        exit_code = 124 if result.error_type == "timeout" else 1 if result.error_type else result.return_code
+        output = (result.stdout or "") + (result.stderr or "")
+        return {
+            "command": command,
+            "status": "success" if exit_code == 0 else "error",
+            "exit_code": exit_code,
+            "output": output,
+            "error": "" if exit_code in (0, 124) else output,
+        }
+
+    def _test(self, flag: str, path: str) -> bool:
+        return self.execute_bash(f"test {flag} {quote(path)}", timeout=30)["exit_code"] == 0
+
+    def dir_exists(self, path: str) -> bool:
+        return self._test("-d", path)
+
+    def file_exists(self, path: str) -> bool:
+        return self._test("-f", path)
+
+    def write_file(self, content: str, dest_path: str) -> None:
+        from nemo_gym.sandbox import upload_text
+
+        self._call(upload_text(self._sandbox, path=dest_path, text=content))
+
+    def retry_feedback(self, *args, **kwargs) -> str | None:
+        return None
+
+    def collect_submission(self, *args, **kwargs) -> None:
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        # Disconnect only: the sandbox's owner stops it.
+        try:
+            self._call(self._sandbox.disconnect())
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        return False
 
 
 def _build_config(payload: dict[str, Any], output_dir: Path):
@@ -132,7 +230,7 @@ def _prompts(cfg, payload: dict[str, Any]) -> tuple[str, str]:
     return system_prompt, user_prompt
 
 
-def _run(payload: dict[str, Any]) -> dict[str, Any]:
+def _run(payload: dict[str, Any], sandbox: dict[str, Any] | None = None) -> dict[str, Any]:
     output_dir = Path(payload["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     cfg = _build_config(payload, output_dir)
@@ -147,7 +245,10 @@ def _run(payload: dict[str, Any]) -> dict[str, Any]:
     model = sr_model(cfg)
 
     tools, tool_params = load_tools(cfg)
-    environment = create_environment(cfg, str(output_dir))
+    if sandbox is not None:
+        environment = SandboxEnvironment(sandbox, payload["work_dir"], cfg.env.timeout)
+    else:
+        environment = create_environment(cfg, str(output_dir))
     if isinstance(environment, LocalEnvironment) and shutil.which("timeout") is None:
         environment.execute_bash = _portable_execute_bash.__get__(environment, LocalEnvironment)
 
@@ -162,9 +263,17 @@ def _run(payload: dict[str, Any]) -> dict[str, Any]:
         )
         metrics_collector.bind(agent)
         result = None
+        stop_reason = None
         try:
             while True:
-                result = agent(user_prompt, environment=env, show_panel=False, tool_params=tool_params)
+                try:
+                    result = agent(user_prompt, environment=env, show_panel=False, tool_params=tool_params)
+                except EventLoopException as error:
+                    # max_llm_iterations ends the run with this exception; the transcript so far is the result.
+                    if "exceeded the set threshold" not in str(error):
+                        raise
+                    stop_reason = "max_turns"
+                    break
                 retry_feedback = env.retry_feedback(agent, result)
                 if not retry_feedback:
                     break
@@ -177,6 +286,7 @@ def _run(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "messages": agent.messages,
         "usage": usage,
+        "stop_reason": stop_reason,
     }
 
 
@@ -184,10 +294,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("request", type=Path)
     parser.add_argument("result", type=Path)
+    # The task sandbox's provider config and descriptor arrive on stdin, so provider credentials never touch disk.
+    parser.add_argument("--sandbox-stdin", action="store_true")
     args = parser.parse_args()
     payload = json.loads(args.request.read_text())
+    sandbox = json.loads(sys.stdin.read()) if args.sandbox_stdin else None
     try:
-        result = _run(payload)
+        result = _run(payload, sandbox)
     except BaseException as error:
         args.result.write_text(json.dumps({"error": str(error), "traceback": traceback.format_exc()}, default=str))
         raise
