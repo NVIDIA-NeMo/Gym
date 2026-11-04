@@ -1,8 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import runpy
+import time
+import warnings
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import orjson
 import pytest
@@ -107,8 +112,119 @@ def test_aggregate_metrics_is_forwarded_to_the_agent() -> None:
 
 
 def test_setting_a_limit_the_relay_does_not_enforce_warns() -> None:
-    with pytest.warns(UserWarning, match="default_episode_timeout_seconds"):
+    with pytest.warns(UserWarning, match="queue_timeout_seconds"):
+        _config(queue_timeout_seconds=60)
+
+
+def test_setting_the_episode_deadline_does_not_warn() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         _config(default_episode_timeout_seconds=60)
+
+
+class _SlowClient(_Client):
+    """Agent `/run` that answers after `delay` seconds and records whether the relay cancelled it."""
+
+    delay: float
+    cancelled: list[bool]
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Upstream:
+        self.calls.append((server_name, url_path, kwargs))
+        try:
+            await asyncio.sleep(self.delay)
+        except asyncio.CancelledError:
+            self.cancelled.append(True)
+            raise
+        return _Upstream(b'{"reward": 1.0}')
+
+
+def _slow_server(delay: float, **limits: float) -> tuple[LegacyAgentEnvironmentServer, _SlowClient]:
+    client = _SlowClient(
+        head_server_config=BaseServerConfig(host="head", port=1),
+        global_config_dict=OmegaConf.create({}),
+        calls=[],
+        responses=[],
+        delay=delay,
+        cancelled=[],
+    )
+    return LegacyAgentEnvironmentServer(config=_config(**limits), server_client=client), client
+
+
+def test_an_episode_past_its_deadline_retains_ambiguous_agent_completion() -> None:
+    server, client = _slow_server(delay=30, default_episode_timeout_seconds=0.2)
+
+    started = time.monotonic()
+    response = TestClient(server.setup_webserver()).post("/run", json={"_ng_task_index": 0})
+    elapsed = time.monotonic() - started
+
+    assert 0.2 <= elapsed < 5
+    assert response.status_code == 200
+    # The shape and classification single_agent_turn_legacy gives an episode its deadline ended.
+    payload = response.json()
+    selected = payload.pop("_ng_failure_id")
+    events = payload.pop("_ng_failure_events")
+    assert events[selected]["operation"] == "episode.deadline"
+    assert events[selected]["boundary"] == "environment"
+    assert events[selected]["foreign_error"]["exception_type"].endswith("TimeoutError")
+    assert payload == {
+        "_ng_failure_class": "environment_server_failed",
+        "_ng_failure_terminal": False,
+        "_ng_failure_message": "Episode timed out",
+        "_ng_failure_stage": None,
+        "agent_ref": {"name": "agent"},
+    }
+    assert len(client.calls) == 1
+    assert client.cancelled == [True]
+
+
+def test_an_episode_within_its_deadline_is_relayed_unchanged() -> None:
+    server, client = _slow_server(delay=0.1, default_episode_timeout_seconds=10)
+
+    response = TestClient(server.setup_webserver()).post("/run", json={})
+
+    assert response.content == b'{"reward": 1.0}'
+    assert client.cancelled == []
+
+
+def test_without_a_deadline_a_slow_episode_is_relayed() -> None:
+    server, client = _slow_server(delay=0.3)
+
+    response = TestClient(server.setup_webserver()).post("/run", json={})
+
+    assert server.config.default_episode_timeout_seconds is None
+    assert response.content == b'{"reward": 1.0}'
+    assert client.cancelled == []
+
+
+def test_a_timeout_the_agent_call_raises_itself_is_not_an_episode_timeout() -> None:
+    class _TimingOutClient(_Client):
+        async def post(self, server_name: str, url_path: str, **kwargs) -> _Upstream:
+            raise TimeoutError("agent connection timed out")
+
+    client = _TimingOutClient(
+        head_server_config=BaseServerConfig(host="head", port=1),
+        global_config_dict=OmegaConf.create({}),
+        calls=[],
+        responses=[],
+    )
+    server = LegacyAgentEnvironmentServer(config=_config(default_episode_timeout_seconds=60), server_client=client)
+
+    with pytest.raises(TimeoutError, match="agent connection timed out"):
+        TestClient(server.setup_webserver()).post("/run", json={})
+
+
+async def test_cancelling_the_relay_cancels_the_agent_call_and_is_not_a_timeout() -> None:
+    server, client = _slow_server(delay=30, default_episode_timeout_seconds=60)
+    request = SimpleNamespace(body=AsyncMock(return_value=b"{}"), headers={}, cookies={})
+
+    relay = asyncio.create_task(server.run_legacy(request))
+    while not client.calls:
+        await asyncio.sleep(0)
+    relay.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await relay
+    assert client.cancelled == [True]
 
 
 def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,3 +235,26 @@ def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.M
     namespace = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="legacy_agent.worker_test")
 
     assert namespace["app"] is worker_app
+
+
+async def test_deadline_includes_response_body_read() -> None:
+    class SlowBody(_Upstream):
+        async def read(self) -> bytes:
+            await asyncio.sleep(1)
+            return self.body
+
+    client = _Client(
+        head_server_config=BaseServerConfig(host="head", port=1),
+        global_config_dict=OmegaConf.create({}),
+        calls=[],
+        responses=[SlowBody(b'{"reward": 1.0}')],
+    )
+    server = LegacyAgentEnvironmentServer(config=_config(default_episode_timeout_seconds=0.01), server_client=client)
+    request = SimpleNamespace(body=AsyncMock(return_value=b"{}"), headers={}, cookies={})
+    response = await server.run_legacy(request)
+    payload = orjson.loads(response.body)
+    event = payload["_ng_failure_events"][payload["_ng_failure_id"]]
+    assert event["operation"] == "episode.deadline"
+    assert "reward" not in payload
+    assert len(client.calls) == 1
+    assert server.config.default_episode_timeout_seconds == 0.01

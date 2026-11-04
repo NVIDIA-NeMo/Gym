@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -118,7 +118,7 @@ class TestBaseResponsesAPIModel:
         ("ModelCallRecord", "nemo_gym.trajectory.model_call_record"),
         ("read_model_call_records", "nemo_gym.rollouts.model_calls"),
         ("aggregate_model_call_metrics", "nemo_gym.rollouts.model_calls"),
-        ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode"),
+        ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode_context"),
         ("token_id_capture_config", "nemo_gym.models.token_capture.config:token_capture_config"),
     ],
 )
@@ -748,7 +748,7 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     from pydantic import BaseModel, ConfigDict
 
     from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
     assert maybe_rollout_id_from_run_body(mapping) == "3-1"
@@ -1351,7 +1351,7 @@ def test_reconstruct_streamed_response_best_effort_none():
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
@@ -1364,7 +1364,7 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
 
 
 def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     # Restarted index numbering derives the same id twice.
@@ -1379,7 +1379,7 @@ def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
 
 @pytest.mark.parametrize("bad", [".hidden", "has/slash", "has space", "", 7, None])
 def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     body = {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_rollout_id": bad}
     if bad is None:
@@ -1393,7 +1393,7 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
     # The id becomes a path segment.
@@ -1724,6 +1724,19 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("surface", ["responses", "chat"])
+def test_model_request_validation_keeps_original_validation_cause(surface):
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
+    from nemo_gym.models.base_responses_api_model import _validate_chat_params, _validate_responses_params
+
+    validate = _validate_responses_params if surface == "responses" else _validate_chat_params
+    with pytest.raises(RequestValidationError) as caught:
+        validate({"input": 123, "messages": 123})
+    assert isinstance(caught.value.__cause__, ValidationError)
+
+
 @pytest.mark.asyncio
 async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observations(tmp_path):
     from nemo_gym.models.model_call_capture import _CaptureMiddleware
@@ -1796,3 +1809,49 @@ def test_invalid_verifier_id_does_not_hide_the_captured_call(tmp_path, invocatio
     assert [call["model_call_id"] for call in capture["calls"]] == ["actual-call"]
     assert not capture.get("verifier_invocations")
     assert "model_call_capture_records_unreadable" in {gap["code"] for gap in capture["gaps"]}
+
+
+def test_a_handled_upstream_error_reply_names_its_failure():
+    """A 422 the model server answers itself keeps its status and body, and its failure header names the
+    original model failure as the final one."""
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="HTTP 422 from the model",
+        operation="model_request",
+        http_status=422,
+    )
+    reply_body = b'{"error":{"message":"context length exceeded"}}'
+
+    class UpstreamRejects(SimpleResponsesAPIModel):
+        async def chat_completions(self, request, body):
+            raise NotImplementedError
+
+        async def responses(self, request, body):
+            error = ClientResponseError(
+                SimpleNamespace(real_url="http://upstream"),
+                (),
+                status=422,
+                message="Unprocessable Entity",
+                headers={"Content-Type": "application/json"},
+            )
+            error.response_content = reply_body
+            raise error from model
+
+    config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="policy")
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {}
+    app = UpstreamRejects(config=config, server_client=server_client).setup_webserver()
+
+    response = TestClient(app).post("/v1/responses", json={"input": "x"})
+
+    assert response.status_code == 422 and response.content == reply_body
+    assert response.headers["content-type"].startswith("application/json")
+    report = FailureHeader.decode(response.headers)
+    assert report is not None and report.failure_id == model.event_id

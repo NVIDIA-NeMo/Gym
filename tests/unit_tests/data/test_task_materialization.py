@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config.global_config import GlobalConfigDictParser
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.data.dataset_preparation import TrainDataProcessor
 from nemo_gym.data.task_data import TaskDataValidator
 from nemo_gym.data.task_materialization import materialize_task
@@ -343,7 +343,7 @@ class CustomTaskInput(BaseModel):
 
 
 def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
-    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest
+    from nemo_gym.core.episode_types import BaseEpisodeRequest
 
     row = {"scenario": "order", "user_profile": {"name": "Example"}}
     source = tmp_path / "custom.jsonl"

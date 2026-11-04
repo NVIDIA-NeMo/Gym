@@ -49,7 +49,7 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
     current_verifier_invocation_id,

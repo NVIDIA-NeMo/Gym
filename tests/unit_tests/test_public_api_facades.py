@@ -112,9 +112,12 @@ def _code_outside_the_library() -> list[Path]:
 
 
 def test_the_librarys_tests_import_from_the_module_that_defines_each_name() -> None:
-    # tests/ imports like nemo_gym/: from the defining module, which is also what it patches.
+    # tests/ imports like nemo_gym/: from the defining module, which is also what it patches. The exporter guide's
+    # examples are the guide's code blocks byte for byte, so they import like code outside the library.
     found = []
     for path in _tracked_python("tests"):
+        if path.is_relative_to("tests/unit_tests/exporter_guide"):
+            continue
         try:
             tree = ast.parse((REPO / path).read_text(errors="replace"))
         except SyntaxError:
