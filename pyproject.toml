@@ -442,6 +442,12 @@ dev = [
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     "requests-mock",
+
+    # OpenTelemetry SDK: the in-memory meter of the telemetry tests, which other tests import. Without it the importing
+    # modules were skipped silently in a dev environment; CI already installs it with the telemetry and mlflow extras.
+    # Updated: Sun Nov 01, 2026 with opentelemetry-sdk==1.44.0
+    # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python/blob/main/LICENSE
+    "opentelemetry-sdk",
 ]
 
 [dependency-groups]

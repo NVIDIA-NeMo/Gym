@@ -19,6 +19,7 @@ import errno
 import os
 import re
 import shlex
+import socket
 import sys
 from math import isfinite
 from pathlib import Path
@@ -37,6 +38,7 @@ from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install
 from nemo_gym.client.server_client import ServerClient, ServerStatus
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
+    DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
@@ -54,7 +56,7 @@ from nemo_gym.config.global_config import (
     _find_open_port_using_range,
     get_global_config_dict,
 )
-from nemo_gym.core.failure_kinds import SERVER_START_FAILED
+from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
 from nemo_gym.orchestration.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
@@ -306,7 +308,7 @@ def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
-_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = 600.0
+_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = float(DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS)
 
 
 # Longest single readiness probe of a Gym server. A probe is capped further by the time left before the deadline.
@@ -469,6 +471,8 @@ def _server_launch_command(
 class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
 
+    failure_kind = SERVER_SPINUP_TIMEOUT
+
 
 class ServerStartFailedError(RuntimeError):
     """A Gym server process (or the head server) exited before it was ready.
@@ -483,6 +487,46 @@ class ServerStartFailedError(RuntimeError):
         super().__init__(message)
         self.server_name = server_name
         self.errno = errno
+
+
+class HeadServerUnresponsiveError(ServerStartFailedError):
+    """The head server's thread is running but it never answered within `head_server_spinup_timeout_seconds`.
+
+    Not resumable: the CLI exits with ``stop_exit_code`` (76), which a job chain reads as "another attempt cannot
+    help", instead of holding its allocation in the wait.
+    """
+
+    stop_exit_code = 76
+
+
+# How long the supervisor waits for a live head server to answer. 0 or a negative value waits forever.
+HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "head_server_spinup_timeout_seconds"
+_DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC = 900.0
+
+
+def _head_server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
+    value = global_config_dict.get(HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
+    if value is None:
+        return _DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"`{HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}` must be a number of seconds, got {value!r}."
+        ) from None
+
+
+def _port_bind_errno(host: str, port: int) -> int | None:
+    """The errno of binding ``host:port`` now, as uvicorn binds it, or None when the port is free."""
+    probe = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))
+    except OSError as error:
+        return error.errno
+    finally:
+        probe.close()
+    return None
 
 
 # uvicorn's report of a failed bind: "[Errno 98] error while attempting to bind on address (...)".
@@ -602,15 +646,19 @@ class RunHelper:  # pragma: no cover
         """After a server found its port in use, give it a fresh one in the config every server is started from.
 
         Each server learns every other server's port from that config when it starts, so the caller starts them all
-        again. Only a bind that failed with EADDRINUSE qualifies; the head server keeps its configured port.
+        again. Only a bind that failed with EADDRINUSE qualifies. The head server moves the same way: every server and
+        the collection client read its port from that config.
         """
         if not isinstance(error, ServerStartFailedError) or error.errno != errno.EADDRINUSE:
             return False
-        server_config = getattr(self, "_server_configs", {}).get(error.server_name)
+        global_config_dict = get_global_config_dict()
+        if error.server_name == HEAD_SERVER_KEY_NAME:
+            server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME)
+        else:
+            server_config = getattr(self, "_server_configs", {}).get(error.server_name)
         if server_config is None:
             return False
-        global_config_dict = get_global_config_dict()
-        taken = [config.get("port") for config in self._server_configs.values()]
+        taken = [config.get("port") for config in getattr(self, "_server_configs", {}).values()]
         taken.append(global_config_dict.get(HEAD_SERVER_KEY_NAME, {}).get("port"))
         port = _find_open_port_using_range(
             disallowed_ports=[port for port in taken if isinstance(port, int)],
@@ -635,6 +683,7 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
         self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
+        self._head_server_spinup_timeout_seconds = _head_server_spinup_timeout_seconds(global_config_dict)
         self._server_shutdown_timeout_seconds = _server_shutdown_timeout_seconds(global_config_dict)
         self._startup.mark("load_config")
 
@@ -802,17 +851,39 @@ class RunHelper:  # pragma: no cover
         return process
 
     def _wait_for_head_server(self) -> None:
-        """Wait until the head server answers; a head server thread that ended (a failed bind) never will."""
+        """Wait until the head server answers, for at most `head_server_spinup_timeout_seconds`.
+
+        A head server thread that ended (a failed bind) never will: that is a typed start failure, with EADDRINUSE when
+        its port is taken now, so `start` moves it to a fresh port once. A live head server that never answers is a
+        `HeadServerUnresponsiveError`, which stops the run instead of holding its allocation.
+        """
         print("Waiting for head server to spin up")
+        timeout_seconds = getattr(self, "_head_server_spinup_timeout_seconds", _DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC)
+        deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
         poll_count = 0
         while True:
             status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
             if status == "success":
                 return
             if not self._head_server_thread.is_alive():
+                head = getattr(getattr(self, "_head_server_instance", None), "config", None)
+                bind_errno = _port_bind_errno(head.host, head.port) if head is not None else None
                 raise ServerStartFailedError(
                     "server_start_failed: the head server exited before it was ready; its error is in the log "
-                    f"above. Is its port already in use? Set it with `++{HEAD_SERVER_KEY_NAME}.port=<port>`.",
+                    + (
+                        f"above. Its port {head.port} is already in use."
+                        if bind_errno == errno.EADDRINUSE
+                        else f"above. Set its port with `++{HEAD_SERVER_KEY_NAME}.port=<port>` if it is taken."
+                    ),
+                    server_name=HEAD_SERVER_KEY_NAME,
+                    errno=bind_errno,
+                )
+            if deadline is not None and monotonic() >= deadline:
+                raise HeadServerUnresponsiveError(
+                    f"server_start_failed: the head server did not answer within {timeout_seconds:g}s although it is "
+                    f"running (last status `{status}`). Stopping instead of waiting on the allocation. Raise the "
+                    f"limit with `++{HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, or set it to 0 to wait "
+                    "without a limit.",
                     server_name=HEAD_SERVER_KEY_NAME,
                     errno=None,
                 )
