@@ -30,8 +30,8 @@ from nemo_gym.eval.recovery.grading import (
 )
 from nemo_gym.eval.recovery.rows import decide_recovery
 from tests.unit_tests.eval.recovery.test_grading_artifacts import _judge_call, _observed, _ungraded
-from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
-from tests.unit_tests.test_evaluation_health import _run
+from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
+from tests.unit_tests.orchestration.test_evaluation_health import _run
 
 
 COMPLETED = {"id": "resp-answer", "status": "completed", "output": [{"type": "message", "role": "assistant"}]}

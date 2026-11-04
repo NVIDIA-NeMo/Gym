@@ -131,7 +131,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
     import httpx
     from omegaconf import OmegaConf
 
-    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
+    from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
     environment, dependencies = _environment_server()
     if empty_output:
@@ -422,7 +422,7 @@ def test_persisted_null_original_input_does_not_fall_back_to_partial(tmp_path):
     from nemo_gym.eval.recovery.policy import _saved_answer
     from nemo_gym.eval.rollout_reverification import _rollout_response
     from nemo_gym.rollouts.rollout_recovery import has_saved_generation
-    from tests.unit_tests.test_eval_resubmit_decision import _judge_failure, collect, write_job_dir
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import _judge_failure, collect, write_job_dir
 
     row = _judge_failure(0, response=None) | {"_ng_failure_partial_response": response()}
     job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])

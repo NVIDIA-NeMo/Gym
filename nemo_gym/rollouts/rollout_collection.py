@@ -112,7 +112,6 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.progress_utils import tqdm
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
@@ -167,6 +166,7 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
     DISPATCH_NAME_ATTRIBUTE,
@@ -195,6 +195,7 @@ from nemo_gym.utils.path_utils import (
     materialized_path_for,
     resubmit_offset_path_for,
 )
+from nemo_gym.utils.tqdm import tqdm
 
 
 if TYPE_CHECKING:
@@ -3972,7 +3973,9 @@ executions → not run again (left to recovery)
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
-            semaphore = Semaphore(config.num_samples_in_parallel)
+            semaphore = MeteredSemaphore(
+                config.num_samples_in_parallel, component="rollout_driver", limit_name="rollouts"
+            )
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
@@ -5880,6 +5883,7 @@ class RolloutAggregationHelper(BaseModel):
 
         results: List[Dict] = []
         histories: List[RolloutStore] = []
+        health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
         legacy_results: List[Dict] = []
         history_results: Dict[str, List[Dict]] = {}
@@ -5892,6 +5896,7 @@ class RolloutAggregationHelper(BaseModel):
             history = RolloutStore.read(
                 shard, import_legacy=False, retry_terminal_timeouts=config.retry_terminal_timeouts
             )
+            health_histories[shard] = history
             if history is not None:
                 if history.manifest.run_id in run_ids:
                     raise ConfigError("The same run was supplied through multiple shard paths.")
@@ -6191,7 +6196,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_health_check:
             from nemo_gym.rollouts.rollout_health import (
-                JournalHealthUnavailable,
                 format_health_report,
                 run_health_checks,
             )
@@ -6201,15 +6205,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     run_health_checks,
                     # Keep each shard's identity, failure history and saved retry policy.
                     [Path(path) for path in input_paths],
-                    selected_projection=output_fpath if config.merge_shards and inventory_known else None,
                     run_coverage=components if inventory_known else None,
+                    source_histories=health_histories,
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                     limits=config.run_health_limits,
                 )
-            except JournalHealthUnavailable as error:
-                print(f"Rollout health checks skipped: {error}")
             except Exception:
                 logger.exception(
                     "Rollout health checks failed after aggregation; aggregate artifacts are still available."

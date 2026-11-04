@@ -198,7 +198,7 @@ async def test_failed_agent_outcome_through_environment_and_collection(tmp_path,
     )
     from nemo_gym.core.failure_transport import FailureHeader, observe_reply
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-    from tests.single_agent_turn_helpers import _Client, _environment_server, _request, _Response
+    from tests.helpers.single_agent_turn import _Client, _environment_server, _request, _Response
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
     from tests.unit_tests.rollouts.test_saved_generation_admission import response
 

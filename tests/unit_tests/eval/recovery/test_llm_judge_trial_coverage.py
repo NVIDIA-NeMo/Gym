@@ -6,7 +6,7 @@ import pytest
 
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.eval.recovery.trials import _observed_trial_operations
-from tests.unit_tests.test_tool_trial_coverage import fixture
+from tests.unit_tests.orchestration.test_tool_trial_coverage import fixture
 
 
 def _judged(mutate):
@@ -188,7 +188,7 @@ def test_chat_judge_incomplete_or_unjoined_completion_stays_unknown(change):
     [("chat", "stop", ("chat", "stop")), ("private-unrecognized", "private-unrecognized", (None, None))],
 )
 def test_stdlib_collector_preserves_only_bounded_chat_completion_metadata(tmp_path, dialect, finish, expected):
-    from tests.unit_tests.test_recovery_health_binding import collect, save_rows, setup
+    from tests.unit_tests.orchestration.test_recovery_health_binding import collect, save_rows, setup
 
     artifacts, rows = setup(tmp_path, n=1)
     metadata = rows[0]["ng_trajectory"]["model_calls"][0]["response_metadata"]

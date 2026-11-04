@@ -62,7 +62,6 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
-from nemo_gym.progress_utils import tqdm
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -100,6 +99,7 @@ from nemo_gym.utils.path_utils import (
     failures_path_for,
     resubmit_offset_path_for,
 )
+from nemo_gym.utils.tqdm import tqdm
 
 
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py

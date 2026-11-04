@@ -21,7 +21,7 @@ reward. A rubric judge's saved verdict and score record the grading when the rew
 import pytest
 
 from nemo_gym.eval.recovery.grading import grading_artifact
-from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
+from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 
 
 COMPLETED = {"id": "resp-answer", "status": "completed", "output": [{"type": "message", "role": "assistant"}]}

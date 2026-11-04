@@ -20,11 +20,12 @@
     ]
   },
   "resources_servers/longmt_eval": {
+    "constraint-dependencies": [
+      "transformers>=4.17,<5"
+    ],
     "override-dependencies": [
       "torchvision==0.27.0",
-      "protobuf==6.33.6",
-      "transformers>=5.17.0,<6",
-      "huggingface-hub>=1.31,<2"
+      "protobuf==6.33.6"
     ]
   },
   "resources_servers/nemo_user_sim": {
@@ -73,11 +74,12 @@
     ]
   },
   "resources_servers/wmt_translation": {
+    "constraint-dependencies": [
+      "transformers>=4.17,<5"
+    ],
     "override-dependencies": [
       "torchvision==0.27.0",
-      "protobuf==6.33.6",
-      "transformers>=5.17.0,<6",
-      "huggingface-hub>=1.31,<2"
+      "protobuf==6.33.6"
     ]
   },
   "responses_api_agents/harbor_agent_general": {

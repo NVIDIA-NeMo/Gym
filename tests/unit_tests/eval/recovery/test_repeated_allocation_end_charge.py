@@ -33,7 +33,7 @@ from nemo_gym.rollouts.rollout_records import read_records
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.utils.path_utils import failures_path_for
-from tests.unit_tests.test_allocation_cut_recovery import _decide
+from tests.unit_tests.orchestration.test_allocation_cut_recovery import _decide
 
 
 ROWS = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(3)]

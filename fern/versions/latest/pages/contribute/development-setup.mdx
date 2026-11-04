@@ -30,6 +30,10 @@ Cloning over HTTPS needs no GitHub credentials. If you have an SSH key registere
 Each component is an independent project with a committed `pyproject.toml` and
 `uv.lock`. Setup uses `uv sync --locked --inexact`; stale committed locks fail setup.
 Use uv 0.13.4 or newer, which includes the corrected certificate trust store.
+If an existing checkout uses an older uv release, run `uv self update` (or rerun
+the uv installer above) and confirm `uv --version` reports at least 0.13.4 before
+syncing. Older releases are rejected by the managed projects' `required-version`
+setting; upgrading uv does not require regenerating the committed locks.
 Custom components and new scaffolds without a lock retain dependency resolution
 from their `pyproject.toml` or `requirements.txt`.
 Select optional extras per component in the environment configuration (paths are
@@ -64,7 +68,12 @@ python scripts/component_locks.py
 ```
 
 Component exceptions to the root uv policy are recorded in
-`scripts/component-lock-policy.json`. CI checks every lock on Linux and macOS.
+`scripts/component-lock-policy.json`. The COMET-based `wmt_translation` and
+`longmt_eval` components use Transformers 4 and Hugging Face Hub below 1 to
+preserve COMET 2.2.7's supported encoder and download APIs. These isolated
+components explicitly replace the shared Transformers 5 floor; other components
+retain it. CI checks every lock on Linux and macOS, and `Nemo_CICD_Test` requires
+both checks to succeed.
 
 ## Development Commands
 

@@ -916,7 +916,7 @@ layers = [
     # core/
     "nemo_gym.core",
     # utils/
-    "nemo_gym.progress_utils : nemo_gym.utils",
+    "nemo_gym.utils",
     # config/
     "nemo_gym.config",
 ]

@@ -27,8 +27,12 @@ from nemo_gym.eval.recovery.trials import (
     fault_class,
     fault_report,
 )
-from tests.unit_tests.test_eval_resubmit_decision import complete_job, fake_executor, run_cli  # noqa: F401
-from tests.unit_tests.test_evaluation_health import _gate, _run
+from tests.unit_tests.orchestration.test_eval_resubmit_decision import (  # noqa: F401
+    complete_job,
+    fake_executor,
+    run_cli,
+)
+from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
 
 
 def test_the_gate_uses_the_shared_class_lists():
