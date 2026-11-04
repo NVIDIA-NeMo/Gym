@@ -12,13 +12,14 @@ bash scripts/ci/check-review-approvals.sh gitlab --project-id "$CI_PROJECT_ID" -
 ```
 
 Both modes require `GH_TOKEN` or `GITHUB_TOKEN` with organization-members read access. GitLab
-also requires `GITLAB_TOKEN` and `CI_API_V4_URL`. Exit codes are 0 for satisfied ownership, 1 for
+also requires `GITLAB_TOKEN`, `CI_API_V4_URL`, and `REVIEWER_IDENTITIES_JSON`. Exit codes are 0 for satisfied ownership, 1 for
 missing approvals, and 2 for API, configuration, or evidence errors. `--output FILE` saves the
 structured verdict and its head SHA.
 
 Package mappings use `# suggest:` entries consumed by the existing Suggest Reviewers workflow.
-The portable checker explicitly reads both standard rules and suggestion entries, in file order,
-and uses the last match for each changed file. GitHub itself ignores the suggestion comments.
+The portable checker reads both standard rules and suggestion entries. The last matching standard
+rule takes precedence; when none matches, the last matching suggestion applies. GitHub itself
+ignores the suggestion comments.
 One member of an owner team on that line must approve. Different packages require approval from
 their assigned teams; a reviewer belonging to several teams can satisfy each of their rules.
 During rollout, an owner group is automatically satisfied while its live membership is
@@ -27,25 +28,23 @@ The checker reports `OPTIONAL` and records `optional_owners` without inventing a
 Adding a third specialist member activates the normal approval requirement on the next check;
 approval from a member of that specialist team then satisfies it. Empty groups, one-person
 groups, and other two-person groups do not receive the exemption.
-Paths outside the package map retain a maintainer fallback;
-CI infrastructure and the existing BioNeMo overrides keep their dedicated owners.
-Seeded teams remain suggested even when their portable approval requirement is optional. Empty
-suggestion overrides before native CI entries suppress broad reviewer hints for those paths.
-Reviewer-only implementation hints are followed by standard entries preserving their existing
-maintainer approval fallback. CI and BioNeMo retain their native ownership rules.
+Existing suggestions outside packages retain their assigned teams and the architects fallback.
+CI infrastructure and BioNeMo retain their standard ownership rules regardless of later suggestions.
+Seeded teams remain suggested even when their portable approval requirement is optional.
 The suggestion workflow only requests reviewers; the shared check determines approval requirements.
 Renames check old and new paths. The checker rejects
 truncated file lists, author approvals, and GitHub approvals for an older head. GitLab must reset
 approvals on push, which is verified through its API. A changing evidence snapshot fails the check.
 
-Policy and identity links come from the immutable target commit, not the submitted branch. The
+Policy comes from the immutable target commit; account links come from protected CI configuration. The
 checker itself must execute from trusted target-branch code. GitHub uses `pull_request_target`, plus
 a secret-free review-event workflow followed by `workflow_run`. It posts the `Package approvals`
 commit status against the actual PR head. Use its `workflow_dispatch` input to reevaluate a specific
 PR after a team membership change, including filling a specialist team or removing an eligible approver.
 
-`.github/reviewer-identities.json` links stable GitLab and GitHub numeric account IDs; it does not
-duplicate groups. Initial links were resolved through the corporate SSO audit and provider APIs.
+The protected `REVIEWER_IDENTITIES_JSON` GitLab CI variable links stable GitLab and GitHub numeric
+account IDs. Its value is a JSON array such as `[{"gitlab_user_id": 100, "github_user_id": 10}]`.
+Keep verified account links in this variable rather than in the repository; they do not duplicate groups.
 A new team member without a verified identity link can approve on GitHub; GitLab ignores that
 person's approval until the link is added. Display names and usernames are not authorization keys.
 
@@ -53,11 +52,14 @@ The GitLab adapter executes on a webhook-triggered pipeline of protected `nv-int
 appends `Package approvals` to the exact MR head pipeline using `pipeline_id`. The existing
 "pipelines must succeed" setting then enforces the verdict. Approval removal reruns the checker
 and changes the job to failed. The trigger job needs protected, masked `GH_TOKEN` (members read)
-and `GITLAB_TOKEN` (project API) variables. No organization-management PAT is needed by this check.
+and `GITLAB_TOKEN` (project API) variables, plus protected `REVIEWER_IDENTITIES_JSON`.
+Missing or malformed account-link configuration fails the check. No organization-management PAT
+is needed by this check.
 
 Deployment order:
 
-1. Merge and mirror the policy, identity links, checker, and trusted CI configuration.
+1. Merge and mirror the policy, checker, and trusted CI configuration; configure the protected
+   GitLab `REVIEWER_IDENTITIES_JSON` variable with verified account links.
 2. Register a GitLab merge-request webhook for the pipeline-trigger API on protected
    `nv-internal-main`, including approval, unapproval, and source-update events. Its payload is
    supplied through GitLab's `TRIGGER_PAYLOAD` file. Keep the trigger token outside the repository.

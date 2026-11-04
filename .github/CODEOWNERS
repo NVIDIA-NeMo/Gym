@@ -1,151 +1,172 @@
-# NeMo Gym — code ownership and reviewer suggestions
+# NeMo Gym — code ownership
 #
-# Package entries use `# suggest:` so Suggest Reviewers can request their
-# teams without making GitHub's native code-owner approval a package gate.
-# The portable check in scripts/ci/check-review-approvals.sh reads standard
-# rules AND `# suggest:` entries in file order; the last match wins.
+# Two kinds of lines in this file:
 #
-# Each package lists its specialist team. A team containing exactly
-# Ananth and Yuya is automatically satisfied by the portable check;
-# optional teams are still suggested.
+#   <path-pattern> @user-or-team ...
+#     Standard CODEOWNERS syntax. ENFORCED: GitHub auto-requests review from
+#     these owners, and main's branch protection requires their approval
+#     before merge.
 #
-# Membership is managed in GitHub Teams under gym_team. Keep specific rules
-# after broader ones. Standard CI and BioNeMo rules retain native ownership.
+#   # suggest: <path-pattern> @user-or-team ...
+#     Same path-pattern syntax, prefixed with a literal `# suggest:` comment
+#     tag. GitHub ignores these comments; suggest-reviewers.yml requests
+#     the listed reviewers. check-review-approvals.sh enforces their policy
+#     on GitHub and GitLab, with native rules taking precedence. Teams with
+#     exactly Ananth and Yuya are optional during rollout.
+#
+# Put a `# suggest:` line right under the enforced rule it relates to, so
+# there's one file to update instead of two.
+#
+# The LAST matching pattern applies independently to native rules and suggestions.
 
-# Maintainer fallback for the portable check and reviewer suggestions.
-# suggest: * @NVIDIA-NeMo/gym_maintainers
-
-# Reviewer-only hints outside the package map. The following standard rule
-# preserves the maintainer approval fallback for each path.
-# suggest: /responses_api_agents/ @NVIDIA-NeMo/gym_env_benchmarks
-/responses_api_agents/ @NVIDIA-NeMo/gym_maintainers
-# suggest: /resources_servers/ @NVIDIA-NeMo/gym_env_benchmarks
-/resources_servers/ @NVIDIA-NeMo/gym_maintainers
-# suggest: /environment_servers/ @NVIDIA-NeMo/gym_env_benchmarks
-/environment_servers/ @NVIDIA-NeMo/gym_maintainers
-# suggest: /responses_api_models/ @NVIDIA-NeMo/gym_reviewers_model
-/responses_api_models/ @NVIDIA-NeMo/gym_maintainers
-# suggest: /benchmarks/ @NVIDIA-NeMo/gym_env_benchmarks
-/benchmarks/ @NVIDIA-NeMo/gym_maintainers
-# suggest: /environments/ @NVIDIA-NeMo/gym_env_benchmarks
-/environments/ @NVIDIA-NeMo/gym_maintainers
-# suggest: /fern/ @NVIDIA-NeMo/gym_leads
-/fern/ @NVIDIA-NeMo/gym_maintainers
-# suggest: /Makefile @NVIDIA-NeMo/automation
-/Makefile @NVIDIA-NeMo/gym_maintainers
-# suggest: /codecov.yml @NVIDIA-NeMo/automation
-/codecov.yml @NVIDIA-NeMo/gym_maintainers
-# suggest: /.pre-commit-config.yaml @NVIDIA-NeMo/automation
-/.pre-commit-config.yaml @NVIDIA-NeMo/gym_maintainers
-
-# Native CI ownership. Empty suggestion overrides suppress the broad
-# suggestion fallback; GitHub already requests the native owners.
-# suggest: .github/
+# ── Enforced ──────────────────────────────────────────────────────────────
 .github/ @nvidia-nemo/automation
-# suggest: docker/
 docker/ @nvidia-nemo/automation
-# suggest: pyproject.toml
 pyproject.toml @nvidia-nemo/automation
-# suggest: uv.lock
 uv.lock @nvidia-nemo/automation
-# suggest: /.gitlab-ci.yml
-/.gitlab-ci.yml @NVIDIA-NeMo/automation
-# suggest: /.gitlab/ci/
-/.gitlab/ci/ @NVIDIA-NeMo/automation
-# suggest: /scripts/ci/
-/scripts/ci/ @NVIDIA-NeMo/automation
+/.gitlab-ci.yml @nvidia-nemo/automation
+/.gitlab/ci/ @nvidia-nemo/automation
+/scripts/ci/ @nvidia-nemo/automation
 
-# Package ownership, including current and proposed migration paths.
-# Shared package surface and compatibility modules.
-# suggest: /nemo_gym/ @NVIDIA-NeMo/gym_architects
-
-# Foundations
-# suggest: /nemo_gym/config/ @NVIDIA-NeMo/gym_reviewers_cli_config
-# suggest: /nemo_gym/utils/ @NVIDIA-NeMo/gym_architects
-# suggest: /nemo_gym/core/ @NVIDIA-NeMo/gym_architects
-# suggest: /nemo_gym/telemetry/ @NVIDIA-NeMo/gym_reviewers_telemetry
-# suggest: /nemo_gym/client/ @NVIDIA-NeMo/gym_reviewers_server_runtime
-
-# Building blocks
-# suggest: /nemo_gym/sandbox/ @NVIDIA-NeMo/gym_reviewers_sandbox
-# suggest: /nemo_gym/trajectory/ @NVIDIA-NeMo/gym_reviewers_rollouts
-# suggest: /nemo_gym/verification/ @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/metrics/ @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /nemo_gym/artifacts/ @NVIDIA-NeMo/gym_reviewers_eval
-
-# Servers: models/ is the current spelling of the proposed model/ package.
-# suggest: /nemo_gym/server_runtime/ @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /nemo_gym/models/ @NVIDIA-NeMo/gym_reviewers_model
-# suggest: /nemo_gym/model/ @NVIDIA-NeMo/gym_reviewers_model
-# suggest: /nemo_gym/agents/ @NVIDIA-NeMo/gym_reviewers_agents
-
-# Model checkpoint hooks share ownership with server_runtime/_checkpoint/.
-# suggest: /nemo_gym/models/_checkpoint.py @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /nemo_gym/models/_checkpoint_workers.py @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /nemo_gym/model/_checkpoint.py @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /nemo_gym/model/_checkpoint_workers.py @NVIDIA-NeMo/gym_reviewers_server_runtime
-
-# Running work
-# suggest: /nemo_gym/data/ @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts
-# suggest: /nemo_gym/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
-# suggest: /nemo_gym/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration
-
-# Tools
-# suggest: /nemo_gym/eval/ @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /nemo_gym/environment/ @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/testing/ @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /nemo_gym/testing/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
-# suggest: /nemo_gym/testing/agent_session_conformance.py @NVIDIA-NeMo/gym_reviewers_agents
-# suggest: /nemo_gym/cli/ @NVIDIA-NeMo/gym_reviewers_cli_config
-
-# Current paths awaiting the eval/, environment/, and orchestration/ moves.
-# suggest: /nemo_gym/comparison/ @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /nemo_gym/eval_plan.py @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /nemo_gym/rollout_compare/ @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /nemo_gym/rollout_reverification.py @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /nemo_gym/agent_registry.py @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/benchmarks.py @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/deliverables.py @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/discovery.py @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/model_registry.py @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/registry.py @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/resources_server_registry.py @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/verifiers/ @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /nemo_gym/h2_ping_sidecar/ @NVIDIA-NeMo/gym_reviewers_orchestration
-# suggest: /nemo_gym/tools/ @NVIDIA-NeMo/gym_reviewers_orchestration
-# suggest: /nemo_gym/cli/setup_command.py @NVIDIA-NeMo/gym_reviewers_orchestration
-# suggest: /nemo_gym/cli_setup_command.py @NVIDIA-NeMo/gym_reviewers_cli_config
-
-# Package tests in current and proposed layouts.
-# suggest: /tests/*/config/ @NVIDIA-NeMo/gym_reviewers_cli_config
-# suggest: /tests/*/utils/ @NVIDIA-NeMo/gym_architects
-# suggest: /tests/*/core/ @NVIDIA-NeMo/gym_architects
-# suggest: /tests/*/telemetry/ @NVIDIA-NeMo/gym_reviewers_telemetry
-# suggest: /tests/*/client/ @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /tests/*/sandbox/ @NVIDIA-NeMo/gym_reviewers_sandbox
-# suggest: /tests/*/trajectory/ @NVIDIA-NeMo/gym_reviewers_rollouts
-# suggest: /tests/*/verification/ @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /tests/*/metrics/ @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /tests/*/artifacts/ @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /tests/*/server_runtime/ @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /tests/*/models/ @NVIDIA-NeMo/gym_reviewers_model
-# suggest: /tests/*/model/ @NVIDIA-NeMo/gym_reviewers_model
-# suggest: /tests/*/agents/ @NVIDIA-NeMo/gym_reviewers_agents
-# suggest: /tests/*/data/ @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /tests/*/rollouts/ @NVIDIA-NeMo/gym_reviewers_rollouts
-# suggest: /tests/*/rollouts/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
-# suggest: /tests/*/orchestration/ @NVIDIA-NeMo/gym_reviewers_orchestration
-# suggest: /tests/*/eval/ @NVIDIA-NeMo/gym_reviewers_eval
-# suggest: /tests/*/environment/ @NVIDIA-NeMo/gym_env_benchmarks
-# suggest: /tests/*/testing/ @NVIDIA-NeMo/gym_reviewers_server_runtime
-# suggest: /tests/*/testing/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
-# suggest: /tests/*/harness_capabilities/ @NVIDIA-NeMo/gym_reviewers_agents
-# suggest: /tests/*/cli/ @NVIDIA-NeMo/gym_reviewers_cli_config
-
-# BioNeMo overrides retain their dedicated approval owners.
+# BioNeMo
 /benchmarks/larp* @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
 /environments/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
 /responses_api_agents/larp_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
 /resources_servers/larp/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
 /resources_servers/litmus_agent/ @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
+
+# ── Suggested (see header) ───────────────────────────────────
+# Package paths use the proposed reviewer teams under gym_team.
+#
+# NOTE: last-match-wins, so a more specific suggestion for a path already
+# covered by the `*` wildcard backstop below must be listed AFTER it, not
+# before it, or the wildcard silently overrides it.
+
+# suggest: * @nvidia-nemo/gym_architects
+# suggest: docker/ @nvidia-nemo/automation
+
+# Package reviewer teams (GitHub Teams under gym_team).
+# suggest: /nemo_gym/ @nvidia-nemo/gym_architects
+# suggest: /nemo_gym/config/ @nvidia-nemo/gym_reviewers_cli_config
+# suggest: /nemo_gym/utils/ @nvidia-nemo/gym_architects
+# suggest: /nemo_gym/core/ @nvidia-nemo/gym_architects
+# suggest: /nemo_gym/telemetry/ @nvidia-nemo/gym_reviewers_telemetry
+# suggest: /nemo_gym/client/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/trajectory/ @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /nemo_gym/verification/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/metrics/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/artifacts/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/server_runtime/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/models/ @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/model/ @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/agents/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/models/_checkpoint.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/models/_checkpoint_workers.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/model/_checkpoint.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/model/_checkpoint_workers.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/data/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/rollouts/ @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /nemo_gym/rollouts/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/eval/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/environment/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/testing/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/testing/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/testing/agent_session_conformance.py @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/comparison/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/eval_plan.py @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/rollout_compare/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/deliverables.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/verifiers/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/h2_ping_sidecar/ @nvidia-nemo/gym_reviewers_orchestration
+# suggest: /nemo_gym/tools/ @nvidia-nemo/gym_reviewers_orchestration
+
+# Environments
+# suggest: /responses_api_agents/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /resources_servers/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /benchmarks/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /environments/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/cli/ @nvidia-nemo/gym_reviewers_cli_config
+# suggest: /nemo_gym/cli_setup_command.py @nvidia-nemo/gym_reviewers_cli_config
+# suggest: /nemo_gym/benchmarks.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/dataset_orchestrator.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/gitlab_utils.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/hf_utils.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/prompt.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/metrics/reward_profile.py @nvidia-nemo/gym_reviewers_eval
+# suggest: /nemo_gym/verification/judge.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/agents/skills.py @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/rollout_reverification.py @nvidia-nemo/gym_reviewers_eval
+
+# Core-Arch + RL
+# suggest: /responses_api_models/ @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/server_runtime/base_server.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/client/openai_client.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/models/anthropic_utils.py @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/models/anthropic_converter.py @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/models/chat_completions_converter.py @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/server_runtime/base_resources_server.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/agents/base_responses_api_agent.py @nvidia-nemo/gym_reviewers_agents
+# suggest: /nemo_gym/models/base_responses_api_model.py @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/registry.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/rollouts/rollout_collection.py @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /nemo_gym/telemetry/profiling.py @nvidia-nemo/gym_reviewers_telemetry
+# suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_reviewers_cli_config
+# suggest: /nemo_gym/server_runtime/server_status.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/data/dataset_preparation.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_reviewers_sandbox
+# suggest: /nemo_gym/models/chat_streaming.py @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/models/responses_streaming.py @nvidia-nemo/gym_reviewers_model
+# suggest: /nemo_gym/discovery.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/model_registry.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/resources_server_registry.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/server_runtime/mcp_auto_exposure.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/orchestration/ @nvidia-nemo/gym_reviewers_orchestration
+# suggest: /nemo_gym/server_runtime/request_handling/rollout_context.py @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /nemo_gym/trajectory/trajectory_record.py @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /nemo_gym/utils/decorators.py @nvidia-nemo/gym_architects
+# suggest: /nemo_gym/utils/path_utils.py @nvidia-nemo/gym_architects
+# suggest: /tests/ @nvidia-nemo/gym_architects
+
+# Shared package files
+# suggest: /nemo_gym/__init__.py @nvidia-nemo/gym_architects
+# suggest: /nemo_gym/config/config_types.py @nvidia-nemo/gym_reviewers_cli_config
+# suggest: /nemo_gym/config/global_config.py @nvidia-nemo/gym_reviewers_cli_config
+# suggest: /nemo_gym/package_info.py @nvidia-nemo/gym_architects
+# suggest: /responses_api_agents/verifiers_agent/ @nvidia-nemo/gym_env_benchmarks
+
+# Docs
+# suggest: /fern/ @nvidia-nemo/gym_leads
+
+# CI & Build (already enforced above via @nvidia-nemo/automation; kept here
+# only for the paths PR #2439 additionally called out)
+# suggest: /Makefile @nvidia-nemo/automation
+# suggest: /codecov.yml @nvidia-nemo/automation
+# suggest: /.pre-commit-config.yaml @nvidia-nemo/automation
+
+# Package test and CLI overrides.
+# suggest: /nemo_gym/cli/setup_command.py @nvidia-nemo/gym_reviewers_orchestration
+# suggest: /tests/*/config/ @nvidia-nemo/gym_reviewers_cli_config
+# suggest: /tests/*/utils/ @nvidia-nemo/gym_architects
+# suggest: /tests/*/core/ @nvidia-nemo/gym_architects
+# suggest: /tests/*/telemetry/ @nvidia-nemo/gym_reviewers_telemetry
+# suggest: /tests/*/client/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /tests/*/sandbox/ @nvidia-nemo/gym_reviewers_sandbox
+# suggest: /tests/*/trajectory/ @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /tests/*/verification/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /tests/*/metrics/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /tests/*/artifacts/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /tests/*/server_runtime/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /tests/*/models/ @nvidia-nemo/gym_reviewers_model
+# suggest: /tests/*/model/ @nvidia-nemo/gym_reviewers_model
+# suggest: /tests/*/agents/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /tests/*/data/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /tests/*/rollouts/ @nvidia-nemo/gym_reviewers_rollouts
+# suggest: /tests/*/rollouts/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /tests/*/orchestration/ @nvidia-nemo/gym_reviewers_orchestration
+# suggest: /tests/*/eval/ @nvidia-nemo/gym_reviewers_eval
+# suggest: /tests/*/environment/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /tests/*/testing/ @nvidia-nemo/gym_reviewers_server_runtime
+# suggest: /tests/*/testing/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /tests/*/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
+# suggest: /tests/*/cli/ @nvidia-nemo/gym_reviewers_cli_config

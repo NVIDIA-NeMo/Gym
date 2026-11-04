@@ -143,13 +143,13 @@ class PolicyTests(unittest.TestCase):
             rules,
         )
         owner_by_path = {path: match["owners"][0] for match in matches for path in match["files"]}
-        self.assertEqual(owner_by_path["nemo_gym/models/_checkpoint.py"], "@NVIDIA-NeMo/gym_reviewers_server_runtime")
-        self.assertEqual(owner_by_path["nemo_gym/models/token_capture/sink.py"], "@NVIDIA-NeMo/gym_reviewers_model")
+        self.assertEqual(owner_by_path["nemo_gym/models/_checkpoint.py"], "@nvidia-nemo/gym_reviewers_server_runtime")
+        self.assertEqual(owner_by_path["nemo_gym/models/token_capture/sink.py"], "@nvidia-nemo/gym_reviewers_model")
         self.assertEqual(
-            owner_by_path["nemo_gym/rollouts/harness_capabilities/checker.py"], "@NVIDIA-NeMo/gym_reviewers_agents"
+            owner_by_path["nemo_gym/rollouts/harness_capabilities/checker.py"], "@nvidia-nemo/gym_reviewers_agents"
         )
         self.assertEqual(
-            owner_by_path["nemo_gym/testing/harness_capabilities/checker.py"], "@NVIDIA-NeMo/gym_reviewers_agents"
+            owner_by_path["nemo_gym/testing/harness_capabilities/checker.py"], "@nvidia-nemo/gym_reviewers_agents"
         )
 
     def test_github_glob_semantics(self) -> None:
@@ -183,7 +183,7 @@ class PolicyTests(unittest.TestCase):
                 approvals.parse_policy(text)
 
     def test_all_library_files_have_one_assigned_team(self) -> None:
-        """Every package file keeps its specialist owner without a shared alternative."""
+        """Every package file keeps a specialist or existing CI owner without a shared alternative."""
         paths = [str(path.relative_to(ROOT)) for path in (ROOT / "nemo_gym").rglob("*.py")]
         matches = approvals.match_policy(
             paths, approvals.parse_policy((ROOT / ".github/CODEOWNERS").read_text(), include_suggestions=True)
@@ -191,7 +191,9 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual({path for match in matches for path in match["files"]}, set(paths))
         for match in matches:
             self.assertEqual(len(match["owners"]), 1)
-            self.assertRegex(match["owners"][0], r"^@NVIDIA-NeMo/gym_(architects|env_benchmarks|reviewers_[a-z_]+)$")
+            self.assertRegex(
+                match["owners"][0], r"^@nvidia-nemo/(automation|gym_(architects|env_benchmarks|reviewers_[a-z_]+))$"
+            )
 
     def test_benchmark_fallback_and_bionemo_override(self) -> None:
         """Preserve coverage outside packages while retaining dedicated BioNeMo owners."""
@@ -202,7 +204,7 @@ class PolicyTests(unittest.TestCase):
         by_path = {path: match["owners"] for match in matches for path in match["files"]}
         self.assertEqual(
             by_path["benchmarks/new-benchmark/config.yaml"],
-            ["@NVIDIA-NeMo/gym_maintainers"],
+            ["@nvidia-nemo/gym_env_benchmarks"],
         )
         self.assertEqual(
             by_path["benchmarks/larp/config.yaml"], ["@nvidia-nemo/gym_bionemo", "@nvidia-nemo/gym_maintainers"]
@@ -220,25 +222,27 @@ class SuggestionTests(unittest.TestCase):
         suggested = approvals.match_policy(paths, suggestion_policy(source))
         native_owners = {owner for rule in native for owner in rule["owners"]}
         requested = {owner for rule in suggested for owner in rule["owners"]} - native_owners
-        self.assertEqual(requested, {"@NVIDIA-NeMo/gym_reviewers_agents"})
+        self.assertEqual(requested, {"@nvidia-nemo/gym_reviewers_agents"})
         self.assertEqual(native, [])
 
-    def test_native_ci_owner_suppresses_fallback_suggestions(self) -> None:
-        """CI retains its native owner without requesting the broad suggestion fallback."""
+    def test_native_ci_owner_takes_precedence_over_suggestions(self) -> None:
+        """CI approval keeps its native owner even when a later hint matches."""
         source = (ROOT / ".github/CODEOWNERS").read_text()
         paths = [".github/workflows/example.yml"]
         combined = approvals.match_policy(paths, approvals.parse_policy(source, include_suggestions=True))
         self.assertEqual(combined[0]["owners"], ["@nvidia-nemo/automation"])
-        self.assertEqual(approvals.match_policy(paths, suggestion_policy(source)), [])
+        self.assertEqual(
+            approvals.match_policy(paths, suggestion_policy(source))[0]["owners"], ["@nvidia-nemo/gym_architects"]
+        )
 
-    def test_reviewer_only_hints_preserve_approval_fallback(self) -> None:
-        """An implementation hint cannot replace the existing maintainer approval policy."""
+    def test_implementation_hints_use_their_assigned_team(self) -> None:
+        """Implementation hints apply when no native owner matches the path."""
         source = (ROOT / ".github/CODEOWNERS").read_text()
         paths = ["responses_api_models/example/app.py"]
         combined = approvals.match_policy(paths, approvals.parse_policy(source, include_suggestions=True))
         suggested = approvals.match_policy(paths, suggestion_policy(source))
-        self.assertEqual(combined[0]["owners"], ["@NVIDIA-NeMo/gym_maintainers"])
-        self.assertEqual(suggested[0]["owners"], ["@NVIDIA-NeMo/gym_reviewers_model"])
+        self.assertEqual(combined[0]["owners"], ["@nvidia-nemo/gym_reviewers_model"])
+        self.assertEqual(suggested[0]["owners"], ["@nvidia-nemo/gym_reviewers_model"])
         dependency = approvals.match_policy(
             ["responses_api_models/example/pyproject.toml"],
             approvals.parse_policy(source, include_suggestions=True),
@@ -354,13 +358,18 @@ class ProviderTests(unittest.TestCase):
             if "/branches/" in path:
                 return {"commit": {"id": "target"}}
             self.assertTrue(path.endswith("?ref=target"))
-            if "reviewer-identities" in path:
-                return encoded_file(json.dumps([{"gitlab_user_id": 100, "github_user_id": 10}]))
+            self.assertIn("repository/files/.github%2FCODEOWNERS?", path)
             return encoded_file("/old/ @org/a")
 
-        snapshot = approvals.gitlab_snapshot(read, 1, 1)
+        identities = json.dumps([{"gitlab_user_id": 100, "github_user_id": 10}])
+        with patch.dict(os.environ, {"REVIEWER_IDENTITIES_JSON": identities}):
+            snapshot = approvals.gitlab_snapshot(read, 1, 1)
         self.assertEqual(snapshot["approved"], {10})
         self.assertEqual(snapshot["policy"], "/old/ @org/a")
+        for invalid in ("", "not-json", "{}", "null"):
+            with self.subTest(identities=invalid), patch.dict(os.environ, {"REVIEWER_IDENTITIES_JSON": invalid}):
+                with self.assertRaises(ValueError):
+                    approvals.gitlab_snapshot(read, 1, 1)
 
     def test_gitlab_rejects_approval_synchronization_in_progress(self) -> None:
         """A push cannot reuse approvals while GitLab is still clearing them."""

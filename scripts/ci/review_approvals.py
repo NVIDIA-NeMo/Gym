@@ -3,8 +3,8 @@
 
 """Enforce the GitHub CODEOWNERS policy against GitHub or GitLab approvals.
 
-The executable must run from trusted target-branch code. Policy and identity
-links are read from the target commit through the provider API, never the PR.
+The executable must run from trusted target-branch code. Policy is read from
+the target commit; GitLab account links come from protected CI configuration.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from typing import Callable
 
 ReadJSON = Callable[[str], object]
 CODEOWNERS_PATH = ".github/CODEOWNERS"
-IDENTITIES_PATH = ".github/reviewer-identities.json"
 INITIAL_REVIEWER_IDS = frozenset({2382532, 54727607})
 
 
@@ -99,9 +98,11 @@ def compile_pattern(pattern: str) -> re.Pattern:
 
 
 def parse_policy(text: str, *, include_suggestions: bool = False) -> list[dict]:
-    """Read native rules or the combined standard-and-suggestion approval policy."""
+    """Read last-match rules, giving native ownership precedence over suggestions."""
     rules = []
+    suggestions = []
     for line_number, line in enumerate(text.splitlines(), start=1):
+        suggested = bool(re.match(r"^\s*#\s*suggest:", line))
         if include_suggestions:
             line = re.sub(r"^\s*#\s*suggest:\s*", "", line)
         fields = line.split("#", 1)[0].split()
@@ -110,10 +111,13 @@ def parse_policy(text: str, *, include_suggestions: bool = False) -> list[dict]:
         pattern, *owners = fields
         if any(not re.fullmatch(r"@[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", owner) for owner in owners):
             raise ValueError(f"CODEOWNERS line {line_number}: use GitHub teams, not individual users")
-        rules.append({"line": line_number, "pattern": pattern, "owners": owners, "regex": compile_pattern(pattern)})
-    if not rules:
+        destination = suggestions if suggested else rules
+        destination.append(
+            {"line": line_number, "pattern": pattern, "owners": owners, "regex": compile_pattern(pattern)}
+        )
+    if not rules and not suggestions:
         raise ValueError("CODEOWNERS contains no ownership rules")
-    return rules
+    return suggestions + rules
 
 
 def match_policy(paths: list[str], rules: list[dict]) -> list[dict]:
@@ -208,7 +212,12 @@ def gitlab_snapshot(read: ReadJSON, project: int, number: int) -> dict:
         encoded = urllib.parse.quote(path, safe="")
         return decode_file(read(f"{prefix}/repository/files/{encoded}?ref={reference}"))
 
-    identities = json.loads(target_file(IDENTITIES_PATH))
+    raw_identities = os.environ.get("REVIEWER_IDENTITIES_JSON", "")
+    if not raw_identities:
+        raise ValueError("GitLab requires the protected REVIEWER_IDENTITIES_JSON CI variable")
+    identities = json.loads(raw_identities)
+    if not isinstance(identities, list):
+        raise ValueError("REVIEWER_IDENTITIES_JSON must be a JSON array of verified account links")
     approvals = read(f"{prefix}/merge_requests/{number}/approvals")["approved_by"]
     approved, unlinked = gitlab_approvers(approvals, identities, merge["author"]["id"])
     return {
