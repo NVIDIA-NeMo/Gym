@@ -26,7 +26,7 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.sandbox import AsyncSandbox
 
 
-PSF_REQUESTS_LOCAL_HTTPBIN = PARENT_DIR / "resources_servers/swebench/psf_requests_local_httpbin.sh"
+PSF_REQUESTS_LOCAL_HTTPBIN = PARENT_DIR / "resources_servers/swebench/patches/psf_requests_local_httpbin.sh"
 
 
 # @bxyu-nvidia: We modify the run_instance function to:
