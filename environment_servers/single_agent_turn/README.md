@@ -3,8 +3,7 @@
 This Environment Server runs one agent turn against one Resources Server.
 It seeds both participant sessions, grants configured task-scoped tool access and any sandbox access returned by Resources to the agent, invokes `/v1/responses` once, verifies the response, and closes both sessions.
 
-`resources_server` names that Resources Server. Leave it unset to bind the one the agent's own `resources_server` names, as a `legacy_agent` relay's `/run` used it. The server then follows an `_inherit_from` rename of the agent, which can also rebind the agent to a renamed Resources Server. A server that sets none, in front of an agent that names none, does not start.
-The shipped templates in `configs/` set `resources_server.name: ???`, so a config that inherits one sets `resources_server: null` to bind the agent's.
+`resources_server` is required and belongs to the Environment Server. Configuration resolution follows an unambiguous top-level `_inherit_from` rename of that Resources Server. Copies and multiple destinations require an explicit binding in the child Environment Server; the agent's own binding does not choose it. See the [configuration migration guide](../../fern/versions/latest/pages/troubleshooting/configuration.mdx#move-a-simple_agent-off-the-relay).
 
 Use this server when one agent turn produces the response that Resources verifies.
 Other interaction patterns should define their own task input, episode result, and Environment Server implementation.

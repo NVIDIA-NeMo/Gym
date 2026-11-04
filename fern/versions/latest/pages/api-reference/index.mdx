@@ -78,11 +78,9 @@ Read the diagram top to bottom, and left to right within a group: each package m
 | `sandbox` | Isolated command execution and its providers. See [Sandbox](/main/infrastructure/sandbox). |
 | `client` | HTTP calls to Gym servers and model endpoints, including the OpenAI client. |
 | `telemetry` | Optional OpenTelemetry instrumentation. |
-| `core` | Types every package shares, such as the Responses API types. |
-| `utils` | General helpers. |
+| `core` | Types every package shares, such as the Responses API types, and the failure types and failure reports passed from one Gym server to the next. |
+| `utils` | General helpers, such as reading the causes, type name, and HTTP status of any Python exception. |
 | `config` | Loading the run config. |
-
-Three modules sit directly in `nemo_gym/` instead of in a package. `failure_transport` and `typed_exceptions` share the `core` layer: they define the exception a failure raises and carry its failure report from one Gym server to the next. `exception_inspection` shares the `utils` layer and reads the causes, type name, and HTTP status of any Python exception.
 
 `nemo_gym.verifiers` sits outside the layers. It runs inside a Harbor task's verifier sandbox, so it uses only the standard library.
 

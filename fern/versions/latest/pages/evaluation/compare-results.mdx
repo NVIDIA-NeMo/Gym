@@ -1,0 +1,128 @@
+---
+title: "Compare Results"
+description: "Compare evaluation runs, inspect score changes, and interpret confidence intervals for candidate-minus-baseline differences."
+position: 6
+---
+
+Use `gym eval compare` to compare a baseline evaluation with one candidate. The report shows metric deltas, confidence intervals, and which tasks changed from passing to failing or the reverse. Use it to evaluate a model, quantization method, prompt, or harness change.
+
+## Prepare Comparable Runs
+
+Keep the benchmark, dataset split, task order, task limit, and verifier settings the same. Vary the model or configuration you want to evaluate, and save each run in a separate directory. The task order matters because the sample-flips table matches tasks by their recorded task index.
+
+Collect repeats to measure variation in the score. For example, after [starting the MCQA servers](/main/get-started/quickstart#run-evaluation), collect a baseline:
+
+```bash
+gym eval run --no-serve \
+    --agent mcqa_simple_agent \
+    --input resources_servers/mcqa/data/example.jsonl \
+    --output results/baseline/rollouts.jsonl \
+    --num-repeats 8
+```
+
+After applying the change you want to evaluate, collect the same tasks into `results/candidate/rollouts.jsonl` with the same collection settings. If you change the model or server configuration, restart the servers with that configuration first.
+
+Each run writes `rollouts_aggregate_metrics.json` beside its rollout file. Comparison reads these aggregate files, so it needs no running servers or new model calls. If collection used `--disable-aggregation`, run [`gym eval aggregate`](/main/reference/cli-commands#gym-eval-aggregate) first.
+
+<Note>
+Eight repeats is an example, not a prescribed sample size. A repeat evaluates the task set once. Both runs need at least two usable per-repeat values for a metric to receive a repeat-based delta confidence interval; a single-repeat run can still have its point estimates compared.
+</Note>
+
+## Run the Comparison
+
+```bash
+gym eval compare \
+    --baseline results/baseline/rollouts.jsonl \
+    --candidates results/candidate/rollouts.jsonl \
+    --agent mcqa_simple_agent \
+    --output-dir results/comparison \
+    --report-format both
+```
+
+Despite the plural option name, `--candidates` currently accepts one candidate run. Omit `--agent` to compare every agent name shared by the two runs. When the names differ, select each side with `--baseline-agent` and `--candidate-agents` instead.
+
+Delta confidence intervals default to 95%. To request 90%, add `--confidence-level 0.90`. Supply a fraction strictly between `0` and `1`. This option changes the delta intervals; each run's separate confidence intervals remain the recorded 95% intervals.
+
+The command prints key metrics and writes:
+
+| File | Contents |
+|---|---|
+| `compare_report.md` | Key metrics, other metrics, and task-level sample flips. |
+| `compare_report.json` | Metric values, delta interval endpoints, and task-level results for further analysis. |
+
+The JSON report records the selected delta confidence level in the top-level `confidence_level` field, for example `0.90`.
+
+Without `--output-dir`, reports are written beside the candidate's rollout file. Repeating the command in the same output directory replaces the report files. See the [CLI Reference](/main/reference/cli-commands#gym-eval-compare) for aggregate-file overrides and all options.
+
+## Read the Report
+
+**Delta is candidate minus baseline.** A positive delta means the candidate's metric is numerically higher. Whether that is better depends on the metric: higher reward is usually better, while lower latency is usually better. Metrics retain their original units; this command does not normalize or combine them into a single score.
+
+For each metric, the rendered report and delta use each run's mean across repeats when available, otherwise its recorded point estimate. JSON exposes `value` and, when available, `mean_across_repeats`; use the latter to reproduce the delta when present. The two fields can differ for uneven task coverage or nonlinear metrics.
+
+The **CI for the delta** is a two-sided Welch t confidence interval computed from the per-repeat metric values at the selected confidence level (95% by default). Each repeat is one observation. The method treats baseline and candidate repeat sets as independent; it does not pair repeats by index.
+
+A delta CI requires `mean_across_repeats/<metric>` on both sides after loading and at least two finite, same-named metric values in each side's `repeat_level_metrics`. For legacy aggregate entries without the `repeat_level_metrics` key, comparison first reconstructs generic repeat statistics in memory from stored per-rollout summaries. An explicitly present list is not recomputed. If the required statistics remain unavailable, the delta CI is unavailable (`—` in Markdown and `null` endpoints in JSON). A custom metric computed only for the whole run may have a point estimate without a delta CI. See [Repeat-Level Metrics](/main/evaluation/aggregate-metrics#repeat-level-metrics) for how these values are produced.
+
+The sample-flips table helps locate changed tasks. For binary rewards, a task passes when its mean reward over repeats is greater than `0.5`; exactly `0.5` is a tie. A flip describes the observed outcomes and does not by itself establish a model regression or improvement.
+
+<Warning>
+Check that both runs completed the intended tasks before interpreting the intervals. Comparison warns about incomplete or unequal task coverage across repeats but can still display a CI. Missing tasks can mix a change in task difficulty with a change in model quality. The command does not verify that the two runs used the same dataset or verifier configuration. Use [Rollout Health Checks](/main/evaluation/rollout-health) and the collection completion summary to inspect the evidence.
+</Warning>
+
+## Interpretation of the Confidence Interval
+
+The example below uses the default 95% confidence level.
+
+### Start with the Difference
+
+When evaluating a change such as quantization, an observed score difference may reflect both the change and variation between repeated evaluations. Consider a GPQA example in which both models answer the same 198 questions in each of eight repeats. A correct answer earns `1`, and an incorrect answer earns `0`.
+
+| Metric | Baseline | Candidate | Candidate − baseline | 95% CI for the difference |
+|---|---:|---:|---:|---:|
+| `mean/reward` | 0.7645 | 0.7689 | +0.0044 | [-0.0140, +0.0228] |
+| As a percentage | 76.45% | 76.89% | +0.442 percentage points | [-1.400, +2.284] percentage points |
+
+The baseline answered 1,211 of 1,584 responses correctly; the candidate answered 1,218 correctly. Seven additional correct responses produce the observed gain of 0.442 percentage points (pp). The interval, calculated from the spread of the eight repeat scores per model, spans a 1.400 pp loss to a 2.284 pp gain. The higher observed score alone does not establish an improvement.
+
+### Could the Candidate Be Too Much Worse? (Noninferiority)
+
+Choose the largest acceptable loss **before** examining the result. For a metric where higher is better, the interval's lower end must exceed the negative of that margin to rule out an unacceptable loss at this confidence level.
+
+| Largest acceptable drop | Required lower bound | Example lower bound | Interpretation |
+|---|---:|---:|---|
+| 2 pp (`0.02` in reward units) | Above -2 pp | -1.400 pp | Rules out a loss of 2 pp or more. |
+| 1 pp (`0.01`) | Above -1 pp | -1.400 pp | Inconclusive: a loss of 1 pp or more is not ruled out. |
+| 0 pp (`0`) | Above 0 pp | -1.400 pp | Does not establish that the candidate is at least as good. |
+
+An inconclusive result does not demonstrate that the candidate exceeds the allowed loss. It means the evaluation cannot rule that loss out. The acceptable margin is an evaluation criterion you justify; the command does not choose it or issue a pass/fail verdict.
+
+### Could We Say the Candidate Is Better? (Superiority)
+
+For a metric where higher is better, the whole delta interval must be above zero to support an improvement. For example, `[+0.2, +1.8] pp` would support that conclusion. The GPQA interval includes both negative and positive differences, so it establishes neither an improvement nor a decline. Including zero also does not establish equivalence.
+
+Use the interval for the **difference** to answer this question. Overlap between the baseline's and candidate's separate confidence intervals is not the corresponding comparison test. For a metric where lower is better, reverse the direction: an interval entirely below zero supports improvement.
+
+### What Does 95% Mean?
+
+Imagine repeating the entire eight-versus-eight evaluation many times under the same conditions. Under the method's assumptions, about 95 out of 100 intervals constructed this way would contain the fixed, unknown true difference. About 2.5 would lie entirely below it and 2.5 entirely above it.
+
+This is a statement about the method over repeated evaluations. It does not assign a 95% probability to the true difference lying inside this particular interval.
+
+### Connection to Statistical Testing
+
+Using the lower end of the two-sided 95% CI in this example for either decision above corresponds to a **one-sided test at the 2.5% significance level**. If the true difference were exactly the -2 pp acceptable-loss cutoff, about 2.5% of repeated evaluations would incorrectly place the lower bound above -2 pp. At a true difference of zero, about 2.5% would incorrectly place it above zero and support improvement. These rates change when you select a different confidence level.
+
+These are long-run false-positive rates at the specified cutoff, not the probability that this particular candidate fails a criterion. They rely on the Welch method's assumptions: repeat scores are independent within each run, and the baseline and candidate repeat sets are independent of each other. The t approximation must also be appropriate for the repeat-score distributions, especially with few repeats; approximately normal repeat scores support that approximation. The interval describes variation from rerunning the evaluated task set; it does not account for sampling a new set of questions. If those assumptions fail, the actual error rates can differ.
+
+<Cards>
+
+<Card title="Aggregate Metrics" href="/main/evaluation/aggregate-metrics">
+Understand per-repeat scores, custom metrics, and the aggregate files used for comparison.
+</Card>
+
+<Card title="Diagnose Results" href="/main/evaluation/diagnose-results">
+Investigate changed tasks and the causes behind score differences.
+</Card>
+
+</Cards>

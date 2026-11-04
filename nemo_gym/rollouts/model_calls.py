@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.core.episode import maybe_rollout_id_from_run_body
-from nemo_gym.failure_transport import FailureReportRow, StreamFailureReportReader
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_transport import FailureReportRow, StreamFailureReportReader
 from nemo_gym.models.model_call_capture import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
 from nemo_gym.trajectory.model_call_record import (

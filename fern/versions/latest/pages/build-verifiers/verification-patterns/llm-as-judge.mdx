@@ -359,7 +359,7 @@ Judge-only recovery requires a supported reverification path. On a manifest-back
 Custom handlers must catch both forms. This replaces catching only `JudgeError` around judge calls; that exception remains supported for parser-declared failures. The tuple also includes other Gym failures, so preserve the selector and re-raise unrelated events:
 
 ```python
-from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
+from nemo_gym.verification import JUDGE_FAILURES, is_judge_failure
 
 try:
     judge_response = await call_judge(...)

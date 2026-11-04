@@ -16,8 +16,8 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    RequestFailureLog,
 )
-from nemo_gym.failure_transport import RequestFailureLog
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation
 from resources_servers.bird_sql.app import (
