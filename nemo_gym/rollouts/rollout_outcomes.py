@@ -8,9 +8,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.core.episode_types import EpisodeFailure
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_kinds import AGENT_REQUEST_FAILED, ENVIRONMENT_SERVER_FAILED
+from nemo_gym.core.failure_records import EpisodeFailure
 
 
 class RolloutFailureRecord(BaseModel):

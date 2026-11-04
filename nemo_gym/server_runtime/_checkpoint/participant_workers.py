@@ -65,7 +65,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
     PARSED_JSON_CONTEXT,
     CheckpointParticipant,

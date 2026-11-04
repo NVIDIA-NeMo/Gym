@@ -2156,7 +2156,7 @@ def test_mcqa_trial_operations_with_unsupported_provenance_are_unproven_not_rais
     ],
 )
 def test_collector_projection_preserves_verification_stop_without_regenerating(tmp_path, case):
-    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
     from nemo_gym.core.failure_transport import FailureReportRow
     from nemo_gym.core.typed_exceptions import NgFailureEvent
     from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row, _collection_failure_report
