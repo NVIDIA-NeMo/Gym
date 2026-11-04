@@ -257,8 +257,8 @@ def test_native_config_reuses_english_components_and_preserves_generation_defaul
     assert indic.get("num_repeats", 1) == 1 and indic.num_repeats_add_seed is True
     assert not indic.get("responses_create_params")
     policy = indic.policy_model.responses_api_models.vllm_model
-    assert policy.chat_template_kwargs is None
-    assert policy.sampling_overrides is None
+    assert policy.get("chat_template_kwargs") is None
+    assert policy.get("sampling_overrides") is None
 
 
 def _resolve_cli_config(flags: list[str]) -> dict:
@@ -312,7 +312,7 @@ def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict],
 
 
 def _collect_rows(config: dict, source_rows: list[dict], tmp_path: Path) -> list[dict]:
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     prepared = tmp_path / "prepared.jsonl"
     prepared.write_text("".join(json.dumps(row) + "\n" for row in source_rows))
