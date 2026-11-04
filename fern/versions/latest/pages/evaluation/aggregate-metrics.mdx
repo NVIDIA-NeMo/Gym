@@ -186,7 +186,7 @@ Selects headline numbers from full-run `agent_metrics`. Default returns all `mea
 ### Example: pass@k
 
 ```python
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -272,6 +272,10 @@ Given 3 tasks with 4 rollouts each (task 0: all correct, task 1: all wrong, task
 
 <Card title="Benchmarks" href="/evaluation/benchmarks">
 How to choose a benchmark, what the categories cover, and how to interpret results.
+</Card>
+
+<Card title="Compare Results" href="/main/evaluation/compare-results">
+Compare baseline and candidate metrics and interpret confidence intervals for their difference.
 </Card>
 
 <Card title="Diagnose Results" href="/evaluation/diagnose-results">

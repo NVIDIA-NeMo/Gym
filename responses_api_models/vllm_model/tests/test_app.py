@@ -28,14 +28,18 @@ from aiohttp import ClientResponseError, RequestInfo
 from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.server_runtime.base_server
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI, PermanentEndpointError, ServerClient, raise_for_status
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    FailureBoundary,
+    FailureHeader,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -64,22 +68,22 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    NgFailureEvent,
     rollout_context,
 )
-from nemo_gym.models import (
-    CaptureAdmission,
+from nemo_gym.models import PolicyModelParticipant, VLLMWorkerCaptureHandler, generation_cut_requester
+from nemo_gym.models.token_capture import (
     CaptureContext,
     InMemoryLineageStore,
     ParentResolutionStatus,
-    PolicyModelParticipant,
     TokenCaptureStore,
-    VLLMWorkerCaptureHandler,
-    generation_cut_requester,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
+from nemo_gym.models.token_capture.staging import CaptureAdmission
+from nemo_gym.rollouts import is_terminal_failure
+from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row
 from nemo_gym.server_runtime import (
     CheckpointRequest,
     GenerationCutInventory,
@@ -957,6 +961,14 @@ class TestApp:
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
         error.response_content = error_content
+        model = NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="HTTP 400 from the model",
+            operation="model_request",
+            http_status=400,
+        )
+        error.__cause__ = model
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=error)
         mock_client.create_completion = AsyncMock(side_effect=error)
@@ -984,8 +996,12 @@ class TestApp:
                     "code": expected_code,
                 }
             }
+            # The refusal ends the request: the reply names the model failure that caused it.
+            report = FailureHeader.decode(response.headers)
+            assert report is not None and report.failure_id == model.event_id
         else:
             assert response.status_code == 200
+            assert FailureHeader.decode(response.headers) is None
             if responses_api:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
                 assert response.json()["usage"]["input_tokens"] == 0
@@ -1091,7 +1107,7 @@ class TestApp:
         """Send one captured request through the real dispatch, which registers the call intent."""
         app = server.setup_webserver()
         server.setup_exception_middleware(app)
-        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        token = set_token_sink(CaptureContext(capture_key="r0", model_call_id="mc-1", token_sink=store))
         try:
             return TestClient(app).post(path, json=body)
         finally:
@@ -1454,7 +1470,7 @@ class TestApp:
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
         context = CaptureContext(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c2",
             token_sink=None,
             external_staging=True,
@@ -1549,7 +1565,7 @@ class TestApp:
         request.headers = {}
         lineage_store = InMemoryLineageStore()
         context = CaptureContext(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             token_sink=None,
             lineage_store=lineage_store,
@@ -2756,6 +2772,66 @@ class TestApp:
         assert response_2_2.status_code == 200
         data = response_2_2.json()
         assert data["output"][0]["content"][0]["text"] == routed_output_2
+
+    @mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+    @mark.parametrize("format_type", ["json_schema", "json_object"])
+    def test_structured_responses_preserve_literal_tags_and_judge_schema(
+        self, monkeypatch, reasoning_field, format_type
+    ):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        verdict = {"coverage_outcome": "fulfilled", "justification": "Literal <think>text</think> stays"}
+        final = json.dumps(verdict)
+        upstream = AsyncMock(
+            return_value={
+                "id": "judge",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": final,
+                            reasoning_field: "Check the claim",
+                        },
+                    }
+                ],
+            }
+        )
+        server._clients = [MagicMock(create_chat_completion=upstream)]
+        schema = {
+            "type": "object",
+            "properties": {"coverage_outcome": {"type": "string"}, "justification": {"type": "string"}},
+            "required": ["coverage_outcome", "justification"],
+            "additionalProperties": False,
+        }
+        format_config = {"type": format_type}
+        if format_type == "json_schema":
+            format_config.update(name="verdict", schema=schema, strict=True)
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "input": [{"role": "user", "content": "Judge this claim"}],
+                    "text": {"format": format_config},
+                    "temperature": 0,
+                    "max_output_tokens": 2048,
+                },
+            )
+        assert response.status_code == 200
+        output = response.json()["output"]
+        assert [item["type"] for item in output] == ["reasoning", "message"]
+        assert output[0]["summary"][0]["text"] == "Check the claim"
+        assert output[1]["content"][0]["text"] == final
+        sent = upstream.await_args.kwargs
+        expected = {"type": format_type}
+        if format_type == "json_schema":
+            expected["json_schema"] = {"name": "verdict", "schema": schema, "strict": True}
+        assert sent["response_format"] == expected
+        assert sent["temperature"] == 0 and sent["max_tokens"] == 2048
 
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -4689,6 +4765,70 @@ class TestVLLMConverter:
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
 
+    def test_benchmark_extra_body_survives_model_type_config_and_reaches_vllm(self, tmp_path) -> None:
+        # `gym eval run --benchmark <b> --model-type vllm_model` merges the vllm_model config after the benchmark
+        # config; the per-request budget and template kwargs a benchmark sets must still reach the engine.
+        benchmark_settings = {
+            "extra_body": {"thinking_token_budget": 17408},
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        benchmark_config = tmp_path / "config.yaml"
+        benchmark_config.write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": benchmark_settings}}})
+        )
+        model_type_config = PARENT_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "config_paths": [str(benchmark_config), str(model_type_config)],
+                        "policy_base_url": "http://api.openai.com/v1",
+                        "policy_api_key": "dummy_key",  # pragma: allowlist secret
+                        "policy_model_name": "dummy_model",
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+        block = OmegaConf.to_container(resolved["policy_model"]["responses_api_models"]["vllm_model"], resolve=True)
+        config = VLLMModelConfig.model_validate({"name": "policy_model", **block})  # the parser assigns host/port
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="response", tool_calls=[]),
+                )
+            ],
+        )
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")]
+        )
+        response = TestClient(app).post("/v1/responses", json=request.model_dump(exclude_unset=True, mode="json"))
+
+        assert response.status_code == 200
+        assert captured_kwargs["thinking_token_budget"] == 17408
+        assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": True}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Assistant reasoning history preprocessing
@@ -6289,7 +6429,7 @@ class TestTopLogprobsHandling:
             model._external_capture_handler = VLLMWorkerCaptureHandler()
             token = set_token_sink(
                 CaptureContext(
-                    rollout_id="r1",
+                    capture_key="r1",
                     model_call_id="c1",
                     token_sink=None,
                     external_staging=True,
@@ -6320,7 +6460,7 @@ class TestTopLogprobsHandling:
             body.update(fields)
         token = set_token_sink(
             CaptureContext(
-                rollout_id="r1",
+                capture_key="r1",
                 model_call_id="c1",
                 token_sink=None,
                 external_staging=True,
@@ -7069,7 +7209,7 @@ async def test_generation_cut_reaches_each_owning_backend(
         ticket = participant.gate.enter(f"rollout-{index}")
         ticket.backend = client.base_url
         ticket.capture = CaptureContext(
-            rollout_id=f"rollout-{index}", model_call_id=f"call-{index}", token_sink=None, request_items=[]
+            capture_key=f"rollout-{index}", model_call_id=f"call-{index}", token_sink=None, request_items=[]
         )
     routes: dict[str, list[str]] = {}
 
@@ -7143,7 +7283,7 @@ class TestPrefixSupply:
     @staticmethod
     def _armed(rollout_id: str, tmp_path) -> CaptureContext:
         return CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id="call-x",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7319,7 +7459,7 @@ class TestPrefixSupplyAccounting:
         lineage_index().for_rollout("acct-0").record("parent", turn, [1, 2, 3], "d")
 
         ctx = CaptureContext(
-            rollout_id="acct-0",
+            capture_key="acct-0",
             model_call_id="c",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7343,7 +7483,7 @@ class TestPrefixSupplyAccounting:
         lineage_index().for_rollout("acct-1").record("parent", [{"role": "assistant", "content": "a"}], [1, 2], "d")
 
         ctx = CaptureContext(
-            rollout_id="acct-1",
+            capture_key="acct-1",
             model_call_id="c",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7431,7 +7571,7 @@ class TestPrefixSupplyReachesTokenize:
 
         sink = set_token_sink(
             CaptureContext(
-                rollout_id="tok-0",
+                capture_key="tok-0",
                 model_call_id="call-y",
                 token_sink=TokenCaptureStore(tmp_path),
                 lineage_store=_TEST_LINEAGE,
@@ -7490,7 +7630,7 @@ class TestPrefixSupplyReachesTokenize:
         model._clients = [mock_client]
 
         context = CaptureContext(
-            rollout_id=rollout,
+            capture_key=rollout,
             model_call_id="call-v",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7571,7 +7711,7 @@ class TestPrefixSupplyReachesTokenize:
 
         sink = set_token_sink(
             CaptureContext(
-                rollout_id="tok-unknown",
+                capture_key="tok-unknown",
                 model_call_id="call-z",
                 token_sink=TokenCaptureStore(tmp_path),
                 lineage_store=_TEST_LINEAGE,
@@ -7669,7 +7809,7 @@ class TestGenerationProofAcceptsBundleShape:
         model._clients = [mock_client]
 
         context = CaptureContext(
-            rollout_id="bundle-0",
+            capture_key="bundle-0",
             model_call_id="call-b",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7690,7 +7830,7 @@ class TestGenerationProofAcceptsBundleShape:
     def _verify(self, tmp_path, response: dict) -> CaptureContext:
         model = TestPrefixSupplyReachesTokenize._model()
         context = CaptureContext(
-            rollout_id="bundle-1",
+            capture_key="bundle-1",
             model_call_id="call-b",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7831,7 +7971,7 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
         assert model._preserve_envelope_id() is False
 
         captured = CaptureContext(
-            rollout_id="env-0",
+            capture_key="env-0",
             model_call_id="call-a",
             token_sink=None,
             lineage_store=_TEST_LINEAGE,
@@ -7844,7 +7984,7 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
             reset_token_sink(token)
 
         local = CaptureContext(
-            rollout_id="env-0",
+            capture_key="env-0",
             model_call_id="call-b",
             token_sink=None,
             lineage_store=_TEST_LINEAGE,
@@ -8440,3 +8580,23 @@ def test_streaming_sanitize_applies_the_configured_custom_tool_strategy() -> Non
     passthrough = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
     cleaned, _ = passthrough._sanitize_streaming_responses_body(body())
     assert cleaned["tools"] == []
+
+
+@mark.parametrize("request_timeout_seconds", [None, 30.0])
+def test_request_timeout_reaches_every_engine_client(request_timeout_seconds) -> None:
+    """Unset keeps the engine request unbounded; a value bounds each HTTP attempt of every client."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8081,
+        base_url=["http://engine-a/v1", "http://engine-b/v1"],
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        entrypoint="",
+        name="vllm_model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        **({} if request_timeout_seconds is None else {"request_timeout_seconds": request_timeout_seconds}),
+    )
+    server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    assert [client.request_timeout_seconds for client in server._clients] == [request_timeout_seconds] * 2

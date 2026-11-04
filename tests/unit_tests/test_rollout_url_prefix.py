@@ -27,7 +27,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from requests.adapters import HTTPAdapter
 
-from nemo_gym.core.episode import current_rollout_id, rollout_context
+from nemo_gym.core.episode_context import current_rollout_id, rollout_context
 from nemo_gym.server_runtime.base_server import (
     async_rollout_prefix_hook,
     rollout_prefix_hook,

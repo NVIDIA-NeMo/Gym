@@ -30,13 +30,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from openai.types.shared import ReasoningEffort
-from pydantic import Field, PrivateAttr, TypeAdapter, ValidationError, model_validator
+from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
-from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI
+from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.core import (
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
+    FailureHeader,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -45,38 +46,38 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
+    failure_report_for,
 )
 from nemo_gym.models import (
-    CAPTURE_REFUSAL_HEADER,
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
-    CaptureAdmissionError,
-    CaptureContext,
-    CaptureInputError,
     ExternalCaptureHandler,
     SimpleResponsesAPIModel,
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
-    capture_engine_refusal,
     context_overflow_error_fields,
-    current_capture_context,
     is_propagated_refusal,
     make_external_capture_handler,
     note_generation_backend,
     note_generation_request,
+    split_responses_input_output_items,  # noqa: F401
+    start_model_execution,
+    validate_framework_context_options,
+)
+from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
+from nemo_gym.models.token_capture import (
+    CAPTURE_REFUSAL_HEADER,
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    CaptureAdmissionError,
+    CaptureContext,
+    CaptureInputError,
+    capture_engine_refusal,
+    current_capture_context,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
-    split_responses_input_output_items,  # noqa: F401
-    start_model_execution,
     token_capture_config,
-    validate_framework_context_options,
-)
-from nemo_gym.models.base_responses_api_model import (
-    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
-    _request_messages,
-    _validate_responses_params,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
@@ -380,6 +381,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     request_prompt_and_generation_token_ids: bool = False
     propagate_context_overflow_errors: bool = False
 
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    max_num_tries: Optional[Literal[1]] = Field(
+        default=None,
+        description="Set to 1 when the caller owns retries, disabling both transport and HTTP-status retries.",
+    )
+
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
     # Which key(s) carry reasoning on an outgoing assistant message. "both" keeps
@@ -497,6 +504,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # connection forever, so a dead endpoint never reaches the failure count that moves
     # sessions off it.
     endpoint_connection_retries: Optional[int] = 8
+
+    # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
+    # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
+    request_timeout_seconds: Optional[PositiveFloat] = None
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
@@ -668,7 +679,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ):
             refuse = getattr(context.lineage_store, "refuse_call", None)
             if refuse is not None:
-                await refuse(context.rollout_id, context.model_call_id)
+                await refuse(context.capture_key, context.model_call_id)
                 context.refused = True
         if source_history or self.config.propagate_context_overflow_errors:
             code = _mark_propagated_overflow(error)
@@ -697,6 +708,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                             }
                         },
                         status_code=error.status,
+                        headers=FailureHeader.encode(failure_report_for(error)),
                     )
                 raise
 
@@ -724,7 +736,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise HTTPException(status_code=422, detail="measurement requires explicit non-streaming history")
         client = self._resolve_client(request)
         context = CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id="measurement",
             token_sink=None,
             lineage_store=self._capture_lineage,
@@ -792,8 +804,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
                     else None
                 ),
+                request_timeout_seconds=self.config.request_timeout_seconds,
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
+                max_http_attempts=self.config.max_http_attempts,
+                max_num_tries=self.config.max_num_tries,
             )
             for base_url in self.config.base_url
         ]
@@ -2228,6 +2243,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
                 max_rate_limit_wait_seconds=0,
+                max_http_attempts=self.config.max_http_attempts,
+                max_num_tries=self.config.max_num_tries,
+                request_timeout_seconds=self.config.request_timeout_seconds,
             )
         ]
         # Every session re-resolves onto the new host.
