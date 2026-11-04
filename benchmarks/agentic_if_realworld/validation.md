@@ -263,15 +263,68 @@ different request identities and must retain their provenance.
   No real benchmark examples were sent by these checks. Synthetic plumbing
   evidence does not establish agreement with Astra or a benchmark accuracy gain.
 
-### Reviewer requirement retained
+### Interim default restoration
 
-The shipped default is restored to `quotes`; `evidence_ids_v1` remains opt-in.
+At `f35546de`, the shipped default was restored to `quotes`; `evidence_ids_v1` remained opt-in.
 [Yu's request](https://github.com/NVIDIA-NeMo/Gym/pull/5013#discussion_r4407413874)
 requires bounded real-task evidence through the judge request being shipped.
 The earlier 50-task run validates the quote transport, not the new evidence-ID
-request. Before promoting evidence IDs, record a bounded adaptive run with the
-approved policy and judge, including revision, cohort, scored/pass/fail/masked
-counts, mask reasons and judge HTTP status counts, and request reviewer confirmation.
+request. Promotion was deferred pending a bounded adaptive run with the approved
+policy and judge, including revision, cohort, scored/pass/fail/masked counts, mask
+reasons and judge HTTP status counts. The new evidence below is available for reviewer confirmation.
 Earlier validation receipts remain bound to their original revisions and modes.
 The default-restoration check passes all 258 component/model tests. No model
 calls or real benchmark rows were needed to restore this reviewed transport.
+
+## November 4 bounded evidence-ID validation
+
+The benchmark PIC requested validation before enabling `evidence_ids_v1` by default.
+`gym eval run --benchmark agentic_if_realworld --split benchmark --limit 50
+--num-repeats 1 --concurrency 4` completed at
+`f35546de22be354e757a5781a950967c81885794`, explicitly selecting that transport.
+The default-selection change uses the same runtime implementation and effective
+judge request. The policy was `nvidia/zai-org/glm-5.3` with maximum effort; the
+judge was `openai/openai/gpt-6.1-sol` with medium effort, both through the approved
+Inference API. The profile was `adaptive_first_complete_max_effort_v1`.
+
+The cohort was the first 50 task IDs in frozen deterministic preparation order,
+selected without inspecting outcomes. Full inputs, criteria, split/exposure roles
+and frozen strict-v2.2 policy remained unchanged. No rubric tuning or individual
+outcome inspection was performed.
+
+| View | Scored / full cohort | Pass | Fail | Attempted masked | Unattempted |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Original failure focused | 47 / 912 | 33 | 14 | 0 | 865 |
+| Supplemental active single turn | 3 / 57 | 0 | 3 | 0 | 54 |
+| Composite | 50 / 969 | 33 | 17 | 0 | 919 |
+
+- Judge: **50 HTTP 200**, one delivered attempt per task; **zero validation
+  failures, HTTP errors, retries or unresolved outcomes**. Mask reasons are empty.
+- Policy: **244 physical HTTP attempts: 50 HTTP 200 and 194 HTTP 429**.
+  There were 98 logical delivery receipts and 146 transport retries within them.
+  The schedule entered phases 1/2/3/4/5 for 50/31/13/4/0 tasks respectively.
+  Capacity errors recovered under the existing bounded protocol; all 50 first
+  complete answers were retained, including failing answers.
+- Independent offline replay verified exact instruction/response evidence,
+  request/raw-body hashes, unchanged canonical validation, first-complete
+  selection, the two-delivery judge budget and agreement with published grades.
+- Completed resume made **zero new model calls**. All **940 immutable receipt,
+  capture, configuration and materialized-input files** retained their hashes;
+  saved answers and per-task results were unchanged.
+- Preparation and environment validation passed. Health reported **50 healthy,
+  zero unhealthy or unobserved**; P0 evidence was fulfilled before and after resume.
+- Judge usage reported 2,610,026 prompt tokens and 50,806 completion tokens
+  (2,660,832 total). This is usage accounting, not a controlled cost comparison.
+
+These checks support enabling evidence IDs in the shipped public profile and its
+EFB bindings. Review of the updated default, hosted CI, canonical merge/pin and
+platform certification remain separate gates. The older internal Gym alternative
+was not used in this run and is not validated by these results.
+
+Full-cohort coverage is **50/969 (5.16%)**; `complete_accuracy` remains null.
+Subtype denominators overlap and are preserved in the private aggregate report.
+The equal overall pass/fail counts of an earlier quote run are not evidence of
+per-task agreement: this run generated new candidate answers. This check does not
+establish better judgment accuracy, causal reduction in unknowns, total cost
+savings or a new full-benchmark reference score. Real traces and receipts remain
+private; only aggregate evidence is published here.
