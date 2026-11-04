@@ -157,7 +157,15 @@ def test_local_launch_uses_the_same_client_settings(monkeypatch, tmp_path):
     assert (captured["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], captured["env"]["API_TIMEOUT_MS"]) == ("64000", "60000")
 
 
-@pytest.mark.parametrize("name", ["ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+    ],
+)
 def test_extra_env_cannot_replace_what_the_agent_sets(name):
     with pytest.raises(ValidationError, match=f"extra_env cannot set {name}"):
         app.ClaudeCodeAgentConfig(name="claude", host="h", port=1, entrypoint="app.py", extra_env={name: "x"})
