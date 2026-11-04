@@ -94,8 +94,15 @@ from responses_api_agents.opencode_agent.artifacts import (
 from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
-    OBSERVABILITY_PATCH,
+    ASSISTANT_MESSAGE_PLUGIN_FILE,
+    ASSISTANT_MESSAGE_PLUGIN_SOURCE,
     OPENCODE_VERSION,
+    REQUIRED_MCP_PLUGIN_FILE,
+    REQUIRED_MCP_PLUGIN_SOURCE,
+    RUNTIME_INSTALLER_FILE,
+    RUNTIME_INSTALLER_SOURCE,
+    TASK_ENVIRONMENT_PLUGIN_FILE,
+    TASK_ENVIRONMENT_PLUGIN_SOURCE,
     apply_observability_patch,
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
@@ -828,12 +835,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
-            installer = "install_opencode_runtime.sh"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+            installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
+            await sandbox.upload(RUNTIME_INSTALLER_SOURCE, installer)
             command = "bash " + " ".join(
                 quote(arg)
                 for arg in (
-                    f"{directory}/{installer}",
+                    installer,
                     runtime,
                     self.config.opencode_version,
                     self.config.sandbox_executable_path or "",
@@ -844,9 +851,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
-            await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
+            await sandbox.upload(TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{directory}/{TASK_ENVIRONMENT_PLUGIN_FILE}")
             if self._model_call_capture_enabled():
-                await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
+                await sandbox.upload(ASSISTANT_MESSAGE_PLUGIN_SOURCE, f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}")
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -1273,7 +1280,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             # Staging spends the activation's budget; an expiry here is a pre-launch timeout.
             async with asyncio.timeout_at(deadline):
                 await state.session.sandbox.upload(
-                    Path(__file__).with_name("required_mcp.mjs"), f"{directory}/required_mcp.mjs"
+                    REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}"
                 )
                 await upload_text(
                     state.session.sandbox, path=f"{directory}/mcp-grants.json", text=json.dumps(mcp_grants)
@@ -1287,10 +1294,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             else:
                 config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
         if self._model_call_capture_enabled():
-            apply_observability_patch(config, plugin_path=Path(state.persistent_directory) / OBSERVABILITY_PATCH.name)
-        config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
+            apply_observability_patch(
+                config, plugin_path=Path(state.persistent_directory) / ASSISTANT_MESSAGE_PLUGIN_FILE
+            )
+        config.setdefault("plugin", []).append(
+            (Path(state.session.session_dir) / TASK_ENVIRONMENT_PLUGIN_FILE).as_uri()
+        )
         if mcp_servers:
-            config["plugin"].append((Path(state.session.session_dir) / "required_mcp.mjs").as_uri())
+            config["plugin"].append((Path(state.session.session_dir) / REQUIRED_MCP_PLUGIN_FILE).as_uri())
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.system_prompt_mode == "replace":
             command.extend(["--agent", "build"])
