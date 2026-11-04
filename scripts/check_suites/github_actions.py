@@ -14,7 +14,13 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict, get_args
+
+
+CompareMode = Literal["branch", "commit"]
+COMPARE_BRANCH: CompareMode = "branch"
+COMPARE_COMMIT: CompareMode = "commit"
+COMPARE_MODES = get_args(CompareMode)
 
 
 def _merge_base(base: str, *, root: Path) -> str:
@@ -29,15 +35,20 @@ def _merge_base(base: str, *, root: Path) -> str:
     return output.strip()
 
 
-def changed_paths(base: str, *, root: Path, subject: str) -> list[str] | None:
-    """Compare the entire branch since its merge base, including deleted/renamed paths.
+def changed_paths(base: str, *, root: Path, subject: str, compare: CompareMode = COMPARE_BRANCH) -> list[str] | None:
+    """List the paths changed from `base` to HEAD, including deleted and renamed ones.
+
+    With `branch`, `base` is a branch and the whole branch since its merge base is compared, as for a PR. For a
+    stacked PR `base` is the parent branch it targets, so only that layer is covered. With `commit`, `base` is a
+    commit, such as the one before a push, and is compared directly with HEAD, which stays correct when history is
+    rewritten.
 
     Returns None when there is no base or the diff is unavailable; the caller then runs all `subject`.
     """
     if not base:
         return None
     try:
-        ancestor = _merge_base(base, root=root)
+        ancestor = _merge_base(base, root=root) if compare == COMPARE_BRANCH else base
         paths = subprocess.check_output(
             ["git", "diff", "--name-only", "--no-renames", "-z", ancestor, "HEAD", "--"], cwd=root
         ).decode("utf-8", errors="replace")

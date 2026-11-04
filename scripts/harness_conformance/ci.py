@@ -10,7 +10,14 @@ import os
 import subprocess
 from pathlib import Path
 
-from scripts.check_suites.github_actions import annotation_data, changed_paths, write_ci_result
+from scripts.check_suites.github_actions import (
+    COMPARE_BRANCH,
+    COMPARE_MODES,
+    CompareMode,
+    annotation_data,
+    changed_paths,
+    write_ci_result,
+)
 
 from .feedback import failure_details, reproduction
 from .registry import HARNESSES
@@ -81,9 +88,9 @@ def select_harnesses(paths: list[str]) -> list[str]:
     return [name for name in HARNESSES if name in selected]
 
 
-def changed_harnesses(base: str, *, root: Path = ROOT) -> list[str]:
-    """Compare the entire branch since its merge base, including deleted/renamed paths."""
-    paths = changed_paths(base, root=root, subject="registered harnesses")
+def changed_harnesses(base: str, *, root: Path = ROOT, compare: CompareMode = COMPARE_BRANCH) -> list[str]:
+    """Select the harnesses affected by the paths changed from `base` (see `changed_paths`)."""
+    paths = changed_paths(base, root=root, subject="registered harnesses", compare=compare)
     return list(HARNESSES) if paths is None else select_harnesses(paths)
 
 
@@ -155,6 +162,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     select = commands.add_parser("select")
     select.add_argument("--base", default="")
+    select.add_argument("--compare", choices=COMPARE_MODES, default=COMPARE_BRANCH)
     install = commands.add_parser("install")
     install.add_argument("--harness", choices=HARNESSES, required=True)
     publish = commands.add_parser("report")
@@ -163,7 +171,7 @@ def main() -> None:
     publish.add_argument("--exit-code", type=int, required=True)
     args = parser.parse_args()
     if args.command == "select":
-        harnesses = changed_harnesses(args.base)
+        harnesses = changed_harnesses(args.base, compare=args.compare)
         print(f"Selected harnesses: {harnesses}")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as handle:
             handle.write(f"harnesses={json.dumps(harnesses)}\n")
