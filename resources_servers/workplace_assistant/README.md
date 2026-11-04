@@ -35,7 +35,7 @@ Closed and verified IDs cannot be seeded again for `session_close_retry_window_s
 
 A tool call after verify, close, or session loss gets 404 with `failure_kind: session_lost`. Verify retries are scored only while the server remembers the completed session and it has not been explicitly closed. Never-seeded, closed, restarted, or expired sessions return a masked sample (`reward: 0`, `mask_sample: true`).
 
-The `/run` seed remains compatible. Both `configs/` and `environments/workplace_assistant/config.yaml` still front `simple_agent` with the `legacy_agent` relay. That caller never closes the session, so verify releases its databases and retains only the bounded retry record. A new `/run` reusing a verified legacy cookie receives a fresh session ID; retries with the previous cookie remain valid within their window. To switch the configs to `single_agent_turn_legacy`:
+The `/run` seed remains compatible. Both `configs/` and `environments/workplace_assistant/config.yaml` still front `simple_agent` with the `legacy_agent` relay. That caller never closes the session, so verify releases its databases and retains only the bounded retry record. A new `/run` reusing a verified legacy cookie keeps its session ID and replaces the previous run's databases and retry record. To switch the configs to `single_agent_turn_legacy`:
 
 ```bash
 python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent resources_servers/workplace_assistant/configs/ environments/workplace_assistant/config.yaml

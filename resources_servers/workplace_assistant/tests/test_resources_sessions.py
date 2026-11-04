@@ -365,20 +365,21 @@ def test_reverify_without_a_session_is_explicitly_unsupported() -> None:
     assert client.post("/verify", json=verify_json(SEND)).json()["mask_sample"] is True
 
 
-def test_new_legacy_run_rotates_cookie_without_invalidating_previous_verify() -> None:
+def test_next_legacy_run_keeps_its_cookie_and_replaces_the_finished_run() -> None:
     server = make_server()
-    webserver = server.setup_webserver()
-    client = TestClient(webserver)
+    client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json={}).status_code == 200
-    old_cookies = dict(client.cookies)
-    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
-    assert client.post("/seed_session", json={}).status_code == 200
-    assert dict(client.cookies) != old_cookies
+    [session_id] = server.session_id_to_tool_env
+    cookies = dict(client.cookies)
     assert client.post("/email_send_email", json=SEND).status_code == 200
-    retry = TestClient(webserver)
-    retry.cookies.update(old_cookies)
-    assert retry.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
-    assert len(server.session_id_to_tool_env) == 1
+    assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
+    # The next /run on the same cookie keeps the ID and replaces the finished run, retry record included.
+    assert client.post("/seed_session", json={}).status_code == 200
+    assert list(server.session_id_to_tool_env) == [session_id] and dict(client.cookies) == cookies
+    assert session_id not in server._verified_sessions
+    emails = server.session_id_to_tool_env[session_id]["containers"]["email"]._emails
+    assert (emails["subject"] == "Session check").sum() == 0
+    assert client.post("/email_send_email", json=SEND).status_code == 200
     assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
     assert server.session_id_to_tool_env == {}
 

@@ -432,6 +432,10 @@ class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
         entry = self._records.get(resources_session_id)
         return None if entry is None else entry[1]
 
+    def forget(self, resources_session_id: str) -> None:
+        """Drop the session's record before its window ends, for a server that starts the same ID again."""
+        self._records.pop(resources_session_id, None)
+
     def __contains__(self, resources_session_id: object) -> bool:
         self._expire()
         return resources_session_id in self._records

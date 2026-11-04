@@ -15,7 +15,6 @@
 import asyncio
 import math
 from typing import Annotated, Any, ClassVar, Dict
-from uuid import uuid4
 
 import pandas as pd
 from fastapi import FastAPI, Request
@@ -187,12 +186,11 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
                 self._fence.raise_if_closed(session_id)
                 if session_id in self._session_episodes or self._verified_sessions.get(session_id) is not None:
                     raise ResourcesSessionConflictError("legacy seed cannot replace a typed session")
-                # A new /run may reuse the caller's cookie. Give it a fresh ID without invalidating retries of
-                # the previous verify. Build first, so a failed seed leaves the caller's cookie unchanged.
-                new_session_id = str(uuid4()) if session_id in self._verified_sessions else session_id
-                self.session_id_to_tool_env[new_session_id] = get_tools(_TOOLKITS)
-                self._restored_unbound_sessions.discard(new_session_id)
-                request.session[SESSION_ID_KEY] = new_session_id
+                # A new /run may reuse the caller's cookie: it keeps the ID and replaces the previous run's tables
+                # and verify retry record. Build first, so a failed seed leaves the previous run's state in place.
+                self.session_id_to_tool_env[session_id] = get_tools(_TOOLKITS)
+                self._verified_sessions.forget(session_id)
+                self._restored_unbound_sessions.discard(session_id)
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
