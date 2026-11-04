@@ -4,7 +4,7 @@ from typing import get_args
 
 import pytest
 
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.vision2code.app import VERIFIER_FIXTURE
 from resources_servers.vision2code.evaluation import RubricName
 from resources_servers.vision2code.generic_rubric import GENERIC_RUBRIC

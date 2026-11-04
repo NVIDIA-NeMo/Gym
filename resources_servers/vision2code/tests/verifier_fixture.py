@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 from resources_servers.vision2code.evaluation import RubricName, aggregate_rating, rating_to_reward
 
 

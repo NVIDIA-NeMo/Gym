@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/image2code/vision2code (Apache-2.0).
+# Source: vision2code/generation/prompts.py; base revision 000f2e162dd62fac5637c718e018d7123b3aff1e.
+# Modified source SHA-256: e90b11d4d738d79ec03aa6a4a63681a30d3e6e0215ab765ecb631a878f6bc95c (see NOTICE).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/image2code/vision2code (Apache-2.0).
+# Source: vision2code/evaluation/image_metrics.py; base revision 000f2e162dd62fac5637c718e018d7123b3aff1e.
+# Modified source SHA-256: 9d6b487e325d4ad7ad941140fddfe75948b7a60edf5c0c8e337bfc53771d6ebe (see NOTICE).
 """Foreground and edge similarity metrics with Blend A reward aggregation."""
 
 from __future__ import annotations

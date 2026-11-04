@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/image2code/vision2code (Apache-2.0).
+# Source: vision2code/evaluation/dataset_rubrics.py; base revision 000f2e162dd62fac5637c718e018d7123b3aff1e.
+# Modified source SHA-256: b81999419c92ef403fce7905f01ccd2a7a47eebbc6960b67c0f8cfab1e2595b8 (see NOTICE).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

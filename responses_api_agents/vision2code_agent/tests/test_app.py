@@ -3,15 +3,25 @@
 """Exercise revisions through SimpleAgent's generation and verification flow."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    FailureBoundary,
+    FailureHeader,
+    NeMoGymResponse,
+    NgFailureEvent,
+    failure_report_for,
+)
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentRunRequest
 from responses_api_agents.vision2code_agent.app import Vision2CodeAgent, Vision2CodeAgentConfig
 
@@ -67,7 +77,7 @@ def harness():
         model_inputs = []
         verified = []
 
-        async def post(*, server_name, url_path, json, cookies):
+        async def post(*, server_name, url_path, json, cookies, headers=None):
             if url_path == "/seed_session":
                 return http_response({})
             if server_name == agent.config.name:
@@ -312,3 +322,42 @@ async def test_masked_failure_stops_and_preserves_status(harness, failure_kind):
     assert result.failure_kind == result.model_extra["_ng_failure_class"] == failure_kind
     assert result.attempts[-1]["feedback"] is None
     assert result.response.usage.total_tokens == 30
+
+
+@pytest.mark.parametrize("failed_pass", [1, 2])
+async def test_policy_timeout_preserves_failure_routing(harness, failed_pass):
+    agent, request, body, inputs, verified = harness(num_passes=3)
+    original_post = agent.server_client.post.side_effect
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.AGENT,
+        failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
+        failure_reason="Policy request exhausted its timeout retries",
+        operation="agent.policy_request",
+    )
+    report = failure_report_for(failure)
+    request_info = SimpleNamespace(url="http://policy", method="POST", headers={}, real_url="http://policy")
+    error = ClientResponseError(request_info, (), status=500, headers=FailureHeader.encode(report))
+    failed = MagicMock(status=500, ok=False, cookies={})
+    failed.content.read = AsyncMock(return_value=b"Policy timeout")
+    failed.raise_for_status = MagicMock(side_effect=error)
+
+    async def post(**kwargs):
+        if kwargs["server_name"] == agent.config.name and len(verified) == failed_pass - 1:
+            return failed
+        return await original_post(**kwargs)
+
+    agent.server_client.post.side_effect = post
+    result = await agent.run(request, body)
+    assert isinstance(result, JSONResponse)
+    row = json.loads(result.body)
+    assert row["failure_kind"] == MODEL_POLICY_RESPONSE_TIMEOUT
+    assert row["_ng_failure_id"] == failure.event_id
+    assert "reward" not in row
+    assert len(inputs) == len(verified) == failed_pass - 1
+
+
+def test_run_route_registers_its_success_response_schema(harness):
+    agent, *_ = harness(num_passes=3)
+    schema = agent.setup_webserver().openapi()
+    response = schema["paths"]["/run"]["post"]["responses"]["200"]
+    assert response["content"]["application/json"]["schema"]["$ref"].endswith("/SimpleAgentVerifyResponse")

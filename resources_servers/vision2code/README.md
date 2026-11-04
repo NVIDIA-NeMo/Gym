@@ -52,8 +52,10 @@ python -m resources_servers.vision2code.prepare /data/manifest.jsonl /data/tasks
 Relative image paths resolve against the manifest directory. Preparation validates static
 PNG/JPEG/WebP/GIF images, embeds them in the policy input, and records their absolute paths,
 dimensions, and hashes in `verifier_metadata`. The resource server must still be able to read
-these files; changed references are rejected. A portable synthetic task is provided in
-[data/example.jsonl](data/example.jsonl).
+these files; changed references are rejected. Five portable synthetic tasks are provided in
+[data/example.jsonl](data/example.jsonl), with [real example rollouts](data/example_rollouts.jsonl)
+and [collection provenance](data/example-provenance.json). Local execution paths and timings
+are omitted from the committed rollout records.
 
 ## Renderer and evaluation
 
@@ -111,19 +113,34 @@ For reasoning endpoints, configure each model adapter's `uses_reasoning_parser` 
 its response format. The optional [Qwen config](configs/vision2code_qwen.yaml) uses
 `NVIDIA_API_KEY` and the same hosted model for both roles; use an independent judge for baselining.
 
-For NeMo RL, use `uv sync --frozen --extra dev` and keep per-server venvs on the base's
-Ray version, **2.56.1**. Before server setup, set `UV_CONSTRAINT` to a file containing
-`ray==2.56.1`; update reused venvs separately. RL trainer configuration is external to this environment.
+For NeMo RL, install the dependencies from this checkout's `uv.lock`; do not reuse a
+per-server environment pinned to an older Gym/Ray release. Ray is an optional extra on
+current main (`uv sync --frozen --extra dev --extra ray` when needed). RL trainer
+configuration is external to this environment.
 
 ## Multi-pass revisions
 
 The agent reuses `SimpleAgent` for model requests, verification, cookies, and rollout
-capture. Enable up to three generate-and-verify passes, including the initial attempt:
+capture. Set `n` to the maximum number of turns (generate-and-verify passes), including
+the initial attempt. For example, `n=3` permits two feedback-driven revisions:
 
 ```bash
+n=3
 gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
-  +vision2code_simple_agent.responses_api_agents.vision2code_agent.num_passes=3
+  +vision2code_simple_agent.responses_api_agents.vision2code_agent.num_passes="$n" \
+  +vision2code.resources_servers.vision2code.reward_power=2
+
+# In another shell, with the same environment activated:
+gym eval run --no-serve --agent vision2code_simple_agent \
+  --input /data/tasks.jsonl --output /results/vision2code/pass3-squared.jsonl \
+  --num-repeats 1 --temperature 0.7 --max-output-tokens 8192
 ```
+
+`num_passes` controls turns within one rollout; `--num-repeats` controls independent
+rollouts per task. Restart the servers after changing the turn budget or reward mode,
+and use a separate output path for each experiment. To combine multiple turns with
+Blend A, replace the `reward_power` override above with
+`+vision2code.resources_servers.vision2code.use_blended_reward=true`.
 
 Continue using `--agent vision2code_simple_agent` in `gym eval run`; the instance name
 is retained for compatibility.
@@ -146,7 +163,8 @@ original reference, instructions, previous responses, and feedback. The generate
 is not added to the policy conversation.
 
 The loop stops at exact reward `1.0`, the pass limit, or a masked infrastructure/judge
-failure. Early stopping uses the configured verifier reward, including reward shaping
+failure. Policy timeouts preserve `SimpleAgent`'s structured failure routing without
+starting another revision. Early stopping uses the configured verifier reward, including reward shaping
 or Blend A. Code errors, timeouts, and invalid images can be revised.
 
 The **last attempt** supplies the returned response, reward, rubric, and artifact paths,
@@ -245,6 +263,70 @@ gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
 gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
   +vision2code.resources_servers.vision2code.use_blended_reward=true
 ```
+
+## Test-mini results
+
+These are **historical results**, not a fresh baseline of this PR on current main.
+The local test-mini export contains 539 tasks across 15 dataset rubrics. The
+[score records](results/test-mini-qwen.csv) and [provenance](results/test-mini-provenance.json)
+record task IDs, reference hashes, masks, source-file hashes, and run settings without
+redistributing source images or credentials.
+
+### Gym Qwen single-turn and multi-turn runs
+
+Policy: `nvidia/qwen/qwen3.8-27b`; judge: `nvidia/qwen/qwen3.8-flash-next`.
+The October 21, 2026 runs used temperature 0, a 32,768 output-token budget per policy
+call, one rollout per task, and **linear reward during collection and early stopping**.
+Squared and Blend A columns rescore the same final attempts offline; they do not measure
+trajectories collected with those rewards. Means below weight each scored task equally.
+Code/render failures remain zero; masked judge failures are excluded.
+
+| Maximum turns | Scored / attempted | Masked | Linear | Squared (offline) | Blend A (offline) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 511 / 539 | 28 (5.2%) | 0.8438 | 0.7801 | 0.6918 |
+| 3 | 460 / 539 | 79 (14.7%) | 0.9258 | 0.8909 | 0.7483 |
+
+For the **446 task IDs scored in both runs**, the matched means are:
+
+| Metric | 1 turn | Up to 3 turns | Difference |
+| --- | --- | --- | --- |
+| Linear | 0.8530 | 0.9246 | +0.0716 |
+| Squared (offline) | 0.7943 | 0.8896 | +0.0953 |
+| Blend A (offline) | 0.7031 | 0.7482 | +0.0451 |
+
+The paired subset reduces the coverage mismatch but still excludes failed judging;
+it is not an unbiased full-test estimate or a significance claim. Multi-turn returns
+the last attempt, not the best attempt. Masked failures were `judge_failed` or
+`judge_unparseable`. These historical trajectories also predate the current category-only
+feedback format; rerun before attributing their gains to the current harness.
+
+### Historical upstream Qwen and Kimi results
+
+The upstream report also contains the following test-mini baselines. These are on the
+original **0–5 scale**, averaged equally across datasets, and are **not Gym results**.
+Each run contains 539 input rows; Qwen3.5-397B-A17B without reasoning has 538 rated
+tasks and one missing rating. The judge and generation settings are not fully captured here, so these numbers must not be ranked against the
+Gym table above. See the [upstream snapshot](results/test-mini-upstream.csv) and the
+exact source revision in [provenance](results/test-mini-provenance.json).
+
+| Upstream policy | Rated tasks | Original rubric rating (0–5) |
+| --- | --- | --- |
+| Qwen3.5-9B | 539 | 1.5970 |
+| Qwen3.5-397B-A17B | 538 | 2.4072 |
+| Qwen3.5-397B-A17B (reasoning) | 539 | 3.0013 |
+| Kimi K2.5 | 539 | 3.0648 |
+| Kimi K2.5 (reasoning) | 539 | 3.2930 |
+
+### What to run next
+
+Before claiming a comparable multi-model Gym baseline, run Qwen and Kimi through this
+harness on the same frozen 539-task manifest, with the same independent judge, prompts,
+renderer, temperature, and token budget. Compare `num_passes=1` and `3`, reporting both
+per-task and per-dataset means, render success, masks, and model/judge token usage.
+First resolve the judge parsing/rate-limit failures and rerun affected tasks with a
+predeclared retry policy. Add repeated rollouts and uncertainty estimates before claiming
+model rankings or reliable multi-turn gains. Collect a separate multi-turn Blend A run
+if comparing reward-dependent early stopping; offline rescoring alone cannot establish it.
 
 ## Failures and artifacts
 

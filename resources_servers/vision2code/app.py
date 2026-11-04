@@ -13,15 +13,15 @@ from pathlib import Path
 from PIL import Image
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.vision2code.evaluation import (
     aggregate_rating,
     build_rater_user_content,

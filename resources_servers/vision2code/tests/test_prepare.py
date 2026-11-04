@@ -8,7 +8,7 @@ from typing import get_args
 import pytest
 from PIL import Image
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.vision2code.evaluation import RubricName
 from resources_servers.vision2code.prepare import prepare
 

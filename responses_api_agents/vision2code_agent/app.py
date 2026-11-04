@@ -5,10 +5,11 @@
 import json
 
 from fastapi import Request
+from fastapi.responses import JSONResponse
 from pydantic import Field, model_validator
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, accumulate_response_usage
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.core import NeMoGymEasyInputMessage, accumulate_response_usage
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
@@ -83,6 +84,10 @@ class Vision2CodeAgent(SimpleAgent):
         trajectory: TrajectoryRecord | None = None
         for pass_number in range(1, self.config.num_passes + 1):
             result = await super().run(request, current)
+            # SimpleAgent returns a structured failure row when policy retries time out.
+            # Preserve its failure routing; there is no policy response to revise or score.
+            if isinstance(result, JSONResponse):
+                return result
             usage = accumulate_response_usage(usage, result.response.usage)
             extra = result.model_extra
             feedback = None if result.mask_sample else revision_feedback(result)

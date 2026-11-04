@@ -11,9 +11,9 @@ import pytest
 from PIL import Image, ImageDraw
 from pydantic import ValidationError
 
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.verification import JudgeError
 from resources_servers.vision2code import app
 from resources_servers.vision2code.evaluation import RubricName, system_prompt
 from resources_servers.vision2code.generic_rubric import GENERIC_RUBRIC, GENERIC_RUBRIC_VERSION
@@ -271,13 +271,17 @@ async def test_reference_changed(setup):
 async def test_committed_reference_is_independent_of_server_working_directory(setup, tmp_path, monkeypatch):
     server, body, _, judge = setup
     example = Path(app.__file__).parent / "data" / "example.jsonl"
-    body.verifier_metadata = app.Reference.model_validate(json.loads(example.read_text())["verifier_metadata"])
+    body.verifier_metadata = app.Reference.model_validate(
+        json.loads(example.read_text().splitlines()[0])["verifier_metadata"]
+    )
     monkeypatch.chdir(tmp_path)
     judge.return_value = judge_result("ChartQA")
     result = await server.verify(body)
     assert result.reward == pytest.approx(0.64) and not result.mask_sample
     content = judge.call_args.kwargs["json"].model_dump()["input"][1]["content"]
-    expected = json.loads(example.read_text())["responses_create_params"]["input"][1]["content"][0]["image_url"]
+    expected = json.loads(example.read_text().splitlines()[0])["responses_create_params"]["input"][1]["content"][0][
+        "image_url"
+    ]
     assert content[1]["image_url"] == expected
 
 
@@ -335,7 +339,7 @@ def test_no_provider_mount_override(setup, provider):
 
 @pytest.mark.asyncio
 async def test_masking_excludes_judge_failures_from_gym_metrics(setup):
-    from nemo_gym.reward_profile import compute_aggregate_metrics
+    from nemo_gym.metrics import compute_aggregate_metrics
 
     server, body, _, judge = setup
     body.model_extra.update({"_ng_task_index": 12, "_ng_rollout_index": 0})
