@@ -586,7 +586,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
     from nemo_gym.config.config_types import ConfigError
     from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-    from nemo_gym.orchestration.submit import submit, supports_job_commands
+    from nemo_gym.orchestration.submit import is_inspectable, submit
 
     _reject_scratch_namespace_additions(overrides)
     config_path = Path(args.config).resolve()
@@ -674,7 +674,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
                     f"[green]submitted[/green] {benchmark.benchmark} → {executor_label} "
                     f"[bold]{benchmark.job_id}[/bold]"
                 )
-        if any(benchmark.job_id for benchmark in record.benchmarks) and supports_job_commands(record):
+        if any(benchmark.job_id for benchmark in record.benchmarks) and is_inspectable(record):
             # Plain print: rich would wrap a long id at 80 columns when stdout is not a terminal.
             print("\n".join(_next_steps(record.gym_job_id)))
 

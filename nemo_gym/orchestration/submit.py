@@ -132,7 +132,7 @@ def logs(
     return operations.logs(executor, record, benchmark, source=source, instance=instance, tail=tail)
 
 
-def supports_job_commands(record: SubmissionRecord) -> bool:
+def is_inspectable(record: SubmissionRecord) -> bool:
     """Whether `gym job status` can look at `record`: its executor can say what is happening to its jobs."""
     executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
     return executor_cls is not None and issubclass(executor_cls, Inspectable)
