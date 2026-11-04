@@ -69,6 +69,9 @@ with this template looks healthy and scores near 0. The same holds for the other
 such a score; it is a model-configuration result, not a tool-use measurement.
 
 A task may use its whole 8 h agent budget, so a chain cap of one or two hours leaves long tasks unfinished.
+Single tasks have needed more than 90 minutes and over 100 model calls, so a one-hour segment, or one of an
+hour and a half, cannot finish them: the task is cut, restarts from scratch in the next segment and is cut
+again. Give each segment more walltime than the longest task needs.
 A row in flight when a segment ends is rerun from the start in the next segment, and after the first such
 end each one charges the row an attempt: a continuation can start and end with the same number of saved
 rows. Such a run stops at the walltime cap with `complete: false` in `artifacts/rollouts_coverage.json`,
