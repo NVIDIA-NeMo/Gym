@@ -50,6 +50,14 @@ class MooncakeConfig(BaseNeMoGymCLIConfig):
     build_parallel_level: int = Field(gt=0)
 
 
+class VLLMRouterConfig(BaseNeMoGymCLIConfig):
+    """Build and install the router with the worker load-accounting fix."""
+
+    repo: str
+    branch: str
+    cpus_per_task: int = Field(gt=0)
+
+
 class WarmupConfig(BaseNeMoGymCLIConfig):
     """Run the vLLM startup-only launcher after installing all build stages.
 
@@ -121,6 +129,7 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     vllm: Optional[VLLMConfig] = None
     flashinfer: Optional[FlashInferConfig] = None
     mooncake: Optional[MooncakeConfig] = None
+    vllm_router: Optional[VLLMRouterConfig] = None
     warmup: Optional[WarmupConfig] = None
     run: Optional[RunConfig] = None
     run_after_build: bool = False
@@ -508,6 +517,132 @@ class VLLMBuilder(BaseBuilder):
         }
 
 
+class VLLMRouterBuilder(BaseBuilder):
+    """Install a source-built router wheel into the working container."""
+
+    config: VLLMRouterConfig
+    _head_sha: Optional[str] = PrivateAttr(default=None)
+
+    async def perform_preflight_checks(self) -> None:
+        """Resolve the branch once so queued builds use the checked commit."""
+        self._head_sha = None
+        self._head_sha = await self._preflight_check_git_repo(self.config.repo, self.config.branch)
+
+    def get_srun_command_str(self) -> str:
+        """Build with the container's Python and verify the load-accounting fix."""
+        if self._head_sha is None:
+            raise RuntimeError("Run router preflight checks before generating the build command")
+        script = dedent(
+            r"""
+            set -Eeuo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            command -v uv >/dev/null
+            # Some aarch64 images fail the libc-bin trigger on 64K-page kernels.
+            # Check the installed tools and headers even if dpkg reports failure.
+            apt-get update
+            apt-get install -y --no-install-recommends \
+                build-essential pkg-config libssl-dev protobuf-compiler curl git ca-certificates \
+                || { dpkg --configure -a || true; }
+            for tool in cc c++ pkg-config protoc curl git; do
+                command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 1; }
+            done
+            test -f /usr/include/openssl/ssl.h
+
+            BUILD_DIR=$(mktemp -d /tmp/vllm-router-build.XXXXXX)
+            export BUILD_DIR
+            trap 'cd /; rm -rf "$BUILD_DIR"' EXIT
+            export CARGO_HOME="$BUILD_DIR/cargo"
+            export RUSTUP_HOME="$BUILD_DIR/rustup"
+            export CARGO_TARGET_DIR="$BUILD_DIR/target"
+            export PATH="$CARGO_HOME/bin:$PATH"
+            export CARGO_INCREMENTAL=0
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.95.0
+            rustc --version
+            cargo --version
+
+            git init "$BUILD_DIR/source"
+            cd "$BUILD_DIR/source"
+            git remote add origin "$VLLM_ROUTER_REPO"
+            git fetch --depth=1 origin "$VLLM_ROUTER_COMMIT"
+            git checkout --detach FETCH_HEAD
+            test "$(git rev-parse HEAD)" = "$VLLM_ROUTER_COMMIT"
+            # grep errors must not be mistaken for absence of the bad code.
+            test -d src
+            if grep -rn 'LOAD_RESET_INTERVAL' src/; then
+                echo 'ERROR: periodic load reset still present; expected router#216' >&2
+                exit 1
+            else
+                test "$?" -eq 1
+            fi
+            cargo test --lib -- \
+                core::worker::tests::test_worker_load_guard \
+                core::worker::tests::test_decrement_at_zero_clamps \
+                core::worker::tests::test_load_guard \
+                core::worker_registry::tests::test_health_checker_preserves
+
+            # Match the interpreter that will run the router, without installing
+            # the wheel build dependencies into system site-packages.
+            buildenv="$BUILD_DIR/buildenv"
+            uv venv --python "$(command -v python3)" "$buildenv"
+            VIRTUAL_ENV="$buildenv" uv pip install setuptools wheel setuptools-rust build
+            "$buildenv/bin/python" -m build --wheel --no-isolation --outdir dist
+            wheels=(dist/*.whl)
+            test "${#wheels[@]}" -eq 1 && test -f "${wheels[0]}"
+            uv pip install --system --force-reinstall "${wheels[0]}"
+            # Import outside the source checkout to test the installed package.
+            cd /
+            python3 -c "import vllm_router_rs; print('vllm_router_rs import OK')"
+            vllm-router --help >/dev/null
+            router_so=$(python3 -c 'import vllm_router_rs; print(vllm_router_rs.__file__)')
+            if grep -aqF 'Resetting worker loads (cycle' "$router_so"; then
+                echo 'ERROR: installed router still resets worker loads periodically' >&2
+                exit 1
+            else
+                test "$?" -eq 1
+            fi
+            if ! grep -aqF 'Attempted to decrement load counter that is already at 0' "$router_so"; then
+                echo 'ERROR: installed router is missing the #216 load-guard changes' >&2
+                exit 1
+            fi
+            uv pip show --system vllm-router
+            rm -rf "$BUILD_DIR"
+            uv cache clean
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            """
+        ).lstrip()
+        return join(["bash", "-c", script, "vllm-router-build"])
+
+    def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        """Pass pinned source and compilation concurrency literally."""
+        if self._head_sha is None:
+            raise RuntimeError("Run router preflight checks before generating the build environment")
+        return {
+            "VLLM_ROUTER_REPO": self.config.repo,
+            "VLLM_ROUTER_COMMIT": self._head_sha,
+            "CARGO_BUILD_JOBS": str(self.config.cpus_per_task),
+        }
+
+    def get_srun_slurm_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        """Save the installed wheel in the image used by subsequent stages."""
+        return {
+            "job-name": "build-vllm-router",
+            "nodes": "1",
+            "ntasks": "1",
+            "segment": "1",
+            "cpus-per-task": str(self.config.cpus_per_task),
+            "gpus-per-node": "0",
+            "gres": "none",
+            "mem": "0",
+            "time": "00:15:00",
+            "container-image": str(container_config.output_container_fpath),
+            "no-container-mount-home": True,
+            "container-save": str(container_config.output_container_fpath),
+            "export": "ALL",
+        }
+
+
 class MooncakeBuilder(BaseBuilder):
     """Build CUDA 13 Mooncake and smoke-test the installed Store over TCP."""
 
@@ -664,6 +799,8 @@ class BuildContainerHelper(BaseModel):
             builders.append(VLLMBuilder(config=self.config.vllm, log_file=self.config.log_file))
         if self.config.flashinfer is not None:
             builders.append(FlashInferBuilder(config=self.config.flashinfer, log_file=self.config.log_file))
+        if self.config.vllm_router is not None:
+            builders.append(VLLMRouterBuilder(config=self.config.vllm_router, log_file=self.config.log_file))
 
         # Install Mooncake last so earlier dependency resolution cannot replace it.
         if self.config.mooncake is not None:

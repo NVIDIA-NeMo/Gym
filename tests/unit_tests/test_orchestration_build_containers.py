@@ -33,6 +33,8 @@ from nemo_gym.orchestration.build_containers import (
     RunConfig,
     VLLMBuilder,
     VLLMConfig,
+    VLLMRouterBuilder,
+    VLLMRouterConfig,
     WarmupConfig,
 )
 
@@ -250,6 +252,10 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
         "  branch: mooncake-dev\n"
         "  cpus_per_task: 32\n"
         "  build_parallel_level: 8\n"
+        "vllm_router:\n"
+        "  repo: https://example.invalid/router\n"
+        "  branch: router-dev\n"
+        "  cpus_per_task: 16\n"
     )
     override = tmp_path / "override.yaml"
     override.write_text(
@@ -288,6 +294,8 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
     assert resolved.flashinfer.invalidate_modules == ["fused_moe_trtllm_sm100"]
     assert resolved.mooncake.branch == "mooncake-dev"
     assert resolved.mooncake.build_parallel_level == 8
+    assert resolved.vllm_router.cpus_per_task == 16
+    assert resolved.vllm_router.branch == "router-dev"
     assert resolved.warmup.env == {"MODEL": "/models/nemotron", "NUM_PREFILL_NODES": 2}
 
 
@@ -437,13 +445,16 @@ def test_vllm_installed_rust_launcher_compatibility(vllm_builder, tmp_path, supp
         assert "--input-listener-fd" in result.stderr
 
 
-@pytest.mark.parametrize("failed_stage", [None, "build-vllm", "build-flashinfer", "build-mooncake", "warmup"])
+@pytest.mark.parametrize(
+    "failed_stage", [None, "build-vllm", "build-flashinfer", "build-vllm-router", "build-mooncake", "warmup"]
+)
 async def test_container_stage_order_and_cleanup(container_config, tmp_path, monkeypatch, capsys, failed_stage):
     ticks = iter(range(0, 100, 5))
     monkeypatch.setattr(build_containers, "perf_counter", lambda: next(ticks))
     container_config.input_container_fpath.write_text("base")
     container_config.vllm = VLLMConfig(repo="vllm", branch="dev", version="0.32.0", precompiled_wheel_commit="b" * 40)
     container_config.flashinfer = FlashInferConfig(repo="fi", branch="dev", invalidate_modules=[], cpus_per_task=64)
+    container_config.vllm_router = VLLMRouterConfig(repo="router", branch="dev", cpus_per_task=16)
     container_config.mooncake = MooncakeConfig(repo="mooncake", branch="dev", cpus_per_task=32, build_parallel_level=8)
     container_config.warmup = WarmupConfig(env={"MODEL": "/models/nemotron"})
     monkeypatch.setattr(build_containers.BaseBuilder, "_preflight_check_git_repo", AsyncMock(return_value="a" * 40))
@@ -471,7 +482,7 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
 
     monkeypatch.setattr(BuildContainerHelper, "_warmup_container", warmup)
     helper = BuildContainerHelper(config=container_config)
-    expected_stages = ["build-vllm", "build-flashinfer", "build-mooncake", "warmup"]
+    expected_stages = ["build-vllm", "build-flashinfer", "build-vllm-router", "build-mooncake", "warmup"]
     if failed_stage:
         with pytest.raises(RuntimeError, match="Command failed"):
             await helper.run()
@@ -484,7 +495,13 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
     assert container_config.input_container_fpath.read_text() == "base"
     output = capsys.readouterr().out
     assert "[Copy container] completed in 5.0s" in output
-    labels = {"build-vllm": "VLLM", "build-flashinfer": "FlashInfer", "build-mooncake": "Mooncake", "warmup": "Warmup"}
+    labels = {
+        "build-vllm": "VLLM",
+        "build-flashinfer": "FlashInfer",
+        "build-vllm-router": "VLLMRouter",
+        "build-mooncake": "Mooncake",
+        "warmup": "Warmup",
+    }
     for stage, label in labels.items():
         if stage not in stages:
             assert f"[{label}]" not in output
@@ -583,6 +600,157 @@ def test_flashinfer_cleanup_matches_warmup_cache_roots(builder):
     warmup_paths = runpy.run_path(str(ROOT / BENCHMARK / "save_warmed_vllm_container.py"))
     # Includes the warmed manifest and startup/CuTe files consumed by the launcher.
     assert set(cleanup[2:]) == {str(warmup_paths[key]) for key in ("CACHE_ROOT", "VLLM_CACHE_ROOT", "CUTE_CACHE_ROOT")}
+
+
+async def test_router_preflight_pins_branch_and_clears_failed_resolution(tmp_path, container_config):
+    repo = tmp_path / "router source"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init")
+    git("checkout", "-b", "router-dev")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "first")
+    commit = git("rev-parse", "HEAD")
+    builder = VLLMRouterBuilder(
+        config=VLLMRouterConfig(repo=str(repo), branch="router-dev", cpus_per_task=16),
+        log_file=tmp_path / "preflight.log",
+    )
+    with pytest.raises(RuntimeError, match="preflight"):
+        builder.get_srun_command_str()
+    with pytest.raises(RuntimeError, match="preflight"):
+        builder.get_srun_env_vars(container_config)
+    await builder.perform_preflight_checks()
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "second")
+    assert git("rev-parse", "HEAD") != commit
+    assert builder.get_srun_env_vars(container_config)["VLLM_ROUTER_COMMIT"] == commit
+    builder.config.branch = "missing-branch"
+    with pytest.raises(RuntimeError, match="Preflight git repo check failed"):
+        await builder.perform_preflight_checks()
+    with pytest.raises(RuntimeError, match="preflight"):
+        builder.get_srun_env_vars(container_config)
+    with pytest.raises(RuntimeError, match="preflight"):
+        builder.get_srun_command_str()
+    builder.config.repo = str(tmp_path / "missing-repo")
+    with pytest.raises(RuntimeError, match="Preflight git repo check failed"):
+        await builder.perform_preflight_checks()
+
+
+@pytest.mark.parametrize("failure", [None, "source", "binary", "commit", "tests", "install"])
+def test_router_build_install_and_guards(tmp_path, container_config, failure):
+    builder = VLLMRouterBuilder(
+        config=VLLMRouterConfig(repo="https://example.invalid/router", branch="dev", cpus_per_task=16),
+        log_file=tmp_path / "router.log",
+    )
+    builder._head_sha = "a" * 40
+    resources = builder.get_srun_slurm_vars(container_config)
+    assert resources["container-image"] == resources["container-save"] == str(container_config.output_container_fpath)
+    assert resources["cpus-per-task"] == "16"
+    assert resources["gpus-per-node"] == "0"
+    assert resources["gres"] == "none"
+    assert resources["time"] == "00:15:00"
+    argv = shlex.split(builder.get_srun_command_str())
+    subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
+    # Isolate the container's system paths; all build/install tools are local stubs.
+    header = tmp_path / "ssl.h"
+    header.touch()
+    argv[2] = argv[2].replace("/usr/include/openssl/ssl.h", str(header))
+    argv[2] = argv[2].replace("/var/lib/apt/lists", str(tmp_path / "apt-lists"))
+    argv[2] = argv[2].replace("/tmp/vllm-router-build.", str(tmp_path / "router-build."))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    driver = bin_dir / "driver"
+    driver.write_text(
+        f"#!{sys.executable}\n"
+        + r"""import json, os, sys
+from pathlib import Path
+tool, args = Path(sys.argv[0]).name, sys.argv[1:]
+failure = os.environ["FAILURE"]
+with open(os.environ["CAPTURE_FILE"], "a") as f:
+    f.write(json.dumps({"tool": tool, "args": args, "cwd": os.getcwd(),
+                        "build_dir": os.environ.get("BUILD_DIR"),
+                        "jobs": os.environ.get("CARGO_BUILD_JOBS")}) + "\n")
+if tool == "git":
+    if args[0] == "init":
+        src = Path(args[1]) / "src"
+        src.mkdir(parents=True)
+        (src / "lib.rs").write_text("LOAD_RESET_INTERVAL" if failure == "source" else "patched")
+    elif args[0] == "rev-parse":
+        print("0" * 40 if failure == "commit" else os.environ["VLLM_ROUTER_COMMIT"])
+elif tool == "cargo" and args[0] == "test" and failure == "tests":
+    sys.exit(42)
+elif tool == "uv":
+    if args[0] == "venv":
+        bindir = Path(args[-1]) / "bin"
+        bindir.mkdir(parents=True)
+        (bindir / "python").symlink_to(Path(sys.argv[0]).resolve())
+    elif args[:2] == ["pip", "install"] and "--system" in args:
+        if failure == "install":
+            sys.exit(43)
+        assert Path(args[-1]).read_text() == "new wheel"
+elif tool == "python":
+    Path("dist").mkdir()
+    Path("dist/router.whl").write_text("new wheel")
+elif tool == "python3" and "__file__" in args[-1]:
+    print(os.environ["ROUTER_SO"])
+"""
+    )
+    driver.chmod(0o755)
+    for tool in (
+        "cc",
+        "c++",
+        "pkg-config",
+        "protoc",
+        "curl",
+        "git",
+        "apt-get",
+        "uv",
+        "rustc",
+        "cargo",
+        "python3",
+        "vllm-router",
+    ):
+        (bin_dir / tool).symlink_to(driver)
+    router_so = tmp_path / "router.so"
+    router_so.write_text(
+        "Resetting worker loads (cycle"
+        if failure == "binary"
+        else "Attempted to decrement load counter that is already at 0"
+    )
+    capture = tmp_path / "calls.jsonl"
+    result = subprocess.run(
+        argv,
+        env={
+            **os.environ,
+            **builder.get_srun_env_vars(container_config),
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "CAPTURE_FILE": str(capture),
+            "ROUTER_SO": str(router_so),
+            "FAILURE": failure or "",
+        },
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    expected_success = failure is None
+    assert (result.returncode == 0) == expected_success, result.stdout + result.stderr
+    calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    assert any(c["tool"] == "git" and c["args"] == ["fetch", "--depth=1", "origin", "a" * 40] for c in calls)
+    builds = {c["build_dir"] for c in calls if c["build_dir"]}
+    assert builds and all(not Path(path).exists() for path in builds)
+    installs = [c for c in calls if c["tool"] == "uv" and "--force-reinstall" in c["args"]]
+    if failure in {"source", "commit", "tests"}:
+        assert not installs
+    else:
+        assert len(installs) == 1
+    if expected_success:
+        tests = [c for c in calls if c["tool"] == "cargo" and c["args"][0] == "test"]
+        assert len(tests) == 1
+        assert all(c["jobs"] == "16" for c in calls)
+        assert any(c["tool"] == "vllm-router" and c["args"] == ["--help"] and c["cwd"] == "/" for c in calls)
 
 
 @pytest.fixture

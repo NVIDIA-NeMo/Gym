@@ -14,6 +14,11 @@ vllm:
   version: "0.32.0"
   precompiled_wheel_commit: v0.32.0
 
+vllm_router:
+  repo: https://github.com/bxyu-nvidia/router
+  branch: bxyu/fix-healthcheck
+  cpus_per_task: 16
+
 mooncake:
     repo: https://github.com/bxyu-nvidia/Mooncake.git
     branch: bxyu/v0.3.13.post1-mooncakemetricstry2
