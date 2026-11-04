@@ -279,8 +279,11 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
     sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
     with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
         sandbox_class.connect = AsyncMock(return_value=sandbox)
-        with pytest.raises(RuntimeError, match=f"error={error_type}") as failed:
+        with pytest.raises(NgFailureEvent, match=f"error={error_type}") as failed:
             await agent.seed_agent_session(request, body)
+    assert failed.value.boundary == "harness"
+    assert failed.value.failure_kind == "agent_route_failed"
+    assert failed.value.operation == "opencode.setup"
     assert "bootstrap output" in str(failed.value)
     assert "provider failed" in str(failed.value)
     assert not request.session
@@ -409,7 +412,21 @@ def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_sessio
         body = response.json()
         assert body["status"] == "failed"
         assert body["output"] == []
-        assert AGENT_OUTCOME_METADATA_KEY not in body["metadata"]
+        from nemo_gym.agents import AgentOutcome, AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+        from nemo_gym.core import NeMoGymResponse
+
+        outcome = AgentOutcome.model_validate_json(body["metadata"][AGENT_OUTCOME_METADATA_KEY])
+        assert outcome.failure_kind == PROVIDER_OOM_KILLED
+        assert outcome.status_code is None
+        typed_response = NeMoGymResponse.model_validate(body)
+        assert agent_outcome_policy(typed_response) == OutcomeAction.VERIFY
+        for action in (OutcomeAction.FAIL, OutcomeAction.RETRY):
+            assert (
+                agent_outcome_policy(
+                    typed_response, config=AgentOutcomePolicyConfig(by_failure_kind={PROVIDER_OOM_KILLED: action})
+                )
+                == action
+            )
         observation = SandboxObservation.model_validate_json(body["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert observation.role == "agent"
         assert observation.outcome == "oom"
@@ -816,7 +833,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
         SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
-    with pytest.raises(RuntimeError, match="curl failed"):
+    with pytest.raises(NgFailureEvent, match="curl failed"):
         await agent.seed_agent_session(request, seed())
     assert not active_sessions(agent)
     assert not request.session
@@ -1434,7 +1451,7 @@ async def test_failed_setup_cleanup_retains_state_for_cookieless_close(setup, fa
     sandbox.exec.side_effect = [success, failed, failed if failure == "remove" else success]
     if failure == "disconnect":
         sandbox.disconnect.side_effect = RuntimeError("disconnect failed")
-    with pytest.raises(RuntimeError, match="installer failed"):
+    with pytest.raises(NgFailureEvent, match="installer failed"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     assert agent._session_records[body.agent_session_id].closing
     with pytest.raises(HTTPException, match="closing"):
