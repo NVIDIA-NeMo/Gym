@@ -32,7 +32,7 @@ from nemo_gym.cli.job_render import (
     render_status,
     render_status_block,
 )
-from nemo_gym.orchestration.jobs import JobState, JobStatus, SubmissionStatus, list_submissions
+from nemo_gym.orchestration.jobs import FINISHED_STATES, JobState, JobStatus, SubmissionStatus, list_submissions
 
 
 def list_command(*, limit: int | None, as_json: bool) -> None:
@@ -81,20 +81,16 @@ def cancel_command(
     """Stop one benchmark, or with `everything` every live benchmark after the id is typed; the exit code."""
     from nemo_gym.orchestration.submit import cancel, cancel_submission, status
 
-    if everything and benchmark:
-        raise ValueError("Give a benchmark or --all, not both.")
-    if not everything and not benchmark:
-        raise ValueError("Give a benchmark, or --all to cancel every benchmark of the submission.")
-    if confirm is not None and not everything:
-        raise ValueError("--confirm only applies to --all.")
-
     if not everything:
         results = [cancel(gym_job_id, benchmark)]
     else:
         (current,) = status([gym_job_id])
-        live = [job for job in current.jobs if job.state not in _FINISHED]
+        live = [job for job in current.jobs if job.state not in FINISHED_STATES]
         if not live:
-            print(f"Nothing to cancel: every benchmark of {gym_job_id} has finished.")
+            if as_json:
+                print(json.dumps([job.model_dump(mode="json") for job in current.jobs], indent=2))
+            else:
+                print(f"Nothing to cancel: every benchmark of {gym_job_id} has finished.")
             return 0
         if confirm is None:
             if as_json or not sys.stdin.isatty():
@@ -115,9 +111,6 @@ def logs_command(gym_job_id: str, benchmark: str, *, source: str, instance: str 
 
     for line in logs(gym_job_id, benchmark, source=source, instance=instance, tail=tail):
         print(line)
-
-
-_FINISHED = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}
 
 
 def _only(submission: SubmissionStatus, live: list[JobStatus]) -> SubmissionStatus:

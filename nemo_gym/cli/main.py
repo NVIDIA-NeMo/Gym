@@ -744,6 +744,12 @@ def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
 @exit_cleanly_on_job_error
 def _job_cancel(args: argparse.Namespace, overrides: list[str]) -> None:
     _reject_overrides(args, overrides, "job cancel")
+    if args.all and args.benchmark:
+        args._parser.error("give a benchmark or --all, not both")
+    if not args.all and not args.benchmark:
+        args._parser.error("give a benchmark, or --all to cancel every benchmark of the submission")
+    if args.confirm is not None and not args.all:
+        args._parser.error("--confirm only applies to --all")
     from nemo_gym.cli import job
 
     code = job.cancel_command(

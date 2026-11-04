@@ -208,7 +208,7 @@ def test_info_says_when_a_submission_predates_log_sources_and_why_the_config_is_
 
 @pytest.fixture
 def cluster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A job index in a temporary cache and a Slurm whose `squeue` and `sacct` answer from files."""
+    """A job index in a temporary cache and a Slurm whose `squeue` and `sacct` answer from files (`sleep` returns at once)."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -222,6 +222,8 @@ def cluster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         'if [ -f "$d/scancel_rc" ]; then echo "scancel: error: Access/permission denied" >&2; exit 1; fi\nexit 0\n'
     )
     scancel.chmod(0o755)
+    (bin_dir / "sleep").write_text("#!/bin/bash\nexit 0\n")
+    (bin_dir / "sleep").chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
 
@@ -646,13 +648,19 @@ def test_there_is_nothing_to_cancel_when_everything_has_finished(tmp_path, clust
     assert out.strip() == "Nothing to cancel: every benchmark of gym-job-a has finished."
     assert not (cluster / "scancel_calls").exists()
 
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all", "--confirm", "gym-job-a", "--json")
+
+    (result,) = json.loads(out)
+    assert (result["benchmark"], result["state"]) == ("gpqa", "SUCCEEDED")
+    assert not (cluster / "scancel_calls").exists()
+
 
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (["gym-job-a"], "Give a benchmark, or --all"),
-        (["gym-job-a", "ruler", "--all"], "Give a benchmark or --all, not both."),
-        (["gym-job-a", "ruler", "--confirm", "gym-job-a"], "--confirm only applies to --all."),
+        (["gym-job-a"], "give a benchmark, or --all"),
+        (["gym-job-a", "ruler", "--all"], "give a benchmark or --all, not both"),
+        (["gym-job-a", "ruler", "--confirm", "gym-job-a"], "--confirm only applies to --all"),
     ],
 )
 def test_cancel_wants_either_a_benchmark_or_all(tmp_path, cluster, monkeypatch, capsys, args, message):
