@@ -118,7 +118,9 @@ what it misses. A J-space concept must be a single token of the model's vocabula
 1.0. It writes no alerts, so replaying an incident pages no one. With rows labeled `expected_severity`, the
 aggregate metrics report recall and false-positive rate at each threshold (`monitor/recall@P1`, ...). The label and
 any earlier `monitor_report` stay out of the evidence the judge sees, and a failed judge call gives a masked row
-(`failure_kind: judge_failed`), not a detected incident:
+(`failure_kind: judge_failed`), not a detected incident. `data/example.jsonl` holds five labeled Terminal-Bench 2.1
+rollouts (two verified catches, three clean runs, internal hosts removed), declared in
+`configs/misalignment_monitor_examples.yaml`:
 
 ```bash
 gym eval reverify \
