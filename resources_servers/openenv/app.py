@@ -24,7 +24,6 @@ to add a new environment.
 import importlib
 import logging
 from typing import Annotated, Any, Dict, Optional
-from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, BeforeValidator, create_model
@@ -42,11 +41,11 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-    ResourcesSessionConflictError,
     ResourcesSessionFence,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
+    reject_typed_resources_seed,
 )
 
 
@@ -63,12 +62,6 @@ def _import_class(dotted_path: str) -> type:
         raise RuntimeError(
             f"Failed to import '{dotted_path}': {e}. Ensure the environment's dependencies are installed."
         ) from e
-
-
-def _reject_typed_seed(value: object) -> object:
-    if isinstance(value, dict) and ResourcesSeedSessionRequest.model_fields.keys() & value.keys():
-        raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
-    return value
 
 
 class OpenEnvResourcesServerConfig(BaseResourcesServerConfig):
@@ -266,7 +259,8 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self,
         request: Request,
-        body: ResourcesSeedSessionRequest | Annotated[BaseSeedSessionRequest, BeforeValidator(_reject_typed_seed)],
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_typed_resources_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         """Create and reset this session's environment instance.
 
@@ -278,13 +272,12 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         if not isinstance(body, ResourcesSeedSessionRequest):
             session_id = request.session[SESSION_ID_KEY]
             async with self._fence.locked(session_id):
-                self._fence.raise_if_closed(session_id)
                 verified = self._verified_sessions.get(session_id)
-                if session_id in self._session_episodes or (verified is not None and verified[0] is not None):
-                    raise ResourcesSessionConflictError("A legacy seed cannot replace a typed session")
-                if verified is not None:
-                    # A new /run may reuse its caller's cookie; keep the completed cookie valid for verify retries.
-                    session_id = str(uuid4())
+                session_id = self._fence.legacy_seed_session_id(
+                    session_id,
+                    identity=self._session_episodes.get(session_id) or (verified[0] if verified is not None else None),
+                    verified=verified is not None,
+                )
                 previous = self._sessions.get(session_id)
                 if previous is not None and hasattr(previous.env, "close"):
                     previous.env.close()
@@ -295,17 +288,14 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
 
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
-            if session_id in self._verified_sessions:
-                raise ResourcesSessionConflictError("resources session has already been verified")
-            identity = self._session_episodes.get(session_id)
-            if identity is None:
-                if session_id in self._sessions:
-                    raise ResourcesSessionConflictError("A typed seed cannot replace a legacy session")
+            if self._fence.check_typed_seed(
+                body,
+                identity=self._session_episodes.get(session_id),
+                has_state=session_id in self._sessions,
+                verified=session_id in self._verified_sessions,
+            ):
                 self._sessions[session_id] = self._new_session(session_id)
                 self._session_episodes[session_id] = (body.episode_id, body.task_id)
-            elif identity != (body.episode_id, body.task_id):
-                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
             request.session[SESSION_ID_KEY] = session_id
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
@@ -317,13 +307,9 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         """
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
-            closed_episode = self._fence.closed_episode(session_id)
-            if closed_episode is not None and closed_episode != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             verified = self._verified_sessions.get(session_id)
             identity = self._session_episodes.get(session_id) or (verified[0] if verified is not None else None)
-            if identity is not None and identity[0] != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            self._fence.check_close(body, identity=identity)
             self._release_session(session_id)
             self._fence.mark_closed(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
