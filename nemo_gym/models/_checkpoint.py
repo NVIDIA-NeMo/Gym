@@ -36,7 +36,6 @@ each worker runs a gate and one coordinator in the main process owns the partici
 
 import asyncio
 import logging
-import re
 import time
 import uuid
 from collections import Counter
@@ -47,7 +46,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.core.correlation import CorrelationPathError, resolve
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
@@ -81,7 +80,6 @@ from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
 LOGGER = logging.getLogger(__name__)
 
 GENERATION_ROUTES = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
-_ROLLOUT_PREFIX = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<capture_key>[^/]+)")
 
 # Request fields that compile into a structured decoder.
 # A cut prefix cannot restore that decoder's state,
@@ -906,8 +904,11 @@ class PolicyAdmissionMiddleware:
         if scope.get("type") != "http" or not scope.get("path", "").endswith(GENERATION_ROUTES):
             await self.app(scope, receive, send)
             return
-        match = _ROLLOUT_PREFIX.match(scope["path"])
-        capture_key = match.group("capture_key") if match else None
+        try:
+            resolved = resolve(scope)
+        except CorrelationPathError:
+            resolved = None
+        capture_key = resolved[0].capture_key if resolved is not None else None
         try:
             await self.gate.admit(capture_key)
         except ControlError as error:
