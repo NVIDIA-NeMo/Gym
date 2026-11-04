@@ -10,8 +10,7 @@ from aiohttp import ClientResponseError, ClientSession, web
 from pydantic import ValidationError
 
 import nemo_gym.client.http_client as transport
-from nemo_gym.client import ServerClient
-from nemo_gym.client.openai_client import MAX_NUM_TRIES
+from nemo_gym.client import MAX_NUM_TRIES, ServerClient
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 

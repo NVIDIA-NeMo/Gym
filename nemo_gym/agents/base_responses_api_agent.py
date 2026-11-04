@@ -56,11 +56,13 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.core.episode_types import FailureBoundary
 from nemo_gym.core.failure_kinds import FailureStage
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.core.typed_exceptions import agent_route_failure, find_boundary_failure
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_runtime._checkpoint.agent import (
@@ -82,13 +84,11 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims, SessionKind
 from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.typed_exceptions import agent_route_failure, find_boundary_failure
 
 
 LOG = logging.getLogger(__name__)

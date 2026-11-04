@@ -9,8 +9,8 @@ import pytest
 from fastapi import Request
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 
 async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tmp_path, monkeypatch, adapter):

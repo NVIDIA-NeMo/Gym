@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.failure_transport import FailureHeader
+from nemo_gym.core import FailureHeader
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from resources_servers.swebench_pro import app as swe
 from resources_servers.swebench_pro.tests.test_app import client_with_task_sandbox, make_server, request_body

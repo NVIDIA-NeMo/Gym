@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Annotated
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
+from nemo_gym.core.episode_types import FailureBoundary, FailureReport, ModelFailureDetails
 from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
@@ -17,12 +18,11 @@ from nemo_gym.core.failure_kinds import (
     MODEL_TRANSPORT_ERROR,
 )
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
-from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureReport, ModelFailureDetails
 
 
 if TYPE_CHECKING:
     from nemo_gym.core.responses_api_types import NeMoGymResponse
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"

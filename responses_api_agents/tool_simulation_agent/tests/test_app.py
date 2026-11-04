@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from pytest import fixture
 
-from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+from nemo_gym.agents import raises_agent_failure
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming

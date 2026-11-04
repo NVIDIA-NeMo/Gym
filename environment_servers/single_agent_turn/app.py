@@ -22,8 +22,8 @@ from nemo_gym.agents import (
     AgentSeedSessionResponse,
     OutcomeAction,
     agent_outcome_policy,
+    confirmed_policy_response_timeout,
 )
-from nemo_gym.agents.agent_outcome import confirmed_policy_response_timeout
 from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
 from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
@@ -36,20 +36,26 @@ from nemo_gym.config import (
     ResourcesServerRef,
     get_first_server_config_dict,
 )
-from nemo_gym.core import MODEL_REQUEST_ERROR, NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core import (
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    FailureBoundary,
+    FailureReport,
+    FailureReportRow,
+    ModelFailureDetails,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NgFailureEvent,
+    rebuild_failure,
+)
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
     DirectHTTPToolAccess,
-    FailureBoundary,
-    FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
-    ModelFailureDetails,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
@@ -59,10 +65,11 @@ from nemo_gym.server_runtime import (
     StepType,
     ToolAccess,
     dependency_failure,
+    handled_episode_failure,
+    is_handled_episode_failure,
     seed_restarts,
     seed_verify_step_type,
 )
-from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_handled_episode_failure
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -71,7 +78,6 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     VerifierInvocation,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
