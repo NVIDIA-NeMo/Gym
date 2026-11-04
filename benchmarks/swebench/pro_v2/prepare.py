@@ -53,11 +53,12 @@ def fetch_upstream_assets(cache_dir: Path = UPSTREAM_CACHE_DIR) -> Path:
     return root
 
 
+# Read bytes: Path.read_text() turns CRLF into LF, which corrupts test patches that add CRLF fixtures.
 def enrich_row(row: Mapping[str, Any], upstream_root: Path) -> dict[str, Any]:
     """Attach one task's upstream verifier files and its instruction to a public dataset row."""
     task_dir = upstream_root / "v2" / "tasks" / str(row["instance_id"])
     tests_dir = task_dir / "tests"
-    test_config = (tests_dir / "config.json").read_text(encoding="utf-8")
+    test_config = (tests_dir / "config.json").read_bytes().decode()
     config = json.loads(test_config)
     enriched = dict(row)
     enriched.update(
@@ -67,12 +68,12 @@ def enrich_row(row: Mapping[str, Any], upstream_root: Path) -> dict[str, Any]:
             "pass_to_pass": config["pass_to_pass"],
             "selected_test_files_to_run": config["selected_test_files_to_run"],
             "test_config": test_config,
-            "test_sh": (tests_dir / "test.sh").read_text(encoding="utf-8"),
-            "run_script": (tests_dir / "run_script.sh").read_text(encoding="utf-8"),
-            "parser_script": (tests_dir / "parser.py").read_text(encoding="utf-8"),
-            "test_patch": (tests_dir / "test_patch.patch").read_text(encoding="utf-8"),
+            "test_sh": (tests_dir / "test.sh").read_bytes().decode(),
+            "run_script": (tests_dir / "run_script.sh").read_bytes().decode(),
+            "parser_script": (tests_dir / "parser.py").read_bytes().decode(),
+            "test_patch": (tests_dir / "test_patch.patch").read_bytes().decode(),
             "responses_create_params": {
-                "input": [{"role": "user", "content": (task_dir / "instruction.md").read_text(encoding="utf-8")}],
+                "input": [{"role": "user", "content": (task_dir / "instruction.md").read_bytes().decode()}],
             },
             "subset": "pro_v2",
             "split": "test",

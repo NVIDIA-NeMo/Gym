@@ -74,6 +74,16 @@ def test_enrich_row_embeds_the_upstream_verifier_files_and_instruction(tmp_path)
     )
 
 
+def test_enrich_row_keeps_crlf_line_endings_in_the_test_patch(tmp_path) -> None:
+    make_upstream(tmp_path, "instance_example")
+    patch_path = tmp_path / "v2" / "tasks" / "instance_example" / "tests" / "test_patch.patch"
+    patch_path.write_bytes(b"+--boundary\r\n+Content-Type: text/plain\r\n")
+
+    row = enrich_row(dataset_row(), tmp_path)
+
+    assert row["test_patch"] == "+--boundary\r\n+Content-Type: text/plain\r\n"
+
+
 def test_enrich_row_takes_the_test_lists_from_the_graded_config_json(tmp_path) -> None:
     make_upstream(tmp_path, "instance_example")
 
