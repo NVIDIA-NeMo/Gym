@@ -9,10 +9,10 @@ or, when it lends none and `sandbox_provider` is set, one the adapter starts and
 - Harness: `crewai==1.15.34`, pinned in [`requirements.txt`](requirements.txt).
 - Execution: in process, under an Environment Server such as `single_agent_turn`. There is no `/run` route and no
   host path: `/v1/responses` without a seeded agent session answers 409.
-- Capability level: Evaluation, plus Environment tools and task sandboxes. The close bundle carries an invocation
-  record with every model-call reference, tool-call records with executor timing, and the agent's sandbox record, but
-  the [harness conformance probes](../../scripts/harness_conformance/README.md) are not registered for this adapter;
-  see [Limitations](#limitations).
+- Capability level: Observability, plus Environment tools and task sandboxes. The close bundle carries an invocation
+  record with every model-call reference, tool-call records with executor timing, and the agent's sandbox record. The
+  [harness conformance probes](../../scripts/harness_conformance/README.md) for `crewai` meet P0 in all eight
+  scenarios.
 - Training: not qualified. `token_id_capture` is untested.
 
 ## Configure a pairing
@@ -223,7 +223,14 @@ gym env test +entrypoint=responses_api_agents/crewai_agent
 ```
 
 The tests run real crews against a scripted Model Server, real `bash` through the local sandbox provider, and a real
-streamable-HTTP MCP server.
+streamable-HTTP MCP server. The kill tests run on Linux only: macOS's bash 3.2 sometimes leaves a subshell of a killed
+process group running.
+
+The harness conformance probes give the agent its own local sandbox through `sandbox_provider` and run on Linux:
+
+```bash
+python scripts/run_harness_conformance.py --harness crewai --output <new directory>
+```
 
 ## Licensing information
 
