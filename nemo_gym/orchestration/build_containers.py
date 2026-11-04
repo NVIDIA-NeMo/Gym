@@ -744,7 +744,7 @@ class MooncakeBuilder(BaseBuilder):
             "cpus-per-task": str(self.config.cpus_per_task),
             "gpus-per-node": "4",
             "mem": "0",
-            "time": "02:00:00",
+            "time": "00:30:00",
             "container-image": str(container_config.output_container_fpath),
             "no-container-mount-home": True,
             "container-save": str(container_config.output_container_fpath),
