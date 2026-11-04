@@ -30,13 +30,14 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from nemo_gym.server_runtime import ReverifyMode
-from nemo_gym.telemetry.resources_operations import ResourcesOperation
-from nemo_gym.verification import JudgeError
+from nemo_gym.telemetry import ResourcesOperation
+from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -949,8 +950,9 @@ class TestApp:
 
         response_mock.return_value = json.dumps({})
         # A body that isn't a valid Response is a broken judge call, not a wrong answer.
-        with raises(JudgeError, match="Field required"):
+        with raises(NgFailureEvent, match="Field required") as failure:
             await resources_server._generate_judge_evaluation("invalid_response", "invalid_1", "invalid_2")
+        assert is_judge_failure(failure.value)
 
         reasoning_item = NeMoGymResponseReasoningItem(id="reasoning_item", summary=[], type="reasoning")
         response_mock.return_value = json.dumps(self._create_response("reasoning_id", reasoning_item))
@@ -1318,10 +1320,10 @@ async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
+    from nemo_gym.agents import agent_tools
     from nemo_gym.config import ResourcesServerRef
     from nemo_gym.core import NeMoGymResponse
     from nemo_gym.metrics import compute_pass_majority_metrics
-    from nemo_gym.sandbox import agent_tools
     from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer, LibraryJudgeMathVerifyRequest
 
     original = NeMoGymResponse.model_validate(

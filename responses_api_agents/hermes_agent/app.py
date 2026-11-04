@@ -31,19 +31,20 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
+    resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -66,7 +67,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -86,7 +87,7 @@ from nemo_gym.trajectory import (
 )
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
-from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
+from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
 
 
 # Legacy /run grades these request rejections and masks other provider failures.
@@ -300,8 +301,6 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
-    # Where uv builds for sandbox architectures other than the host's are cached.
-    uv_cache_dir: str = DEFAULT_UV_CACHE_DIR
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
@@ -538,9 +537,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            await state.install_runtime(
-                install_timeout=self.config.sandbox_install_timeout_seconds, uv_cache_dir=self.config.uv_cache_dir
-            )
+            await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -591,7 +588,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     ToolCallObservation.model_validate(tool) for tool in raw_observations.get("tools") or []
                 )
                 records.extend(
-                    ContextCompactionObservation.model_validate(compaction)
+                    ContextCompactionObservation.model_validate(
+                        {
+                            **compaction,
+                            "model_calls": [
+                                {**ref, "model_ref": self.config.model_server}
+                                for ref in compaction.get("model_calls", [])
+                            ],
+                        }
+                    )
                     for compaction in raw_observations.get("compactions") or []
                 )
                 return AgentObservationBundle(

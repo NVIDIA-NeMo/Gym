@@ -16,8 +16,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from environment_servers.legacy_agent.tests.test_app import _Client, _Upstream
-from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.server_utils import BaseServerConfig
+from nemo_gym.config import AggregateMetricsRequest, BaseServerConfig
 
 
 METRICS_SERVER = {"type": "resources_servers", "name": "partner_if"}
@@ -111,8 +110,8 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(harness):
 
 
 def test_tool_executions_in_the_agent_reply_reach_the_agent_observations():
-    from nemo_gym.harness_capabilities.checker import inspect_record
-    from nemo_gym.rollout_collection import _attach_trajectory_record
+    from nemo_gym.rollouts.harness_capabilities import inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 
     module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
     invocation = {

@@ -31,11 +31,11 @@ from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
 from pydantic import ConfigDict
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -46,9 +46,6 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-)
-from nemo_gym.server_utils import (
-    get_first_server_config_dict,
 )
 
 

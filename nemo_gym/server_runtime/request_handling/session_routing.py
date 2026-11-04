@@ -37,6 +37,7 @@ Where the session ID comes from:
 | A typed resources ``/seed_session`` or ``/close_session`` | The body's ``resources_session_id`` |
 | Any request to an agent server | The session cookie's ``agent_session_id`` |
 | An agent session seed or close | The body's ``agent_session_id`` |
+| An agent rollout stop without a cookie | The path's ``/rollouts/<rollout id>``, which the session's worker also claims |
 
 The body is read only on the seed and close routes, where it names the session before any cookie exists.
 If the cookie and the body name different sessions, the reply is 409.
@@ -60,6 +61,11 @@ A claim ends once its session's last record on the claimant is gone:
 - a resources session's claim lasts while the session is open, from a successful seed until its close or ``/verify``,
   and ends ``session_close_retry_window_seconds`` after the last request for it otherwise.
   A ``/verify`` that says a close follows, as an environment server's does, leaves the session open for that close.
+
+An agent worker also claims ``/rollouts/<rollout id>`` from the start of a session's seed until the session closes,
+so a rollout stop, which names only the rollout, reaches the worker that runs it.
+That request is forwarded to the key's claimant but never claims the key,
+so a stop for a rollout no worker runs is handled where it arrives and leaves no claim.
 
 The claims of a worker that exited stay until the server exits, so its sessions keep getting a 410.
 The whole directory goes with the server's runtime directory when the server exits.
@@ -167,6 +173,9 @@ class SessionKind:
     #: claimed if the request starts a session or its handler uses the session.
     #: An agent session is named by a key of its own in the cookie instead.
     cookie_session: bool
+    #: Routes whose path names a key the session's worker claims besides the session ID, in the ``claim`` group,
+    #: such as an agent's rollout stop. A request on one without a session ID goes to the key's claimant.
+    path_claim: Optional[re.Pattern[str]] = None
 
     @property
     def body_paths(self) -> re.Pattern[str]:
@@ -654,6 +663,15 @@ class SessionRoutingMiddleware:
         # 2. Look up the session's claim. A seed, a close or another session start creates it if nobody has.
         forwarded = bool(scope.get(_FORWARDED_SCOPE_KEY))
         starts = self.lifetimes is not None and self.lifetimes.starts(scope["path"])
+        path_claim = self.kind.path_claim.fullmatch(scope["path"]) if self.kind.path_claim is not None else None
+        if session_id is None and path_claim is not None:
+            # Looked up, never claimed: a request for a key nobody claims is handled here and leaves no claim.
+            claimant = None if forwarded else claims.claimant(path_claim.group("claim"))
+            if claimant is None or claimant == self.routing_id:
+                await self.app(scope, receive, send)
+            else:
+                await self._forward(claimant, scope, receive, send, body=body)
+            return
         if session_id is None:
             owner = _valid_routing_id(HTTPConnection(scope).headers.get(SESSION_OWNER_HEADER))
             if owner is not None and owner != self.routing_id and not forwarded:

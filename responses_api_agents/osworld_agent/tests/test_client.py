@@ -21,6 +21,7 @@ from responses_api_agents.osworld_agent import client as osworld_client
 from responses_api_agents.osworld_agent import remote_environment as osworld_remote
 from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
+    OSWorldGuestStartTimeoutError,
     OSWorldModelTimeoutError,
 )
 
@@ -2404,3 +2405,42 @@ def test_pointer_env_evaluate_receives_eval_logger(monkeypatch, tmp_path) -> Non
     assert result.reward == 1.0
     assert result.score == 1.0
     assert result.error is None
+
+
+@pytest.mark.parametrize(("http_status", "reported"), [(502, True), (None, True), (404, False)])
+def test_a_guest_start_timeout_is_reported_as_a_sandbox_start_failure(monkeypatch, http_status, reported) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    last_reply = f"HTTP {http_status}, bytes=0" if http_status else "ConnectionError: refused"
+
+    def start_fails(self, **kwargs):
+        timeout = OSWorldGuestStartTimeoutError(
+            f"OSWorld guest did not become ready within 900s: {last_reply}",
+            provider="docker",
+            http_status=http_status,
+            sandbox_id="sbx-1",
+        )
+        raise RuntimeError("environment start failed") from timeout  # the OSWorld environment may wrap it
+
+    monkeypatch.setattr(FakeEnv, "__init__", start_fails)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-start-timeout", "instruction": "Never starts."},
+        model_fn=lambda *_args: "unused",
+        runner_name="prompt_agent_computer_13",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakePromptAgent",
+        messages_model_fn=lambda _messages, _payload: "unused",
+        max_steps=1,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    expected = {
+        "provider": "docker",
+        "http_status": http_status,
+        "message": f"OSWorld guest did not become ready within 900s: {last_reply}",
+        "sandbox_id": "sbx-1",
+    }
+    assert result.sandbox_start_failure == (expected if reported else None)
+    # The score and the runtime mask do not change.
+    assert (result.reward, result.mask_sample, result.evaluation_completed) == (0.0, True, False)

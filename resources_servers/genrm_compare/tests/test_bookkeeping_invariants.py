@@ -10,8 +10,7 @@ from fastapi import HTTPException
 
 import resources_servers.genrm_compare.app as genrm
 from nemo_gym.core import EpisodeId
-from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
-from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+from nemo_gym.server_runtime import CheckpointRequest, ResourcesParticipant
 from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member

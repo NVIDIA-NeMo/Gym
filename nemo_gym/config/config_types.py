@@ -207,6 +207,10 @@ class AmbiguousAgentRenameError(ConfigError, ValueError):
     """An environment server references an agent inherited by several new instances."""
 
 
+class AmbiguousResourcesRenameError(ConfigError, ValueError):
+    """An environment server references resources inherited by several new instances."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 
@@ -1024,8 +1028,9 @@ class AggregateMetrics(BaseModel):
 # Model Call Capture
 ########################################
 
-# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
-# the capture middleware in base_responses_api_model.py strips this prefix before routing.
+# Per-rollout model-call correlation.
+# Callers place the rollout id in the model-server URL.
+# The capture middleware in models/model_call_capture.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
 TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"

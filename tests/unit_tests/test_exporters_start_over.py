@@ -19,6 +19,7 @@ reopened run continues or the output starts over (`start_over`)."""
 
 from asyncio import Future
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -26,15 +27,15 @@ import orjson
 import pytest
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.artifacts.exporters.wandb as wandb_module
-import nemo_gym.rollout_collection as collection_module
-import nemo_gym.rollout_reverification as reverification_module
+import nemo_gym.eval.rollout_reverification as reverification_module
+import nemo_gym.rollouts.rollout_collection as collection_module
 from nemo_gym.artifacts.exporters import export_rollouts, get_exporters, setup_exporters, teardown_exporters
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
-from nemo_gym.rollout_reverification import OutputPaths
+from nemo_gym.eval.rollout_reverification import OutputPaths
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 
 
 @pytest.fixture(autouse=True)
@@ -266,7 +267,7 @@ class TestReverificationStartOver:
             getattr(paths, name).write_text('{"_ng_task_index": 0, "_ng_rollout_index": 0}\n')
         before = {p: p.read_bytes() for p in (paths.output, paths.failures) if p.exists()}
         exporter = MagicMock()
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", lambda: [exporter])
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", lambda: [exporter])
         config = reverification_module.RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath="in.jsonl",
             rollouts_jsonl_fpath="rollouts.jsonl",
@@ -410,6 +411,9 @@ class TestStringFlags:
         assert exporter.run_id != old_run and not exporter.reopened
 
         monkeypatch.setattr(collection_module, "get_global_config_dict", MagicMock(return_value={}))
+        # The run manifest fingerprints the running servers' configuration.
+        servers = SimpleNamespace(global_config_dict=OmegaConf.create({"a": {"responses_api_agents": {"impl": {}}}}))
+        monkeypatch.setattr(collection_module, "setup_server_client_utils", lambda *args, **kwargs: servers)
         inputs = tmp_path / "input.jsonl"
         inputs.write_bytes(
             orjson.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + b"\n"
