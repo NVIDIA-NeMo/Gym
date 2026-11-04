@@ -139,7 +139,7 @@ MOVED_MODULES: dict[str, MovedPath] = {
     ),
     "nemo_gym.mcp_auto_exposure": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure", since="0.8.0"),
     "nemo_gym.server_status": MovedPath(new="nemo_gym.server_runtime.server_status", since="0.8.0"),
-    "nemo_gym.episode_types": MovedPath(new="nemo_gym.server_runtime.episode_types", since="0.8.0"),
+    "nemo_gym.episode_types": MovedPath(new="nemo_gym.core.episode_types", since="0.8.0"),
     "nemo_gym.single_agent_turn_types": MovedPath(
         new="nemo_gym.server_runtime.single_agent_turn_types", since="0.8.0"
     ),
