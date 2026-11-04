@@ -379,7 +379,7 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert (
-        "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]"
+        "needs: [pre-flight, classify_changes, component_locks, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]"
         in workflow
     )
     assert "if: always() && !cancelled()" in workflow
@@ -388,6 +388,7 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     assert '"$DOCS_ONLY" == "true"' in workflow
     assert '"$IS_NIGHTLY" == "true"' in workflow
     assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
+    assert "COMPONENT_LOCKS_RESULT: ${{ needs.component_locks.result }}" in workflow
     assert '"$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped"' in workflow
 
 
@@ -406,6 +407,7 @@ def _run_step(job_name: str, step_name: str, env_overrides: dict[str, str]) -> s
 _ALL_SUCCESS_RESULTS = {
     "PREFLIGHT_RESULT": "success",
     "CLASSIFY_RESULT": "success",
+    "COMPONENT_LOCKS_RESULT": "success",
     "DOCS_ONLY": "false",
     "UNIT_TEST_RESULT": "success",
     "CONTAINER_BUILD_RESULT": "success",
@@ -421,6 +423,15 @@ _ALL_SUCCESS_RESULTS = {
         ("pull_request", {}, True),
         ("pull_request", {"CONTAINER_BUILD_RESULT": "failure"}, True),
         ("pull_request", {"UNIT_TEST_RESULT": "failure"}, False),
+        ("push", {"COMPONENT_LOCKS_RESULT": "failure"}, False),
+        ("merge_group", {"COMPONENT_LOCKS_RESULT": "cancelled"}, False),
+        ("push", {"COMPONENT_LOCKS_RESULT": "skipped"}, False),
+        ("push", {"COMPONENT_LOCKS_RESULT": ""}, False),
+        (
+            "push",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped", "COMPONENT_LOCKS_RESULT": "failure"},
+            False,
+        ),
         (
             "pull_request",
             {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
@@ -449,6 +460,7 @@ _ALL_SUCCESS_RESULTS = {
             True,
         ),
         ("schedule", {"UNIT_TEST_RESULT": "failure"}, False),
+        ("schedule", {"COMPONENT_LOCKS_RESULT": "failure"}, False),
         ("workflow_dispatch", {"CONTAINER_BUILD_RESULT": "failure"}, False),
         ("workflow_dispatch", {}, True),
     ],
@@ -462,6 +474,20 @@ def test_nemo_cicd_test_gate_matches_event_and_job_results(
     result = _run_step("Nemo_CICD_Test", "Check test results", env)
 
     assert (result.returncode == 0) == expect_success, result.stdout + result.stderr
+
+
+def test_component_lock_freshness_runs_in_required_pipeline() -> None:
+    """Check every managed lock on both platforms before the required summary can pass."""
+    jobs = _cicd_main_jobs()
+    locks = jobs["component_locks"]
+    assert locks["uses"] == "./.github/workflows/component-locks.yml"
+    assert "if" not in locks
+    assert "component_locks" in jobs["Nemo_CICD_Test"]["needs"]
+    workflow = yaml.load((REPO_ROOT / ".github/workflows/component-locks.yml").read_text(), Loader=yaml.BaseLoader)
+    assert "workflow_call" in workflow["on"]
+    check = workflow["jobs"]["check"]
+    assert check["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-latest"]
+    assert any("python scripts/component_locks.py" in step.get("run", "") for step in check["steps"])
 
 
 def test_cicd_nightly_jobs_require_upstream_success() -> None:

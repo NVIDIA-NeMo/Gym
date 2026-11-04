@@ -164,6 +164,7 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
     DISPATCH_NAME_ATTRIBUTE,
@@ -3976,7 +3977,9 @@ executions → not run again (left to recovery)
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
-            semaphore = Semaphore(config.num_samples_in_parallel)
+            semaphore = MeteredSemaphore(
+                config.num_samples_in_parallel, component="rollout_driver", limit_name="rollouts"
+            )
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
