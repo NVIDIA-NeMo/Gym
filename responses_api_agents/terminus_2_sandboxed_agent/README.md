@@ -1,5 +1,20 @@
 # Harbor Terminus 2 Agent
 
+> [!WARNING]
+> **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
+> (for example [`benchmarks/terminal_bench_2_1/terminus_2.yaml`](../../benchmarks/terminal_bench_2_1/terminus_2.yaml)),
+> this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
+> That path will be removed after the environment-server migration, and the agent logs a deprecation
+> warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
+>
+> Episode sessions under an environment server are not deprecated: Harbor task folders run this agent
+> that way (`gym eval run <tasks> --agent terminus_2_sandboxed_agent`; see the
+> [`harbor` environment server](../../environment_servers/harbor/README.md)). Terminal Bench 2.1 runs that way from
+> its Harbor task folders (`gym eval run terminal_bench_2_1 --agent terminus_2_sandboxed_agent`; see
+> [`environments/harbor/terminal_bench_2_1`](../../environments/harbor/terminal_bench_2_1/README.md)). For other benchmarks, use a
+> session-capable harness such as `pi_agent`, `codex_agent`, `opencode_agent` or `openclaw_agent`; see
+> [Choose a harness](../../benchmarks/terminal_bench_2_1/README.md#choose-a-harness).
+
 This agent runs Harbor's `Terminus2` control loop in the task sandbox supplied by
 the NeMo Gym resources server. It adapts the small Harbor environment interface
 that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore

@@ -19,8 +19,8 @@ from typing import Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import JSON_OUTPUT_KEY_NAME, GlobalConfigDictParserConfig, get_global_config_dict
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.global_config import JSON_OUTPUT_KEY_NAME, GlobalConfigDictParserConfig, get_global_config_dict
 
 
 def dev_test():  # pragma: no cover
@@ -67,7 +67,7 @@ def dev_compare(*, json_stdout: bool = False, **cli_values: Optional[str]) -> No
     gym dev compare old/rollouts.jsonl new/rollouts.jsonl --logs-root environment_servers/harbor --json compare.json
     ```
     """
-    from nemo_gym.rollout_compare import RolloutCompareConfig, run_compare
+    from nemo_gym.eval.rollout_compare import RolloutCompareConfig, run_compare
 
     initial = DictConfig({name: _literal(value) for name, value in cli_values.items() if value is not None})
     global_config_dict = get_global_config_dict(GlobalConfigDictParserConfig(initial_global_config_dict=initial))

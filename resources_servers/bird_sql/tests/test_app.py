@@ -9,13 +9,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
+    VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    RequestFailureLog,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime import verifier_observability
+from nemo_gym.trajectory import VerifierInvocation
 from resources_servers.bird_sql.app import (
     BirdSqlResourcesServer,
     BirdSqlResourcesServerConfig,
@@ -80,9 +84,9 @@ def _make_verify_request(
 
 @pytest.fixture
 def tiny_db(tmp_path) -> Path:
-    """Create a tiny SQLite DB with one table."""
+    """Create a tiny SQLite DB with one table (over the server fixture's empty placeholder, if present)."""
     db_dir = tmp_path / "TestDB"
-    db_dir.mkdir()
+    db_dir.mkdir(exist_ok=True)
     db = db_dir / "TestDB.sqlite"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE t (x INTEGER)")
@@ -94,7 +98,14 @@ def tiny_db(tmp_path) -> Path:
 
 @pytest.fixture
 def server_with_mocked_dbs(tmp_path, monkeypatch):
-    """Build a BirdSqlResourcesServer whose DB root points at tmp_path (no download)."""
+    """Build a BirdSqlResourcesServer whose DB root points at tmp_path (no download).
+
+    ``verify`` refuses to run a query without the database file, so the default ``TestDB`` gets an
+    empty placeholder file; tests that mock ``execute_and_compare`` never open it, and ``tiny_db``
+    turns it into a real database.
+    """
+    (tmp_path / "TestDB").mkdir(exist_ok=True)
+    (tmp_path / "TestDB" / "TestDB.sqlite").touch()
     monkeypatch.setattr(
         "resources_servers.bird_sql.app.ensure_bird_sql",
         lambda _path: tmp_path,
@@ -392,6 +403,33 @@ async def test_verify_match(server_with_mocked_dbs, monkeypatch):
     assert resp.had_codeblock is True
 
 
+def _assert_scored(resp, reward: float, failure_reason: FailureCode) -> None:
+    """A measured answer: the reward counts, nothing is masked, no failure kind is named."""
+    assert resp.reward == reward
+    assert resp.failure_reason == failure_reason
+    assert resp.mask_sample is False
+    assert resp.failure_kind is None
+
+
+def _assert_verifier_failure(resp, failure_reason: FailureCode, extracted_sql: str) -> None:
+    """The verifier could not measure the answer: masked, typed, and the answer is kept on the row."""
+    assert resp.reward == 0.0
+    assert resp.mask_sample is True
+    assert resp.failure_kind == VERIFIER_ERROR
+    assert resp.failure_reason == failure_reason
+    assert resp.execution_match is False
+    assert resp.had_codeblock is True
+    assert resp.extracted_sql == extracted_sql
+    assert extracted_sql in resp.model_output
+
+
+def _observed_verifier_failures(log: RequestFailureLog) -> list:
+    return [
+        (event.boundary, event.failure_kind, event.operation, event.stage, event.exception_type)
+        for event in log.report.events.values()
+    ]
+
+
 @pytest.mark.asyncio
 async def test_verify_mismatch_with_codeblock(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
@@ -401,14 +439,15 @@ async def test_verify_mismatch_with_codeblock(server_with_mocked_dbs, monkeypatc
 
     body = _make_verify_request("```sql\nSELECT 2\n```")
     resp = await server_with_mocked_dbs.verify(body)
-    assert resp.reward == 0.0
+    _assert_scored(resp, 0.0, FailureCode.RESULT_MISMATCH)
     assert resp.execution_match is False
     assert resp.had_codeblock is True
-    assert resp.failure_reason == FailureCode.RESULT_MISMATCH
 
 
 @pytest.mark.asyncio
 async def test_verify_pred_sql_error_with_codeblock(server_with_mocked_dbs, monkeypatch):
+    """The model's own query failing is a wrong answer (the official BIRD rule), so it stays a scored 0."""
+
     async def fake(**_kw):
         return False, [(1,)], None, "pred_sql_error"
 
@@ -416,8 +455,7 @@ async def test_verify_pred_sql_error_with_codeblock(server_with_mocked_dbs, monk
 
     body = _make_verify_request("```sql\nBROKEN SQL\n```")
     resp = await server_with_mocked_dbs.verify(body)
-    assert resp.reward == 0.0
-    assert resp.failure_reason == FailureCode.EXECUTION_ERROR
+    _assert_scored(resp, 0.0, FailureCode.EXECUTION_ERROR)
 
 
 @pytest.mark.asyncio
@@ -429,47 +467,138 @@ async def test_verify_pred_sql_timeout_with_codeblock(server_with_mocked_dbs, mo
 
     body = _make_verify_request("```sql\nSLOW SQL\n```")
     resp = await server_with_mocked_dbs.verify(body)
-    assert resp.reward == 0.0
-    assert resp.failure_reason == FailureCode.EXECUTION_TIMEOUT
+    _assert_scored(resp, 0.0, FailureCode.EXECUTION_TIMEOUT)
 
 
 @pytest.mark.asyncio
-async def test_verify_gold_sql_error(server_with_mocked_dbs, monkeypatch):
+async def test_verify_gold_sql_error_is_a_typed_verifier_failure(server_with_mocked_dbs, monkeypatch):
+    """A gold query that cannot run was never the model's doing: masked and typed, never a scored 0."""
+
     async def fake(**_kw):
         return False, None, None, "gold_sql_error"
 
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
 
     body = _make_verify_request("```sql\nSELECT 1\n```")
-    resp = await server_with_mocked_dbs.verify(body)
-    assert resp.reward == 0.0
-    assert resp.failure_reason == FailureCode.GOLD_EXECUTION_ERROR
+    with RequestFailureLog.capture() as log:
+        resp = await server_with_mocked_dbs.verify(body)
+    _assert_verifier_failure(resp, FailureCode.GOLD_EXECUTION_ERROR, "SELECT 1")
+    assert _observed_verifier_failures(log) == [("resources_server", VERIFIER_ERROR, "verify", "verification", None)]
 
 
 @pytest.mark.asyncio
-async def test_verify_gold_sql_timeout(server_with_mocked_dbs, monkeypatch):
+async def test_verify_gold_sql_timeout_is_a_typed_verifier_failure(server_with_mocked_dbs, monkeypatch):
     async def fake(**_kw):
         return False, None, None, "gold_sql_timeout"
 
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
 
     body = _make_verify_request("```sql\nSELECT 1\n```")
-    resp = await server_with_mocked_dbs.verify(body)
-    assert resp.reward == 0.0
-    assert resp.failure_reason == FailureCode.GOLD_EXECUTION_TIMEOUT
+    with RequestFailureLog.capture() as log:
+        resp = await server_with_mocked_dbs.verify(body)
+    _assert_verifier_failure(resp, FailureCode.GOLD_EXECUTION_TIMEOUT, "SELECT 1")
+    assert _observed_verifier_failures(log) == [("resources_server", VERIFIER_ERROR, "verify", "verification", None)]
 
 
 @pytest.mark.asyncio
-async def test_verify_unknown_exception(server_with_mocked_dbs, monkeypatch):
+async def test_verify_crash_is_a_typed_verifier_failure(server_with_mocked_dbs, monkeypatch):
+    """A crash inside the executor is reported with its cause, not scored as a wrong answer."""
+
     async def fake(**_kw):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
 
     body = _make_verify_request("```sql\nSELECT 1\n```")
+    with RequestFailureLog.capture() as log:
+        resp = await server_with_mocked_dbs.verify(body)
+    _assert_verifier_failure(resp, FailureCode.UNKNOWN_ERROR, "SELECT 1")
+    assert _observed_verifier_failures(log) == [
+        ("resources_server", VERIFIER_ERROR, "verify", "verification", "RuntimeError")
+    ]
+    [event] = log.report.events.values()
+    assert event.failure_reason == "BIRD verifier crashed: RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_verify_missing_database_is_a_typed_verifier_failure(server_with_mocked_dbs, tmp_path, monkeypatch):
+    """No database for the db_id: nothing is executed, nothing is created, and the row is masked and typed."""
+
+    async def fail_if_called(**_kw):
+        raise AssertionError("execute_and_compare should not run without a database")
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
+
+    body = _make_verify_request("```sql\nSELECT x FROM t\n```", db_id="NoSuchDB")
+    with RequestFailureLog.capture() as log:
+        resp = await server_with_mocked_dbs.verify(body)
+    _assert_verifier_failure(resp, FailureCode.DATABASE_MISSING, "SELECT x FROM t")
+    assert not (tmp_path / "NoSuchDB").exists()
+    [event] = log.report.events.values()
+    assert (event.failure_kind, event.failure_reason) == (
+        VERIFIER_ERROR,
+        "BIRD database for db_id='NoSuchDB' is missing",
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_corrupt_database_is_a_typed_verifier_failure(server_with_mocked_dbs, tmp_path):
+    """A file that is not a SQLite database fails the gold query: a verifier failure, never a scored 0."""
+    db_dir = tmp_path / "TestDB"
+    db_dir.mkdir(exist_ok=True)
+    (db_dir / "TestDB.sqlite").write_bytes(b"this is not a sqlite database" * 64)
+
+    body = _make_verify_request("```sql\nSELECT x FROM t\n```", gt_sql="SELECT x FROM t")
     resp = await server_with_mocked_dbs.verify(body)
-    assert resp.reward == 0.0
-    assert resp.failure_reason == FailureCode.UNKNOWN_ERROR
+    _assert_verifier_failure(resp, FailureCode.GOLD_EXECUTION_ERROR, "SELECT x FROM t")
+
+
+@pytest.mark.asyncio
+async def test_verify_wrong_answer_against_real_database_stays_a_scored_zero(server_with_mocked_dbs, tiny_db):
+    body = _make_verify_request("```sql\nSELECT x FROM t WHERE x = 2\n```", gt_sql="SELECT x FROM t WHERE x = 1")
+    resp = await server_with_mocked_dbs.verify(body)
+    _assert_scored(resp, 0.0, FailureCode.RESULT_MISMATCH)
+
+
+@pytest.mark.asyncio
+async def test_verify_broken_model_sql_against_real_database_stays_a_scored_zero(server_with_mocked_dbs, tiny_db):
+    body = _make_verify_request("```sql\nSELECT nope FROM t\n```", gt_sql="SELECT x FROM t")
+    resp = await server_with_mocked_dbs.verify(body)
+    _assert_scored(resp, 0.0, FailureCode.EXECUTION_ERROR)
+
+
+@pytest.mark.asyncio
+async def test_verify_correct_answer_against_real_database_scores_one(server_with_mocked_dbs, tiny_db):
+    body = _make_verify_request("```sql\nSELECT x FROM t ORDER BY x DESC\n```", gt_sql="SELECT x FROM t")
+    resp = await server_with_mocked_dbs.verify(body)
+    _assert_scored(resp, 1.0, FailureCode.NONE)
+    assert resp.execution_match is True
+
+
+@pytest.mark.asyncio
+async def test_verify_records_a_programmatic_grading_observation(server_with_mocked_dbs, tiny_db):
+    """A scored verify is a programmatic grade of the saved answer; a verifier failure grades nothing."""
+
+    async def verify_under_invocation(text: str, **kwargs) -> VerifierInvocation:
+        invocation = VerifierInvocation(invocation_id="verify-test")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            await server_with_mocked_dbs.verify(_make_verify_request(text, **kwargs))
+        finally:
+            verifier_observability._active_verifier.reset(token)
+        return invocation
+
+    scored = await verify_under_invocation("```sql\nSELECT x FROM t\n```", gt_sql="SELECT x FROM t")
+    [operation] = scored.grading_operations
+    assert operation.outcome == "completed"
+    assert operation.dependencies == []
+
+    no_sql = await verify_under_invocation("no query here", gt_sql="SELECT x FROM t")
+    [operation] = no_sql.grading_operations
+    assert operation.outcome == "completed"
+
+    failed = await verify_under_invocation("```sql\nSELECT x FROM t\n```", db_id="NoSuchDB")
+    assert failed.grading_operations is None
 
 
 # ---------------------------------------------------------------------------
