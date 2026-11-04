@@ -137,6 +137,30 @@ def test_without_the_flag_the_row_stays_masked_and_inspect_names_it_in_its_own_b
     assert store.pending() == [] and store.attempt_count({"_ng_task_index": 1, "_ng_rollout_index": 0}) == 0
 
 
+def test_a_masked_row_without_artifact_keeps_an_operator_continuation_of_unknown_accounting(tmp_path):
+    # The masked-without-artifact note extends the decision's display reason. The unknown accounting is still the
+    # cause of the stop, so an explicit operator budget continues the run: the masked row stays retained (masked,
+    # not rerun) and the missing one resumes.
+    from nemo_gym.orchestration.recovery import OperatorBudget
+
+    output, _ = _run(tmp_path, [[_kept()], []])
+    (tmp_path / ".gym_infra_retries").write_text("unreadable" + chr(10))
+    before = output.read_bytes()
+    budget = OperatorBudget(
+        user="example-operator", max_walltime="20:00:00", reason="continue after a lost submission reply", retries=2
+    )
+
+    decision = _decide(tmp_path, operator_budget=budget)
+
+    assert decision.action.value == "resubmit", decision.reason
+    assert decision.counts == {"scored": 1, "masked": 1, "missing": 1}
+    assert decision.masked_without_artifact == [(1, 0)] and decision.rerun_masked == []
+    assert decision.operator_continuation is not None
+    assert "1 masked result(s) without a gradeable artifact" in decision.reason
+    assert _evidence(decision, (1, 0)).state.value == "masked"
+    assert output.read_bytes() == before
+
+
 def test_a_masked_row_with_a_model_kind_is_not_in_the_bucket(tmp_path):
     _run(tmp_path, [[_kept("agent_timeout")]])
     decision = _decide(tmp_path)
