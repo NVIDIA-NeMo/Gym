@@ -36,9 +36,8 @@ When the Environment Server drives agent sessions, it orders the calls. The agen
 you can swap the agent behind a benchmark through configuration alone. [Architecture](/main/about/architecture)
 shows one episode as a sequence diagram.
 
-By default (`environment_routing_mode: agent`), a flat JSONL row goes to the Environment Server that names the row's
-agent; two such servers are an error. Rows of a dataset that declares a `taskset`, such as task-folder rows, go to
-the server that `environment_server_routes` names for that taskset. `gym eval run` writes that route for task folders.
+Rollout collection routes each row to its Environment Server for you, and `gym eval run` writes the route for task
+folders. The routing settings are fields of `SharedRolloutCollectionConfig` in `nemo_gym/rollouts/rollout_collection.py`.
 
 ### Episode limits
 
@@ -48,8 +47,11 @@ Every Environment Server built on `BaseEnvironmentServer` takes the same limits 
 | --- | --- |
 | `max_concurrent_episodes` | Caps the episodes each server worker runs at once, so the server runs up to `num_workers` times this. Requires `queue_timeout_seconds`. |
 | `queue_timeout_seconds` | How long an episode may wait for a slot before it fails as retryable. |
-| `default_episode_timeout_seconds` | Wall-clock bound on one episode, not counting the wait for a slot or the final cleanup. Unbounded by default, except 21600 on `harbor` and `single_agent_turn_legacy`. |
-| `cleanup_timeout_seconds` | Bound on each cleanup step. Required unless the server sets a default: 180 on `harbor`, `legacy_agent` and `single_agent_turn_legacy`, 300 on `swe_together`. |
+| `default_episode_timeout_seconds` | Wall-clock bound on one episode, not counting the wait for a slot or the final cleanup. |
+| `cleanup_timeout_seconds` | Bound on each cleanup step. |
+
+The fields are defined in `nemo_gym/server_runtime/base_environment_server.py`. Each server's defaults are in its
+config class in `environment_servers/<name>/app.py`.
 
 `legacy_agent` takes these keys but applies none of them; the agent keeps its own limits.
 
