@@ -475,6 +475,29 @@ async def test_a_failed_pass_counts_each_withdrawn_admission_once(tmp_path, monk
 
 
 @pytest.mark.parametrize(
+    ("counts", "says"),
+    [
+        (
+            {"selected": 2, "settled": 1, "withdrawn": 1},
+            "before it failed it settled 1 of 2 selected saved answer(s), which counts as progress, and withdrew 1, "
+            "left as they were; the others stay as they were",
+        ),
+        (
+            {"selected": 2, "settled": 0, "withdrawn": 2},
+            "before it failed it settled 0 of 2 selected saved answer(s) and withdrew 2, left as they were; the "
+            "others stay as they were",
+        ),
+        ({"selected": 2, "settled": 0, "withdrawn": 0}, "the saved answers it was to grade again stay as they were"),
+    ],
+)
+def test_the_note_on_a_failed_judge_job_says_what_it_settled_and_withdrew(counts, says):
+    from nemo_gym.orchestration.recovery import judge_job_note
+
+    job = {"job_id": "1", "state": "failed", "ended_at": "2026-01-01T00:00:00Z", "error": "OSError: disk full"}
+    assert judge_job_note(job | counts) == f"judge-only job 1 failed: OSError: disk full; {says}"
+
+
+@pytest.mark.parametrize(
     "masked",
     [
         {"reward": 0.0, "mask_sample": True},
