@@ -45,6 +45,7 @@ import aiohttp
 import orjson
 from aiohttp import ClientConnectorError, ClientError
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf.errors import OmegaConfBaseException
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
@@ -142,6 +143,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
     _digest,
     atomic_write_json,
+    config_identity_path_for,
     has_only_intentional_gaps,
     is_answered_agent_deadline,
     is_terminal_failure,
@@ -149,6 +151,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     manifest_path_for,
     matches_failure_class,
     observed_elapsed,
+    resume_drift_path_for,
     run_lock,
 )
 from nemo_gym.rollouts.rollout_recovery import (
@@ -1131,7 +1134,10 @@ class _RunRecordWriter:
     A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar and, when the rows are
     given, its materialized inputs, a verified run manifest with every attempt reserved, and its saved progress
     (``rollouts-<shard>_batch_status.json``) beside it, so a folder of shards is what ``gym eval aggregate``, the run
-    health check, the Store (including resume and recovery) and EvalRDL's reader already read. The caller picks the shard label (for example a training step
+    health check, the Store (including resume and recovery) and EvalRDL's reader already read. The manifest is the one
+    ``gym eval run`` computes when it resumes the shard (``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl
+    +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl +resume_from_cache=true``), so that resume runs only what the shard
+    still lacks. The caller picks the shard label (for example a training step
     and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
     the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
     sidecar as an omitted-rollout row only when ``record_omitted_rollouts`` is set. Opening a shard replaces what an
@@ -1147,8 +1153,7 @@ class _RunRecordWriter:
         rows: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
         status_rows: Optional[List[Dict[str, Any]]] = None,
-        source_rows: Optional[List[Dict[str, Any]]] = None,
-        config_identity: Optional[Dict[str, Any]] = None,
+        global_config: Any = None,
     ) -> None:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
@@ -1170,6 +1175,8 @@ class _RunRecordWriter:
             self.failures_fpath.unlink(missing_ok=True)
             self.materialized_fpath.unlink(missing_ok=True)
             self.manifest_fpath.unlink(missing_ok=True)
+            config_identity_path_for(self.manifest_fpath).unlink(missing_ok=True)
+            resume_drift_path_for(self.manifest_fpath).unlink(missing_ok=True)
             self.status_fpath.unlink(missing_ok=True)
             # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
             # found by readers that discover shards by it. A new file (not a truncation) gives this writer its own
@@ -1195,15 +1202,8 @@ class _RunRecordWriter:
                         file.write(orjson.dumps(row) + b"\n")
                 # A verified run manifest with every row's attempt reserved before the first request, as collection
                 # writes its own: resume and recovery accept the shard, and the Store checks each record's identity
-                # against it. ``rows`` are the copies as dispatched (run id and attempt index stamped).
-                self.manifest = RunManifest(
-                    max_rollout_attempts=get_max_rollout_attempts(),
-                    run_id=self.run_id,
-                    source_digest=_digest(source_rows if source_rows is not None else rows),
-                    materialized_digest=_digest(rows),
-                    config_digest=_digest(config_identity or {}),
-                    next_attempt={logical_rollout_id(row): row.get(ATTEMPT_INDEX_KEY_NAME, 0) + 1 for row in rows},
-                )
+                # against it. ``rows`` are the copies as dispatched (run id, rollout id and attempt index stamped).
+                self.manifest = self._resumable_manifest(rows, global_config)
                 self.manifest.write(self.manifest_fpath)
             # The shard's own saved progress, `rollouts-<shard>_batch_status.json`, read by `gym eval status` and
             # marked by aggregation like any run's. It counts the records this writer writes, which are what the
@@ -1227,6 +1227,40 @@ class _RunRecordWriter:
                 except Exception as error:
                     disable_run_status(self.status_fpath, error)
                     self._status = None
+
+    def _resumable_manifest(self, rows: List[Dict[str, Any]], global_config: Any) -> RunManifest:
+        """The manifest ``gym eval run`` computes when it resumes this shard, with every row's attempt reserved.
+
+        That resume names the shard's materialized inputs as its input and the shard as its output, and leaves the
+        other collection settings at their defaults: the same source file, the same rows and, with the same servers,
+        the same configuration. Collection numbers each task's rollouts 0, 1, ... in input order, so rows numbered
+        otherwise are recorded too, and that resume refuses them as other materialized inputs. A configuration this call
+        cannot take an identity from still records the shard, whose manifest then verifies its own inputs only, so a
+        resume refuses it and says why.
+        """
+        reserved = {
+            "run_id": self.run_id,
+            "next_attempt": {logical_rollout_id(row): row.get(ATTEMPT_INDEX_KEY_NAME, 0) + 1 for row in rows},
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self.materialized_fpath), output_jsonl_fpath=str(self.rollouts_fpath)
+        ).model_dump()
+        try:
+            manifest = RunManifest.create(self.materialized_fpath, rows, config, global_config or {})
+        except (ConfigError, OmegaConfBaseException) as error:
+            warnings.warn(
+                f"Shard {self.rollouts_fpath.name} is recorded, but gym eval run will not resume it: its configuration "
+                f"has no identity to compare against. {error}",
+                stacklevel=3,
+            )
+            manifest = RunManifest(
+                max_rollout_attempts=get_max_rollout_attempts(),
+                run_id=self.run_id,
+                source_digest=_digest(rows),
+                materialized_digest=_digest(rows),
+                config_digest="unrecorded",
+            )
+        return manifest.model_copy(update=reserved)
 
     @contextmanager
     def _locked(self) -> Iterator[Any]:
@@ -5488,7 +5522,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
         Each copy's rollout id is the row's own id (its ``_ng_rollout_id``, or ``<task>-<rollout>``) prefixed with the
         shard's run id, so the shard's model calls are captured under keys of its own; a caller that looks a capture up
-        reads its key from the returned row (``maybe_rollout_id_from_run_body``).
+        reads its key from the returned row (``maybe_rollout_id_from_run_body``). ``gym eval run`` with
+        ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
+        +resume_from_cache=true`` resumes a shard and runs only what it still lacks.
         """
         if record_output_dir is not None and not record_shard:
             raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
@@ -5580,15 +5616,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 rows=dispatched,
                 run_id=run_id,
                 status_rows=status_rows,
-                source_rows=examples,
-                config_identity={
-                    "run_examples": {
-                        "route_failures_to_sidecar": route_failures_to_sidecar,
-                        "record_omitted_rollouts": record_omitted_rollouts,
-                        "include_model_call_payloads": include_model_call_payloads,
-                        "retry_requests": retry_requests,
-                    }
-                },
+                global_config=global_config,
             )
         return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
 
