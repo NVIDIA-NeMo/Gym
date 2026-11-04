@@ -9,10 +9,18 @@ It is benchmark-agnostic: the task prompt, the task tools and the sandbox come f
 Stirrup runs only in agent sessions, seeded by an environment server with these grants:
 
 - `sandbox_access`: the task sandbox, owned by the resources server. Without it, the agent starts its own sandbox from
-  `sandbox_provider` and `sandbox_config`. At seed, the agent installs the server's Stirrup version in a venv outside
-  the working directory and stages `sandbox_runner.py` with the modules it imports.
+  `sandbox_provider` and `sandbox_config`. At seed, the agent uploads a Python runtime with the server's Stirrup
+  version, built on the agent's host, to a directory outside the working directory, and stages `sandbox_runner.py`
+  with the modules it imports. The sandbox needs no network access or Python of its own.
 - At most one `direct_http` tool access: the resources server's routes and the session cookies. A request with `tools`
   needs it.
+
+The sandbox must be x86_64 or aarch64 Linux with glibc 2.28 or newer, `bash`, and `tar` with gzip. musl images, such as
+Alpine, and older glibc are not supported: `imageio-ffmpeg` publishes no musllinux wheel, and the Pillow version in
+`overrides.txt` publishes only manylinux_2_28 wheels. The agent's host builds the runtime with `uv` and caches it under
+`sandbox_python` in Gym's `cache_dir`. Building needs the Python package index and the python-build-standalone
+releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python
+build can be given the file in that cache directory.
 
 The activation (`/ng-rollout/<id>/v1/responses`) runs `sandbox_runner.py` in the sandbox under Gym's process
 supervisor. The runner builds Stirrup's messages from `responses_create_params.input` and gives the model:
@@ -42,7 +50,7 @@ episode.
 | `temperature` | `0.6` | Sampling temperature when the request sets none. |
 | `finish_tool_names` | `null` | Request tools that end the episode when they succeed; `null` uses Stirrup's own finish tool. |
 | `code_exec` | `true` | Whether the model gets the `code_exec` shell tool. Off when the request's tools are the only tools the task allows (EnterpriseOps-Gym). |
-| `sandbox_install_timeout_seconds` | `900` | Bound on installing the runtime in the sandbox. |
+| `sandbox_install_timeout_seconds` | `900` | Bound on building, uploading and installing the runtime at seed. |
 | `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
 | `session_close_timeout_seconds` | `30` | Bound on each cleanup phase at close. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |

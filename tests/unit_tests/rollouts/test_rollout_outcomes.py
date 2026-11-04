@@ -6,9 +6,9 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import BaseEpisodeResponse, EpisodeId, TaskId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailure, RolloutFailureRecord
-from nemo_gym.server_runtime.episode_types import BaseEpisodeResponse, EpisodeFailure
 
 
 def test_same_failure_survives_wire_and_persisted_record_json() -> None:
@@ -122,7 +122,12 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
             "http_status",
             "exception_type",
         },
-        "EpisodeFailure": {"failure_reason", "terminal", "failure_kind", "stage"},
+        "EpisodeFailure": {
+            "failure_reason",
+            "terminal",
+            "failure_kind",
+            "stage",
+        },
         "EpisodeId": {"rollout_id", "attempt"},
     }, "Changing version-1 saved fields requires reviewing the RolloutFailureRecord schema_version bump policy"
     assert failure["additionalProperties"] is False

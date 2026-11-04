@@ -10,9 +10,9 @@ from datasets import Dataset
 from omegaconf import OmegaConf
 
 from benchmarks.indic.math_500 import prepare as module
-from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.environment.benchmarks import BenchmarkConfig
 from nemo_gym.environment.manifest import load_manifest
 
 
