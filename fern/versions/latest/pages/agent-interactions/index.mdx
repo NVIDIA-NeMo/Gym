@@ -74,28 +74,10 @@ one, with a deprecation warning, for any agent that no Environment Server names.
 Some benchmarks ship their own Environment Server under `environment_servers/<name>/`, such as `swe_together`. The
 benchmark's configuration sets it and its README documents it.
 
-An Environment Server is a configuration block like any other server. The top-level key names the instance, and
-the key under `environment_servers` names the implementation folder, `environment_servers/<name>/`. This block
-binds one agent to one Resources Server for one agent turn:
-
-```yaml
-my_benchmark_environment:
-  environment_servers:
-    single_agent_turn:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: my_benchmark_resources_server
-      agent_server:
-        type: responses_api_agents
-        name: my_benchmark_agent
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
-```
-
-`single_agent_turn` grants no Resources Server tools unless you list `direct_http`, `mcp`, or both in
-`resources_tool_transports`. Each server's other settings are fields of its config class in
-`environment_servers/<name>/app.py`.
+Each Environment Server is a block in your configuration that binds an agent, and for `single_agent_turn` a
+Resources Server, by name. For a complete working configuration, see
+[Configure an experiment](/main/agent-server/integrate-existing-agents#configure-an-experiment). Each server's
+settings are fields of its config class in `environment_servers/<name>/app.py`.
 
 ## Write your own Environment Server
 
