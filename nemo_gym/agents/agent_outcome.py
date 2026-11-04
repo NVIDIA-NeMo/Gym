@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Annotated
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
-from nemo_gym.core.episode_types import FailureBoundary, FailureReport, ModelFailureDetails
 from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
@@ -17,6 +16,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
 )
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
 
 

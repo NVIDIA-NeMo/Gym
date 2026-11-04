@@ -34,6 +34,9 @@ gpqa_diamond_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gpqa_diamond
       agent_server:
         type: responses_api_agents
         name: gpqa_diamond_simple_agent

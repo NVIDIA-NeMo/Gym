@@ -2141,3 +2141,18 @@ class TestModelTypeKeepsBenchmarkPolicySettings:
         for key, value in self.POLICY_SETTINGS.items():
             assert vllm_model[key] == value, key
         assert vllm_model["entrypoint"] == "app.py"  # the model-type config still applied
+
+
+class TestEvalResubmitFractionFlagsHelp:
+    def test_the_fraction_flags_are_described_as_reported_not_as_gates(
+        self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        # Only evaluation health decides the gate; the help must not promise that these flags change the verdict.
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["eval", "resubmit", "--help"])
+        help_text = " ".join(capsys.readouterr().out.split())
+
+        assert "response gate passes" not in help_text
+        assert "trial gate fails" not in help_text
+        assert help_text.count("reported under criteria with applied: false") == 2
+        assert "reported in warnings; it does not change the verdict" in help_text

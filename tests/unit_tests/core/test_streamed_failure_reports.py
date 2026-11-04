@@ -11,7 +11,7 @@ from fastapi import Body
 from fastapi.testclient import TestClient
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode_types import FailureBoundary
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
