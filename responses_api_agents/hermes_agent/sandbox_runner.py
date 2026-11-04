@@ -16,14 +16,6 @@ from typing import Any
 from uuid import uuid4
 
 
-try:
-    from .model_kwargs import _model_api_kwargs, install_summary_compat
-    from .sandbox_observer import SandboxHermesObserver
-except ImportError:
-    from model_kwargs import _model_api_kwargs, install_summary_compat
-    from sandbox_observer import SandboxHermesObserver
-
-
 def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     temporary.write_text(json.dumps(payload))
@@ -39,10 +31,10 @@ def _use_model_server(base_url: str) -> None:
     The root agent and its iteration-limit summary share one client, delegated children inherit the
     parent's base URL, and auxiliary clients such as context compression read ``OPENAI_BASE_URL``.
     """
-    from run_agent import AIAgent
-
     os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = _MODEL_API_KEY
+
+    from run_agent import AIAgent
 
     # The Model Server answers only whole responses, so no agent may stream, including the children Hermes builds.
     initialize = AIAgent.__init__
@@ -55,10 +47,7 @@ def _use_model_server(base_url: str) -> None:
 
 
 def _connect_mcp_servers(required: list[str]) -> None:
-    """Connect the MCP servers config.yaml lists for this episode and register their tools.
-
-    Hermes discovers MCP servers when ``run_agent`` is imported, which is before this episode's config exists.
-    """
+    """Refresh this episode's MCP tools and verify that every required server connected."""
     from tools.mcp_tool import discover_mcp_tools, get_mcp_status
 
     discover_mcp_tools()
@@ -69,8 +58,8 @@ def _connect_mcp_servers(required: list[str]) -> None:
 
 
 def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None = None) -> dict[str, Any]:
-    from run_agent import AIAgent
-
+    # Hermes reads .env/config and caches state paths at import time. Configure its session home before any
+    # harness imports, including sibling modules that may import Hermes transitively; preserve the task's HOME.
     hermes_home = session_dir / "hermes-home"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "config.yaml").write_text(payload["config_yaml"])
@@ -78,6 +67,15 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     os.environ["TERMINAL_ENV"] = "local"
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
     _use_model_server(payload["model_base_url"])
+
+    try:
+        from .model_kwargs import _model_api_kwargs, install_summary_compat
+        from .sandbox_observer import SandboxHermesObserver
+    except ImportError:
+        from model_kwargs import _model_api_kwargs, install_summary_compat
+        from sandbox_observer import SandboxHermesObserver
+    from run_agent import AIAgent
+
     if payload["mcp_servers"]:
         _connect_mcp_servers(payload["required_mcp_servers"])
 
