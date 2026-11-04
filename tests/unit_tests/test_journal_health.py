@@ -185,3 +185,66 @@ def test_run_directory_health_reads_the_stacks_settled_judge_answer(tmp_path):
     assert report["artifacts"]["failed"]["total"] == 0
     assert report["issues"]["rollout_duplicate_identity"] == 0
     assert output.read_bytes() == before
+
+
+@pytest.mark.parametrize("key_style", ["relative", "alias"])
+@pytest.mark.parametrize("managed", [False, True])
+def test_health_accepts_relative_and_aliased_history_keys(tmp_path, monkeypatch, key_style, managed):
+    from nemo_gym.rollouts.rollout_health import run_health_checks
+    from nemo_gym.rollouts.rollout_recovery import RunManifest
+    from nemo_gym.rollouts.rollout_store import RolloutStore
+    from tests.unit_tests.rollouts.test_rollout_health import _record
+
+    output = tmp_path / "rollouts.jsonl"
+    history = None
+    if managed:
+        inputs = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+        source = tmp_path / "inputs.jsonl"
+        source.write_text(json.dumps(inputs[0]) + "\n")
+        manifest = RunManifest.create(source, inputs, {}, {})
+        with RolloutStore.start_or_resume(output, lambda: (inputs, manifest), resume=False) as history:
+            row = history.pending()[0]
+            history.record_dispatch(row)
+            history.record_outcome(row | _record(0, 0) | {"reward": 1.0})
+    else:
+        output.write_text(json.dumps(_record(0, 0) | {"reward": 1.0}) + "\n")
+    monkeypatch.chdir(tmp_path)
+    key = Path(output.name)
+    if key_style == "alias":
+        key = tmp_path / "alias.jsonl"
+        key.symlink_to(output)
+
+    report = run_health_checks(output, workers=1, source_histories={key: history}, output_dir=tmp_path / "health")
+    assert report.summary["run"]["artifacts"]["records"] == 1
+
+
+def test_health_names_missing_or_conflicting_history_paths(tmp_path):
+    from nemo_gym.rollouts.rollout_health import run_health_checks
+
+    output = tmp_path / "rollouts.jsonl"
+    output.write_text("{}\n")
+    alias = tmp_path / "alias.jsonl"
+    alias.symlink_to(output)
+    with pytest.raises(ValueError, match="No source history supplied") as error:
+        run_health_checks(output, workers=1, source_histories={})
+    assert str(output) in str(error.value)
+    with pytest.raises(ValueError, match="Conflicting source histories supplied") as error:
+        run_health_checks(output, workers=1, source_histories={output: None, alias: object()})
+    assert str(output) in str(error.value)
+
+
+def test_health_names_selected_record_without_file_identity(tmp_path):
+    from unittest.mock import Mock
+
+    from nemo_gym.rollouts.rollout_health import _index_jsonl
+    from nemo_gym.rollouts.rollout_records import RolloutRecord
+    from nemo_gym.rollouts.rollout_store import RolloutStore
+
+    output = tmp_path / "rollouts.jsonl"
+    output.write_text("{}\n")
+    record = RolloutRecord(path=output, offset=0, length=3, line_number=37)
+    history = Mock(spec=RolloutStore)
+    history.selected_records.return_value = {("task", 0): record}
+    with pytest.raises(ValueError, match="has no file identity") as error:
+        _index_jsonl([output], histories={output: history})
+    assert f"{output}:37" in str(error.value)
