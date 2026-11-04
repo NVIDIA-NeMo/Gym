@@ -779,8 +779,11 @@ class PiAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider_name=provider.name,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    # Only the grants Pi keeps; activation leaves out the optional ones listed in `problems`.
                     tool_urls=[
-                        str(access.connection.url) for access in tool_accesses if isinstance(access, MCPToolAccess)
+                        str(access.connection.url)
+                        for access in tool_accesses
+                        if isinstance(access, MCPToolAccess) and access.name not in problems
                     ],
                 )
             except BaseException:
