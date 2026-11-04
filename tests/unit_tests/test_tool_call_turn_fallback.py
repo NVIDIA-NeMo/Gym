@@ -18,9 +18,9 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.token_id_capture.lineage import RolloutLineage, stamp_continuation
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
-from nemo_gym.token_id_capture.terminal import resolve_terminal
+from nemo_gym.models.token_capture.lineage import RolloutLineage, stamp_continuation
+from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
+from nemo_gym.models.token_capture.terminal import resolve_terminal
 
 
 def _tool(call_id: str, name: str, arguments: str) -> dict:
@@ -76,7 +76,7 @@ def _mutate(kind: str) -> list[dict]:
 
 def _entry(output: list[dict]) -> TokenEntry:
     entry = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="served",
         prompt_token_ids=[1, 2],
         generation_token_ids=[3],

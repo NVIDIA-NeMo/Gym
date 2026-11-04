@@ -15,9 +15,8 @@ from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnviro
 from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage
-from nemo_gym.core.episode import current_verifier_invocation_id
-from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifier_invocation_id
+from nemo_gym.rollouts.rollout_collection import _episode_record
 
 
 def activation(index=0, **kwargs):
@@ -752,7 +751,9 @@ async def test_local_lifecycle_closes_candidate_before_verification(
 async def test_interaction_deadline_closes_remote_work_before_grading(
     tmp_path, monkeypatch, native_outcome, confirmed
 ):
-    environment = server(tmp_path, interaction_timeout_seconds=0.03, cleanup_timeout_seconds=1)
+    # The deadline must fire while the activation is in flight: 0.5 s leaves a loaded runner time to start it,
+    # and the remote work outlasts the deadline, so only the deadline close can end it.
+    environment = server(tmp_path, interaction_timeout_seconds=0.5, cleanup_timeout_seconds=1)
     remote = None
     close_count = 0
     verified = False
@@ -760,7 +761,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
 
     async def work():
         nonlocal late_work
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(5)
         late_work = True
 
     async def prepare(self, value):
@@ -837,6 +838,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
     monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
     environment.server_client = SimpleNamespace(post=post)
     result = await environment.run_request(request())
+    assert remote is not None, "the activation did not start before the interaction deadline"
     assert remote.cancelled() and not late_work
     simulator.assert_not_awaited()
     if native_outcome == "interrupted" and confirmed:

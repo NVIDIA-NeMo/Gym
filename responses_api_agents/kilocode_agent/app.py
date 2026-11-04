@@ -32,15 +32,17 @@ from fastapi import HTTPException, Request
 from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_COMMAND_NOT_STARTED, HARNESS_RUNNER_FAILED, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    CleanupReceipt,
+    SandboxSession,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -67,7 +69,13 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
-from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+)
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
@@ -325,11 +333,11 @@ class KiloCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # keeps whatever it declares. They are config fields rather than `kilo_config` keys because the
     # config merge is struct-mode, so a config using `_inherit_from` cannot add keys under `models`.
     #
-    # `context_window` is what kilo measures a session against. It only drives auto-compaction when
-    # `kilo_config` also sets `compaction.threshold_percent`; 0 disables that accounting entirely.
+    # `context_window` drives usage-based compaction. Setting `kilo_config.compaction.threshold_percent`
+    # also enables Kilo's outgoing-request preflight check, before contacting the model server.
     context_window: int = 32768
-    # `max_output_tokens` is the per-request output budget; kilo asks the model server for
-    # min(this, its own OUTPUT_TOKEN_MAX of 32000), so values above 32000 have no effect.
+    # Set Kilo's output ceiling as well as its model metadata so its default 32000 cap does not
+    # silently truncate a larger configured per-request output budget.
     #
     # Setting it too high fails silently, which is why the default is conservative. Kilo's system
     # prompt and tool definitions run to ~10k tokens, and vLLM rejects prompt + max_tokens >
@@ -552,6 +560,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         else:
             observations = artifacts.observations.model_copy(deep=True)
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if outcome == "failed" or record.status == "failed":
                     record.status = "failed"
@@ -670,6 +680,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         if api_key:
             env["OPENAI_API_KEY"] = api_key
         env.update({k: v for k, v in self.config.env.items() if v})
+        if self.config.model_server:
+            env["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(self.config.max_output_tokens)
         return env
 
     def _build_command(self, project_dir: Path, prompt: str) -> list[str]:
@@ -868,6 +880,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 stage_activation=lambda: state.stage_activation(
                     command=command,
                     config=json.dumps(config),
+                    output_token_max=self.config.max_output_tokens if self.config.model_server else None,
                 ),
                 collect=state.collect_artifacts,
                 timeout=self.config.timeout,
@@ -963,6 +976,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 gaps=[ObservationGap(code="agent_artifact_unavailable")],
             )
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if problem is not None:
                     record.status = "failed"
