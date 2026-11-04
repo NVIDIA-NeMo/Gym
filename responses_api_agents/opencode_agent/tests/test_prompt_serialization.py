@@ -4,14 +4,17 @@
 
 import json
 import os
+import runpy
 import shutil
 import subprocess
+from contextlib import ExitStack
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.agents.utils.model_history_transport import _serialize_opencode_replacement_config
 from responses_api_agents.opencode_agent.app import _serialize_replacement_config
 from responses_api_agents.opencode_agent.tests.test_app import _make_agent
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
@@ -36,6 +39,7 @@ def test_only_the_replacement_prompt_is_protected_without_mutation(prompt):
     }
     original = deepcopy(config)
     serialized = _serialize_replacement_config(config)
+    assert _serialize_opencode_replacement_config(config) == serialized
     assert json.loads(serialized) == original
     assert config == original
     # Unrelated copies of identical text retain normal JSON serialization and native expansion.
@@ -58,7 +62,7 @@ def pinned_opencode():
     return binary
 
 
-@pytest.mark.parametrize("path", ["local", "sandbox"])
+@pytest.mark.parametrize("path", ["local", "sandbox", "sandbox-delta"])
 async def test_pinned_cli_keeps_the_generated_replacement_literal(path, setup, tmp_path, pinned_opencode):
     prompt = (
         '  λ\n"quoted" \\path\\end\n'
@@ -96,10 +100,21 @@ async def test_pinned_cli_keeps_the_generated_replacement_literal(path, setup, t
         agent, sandbox = setup
         agent.config.system_prompt_mode = "replace"
         agent.config.system_prompt = prompt
+        agent.config.history_delta_enabled = path == "sandbox-delta"
         with TestClient(agent.setup_webserver()) as client:
             client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).raise_for_status()
             serialized = sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"]
+            if path == "sandbox-delta":
+                params = json.loads(sandbox.files[f"{sandbox.directory}/history-transport-input.json"])
+                assert params["literal_replacement_prompt"] is True
+                # Load the staged helper and apply its sandbox-side config rewrite.
+                helper_file = tmp_path / "history_transport"
+                helper_file.write_text(sandbox.files[f"{sandbox.directory}/history_transport"])
+                helper = runpy.run_path(str(helper_file))
+                with ExitStack() as stack:
+                    helper["configure_transport"](stack, params, harness="opencode")
+                    serialized = params["env"]["OPENCODE_CONFIG_CONTENT"]
     assert json.loads(serialized)["agent"]["build"]["prompt"] == prompt
     env = {
         "PATH": os.environ["PATH"],

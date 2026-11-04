@@ -45,6 +45,28 @@ def _encoded(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
+def _dump_opencode_serialized_member(value: dict[str, Any], member: str, serialized: str) -> str:
+    return (
+        "{"
+        + ",".join(
+            json.dumps(key) + ":" + (serialized if key == member else json.dumps(item)) for key, item in value.items()
+        )
+        + "}"
+    )
+
+
+def _serialize_opencode_replacement_config(config: dict[str, Any]) -> str:
+    """Keep only the replacement prompt literal through OpenCode's pre-JSON substitutions."""
+    # Keep in sync with opencode_agent.app._serialize_replacement_config.
+    # This standalone sandbox helper cannot import the Gym agent application.
+    agent = config["agent"]
+    build = agent["build"]
+    prompt = json.dumps(build["prompt"]).replace("{", "\\u007b")
+    build_json = _dump_opencode_serialized_member(build, "prompt", prompt)
+    agent_json = _dump_opencode_serialized_member(agent, "build", build_json)
+    return _dump_opencode_serialized_member(config, "agent", agent_json)
+
+
 class DeltaState:
     """Track an optimistic history base shared by concurrent model requests."""
 
@@ -418,7 +440,11 @@ def configure_transport(stack: ExitStack, params: dict, *, harness: str) -> None
     if harness == "opencode":
         config = json.loads(params["env"]["OPENCODE_CONFIG_CONTENT"])
         config["provider"]["nemo_gym"]["options"]["baseURL"] = local_url
-        params["env"]["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+        params["env"]["OPENCODE_CONFIG_CONTENT"] = (
+            _serialize_opencode_replacement_config(config)
+            if params.get("literal_replacement_prompt", False)
+            else json.dumps(config)
+        )
     elif harness == "pi":
         path = directory / "home/.pi/agent/models.json"
         config = json.loads(path.read_text())
