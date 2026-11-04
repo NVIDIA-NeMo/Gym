@@ -249,7 +249,7 @@ dependencies = [
 
     # pydot License: MIT https://github.com/pydot/pydot/blob/a2bee1e770698867332516fb2878fac262b4ffc5/LICENSES/MIT.txt
     "pydot",
-    
+
     # tiktoken: BPE tokenizer for SPEED-Bench dataset preparation script
     # License: MIT https://raw.githubusercontent.com/openai/tiktoken/refs/tags/0.9.0/LICENSE
     "tiktoken>=0.9.0",
@@ -446,6 +446,7 @@ dev = [
     # Updated: Fri Jul 25, 2025 and requests-mock==1.12.1
     # License: Apache 2.0 https://github.com/jamielennox/requests-mock/blob/9742d02a8cad17276dbeba7b300b6d27ae1b6fb1/LICENSE
     "requests-mock",
+    "tomlkit>=0.12",
 
     # OpenTelemetry SDK: the in-memory meter of the telemetry tests, which other tests import. Without it the importing
     # modules were skipped silently in a dev environment; CI already installs it with the telemetry and mlflow extras.
@@ -473,13 +474,16 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv]
 managed = true
-required-version = ">=0.9.30"
+required-version = ">=0.13.4"
 # grpcio and msgpack are transitive dependencies of ray. Pin the lower bounds here to
 # ensure uv selects a CVE-safe version across all resolver paths.
 # Updated Sun Jun 22, 2026 (CVE remediation)
 constraint-dependencies = [
-    "grpcio>=1.81.0rc1",
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
     "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
 ]
 # override-dependencies overrides transitive dep version pins that conflict with
 # Python 3.13 wheel availability. Server venvs inherit this via the editable
@@ -882,7 +886,7 @@ layers = [
     # eval/
     "nemo_gym.eval",
     # orchestration/
-    "nemo_gym.orchestration",
+    "nemo_gym.cli._locked_env : nemo_gym.cli._prepare_worker : nemo_gym.orchestration",
     # rollouts/
     "nemo_gym.rollouts",
     # data/

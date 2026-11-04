@@ -31,7 +31,6 @@ from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 import orjson
 from omegaconf import DictConfig
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
-from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
@@ -100,6 +99,7 @@ from nemo_gym.utils.path_utils import (
     failures_path_for,
     resubmit_offset_path_for,
 )
+from nemo_gym.utils.tqdm import tqdm
 
 
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
