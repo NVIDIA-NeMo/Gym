@@ -7,7 +7,7 @@ instrumentation lives in a separate controller checkout. The branch is
 
 ## Workload
 
-The comparison preserves the source revision's CI commands and routing:
+The baseline uses the source revision's CI commands. Both arms preserve its test scope, routing and gates:
 
 - Four duration-balanced core shards on independent runners.
 - A separate sandbox job and the combined coverage gate.
@@ -48,26 +48,50 @@ main, selects fresh main commits, dispatches these comparisons, and collects the
 results. It must avoid duplicate active runs, abort conflicting rebases, use
 verified force-with-lease for updates, and retain signed DCO commits.
 
+## Refresh dependency locks
+
+When the sampled main commit changes `uv.lock`, `pyproject.toml` or
+`.python-version`, regenerate from a clean checkout of that exact commit:
+
+```bash
+python3 scripts/pants/native_core/refresh_locks.py \
+  --source /absolute/clean-sampled-main-checkout \
+  --pants /absolute/pants-launcher \
+  --uv /absolute/uv-0.11.29
+```
+
+The command exports both CI extras sets from uv, generates both Pants resolves,
+and validates exact package pins and VCS integrity before publishing the files
+together. It leaves the sampled checkout unchanged. Commit the validated
+controller assets before dispatch; stale locks fail the comparison explicitly.
+
 ## What Pants does in this phase
 
-Pants orchestrates the complete existing CI commands through workspace processes.
-This preserves Git-dependent tests, nested server environments and shared test
-fixtures. The execution adapter records the full tracked-source input and keeps
-coverage/JUnit artifacts available to the same gates.
+Core and sandbox suites use native Pants Python targets, one per test file. The
+four core jobs retain Gym's duration-balanced file assignments; the sandbox job
+runs the complete sandbox selection. The adapter checks dependency parity against
+`uv.lock` and preserves each job's JUnit and raw coverage inputs.
 
-This is a full-scope execution-parity phase, not yet a conversion of the complete
-suite to native per-test Pants targets. Unlocked server dependencies, mutable
-external resources and host tools make cross-session test-result reuse unsafe;
-those results are not reused. Do not interpret orchestration overhead as a verdict
-on native Pants caching or advertise selective test pruning that is absent.
+Server tests, session-routing E2E and lint retain their existing commands through
+Pants workspace processes, preserving nested server environments and external
+fixtures. The execution adapter records tracked-source inputs for both arms.
+
+This phase establishes full-scope execution parity. Native tests currently use
+`--test-force`, so recorded metadata labels them `forced-native-tests`; successful
+test results are not reused. Workspace jobs use session-only result caching,
+because server dependencies and external resources are not fully pinned. Engine
+and dependency caches persist between runs. Do not claim selective test pruning
+or cross-run test-result savings from these measurements.
 
 ## Evidence
 
 Require matching job selections, command success, testcase identities and outcomes,
 and successful coverage gates before comparing speed. Missing results remain
-failures. Report both arm elapsed time and total runner-minutes, including setup
-and cache transfer, and distinguish queued time from execution. Preserve slower
-results and failures alongside faster runs.
+failures. Report feedback time from shared workflow creation to each arm's final
+required job, execution span, and total runner-minutes. Feedback includes shared
+preparation, initial queue delay, setup and cache transfers. Compare fresh workflow
+dispatches only; rerun attempts are rejected because they retain the original
+creation timestamp. Preserve slower results and failures alongside faster runs.
 
 The historical six-file/103-test benchmark is documented in [SUBSET.md](SUBSET.md).
 Its workflow is manual only and its measurements do not establish production CI

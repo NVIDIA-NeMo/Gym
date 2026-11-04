@@ -42,7 +42,7 @@ def repository(tmp_path, monkeypatch, *, command="exit 0\n"):
     return tmp_path
 
 
-def invoke(monkeypatch, *, output="results/full-ci", engine="baseline"):
+def invoke(monkeypatch, *, output="results/full-ci", engine="baseline", job="core"):
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -50,7 +50,7 @@ def invoke(monkeypatch, *, output="results/full-ci", engine="baseline"):
             "--engine",
             engine,
             "--job",
-            "core",
+            job,
             "--shard",
             "2",
             "--shards",
@@ -241,8 +241,66 @@ def test_pants_launcher_exception_records_failure_and_cleans_bootstrap(tmp_path,
     repository(tmp_path, monkeypatch)
     monkeypatch.setenv("PANTS_BIN", str(tmp_path / "does-not-exist"))
     with pytest.raises(FileNotFoundError):
-        invoke(monkeypatch, engine="pants")
+        invoke(monkeypatch, engine="pants", job="lint")
     metadata = json.loads(Path("results/full-ci/metadata.json").read_text())
     assert metadata["exit_code"] != 0
     assert not Path("BUILD.pants-full-ci").exists()
     assert not Path("pants.toml").exists()
+
+
+@pytest.mark.parametrize("job", ["core", "sandbox"])
+def test_native_groups_preserve_entire_requested_shard_and_never_fallback(tmp_path, monkeypatch, job):
+    repository(tmp_path, monkeypatch)
+    seen = []
+
+    def native(**kwargs):
+        seen.append(kwargs)
+        return 7
+
+    def forbidden(**kwargs):
+        pytest.fail("Native failure must not silently fall back to workspace execution")
+
+    monkeypatch.setattr(full_ci, "run_native", native)
+    monkeypatch.setattr(full_ci, "run_pants", forbidden)
+    assert invoke(monkeypatch, engine="pants", job=job) == 7
+    assert len(seen) == 1
+    assert seen[0]["job"] == job
+    assert (seen[0]["shard"], seen[0]["shards"]) == (2, 4)
+    metadata = json.loads(Path("results/full-ci/metadata.json").read_text())
+    assert metadata["implementation"] == "native Python test targets"
+    assert metadata["execution_provenance"] == "native/metadata.json"
+    assert metadata["command_exit_code"] == metadata["exit_code"] == 7
+
+
+@pytest.mark.parametrize("missing_coverage", [False, True])
+def test_native_artifacts_preserve_coverage_and_junit_and_require_complete_success(
+    tmp_path, monkeypatch, missing_coverage
+):
+    repository(tmp_path, monkeypatch)
+    output = Path("results/full-ci")
+    (output / "junit").mkdir(parents=True)
+    monkeypatch.setenv("PANTS_BIN", "/test/pants")
+    monkeypatch.setattr(full_ci.shutil, "which", lambda *args, **kwargs: "/test/uv")
+
+    def native_process(command, *, log, env):
+        assert command[command.index("--source") + 1] == str(tmp_path)
+        assert command[command.index("--group") + 1] == "core"
+        assert command[command.index("--shard") + 1] == "2"
+        assert command[command.index("--shards") + 1] == "4"
+        assert "GITHUB_TOKEN" not in env
+        native = Path(command[command.index("--output") + 1])
+        (native / "junit").mkdir(parents=True)
+        (native / "junit/core.xml").write_text("all native testcase occurrences")
+        (native / "metadata.json").write_text(json.dumps({"exit_code": 0, "source_sha": "sample"}))
+        if not missing_coverage:
+            (native / ".coverage.core-2").write_bytes(b"raw coverage database")
+        return 0
+
+    monkeypatch.setattr(full_ci, "run_logged", native_process)
+    if missing_coverage:
+        with pytest.raises(ValueError, match="without required"):
+            full_ci.run_native(job="core", shard=2, shards=4, output=output, env={"GITHUB_SHA": "sample"})
+    else:
+        assert full_ci.run_native(job="core", shard=2, shards=4, output=output, env={"GITHUB_SHA": "sample"}) == 0
+        assert (output / ".coverage.core-2").read_bytes() == b"raw coverage database"
+        assert (output / "junit/core.xml").read_text() == "all native testcase occurrences"

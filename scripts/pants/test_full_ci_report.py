@@ -218,3 +218,58 @@ def test_feedback_time_includes_shared_preparation_and_initial_queue():
     assert pants["feedback_seconds"] == 360
     assert baseline["jobs"][0]["feedback_seconds"] == 420
     assert baseline["jobs"][1]["job_seconds"] == 60
+
+
+def test_coverage_rejects_existing_database_with_no_executed_repository_lines(tmp_path):
+    import sqlite3
+
+    from full_ci_report import coverage_summary
+
+    path = tmp_path / ".coverage"
+    with sqlite3.connect(path) as database:
+        database.execute("CREATE TABLE file (id INTEGER, path TEXT)")
+        database.execute("CREATE TABLE line_bits (file_id INTEGER, numbits BLOB)")
+        database.execute("INSERT INTO file VALUES (1, 'nemo_gym/example.py')")
+        database.execute("INSERT INTO file VALUES (2, '/external/site-packages/example.py')")
+        database.execute("INSERT INTO line_bits VALUES (1, ?)", (b"",))
+        database.execute("INSERT INTO line_bits VALUES (2, ?)", (b"\x0e",))
+    result = coverage_summary(path)
+    assert not result["valid"]
+    assert result["measured_files"] == ["nemo_gym/example.py"]
+    assert result["executed_files"] == []
+
+
+def test_coverage_tracks_measured_scope_and_executed_lines(tmp_path):
+    import sqlite3
+
+    from full_ci_report import coverage_summary
+
+    path = tmp_path / ".coverage"
+    with sqlite3.connect(path) as database:
+        database.execute("CREATE TABLE file (id INTEGER, path TEXT)")
+        database.execute("CREATE TABLE line_bits (file_id INTEGER, numbits BLOB)")
+        database.execute("INSERT INTO file VALUES (1, 'nemo_gym/example.py')")
+        database.execute("INSERT INTO file VALUES (2, '/var/tmp/pants/source/nemo_gym/untested.py')")
+        database.execute("INSERT INTO line_bits VALUES (1, ?)", (b"\x0e",))
+    result = coverage_summary(path)
+    assert result["valid"]
+    assert result["measured_files"] == ["nemo_gym/example.py", "nemo_gym/untested.py"]
+    assert result["executed_files"] == ["nemo_gym/example.py"]
+    assert result["executed_line_count"] == 3
+
+
+def test_execution_description_does_not_relabel_historical_wrapper_runs():
+    from full_ci_report import execution_description
+
+    description = execution_description(
+        {
+            "full-ci-pants-core-0": {
+                "implementation": "whole-job workspace execution",
+                "pants_result_cache": "session-only",
+            },
+            "full-ci-baseline-core-0": {"implementation": "unchanged CI commands", "pants_result_cache": None},
+        }
+    )
+    assert "0 native Python test jobs" in description
+    assert "1 whole-job workspace jobs" in description
+    assert "Result-cache modes: session-only." in description

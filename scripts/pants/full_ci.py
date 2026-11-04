@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run a complete existing CI job directly or through Pants, preserving its contract.
 
-This is the full-scope parity phase: Pants orchestrates entire existing jobs in
-its workspace environment. Python target inference and persistent result-cache
-reuse are deliberately absent until external dependencies/fixtures are pinned.
+Core and sandbox jobs use native Pants Python targets. Other jobs retain their
+existing commands through Pants's workspace environment until migrated.
 The current working directory is the checkout under test; this script may live
 in a separate controller checkout (required for the untouched baseline).
 """
@@ -236,6 +235,68 @@ def run_logged(command: list[str], *, log: Path, env: dict[str, str]) -> int:
         return process.wait()
 
 
+def pants_environment(env: dict[str, str]) -> dict[str, str]:
+    """Forward only configured noncredential cache locations to the launcher."""
+    result = dict(env)
+    for name in (
+        "PANTS_GLOBAL_WORKDIR",
+        "PANTS_NAMED_CACHES_DIR",
+        "PANTS_LOCAL_STORE_DIR",
+        "PANTS_LOCAL_EXECUTION_ROOT_DIR",
+        "PANTS_VERSION",
+    ):
+        if name in os.environ:
+            result[name] = os.environ[name]
+    return result
+
+
+def run_native(*, job: str, shard: int, shards: int, output: Path, env: dict[str, str]) -> int:
+    """Run the entire native core shard or sandbox suite, with no fallback."""
+    native = output / "native"
+    runner = HERE / "native_core/run.py"
+    if not runner.is_file():
+        raise FileNotFoundError(f"Native {job} runner is required: {runner}")
+    pants = os.environ.get("PANTS_BIN") or shutil.which("pants") or str(HERE.parents[1] / ".pants-bin/pants")
+    uv = shutil.which("uv", path=env.get("PATH"))
+    if not uv:
+        raise FileNotFoundError("uv is required for full native dependency parity checks")
+    command = [
+        sys.executable,
+        str(runner),
+        "--source",
+        str(Path.cwd()),
+        "--group",
+        job,
+        "--shard",
+        str(shard),
+        "--shards",
+        str(shards),
+        "--output",
+        str(native.resolve()),
+        "--pants",
+        pants,
+        "--uv",
+        uv,
+    ]
+    write_json(output / "execution.json", {"engine": "pants-native", "command": command})
+    code = run_logged(command, log=output / "runner.log", env=pants_environment(env))
+    junit = native / "junit" / f"{job}.xml"
+    coverage_name = f".coverage.core-{shard}" if job == "core" else ".coverage.sandbox"
+    coverage = native / coverage_name
+    # Retain partial reports on failure; comparison remains failed via exit status.
+    for source, destination in ((junit, output / "junit" / junit.name), (coverage, output / coverage_name)):
+        if source.is_file():
+            shutil.copy2(source, destination)
+    if code:
+        return code
+    if not junit.is_file() or not coverage.is_file() or not (native / "metadata.json").is_file():
+        raise ValueError("Native CI reported success without required JUnit, coverage, and provenance")
+    metadata = json.loads((native / "metadata.json").read_text())
+    if metadata.get("exit_code") != 0 or metadata.get("source_sha") != env["GITHUB_SHA"]:
+        raise ValueError("Native CI provenance disagrees with the sampled source or success status")
+    return 0
+
+
 def run_pants(*, script: Path, output: Path, env: dict[str, str], sources: list[str]) -> int:
     """Execute the identical command in Pants's workspace and restore its status."""
     build_path = Path("BUILD.pants-full-ci")
@@ -266,16 +327,7 @@ def run_pants(*, script: Path, output: Path, env: dict[str, str], sources: list[
     bootstrap = Path("pants.toml")
     created_bootstrap = False
     pants = os.environ.get("PANTS_BIN") or shutil.which("pants") or str(Path(".pants-bin/pants").resolve())
-    launcher_env = dict(env)
-    for name in (
-        "PANTS_GLOBAL_WORKDIR",
-        "PANTS_NAMED_CACHES_DIR",
-        "PANTS_LOCAL_STORE_DIR",
-        "PANTS_LOCAL_EXECUTION_ROOT_DIR",
-        "PANTS_VERSION",
-    ):
-        if name in os.environ:
-            launcher_env[name] = os.environ[name]
+    launcher_env = pants_environment(env)
     try:
         if not bootstrap.exists():
             with bootstrap.open("x") as stream:
@@ -364,8 +416,11 @@ def main() -> int:
     code = 1
     command_code = 1
     source_changed = False
+    native = args.engine == "pants" and args.job in ("core", "sandbox")
     try:
-        if args.engine == "pants":
+        if native:
+            command_code = run_native(job=args.job, shard=args.shard, shards=args.shards, output=output, env=env)
+        elif args.engine == "pants":
             command_code = run_pants(script=script, output=output, env=env, sources=sources)
         else:
             command_code = run_logged(["bash", str(script)], log=output / "runner.log", env=env)
@@ -389,10 +444,17 @@ def main() -> int:
                 "exit_code": code,
                 "command_exit_code": command_code,
                 "source_changed": source_changed,
-                "pants_result_cache": "session-only" if args.engine == "pants" else None,
-                "implementation": "whole-job workspace execution"
+                "pants_result_cache": "forced-native-tests"
+                if native
+                else "session-only"
+                if args.engine == "pants"
+                else None,
+                "implementation": "native Python test targets"
+                if native
+                else "whole-job workspace execution"
                 if args.engine == "pants"
                 else "unchanged CI commands",
+                "execution_provenance": "native/metadata.json" if native else None,
             },
         )
     return code

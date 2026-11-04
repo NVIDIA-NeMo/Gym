@@ -36,7 +36,7 @@ defaults:
     shell: bash
 
 env:
-  PANTS_LOCAL_EXECUTION_ROOT_DIR: /tmp/pants-full-ci
+  PANTS_LOCAL_EXECUTION_ROOT_DIR: /var/tmp/pants-full-ci
 
 jobs:
   core:
@@ -110,6 +110,19 @@ jobs:
           echo "2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0  $pants_bin" | sha256sum --check
           chmod +x "$pants_bin"
           echo "PANTS_BIN=$pants_bin" >> "$GITHUB_ENV"
+      - name: Install pinned uv for both core and sandbox arms
+        run: |
+          uv_bin_dir="$RUNNER_TEMP/pants-native-uv-0.11.29"
+          if command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == '0.11.29' ]]; then
+            uv_bin_dir="$(dirname "$(command -v uv)")"
+          else
+            curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 120 \
+              https://astral.sh/uv/0.11.29/install.sh \
+              --output "$RUNNER_TEMP/pants-native-uv-install.sh"
+            env UV_UNMANAGED_INSTALL="$uv_bin_dir" sh "$RUNNER_TEMP/pants-native-uv-install.sh"
+          fi
+          test "$("$uv_bin_dir/uv" --version | awk '{print $2}')" = '0.11.29'
+          echo "$uv_bin_dir" >> "$GITHUB_PATH"
       - name: Run identical routed workload
         working-directory: sample
         env:

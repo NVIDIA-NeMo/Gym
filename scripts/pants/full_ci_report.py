@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -157,6 +158,71 @@ def timing(jobs: list[dict], engine: str, created_at: str | None = None) -> dict
     }
 
 
+def coverage_summary(path: Path) -> dict:
+    """Audit portable raw coverage without installing a second coverage version.
+
+    Coverage 7 stores measured file names and line bitmaps (or executed branch
+    arcs) in SQLite. A database containing only empty/omitted files is not proof
+    that the repository code was measured, even when the file itself exists.
+    """
+
+    def repository_path(value: str) -> str | None:
+        value = value.replace("\\", "/")
+        if value.startswith("nemo_gym/"):
+            return value
+        if "/nemo_gym/" in value:
+            return "nemo_gym/" + value.split("/nemo_gym/", 1)[1]
+        return None
+
+    result = {"valid": False, "errors": [], "measured_files": [], "executed_files": [], "executed_line_count": 0}
+    if not path.is_file():
+        result["errors"].append("Missing raw coverage database")
+        return result
+    try:
+        with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as database:
+            files = {number: repository_path(name) for number, name in database.execute("SELECT id, path FROM file")}
+            result["measured_files"] = sorted({name for name in files.values() if name})
+            tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            executed = set()
+            line_count = 0
+            if "line_bits" in tables:
+                for file_id, bitmap in database.execute("SELECT file_id, numbits FROM line_bits"):
+                    if files.get(file_id) and any(bitmap):
+                        executed.add(files[file_id])
+                        line_count += sum(byte.bit_count() for byte in bitmap)
+            if "arc" in tables:
+                lines = set()
+                for file_id, start, end in database.execute("SELECT file_id, fromno, tono FROM arc"):
+                    if files.get(file_id):
+                        lines.update((file_id, number) for number in (start, end) if number > 0)
+                executed.update(files[file_id] for file_id, _ in lines)
+                line_count += len(lines)
+            result["executed_files"] = sorted(executed)
+            result["executed_line_count"] = line_count
+            if not executed:
+                result["errors"].append("Raw coverage contains no executed nemo_gym source lines")
+    except (sqlite3.Error, OSError, TypeError) as error:
+        result["errors"].append(f"Unreadable coverage data: {error}")
+    result["valid"] = not result["errors"]
+    return result
+
+
+def execution_description(execution: dict) -> str:
+    """Describe recorded execution, including historical workspace-only runs."""
+    pants = [value for name, value in execution.items() if name.startswith("full-ci-pants-")]
+    if not pants:
+        return "Pants execution metadata is unavailable; no implementation or cache benefit is inferred."
+    native = sum(value.get("implementation") == "native Python test targets" for value in pants)
+    workspace = sum(value.get("implementation") == "whole-job workspace execution" for value in pants)
+    cache_modes = sorted({str(value.get("pants_result_cache")) for value in pants})
+    return (
+        f"Recorded Pants execution: {native} native Python test jobs and {workspace} whole-job workspace jobs. "
+        f"Result-cache modes: {', '.join(cache_modes)}. "
+        "forced-native-tests means --test-force; session-only workspace jobs never replay successes from another run. "
+        "Persistent engine/dependency caches may be restored. These parity runs do not establish test-result reuse or selective pruning."
+    )
+
+
 def report(args: argparse.Namespace) -> None:
     route = json.loads(args.route.read_text())
     pages = json.loads(args.jobs.read_text())
@@ -183,6 +249,9 @@ def report(args: argparse.Namespace) -> None:
             errors.append(f"Missing execution metadata: {directory.name}")
         else:
             value = json.loads(metadata.read_text())
+            result.setdefault("execution", {})[directory.name] = {
+                key: value.get(key) for key in ("implementation", "pants_result_cache", "execution_provenance")
+            }
             if value.get("exit_code") != 0 or value.get("command_exit_code") != 0:
                 errors.append(f"Execution failed: {directory.name}")
             if value.get("source_sha") != route["source_sha"]:
@@ -214,6 +283,17 @@ def report(args: argparse.Namespace) -> None:
             errors.append(f"Test outcome mismatch or incomplete evidence: {label}")
         if len(manifests) == 2 and manifests["baseline"] != manifests["pants"]:
             errors.append(f"Test scope manifest mismatch: {label}")
+        if item["job"] in ("core", "sandbox"):
+            coverage_name = f".coverage.core-{item['shard']}" if item["job"] == "core" else ".coverage.sandbox"
+            measured = {}
+            for engine in ("baseline", "pants"):
+                coverage = coverage_summary(args.artifacts / f"full-ci-{engine}-{label}" / coverage_name)
+                result.setdefault("coverage", {})[f"{engine}/{label}"] = coverage
+                measured[engine] = coverage["measured_files"]
+                if not coverage["valid"]:
+                    errors.append(f"Invalid raw coverage for {engine}/{label}: {coverage['errors']}")
+            if measured["baseline"] != measured["pants"]:
+                errors.append(f"Measured nemo_gym coverage scope differs: {label}")
     result["outcomes"] = comparisons
     for engine in ("baseline", "pants"):
         expected = len([item for item in route["matrix"]["include"] if item["engine"] == engine])
@@ -231,7 +311,7 @@ def report(args: argparse.Namespace) -> None:
         "",
         "Both arms use the same source diff and runner labels, four core shards and up to eight server shards.",
         "Feedback time runs from shared workflow creation to each arm's last required job completion, including shared preparation and initial queue delay. Execution span starts at that arm's first job. Both include cache/setup overhead and subsequent queue gaps; runner-minutes sum occupied job time.",
-        "Pants currently wraps complete native jobs with session-only result caching. Persistent engine/dependency caches are restored, but prior test successes are never replayed. This establishes full-scope parity; it does not yet measure test-level inference or cross-run test-result reuse.",
+        execution_description(result.get("execution", {})),
         "",
         "| Arm | Feedback seconds | Execution span seconds | Runner-minutes | Jobs |",
         "|---|---:|---:|---:|---:|",

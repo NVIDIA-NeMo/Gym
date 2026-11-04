@@ -36,7 +36,7 @@ defaults:
     shell: bash
 
 env:
-  PANTS_LOCAL_EXECUTION_ROOT_DIR: /tmp/pants-full-ci
+  PANTS_LOCAL_EXECUTION_ROOT_DIR: /var/tmp/pants-full-ci
 
 jobs:
   prepare:
@@ -69,7 +69,7 @@ jobs:
           git merge-base --is-ancestor "$source_sha" origin/main
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "parent_sha=$(git rev-parse "$source_sha^")" >> "$GITHUB_OUTPUT"
-          echo "cache_contract=$(cat scripts/pants/full_ci.py scripts/pants/full_ci.toml scripts/pants/full_ci.BUILD | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "cache_contract=$(git ls-files -z scripts/pants/full_ci.py scripts/pants/full_ci.toml scripts/pants/full_ci.BUILD scripts/pants/native_core | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ steps.source.outputs.source_sha }}
