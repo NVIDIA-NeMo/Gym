@@ -1379,7 +1379,7 @@ class TestResourcesSessions:
             assert response.json()["detail"]["failure_kind"] == "session_lost"
         assert server._sessions == {}
 
-    def test_typed_verify_retry_keeps_metadata_until_close(self) -> None:
+    def test_typed_verify_retry_succeeds_after_metadata_cleanup(self) -> None:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
