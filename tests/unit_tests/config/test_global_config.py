@@ -3517,7 +3517,7 @@ class TestComposeUnboundAgent:
         assert relay["num_workers"] == 4
         assert relay["uvicorn_reuse_port"] is True
 
-    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
+    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent", "legal_agent_bench_native"])
     def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
         config = self._session_environment_config(harness_type)
         server_before = OmegaConf.to_container(

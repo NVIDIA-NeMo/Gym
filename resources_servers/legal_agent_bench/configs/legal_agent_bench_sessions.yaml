@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+- nemo_gym/sandbox/providers/docker/configs/docker.yaml
+legal_agent_bench:
+  resources_servers:
+    legal_agent_bench:
+      num_workers: 1
+      entrypoint: session_app.py
+      domain: agent
+      verified: false
+      description: Legal Agent Benchmark task sessions with isolated grading
+      value: Improve legal-agent document review, drafting, and analysis capability
+      harbor_tasks_cache_dir: ${oc.env:LEGAL_AGENT_BENCH_TASK_CACHE_DIR,resources_servers/legal_agent_bench/data/cache/harbor_tasks/legal_agent_bench}
+      harbor_tasks_dir: ${oc.env:LEGAL_AGENT_BENCH_RUNTIME_TASKS_DIR,resources_servers/legal_agent_bench/data/runtime/harbor_tasks/legal_agent_bench}
+      harness_skills_dir: ${oc.env:LEGAL_AGENT_BENCH_SKILLS_DIR,resources_servers/legal_agent_bench/data/cache/harness/skills}
+      auto_prepare_assets: true
+      reward_mode: full_task
+      judges: ${oc.select:lab_judges,null}  # required: one judge or the official pair
+      judge_reasoning_effort: ${oc.select:judge_reasoning_effort,null}
+      judge_base_url: ${oc.select:judge_base_url,null}
+      judge_api_key: ${oc.select:judge_api_key,null}
+      judge_temperature: null
+      judge_request_timeout_seconds: 90
+      judge_max_retries: 1
+      judge_structured_output: true
+      judge_parse_repair_attempts: 1
+      judge_repair_max_tokens: 4096
+      judge_max_tokens: 4096
+      judge_parallelism: 6
+      sandbox_provider: sandbox
+      sandbox_image: null
+      sandbox_config:
+        resources:
+          cpu: 1
+          memory_mib: 4096
+          disk_gib: 10
+      concurrency: 1
+      agent_timeout_seconds: 10800
+      verifier_timeout_seconds: 3600
+      staging_timeout_seconds: 900
+      results_dir: results/legal_agent_bench

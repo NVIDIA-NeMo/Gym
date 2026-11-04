@@ -99,7 +99,7 @@ RUN apt-get update \\
 RUN groupadd --gid 1000660000 sandbox \\
     && useradd -K UID_MAX=1000660000 --no-log-init --uid 1000660000 \\
         --gid sandbox --create-home --shell /bin/bash sandbox \\
-    && install -d -o sandbox -g sandbox /workspace/output
+    && install -d -o sandbox -g sandbox /workspace /workspace/output /workspace/workspace
 
 RUN python -m pip install --upgrade pip \\
     && python -m pip install \\

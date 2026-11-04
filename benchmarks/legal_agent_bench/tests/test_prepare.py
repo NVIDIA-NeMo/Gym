@@ -108,7 +108,7 @@ def test_prepare_subset_forwards_selection_and_environment_cache_paths(monkeypat
 
 @pytest.mark.parametrize(
     "filename",
-    ["config.yaml"],
+    ["config.yaml", "config_native.yaml"],
 )
 def test_subset_config_and_cli_prepare_use_input_without_publishing_full_index(
     monkeypatch, tmp_path, filename
@@ -213,3 +213,44 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     assert agent.job.agents[0].kwargs.max_turns == 60
     assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"
+
+
+def test_native_archive_limits_override_defaults_through_config() -> None:
+    from resources_servers.legal_agent_bench.session_app import LabSessionResourcesConfig
+
+    initial = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / "config_native.yaml"),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {
+            "lab_judges": [{"model_name": "gpt-5.5"}],
+            "legal_agent_bench_benchmark_resources_server": {
+                "resources_servers": {
+                    "legal_agent_bench": {
+                        "archive_limits": {"max_archive_bytes": 8 * 1024**3, "timeout_seconds": 1800}
+                    }
+                }
+            },
+        },
+    )
+    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+    settings = OmegaConf.to_container(
+        resolved.legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench, resolve=True
+    )
+    config = LabSessionResourcesConfig.model_validate({**settings, "name": "lab", "host": "127.0.0.1", "port": 0})
+    assert config.archive_limits.max_archive_bytes == 8 * 1024**3
+    assert config.archive_limits.timeout_seconds == 1800
+    assert config.archive_limits.max_expanded_bytes == 16 * 1024**3
+
+
+@pytest.mark.parametrize("concurrency", [1, 3])
+def test_native_preset_uses_collection_concurrency(concurrency: int) -> None:
+    initial = OmegaConf.merge(
+        OmegaConf.load(BENCHMARK_DIR / "config_native.yaml"),
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"num_samples_in_parallel": concurrency},
+    )
+    resolved = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
+    assert (
+        resolved.legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.concurrency
+        == concurrency
+    )

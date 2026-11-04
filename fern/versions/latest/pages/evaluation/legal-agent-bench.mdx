@@ -34,10 +34,11 @@ include the source revision, so old caches cannot silently serve the new pin.
 
 ## Sandbox sessions
 
-Gym's sandbox providers support borrowing an existing sandbox through
-`AsyncSandbox.serialize()` and `AsyncSandbox.connect()`. LAB integration that
-lets session harnesses borrow a Resources-owned sandbox follows separately;
-the Harbor path described above remains the available LAB execution path here.
+The LAB resources server creates and cleans up the task sandbox. The native
+harness borrows a connection through `AsyncSandbox.serialize()` and
+`AsyncSandbox.connect()`. Closing the harness session stops its tool processes
+and disconnects; the resources server collects outputs and stops the sandbox.
+The resources server also creates and cleans up a separate verifier sandbox.
 
 Docker and OpenSandbox use their existing connection support. Apptainer and
 Enroot require the same host and UID; Enroot also requires matching data/runtime directories and a live
@@ -122,3 +123,77 @@ Completion checks only the files the agent claims to have produced, never the
 hidden rubric. Missing files reject completion twice before the soft gate
 accepts it; the verifier still scores the resulting output. CLI harnesses use
 their own tools and termination conventions.
+
+## Native task sessions
+
+`benchmarks/legal_agent_bench/config_native.yaml` selects the native LAB loop.
+The unqualified benchmark continues to use Harbor. Native flat rows run through
+`single_agent_turn_legacy`; select the harness in configuration, leaving task rows
+unchanged.
+
+The LAB resources server stages documents and public skills without mounting a
+repository or host output directory. The harness borrows a connection to the task
+sandbox. After the harness closes, the resources server captures output, stops
+the task sandbox, rejects archive links and
+unsafe paths, and runs the verifier in a fresh sandbox. Judge credentials and
+hidden criteria are only supplied to verification. Results under
+`results/legal_agent_bench` retain the response, tool transcript, output files,
+source revision, harness pins, runtime image, judge profile, and grading reports.
+
+Native session artifacts are downloaded and extracted in separate worker processes.
+The default limits are 4 GiB per compressed archive, 16 GiB of decompressed data
+(including tar metadata and padding), 8 GiB per file, 100,000 entries (including
+implicit directories), 4,096 bytes per path, and 64 path components. Each worker
+has an 8 GiB memory budget and a 15-minute wall-time/CPU budget. Linux also applies
+an address-space limit; resident memory is monitored on all supported hosts.
+Invalid or oversized archives fail verification rather than producing a score.
+Only successfully extracted files are published; a failed attempt preserves any
+previous output. Limits apply separately to agent output and verifier reports.
+
+For larger deliverables, override the relevant fields in the native benchmark's
+Resources configuration. Unspecified fields keep their defaults:
+
+```yaml
+legal_agent_bench_benchmark_resources_server:
+  resources_servers:
+    legal_agent_bench:
+      archive_limits:
+        max_archive_bytes: 8589934592       # 8 GiB compressed
+        max_expanded_bytes: 34359738368     # 32 GiB, including tar overhead
+        max_file_bytes: 17179869184         # 16 GiB per file
+        worker_memory_bytes: 17179869184    # 16 GiB; some providers buffer downloads
+        timeout_seconds: 1800
+```
+
+These are per-worker ceilings, not reserved capacity. Set task concurrency and
+host capacity accordingly. Both transfer and extraction workers are stopped on
+cancellation or timeout; the resources server remains responsible for sandbox teardown.
+
+The default session provider is local Docker. The native benchmark preset sets
+the resources server's concurrency from `num_samples_in_parallel` (default: `1`).
+**Automatic LAB runtime image building requires the Docker CLI and a running
+Docker daemon on the Gym host.** It builds from the explicit runtime context when
+`sandbox_image` is unset and the selected provider is Docker.
+
+For ECS Fargate, Apptainer, Enroot, OpenSandbox, or OpenShell, replace the provider
+configuration and set `sandbox_image` to an accessible, provider-compatible LAB
+image prepared from that context. Supplying this image avoids local Docker image
+building; changing only the provider does not. With a non-Docker provider and no
+`sandbox_image`, LAB rejects setup rather than invoking Docker. Automatic image
+building without Docker is not implemented.
+
+ECS reattachment
+currently requires the owning Gym host and its live SSH forward; Enroot requires
+the same host and UID. OpenShell requires a matching configured gateway. No image
+is automatically pushed. Provider availability must be established before claiming
+a successful run.
+
+The native adapter retains Responses/tool history and declares a gap for
+normalized invocation observations. It is intended for evaluation; no training
+or TB21 support is claimed. Session checkpoint recovery restarts the episode.
+Native operator rollout stops are unsupported; the Environment Server episode
+deadline and session close cancel the host loop and supervise command cleanup.
+
+The native agent time budget includes model calls, activation setup, and tool
+staging and execution. When it expires, cleanup must finish before the result
+can be graded as incomplete. Cleanup failures remain operational errors.

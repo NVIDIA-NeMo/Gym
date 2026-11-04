@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+num_samples_in_parallel: 1
+config_paths:
+- resources_servers/legal_agent_bench/configs/legal_agent_bench_sessions.yaml
+- responses_api_agents/legal_agent_bench_native/configs/legal_agent_bench_native.yaml
+legal_agent_bench_benchmark_resources_server:
+  _inherit_from: legal_agent_bench
+  resources_servers:
+    legal_agent_bench:
+      concurrency: ${num_samples_in_parallel}
+legal_agent_bench_benchmark_native_agent:
+  _inherit_from: legal_agent_bench_native_agent
+  responses_api_agents:
+    legal_agent_bench_native:
+      datasets:
+      - name: legal_agent_bench
+        type: benchmark
+        jsonl_fpath: ${oc.select:prepare_script_args.input,benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl}
+        prompt_config: null
+        prepare_script: benchmarks/legal_agent_bench/prepare.py
+        num_repeats: 1
+legal_agent_bench_benchmark_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: legal_agent_bench_benchmark_native_agent
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench_benchmark_resources_server
+      default_episode_timeout_seconds: 18000
+      cleanup_timeout_seconds: 180
