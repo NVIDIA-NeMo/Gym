@@ -632,8 +632,6 @@ class VLLMRouterBuilder(BaseBuilder):
             "ntasks": "1",
             "segment": "1",
             "cpus-per-task": str(self.config.cpus_per_task),
-            "gpus-per-node": "0",
-            "gres": "none",
             "mem": "0",
             "time": "00:15:00",
             "container-image": str(container_config.output_container_fpath),
