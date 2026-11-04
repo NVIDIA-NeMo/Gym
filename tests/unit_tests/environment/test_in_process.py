@@ -10,7 +10,8 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
 from nemo_gym.config.global_config import maybe_get_global_config_dict
 from nemo_gym.environment import in_process
-from nemo_gym.environment.in_process import TaskRunner, plan_benchmark, serve_benchmark
+from nemo_gym.environment.in_process import PlannedBenchmark, TaskRunner, plan_benchmark, serve_benchmark
+from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
 
@@ -23,6 +24,17 @@ def _row(task_id: str, prompt: str = "solve it") -> dict:
         "agent_ref": {"name": "agent"},
         "responses_create_params": {"input": [{"role": "user", "content": prompt}]},
     }
+
+
+def _planned(*task_ids: str, prompt: str = "solve it", commit: str | None = "abc") -> PlannedBenchmark:
+    rows = [_row(task_id, prompt) for task_id in task_ids]
+    plan = build_eval_plan(
+        rows,
+        benchmark=PlanBenchmark(name="bench", config_paths=["benchmarks/bench/config.yaml"]),
+        taskset="bench",
+        gym=PlanGym(version="0.0.0", commit=commit),
+    )
+    return PlannedBenchmark(plan=plan, rows=rows)
 
 
 class _FakeRuns:
@@ -86,6 +98,38 @@ class TestTaskRunner:
     async def test_unknown_task_is_a_config_error(self) -> None:
         with pytest.raises(ConfigError, match="No input rows for task ids"):
             await TaskRunner([_row("a")], registry_server=HEAD).run_task("z")
+
+
+class TestPlannedBenchmark:
+    def test_task_digests_map_each_task_id_to_the_digest_of_its_input(self) -> None:
+        planned = _planned("a", "b")
+
+        digests = planned.task_digests()
+
+        assert list(digests) == planned.task_ids() == ["a", "b"]
+        assert digests == {task.task_id.task_id: task.digest for task in planned.plan.tasks}
+
+    def test_a_changed_input_changes_the_digest(self) -> None:
+        assert _planned("a", prompt="one").task_digests() != _planned("a", prompt="two").task_digests()
+
+    def test_gym_commit_is_the_commit_the_plan_was_made_with(self) -> None:
+        assert _planned("a", commit="abc").gym_commit == "abc"
+        assert _planned("a", commit=None).gym_commit is None
+
+    def test_json_carries_a_plan_to_another_process_unchanged(self) -> None:
+        planned = _planned("a", "b")
+
+        restored = PlannedBenchmark.from_json(planned.to_json())
+
+        assert restored == planned
+        assert restored.task_digests() == planned.task_digests()
+
+    def test_json_refuses_a_row_it_cannot_represent(self) -> None:
+        planned = _planned("a")
+        planned.rows[0]["score"] = float("nan")
+
+        with pytest.raises(ValueError):
+            planned.to_json()
 
 
 class TestPlanBenchmark:
@@ -189,6 +233,35 @@ class TestServeBenchmark:
         }
         assert _FakeRunHelper.shut_down == 1
         assert sys.argv == ["gym", "unrelated=1"]
+
+    def test_the_registry_port_is_set_in_the_config(self) -> None:
+        with serve_benchmark("bench", registry_port=5555):
+            pass
+
+        assert _FakeRunHelper.started_with.initial_global_config_dict["head_server"] == {"port": 5555}
+
+    def test_the_registry_port_keeps_the_rest_of_the_registry_server_config(self) -> None:
+        with serve_benchmark("bench", overrides={"head_server": {"host": "0.0.0.0"}}, registry_port=5555):
+            pass
+
+        assert _FakeRunHelper.started_with.initial_global_config_dict["head_server"] == {
+            "host": "0.0.0.0",
+            "port": 5555,
+        }
+
+    def test_gym_chooses_the_registry_port_by_default(self) -> None:
+        with serve_benchmark("bench"):
+            pass
+
+        assert "head_server" not in _FakeRunHelper.started_with.initial_global_config_dict
+
+    @pytest.mark.parametrize("port", [0, -1, 65536, 70000])
+    def test_a_registry_port_that_is_not_a_port_is_refused_before_anything_starts(self, port: int) -> None:
+        with pytest.raises(ConfigError, match="registry_port"):
+            with serve_benchmark("bench", registry_port=port):
+                pass
+
+        assert _FakeRunHelper.started_with is None
 
     def test_the_model_type_is_a_parameter(self) -> None:
         with serve_benchmark("bench", model_type="vllm_model"):

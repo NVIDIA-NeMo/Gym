@@ -110,5 +110,22 @@ command-line arguments and does not set Gym's process-wide configuration, so a l
 Start the servers with `gym env start --benchmark NAME` first. The registry server is the server that serves the
 run's config and the other servers' addresses.
 
-These functions are a supported API. Their signatures change only additively: a new parameter is optional and
-keyword-only, and a parameter is deprecated before it is removed or renamed.
+### What is stable
+
+Import everything from `nemo_gym.environment`: `plan_benchmark`, `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`,
+`TaskResult` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`. Signatures and the fields of the result
+types change only additively: a new parameter is optional and keyword-only, and a parameter is deprecated before it is
+removed or renamed. A test pins them.
+
+`TaskResult.results` holds Gym's raw `/run` responses. Their keys are not part of the contract: read `rewards`, and
+use `results` for debugging.
+
+### Constraints
+
+- `serve_benchmark` sets the process's Gym configuration, as `gym env start` does, so serve one benchmark per process.
+- Benchmark names resolve relative to the working directory, `NEMO_GYM_EXTRA_ROOTS` and the install root.
+- Preparing a benchmark's data and installing a server's environment write beside their source, so the Gym checkout or
+  install must be writable.
+- To serve from another process, pass `registry_port` to `serve_benchmark` and build the `TaskRunner` with the same
+  port, for example `BaseServerConfig(host="127.0.0.1", port=port)`. `PlannedBenchmark.to_json` and `from_json` carry a
+  plan between processes.

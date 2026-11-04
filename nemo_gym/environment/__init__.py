@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from nemo_gym.environment.benchmarks import BENCHMARKS_DIR, BenchmarkConfig
     from nemo_gym.environment.deliverables import IGNORE_FILES, is_deliverable
     from nemo_gym.environment.in_process import (
+        EvalPlan,
         PlannedBenchmark,
         TaskResult,
         TaskRunner,
@@ -29,6 +30,7 @@ _PUBLIC_API = {
     "BENCHMARKS_DIR": "benchmarks",
     "BenchmarkConfig": "benchmarks",
     "EnvironmentManifest": "manifest",
+    "EvalPlan": "in_process",
     "IGNORE_FILES": "deliverables",
     "PlannedBenchmark": "in_process",
     "TaskResult": "in_process",
@@ -38,8 +40,8 @@ _PUBLIC_API = {
     "is_deliverable": "deliverables",
     "load_manifest": "manifest",
     "plan_benchmark": "in_process",
-    "serve_benchmark": "in_process",
     "resolve_manifest_config_path": "manifest",
+    "serve_benchmark": "in_process",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

@@ -100,6 +100,23 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
         ("rollout_id", _KEYWORD, None),
     ],
     "TaskRunner.task_ids": [("self", _POSITIONAL, _REQUIRED)],
+    "serve_benchmark": [
+        ("benchmark", _POSITIONAL, _REQUIRED),
+        ("model_type", _KEYWORD, "openai_model"),
+        ("overrides", _KEYWORD, None),
+        ("registry_port", _KEYWORD, None),
+    ],
+    "PlannedBenchmark.task_ids": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.task_digests": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.to_json": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.from_json": [("text", _POSITIONAL, _REQUIRED)],
+}
+
+# The fields of the two result types. Adding a field with a default is additive; removing or renaming one needs a
+# deprecation first. Update this list in the same change.
+EXPECTED_IN_PROCESS_RESULT_FIELDS = {
+    "PlannedBenchmark": ["plan", "rows"],
+    "TaskResult": ["task_id", "rewards", "results"],
 }
 
 
@@ -113,6 +130,24 @@ def test_in_process_task_api_keeps_its_signature(qualified_name: str):
     parameters = inspect.signature(target).parameters.values()
     actual = [(parameter.name, parameter.kind, parameter.default) for parameter in parameters]
     assert actual == EXPECTED_IN_PROCESS_TASK_SIGNATURES[qualified_name]
+
+
+@pytest.mark.parametrize("type_name", sorted(EXPECTED_IN_PROCESS_RESULT_FIELDS))
+def test_in_process_result_types_keep_their_fields(type_name: str):
+    import dataclasses
+
+    from nemo_gym.environment import in_process
+
+    fields = [field.name for field in dataclasses.fields(getattr(in_process, type_name))]
+    assert fields == EXPECTED_IN_PROCESS_RESULT_FIELDS[type_name]
+
+
+def test_everything_an_external_caller_needs_is_exported_from_the_environment_package():
+    import nemo_gym.environment as environment
+
+    for name in ("plan_benchmark", "serve_benchmark", "TaskRunner", "PlannedBenchmark", "TaskResult", "EvalPlan"):
+        assert name in environment.__all__
+        assert getattr(environment, name) is not None
 
 
 def test_public_api_contract_is_explicit():

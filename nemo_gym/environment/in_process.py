@@ -25,6 +25,11 @@ so a long-lived process can call it. `serve_benchmark` starts the servers `gym e
 starts, from the same kind of config dict; each server runs in its own process and environment either way.
 The registry server is the server that serves the run's config and the other servers' addresses; a `TaskRunner`
 talks to it.
+
+This is the API for callers outside Gym. They import the names `nemo_gym.environment` exports (`plan_benchmark`,
+`serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult` and `EvalPlan`) and `ConfigError` from
+`nemo_gym.config`. Signatures and result fields change only additively, and tests pin them. `TaskResult.results`
+holds Gym's raw `/run` responses, whose keys can change: depend on `rewards`, and use `results` for debugging.
 """
 
 import json
@@ -39,7 +44,11 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import (
+    HEAD_SERVER_KEY_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+)
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
@@ -57,6 +66,26 @@ class PlannedBenchmark:
 
     def task_ids(self) -> list[str]:
         return [task.task_id.task_id for task in self.plan.tasks]
+
+    def task_digests(self) -> dict[str, str]:
+        """Each planned task's id mapped to the digest of its input, which changes when the input changes."""
+        return {task.task_id.task_id: task.digest for task in self.plan.tasks}
+
+    @property
+    def gym_commit(self) -> Optional[str]:
+        """The Gym commit the plan was made with, or None when Gym was not installed from a git checkout."""
+        return self.plan.gym.commit
+
+    def to_json(self) -> str:
+        """The planned benchmark as JSON text, for handing it to another process; `from_json` reads it back."""
+        return json.dumps(
+            {"plan": self.plan.model_dump(mode="json", by_alias=True), "rows": self.rows}, allow_nan=False
+        )
+
+    @classmethod
+    def from_json(cls, text: str) -> "PlannedBenchmark":
+        saved = json.loads(text)
+        return cls(plan=EvalPlan.model_validate(saved["plan"]), rows=saved["rows"])
 
 
 @dataclass(frozen=True)
@@ -99,6 +128,7 @@ def serve_benchmark(
     *,
     model_type: str = "openai_model",
     overrides: Optional[Mapping[str, Any]] = None,
+    registry_port: Optional[int] = None,
 ) -> Iterator[BaseServerConfig]:
     """Start the benchmark's servers, and stop them on exit. Yields the registry server a `TaskRunner` talks to.
 
@@ -106,13 +136,19 @@ def serve_benchmark(
     `gym env start --benchmark NAME --model-type TYPE`. `overrides` are config keys merged on top, as in
     `plan_benchmark`, so planning and serving read the same dict: nested dicts, and a dotted key is refused
     (`ConfigError`). The model's
-    `policy_base_url`, `policy_api_key` and `policy_model_name` are among them.
+    `policy_base_url`, `policy_api_key` and `policy_model_name` are among them. `registry_port` fixes the registry
+    server's port, so a caller that serves from another process can know the address before the servers start;
+    Gym chooses the port when it is None.
 
     Returns once every server is ready; raises `ConfigError` if a server or a model endpoint is not. Like
     `gym env start`, it sets this process's Gym configuration, so serve one benchmark per process.
     """
     config_paths = [asset_config_path("benchmark", benchmark), asset_config_path("model-type", model_type)]
     initial = OmegaConf.merge({"config_paths": config_paths}, _checked_overrides(overrides))
+    if registry_port is not None:
+        if not 0 < registry_port < 65536:
+            raise ConfigError(f"registry_port must be a port number from 1 to 65535, got {registry_port!r}")
+        initial = OmegaConf.merge(initial, {HEAD_SERVER_KEY_NAME: {"port": registry_port}})
     helper = RunHelper()
     helper.start(GlobalConfigDictParserConfig(initial_global_config_dict=initial, skip_load_from_cli=True))
     try:
