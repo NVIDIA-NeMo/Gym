@@ -339,3 +339,55 @@ async def test_checkpoint_restores_failure_reference_and_report_before_verificat
     assert reference.failure_id == failure.event_id
     assert forwarded.events[reference.failure_id].details.sandbox_id == "sandbox-1"
     assert [path for _, path, _ in client.calls] == ["/verify", "/close_session"]
+
+
+@pytest.mark.parametrize("action", ["verify", "fail", "retry"])
+async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
+    from nemo_gym.agents import AgentOutcomePolicyConfig
+    from nemo_gym.core import PROVIDER_OOM_KILLED, FailureReport, NgFailureEvent, SandboxFailureDetails
+    from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Current workload OOMKilled",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="sandbox-1"),
+    )
+    observation = SandboxObservation(
+        role="agent",
+        phase="agent_execution",
+        outcome="oom",
+        failure_id=failure.event_id,
+    )
+    report = FailureReport(events={failure.event_id: failure.event})
+    response = _agent_response().model_copy(
+        update={
+            "status": "failed",
+            "output": [],
+            "failure_report": report.model_dump(mode="json"),
+            "metadata": {
+                AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=failure.failure_kind).model_dump_json(),
+                NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json(),
+            },
+        }
+    )
+    environment, client = _environment_server()
+    if action != "verify":
+        environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(
+            by_failure_kind={PROVIDER_OOM_KILLED: action}
+        )
+        del client.responses[4]
+    client.responses[2] = _Response(response.model_dump(mode="json"))
+    result = await environment.run_request(_request())
+    verified = any(path == "/verify" for _, path, _ in client.calls)
+    assert verified is (action == "verify")
+    if action == "verify":
+        assert result.failure is None
+        assert result.result.reward == 1.0  # The verifier's own verdict is retained.
+    else:
+        assert result.result is None
+        assert result.failure.terminal is (action == "fail")
+        partial = result.failure.partial_response
+        assert partial.failure_report["events"][failure.event_id]["failure_kind"] == PROVIDER_OOM_KILLED
+        saved = SandboxObservation.model_validate_json(partial.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert saved.failure_id == failure.event_id
