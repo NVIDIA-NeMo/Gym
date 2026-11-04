@@ -1,9 +1,8 @@
 ---
 name: run-and-babysit-eval
 description: >
-  If you do not have a Gym eval config yet, compose it first with add-model-eval-config (or with
-  your organisation's own config tooling), then come back here; this skill takes a config and
-  runs/babysits it, nothing else. Take a NeMo Gym evaluation from a ready config to a trusted
+  No eval config yet: compose it first with add-model-eval-config, or start from a config you
+  already have. Config in hand: this skill takes it and runs/babysits it, nothing else. Take a NeMo Gym evaluation from a ready config to a trusted
   result: submit it, let the resumable Slurm chain continue through walltime limits, preemption and node loss, inspect and recover the
   run from its saved evidence with `gym eval resubmit --recover`, check health and the acceptance
   gates, and decide when to stop a chain or start a fresh run. Use when a working Gym config
@@ -16,10 +15,6 @@ description: >
 ---
 
 # Run a Gym Evaluation to Its Result
-
-If you do not have a Gym eval config yet, compose it first with
-[add-model-eval-config](../add-model-eval-config/SKILL.md) (or with your organisation's own config tooling),
-then come back here; this skill takes a config and runs/babysits it, nothing else.
 
 The Gym pages are the reference; when they and this skill disagree, the pages win:
 [Configuration](../../../fern/versions/latest/pages/orchestration/configuration.mdx),
