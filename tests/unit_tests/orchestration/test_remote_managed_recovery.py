@@ -113,7 +113,7 @@ def test_remote_projection_cannot_replace_collection_evidence(tmp_path, mutation
 def test_the_remote_reader_reports_the_admissions_a_killed_rejudge_pass_left(tmp_path):
     # A re-judge pass killed after admitting its judge failure leaves an admission without an outcome. The Store reader
     # reports it, and the remote bridge keeps it, so remote recovery re-judges the saved answer as local recovery does.
-    from tests.unit_tests.test_rejudge_saved_judge_failures import _admitted_by_a_dead_pass
+    from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _admitted_by_a_dead_pass
 
     job, _, identity = _admitted_by_a_dead_pass(tmp_path)
     raw = collect(job)
