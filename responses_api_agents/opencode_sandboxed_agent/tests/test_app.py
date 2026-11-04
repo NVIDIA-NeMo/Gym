@@ -1551,13 +1551,22 @@ def test_assistant_message_plugin_hooks() -> None:
 
 
 @mark.parametrize("ended,execution_failed", [(True, True), (False, True), (True, False)])
-async def test_mcp_check_after_execution_failure_preserves_only_ended_sandbox(tmp_path, ended, execution_failed):
+@mark.parametrize(
+    "ended_error",
+    [
+        "[SANDBOX::ENDED] Sandbox has ended (OOMKilled)",
+        'HTTP 410: {"code":"SANDBOX::ENDED", "message":"Sandbox has ended"}',
+    ],
+)
+async def test_mcp_check_after_execution_failure_preserves_only_ended_sandbox(
+    tmp_path, ended, execution_failed, ended_error
+):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
     config.execution_failure_reward_zero = True
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
-    check_error = RuntimeError("[SANDBOX::ENDED] Sandbox has ended (OOMKilled)" if ended else "connection reset")
+    check_error = RuntimeError(ended_error if ended else "connection reset")
     sandbox = MagicMock(upload=AsyncMock(), download=AsyncMock())
     run_result = (
         RuntimeError("Sandbox ended (OOMKilled)")

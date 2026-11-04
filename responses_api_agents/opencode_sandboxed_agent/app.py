@@ -1039,7 +1039,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 # Once execution has failed and the sandbox is gone, its MCP marker
                 # is unavailable too. Preserve that failed answer rather than
                 # aborting collection and resampling it on the next resume.
-                if not run_error_type or "[SANDBOX::ENDED]" not in str(exc):
+                if not run_error_type or "SANDBOX::ENDED" not in str(exc):
                     raise
             else:
                 if mcp_check.return_code != 0 or mcp_check.error_type:
