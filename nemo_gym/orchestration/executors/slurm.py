@@ -28,7 +28,7 @@ import yaml
 from nemo_gym import __version__
 from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
-from nemo_gym.orchestration.executors.capabilities import LogReadable, Resubmittable, Terminable
+from nemo_gym.orchestration.executors.capabilities import Inspectable, LogReadable, Resubmittable, Terminable
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
@@ -196,7 +196,8 @@ def _submission_exports(config: SubmitConfig) -> list[str]:
     return exports
 
 
-class SlurmExecutor(BaseExecutor, Resubmittable, Terminable, LogReadable):
+# Inspectable is implied by Terminable and LogReadable; it is listed last so the line shows everything Slurm supports.
+class SlurmExecutor(BaseExecutor, Resubmittable, Terminable, LogReadable, Inspectable):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
     Every service and the driver are launched via `srun --container-image` so they
