@@ -1,0 +1,21 @@
+You are grading one answer to a chart-reading question against a reference answer.
+
+Question:
+{question}
+
+Reference answer (one part per line or per label; a numeric part may give an acceptable range):
+{golden_answer}
+
+Answer to grade:
+{response}
+
+How to grade:
+1. Find the final answer the response commits to. If it settles on one answer after earlier attempts, grade the last one it settles on. Ignore working, reasoning, restatements and formatting. If it gives different answers for the same part without settling on one, that part is incorrect.
+2. Split the reference answer into its parts and grade each part on its own, in the reference order.
+3. A number with an acceptable range is correct when the response's value lies inside the range, endpoints included. A number without a range must match the reference at the precision the question asks for, or else at the precision of the reference. Equivalent forms count as equal (for example 0.25 and 25% for a share, 1.2 thousand and 1,200), and so do conversions to other units that give the same quantity. A missing value is incorrect.
+4. A label or name is correct when it names the same item as the reference, ignoring case, spacing and obvious abbreviations. A different item is incorrect.
+5. A list is correct when it contains exactly the reference items, and in the reference order when the reference says the order matters. Extra or missing items make it incorrect.
+6. Yes/no and category answers must match the reference.
+7. The reference answer decides. Do not use your own reading of the chart, and give no credit for a correct method that ends in a wrong value.
+
+Reply with JSON only: an object with "final_answer" (the answer you graded, as a short string) and "parts" (a list with one object per reference part, in order, each with "part" (the reference part), "answer" (the matching piece of the final answer, or an empty string), "correct" (true or false) and "reason" (one short sentence)).
