@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.check_suites.github_actions import COMPARE_COMMIT
 from scripts.harness_conformance.ci import changed_harnesses, report, select_harnesses
 from scripts.harness_conformance.registry import HARNESSES
 
@@ -145,6 +146,44 @@ def test_a_base_branch_that_only_exists_as_a_remote_tracking_ref_is_resolved(tmp
     git("add", ".")
     git("-c", "commit.gpgsign=false", "commit", "-qm", "adapter")
     assert changed_harnesses("release", root=tmp_path) == ["pi"]
+
+
+def _repository_with_adapter_commit(path):
+    """A repository whose base commit has only docs and whose next commit adds the Pi adapter."""
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=path, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "CI test")
+    git("config", "user.email", "ci@example.invalid")
+    (path / "README.md").write_text("docs\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    adapter = path / "responses_api_agents/pi_agent/app.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("new\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "adapter")
+    return git, base
+
+
+def test_a_base_commit_is_compared_directly_so_a_rewind_selects_what_it_removed(tmp_path):
+    git, base = _repository_with_adapter_commit(tmp_path)
+    before = git("rev-parse", "HEAD")
+    assert changed_harnesses(base, root=tmp_path, compare=COMPARE_COMMIT) == ["pi"]
+    git("reset", "-q", "--hard", base)
+    assert changed_harnesses(before, root=tmp_path, compare=COMPARE_COMMIT) == ["pi"]
+    # The merge base of a rewound branch is the new head, so a branch comparison sees nothing.
+    assert changed_harnesses(before, root=tmp_path) == []
+
+
+def test_a_detached_head_is_compared_like_a_branch(tmp_path):
+    git, base = _repository_with_adapter_commit(tmp_path)
+    git("checkout", "-q", "--detach")
+    assert changed_harnesses(base, root=tmp_path) == ["pi"]
+    assert changed_harnesses(base, root=tmp_path, compare=COMPARE_COMMIT) == ["pi"]
 
 
 def test_missing_base_runs_all(tmp_path, capsys):
