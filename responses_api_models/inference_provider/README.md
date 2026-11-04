@@ -11,6 +11,7 @@ A model server for any inference provider that exposes an OpenAI-compatible `/v1
 | OpenRouter | `configs/openrouter.yaml` |
 | DeepInfra | `configs/deepinfra.yaml` |
 | Nebius | `configs/nebius.yaml` |
+| NVIDIA Inference API | `configs/nvidia.yaml` |
 | Friendli | `configs/friendli.yaml` |
 | Baseten | `configs/baseten.yaml` |
 | HF Inference | `configs/hf_inference.yaml` |
