@@ -28,7 +28,7 @@ job takes ``--judge-qos``, else the saved CPU pool's own QOS, else the QOS the r
 for that partition, else the partition's default.
 
 A run that serves its judge as a service of its own, on a node pool of its own beside the policy's (a vLLM judge its
-judge server reaches at ``${GYM_POOL_<POOL>_NODES}``), gets the served-judge profile: those services on their saved
+judge server reaches through ``GYM_POOL_*_NODES``), gets the served-judge profile: those services on their saved
 node pools, with their saved shape and partition, and no policy service, policy model or policy pool. It is a GPU job
 like the run, so it keeps the run's job-level QOS; ``--judge-partition`` and ``--judge-qos`` name a CPU placement and
 are not used (a launcher that passes them on every recovery would put the GPU pool on a CPU partition or QOS). A
