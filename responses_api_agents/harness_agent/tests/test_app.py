@@ -769,6 +769,8 @@ async def test_sandbox_ending_mid_episode_masks_the_rollout_instead_of_failing_r
     assert result.evaluation_completed is False
     assert result.failure_kind == "provider_oom_killed"
     assert "SANDBOX::ENDED" in result.failure_reason
+    # Where and on which sandbox it ended; the kind and the mask are unchanged.
+    assert result.failure_reason.startswith("[sandbox phase=agent sandbox=box-1 reason=SandboxApiException] ")
     assert result.task_id == "task-1"
 
 
