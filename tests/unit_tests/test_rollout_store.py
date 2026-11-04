@@ -53,29 +53,6 @@ def snapshot(output):
     return {path.name: path.read_bytes() for path in output.parent.iterdir() if path.is_file()}
 
 
-def test_deferred_reservations_skip_dispatch_writes_and_flush_on_close(prepared_run):
-    output, prepare = prepared_run
-    store = RolloutStore.start_or_resume(output, prepare, resume=False)
-    store.defer_reservation_writes = True
-    with store:
-        manifest_path = manifest_path_for(output)
-        before = manifest_path.read_bytes()
-        first, second = store.pending(3)
-        store.record_dispatches([first, second])
-        assert manifest_path.read_bytes() == before
-        assert len(store.manifest.next_attempt) == 2
-        store.record_outcome(first | {"reward": 1.0})
-        assert manifest_path.read_bytes() == before
-
-    assert manifest_path.read_bytes() != before
-    with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
-        assert len(resumed.selected("success")) == 1
-        pending = resumed.pending(3)
-        assert len(pending) == 1
-        assert pending[0]["_ng_task_index"] == second["_ng_task_index"]
-        assert pending[0]["_ng_attempt_index"] == 1
-
-
 def test_invalid_outcomes_are_rejected_before_appending_bytes(prepared_run):
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:

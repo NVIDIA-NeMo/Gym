@@ -248,9 +248,21 @@ class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
 
 
-# TEMP: restore pre-#4775 extraction for throughput comparison. Staged/committed fixes are omitted.
-def patch_extraction_command(workdir: str) -> str:
-    return f"cd {quote(workdir)} && git --no-pager diff"
+# The agent's working tree is graded by the diff it leaves behind. A plain
+# `git diff` shows only unstaged changes to tracked files, so a fix the agent
+# staged (`git add`) or committed scored 0 with an empty patch: 14% of Claude
+# Code rollouts on SWE-bench Verified did one of the two (2026-10-19). Diff the
+# index against the commit the session was seeded at instead, after staging
+# the tracked files' changes, so staged and committed fixes count. Untracked
+# files are left out on purpose: `git add -A` swept a generated Sphinx `_build`
+# tree (1.1 MB of jquery) into one patch; a new file the agent committed is
+# still included. Binary sections are dropped, since `git apply` cannot take
+# them without binary data.
+def patch_extraction_command(workdir: str, seed_head: str) -> str:
+    return (
+        f"cd {quote(workdir)} && git add -u >/dev/null 2>&1; "
+        f"cd {quote(workdir)} && git --no-pager diff --cached {quote(seed_head)}"
+    )
 
 
 def strip_binary_diffs(patch: str) -> str:
@@ -268,6 +280,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._session_id_to_seed_head: Dict[str, str] = dict()
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -345,6 +358,13 @@ Stdout:
 Stderr:
 {result.stderr}""")
 
+        # The commit to diff against at verify time: HEAD once the sandbox is
+        # ready (anti-cheating rewrites refs but not the tree), falling back to
+        # the task's base commit if git is unavailable.
+        head_result = await eval_sandbox.exec("git rev-parse HEAD")
+        seed_head = (head_result.stdout or "").strip() if head_result.return_code == 0 else ""
+        self._session_id_to_seed_head[request.session[SESSION_ID_KEY]] = seed_head or test_spec.base_commit
+
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
@@ -382,8 +402,11 @@ Stderr:
             original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-                model_patch_result = await original_sandbox.exec(patch_extraction_command(original_workdir))
-                model_patch = model_patch_result.stdout or ""
+                seed_head = (
+                    self._session_id_to_seed_head.pop(request.session[SESSION_ID_KEY], None) or test_spec.base_commit
+                )
+                model_patch_result = await original_sandbox.exec(patch_extraction_command(original_workdir, seed_head))
+                model_patch = strip_binary_diffs(model_patch_result.stdout or "")
             except:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
             try:

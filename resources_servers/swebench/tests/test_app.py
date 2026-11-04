@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -293,26 +292,14 @@ class TestMultilingualMavenSettings:
 
 
 class TestPatchExtraction:
-    def test_temporary_extraction_only_includes_unstaged_changes(self, tmp_path: Path) -> None:
-        def git(*args: str) -> None:
-            subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
-
-        git("init")
-        source = tmp_path / "source.txt"
-        source.write_text("before\n")
-        git("add", "source.txt")
-        git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--no-gpg-sign", "-m", "seed")
-        source.write_text("after\n")
-        command = patch_extraction_command(str(tmp_path))
-        diff = subprocess.check_output(["bash", "-c", command], text=True)
-        assert "+after" in diff
-        git("add", "source.txt")
-        assert subprocess.check_output(["bash", "-c", command], text=True) == ""
-        git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--no-gpg-sign", "-m", "fix")
-        assert subprocess.check_output(["bash", "-c", command], text=True) == ""
+    def test_command_stages_tracked_changes_and_diffs_the_index_against_the_seed_commit(self) -> None:
+        cmd = patch_extraction_command("/testbed", "abc123")
+        assert cmd.startswith("cd /testbed && git add -u ")
+        assert "add -A" not in cmd  # untracked build output must not ride along
+        assert cmd.endswith("cd /testbed && git --no-pager diff --cached abc123")
 
     def test_command_quotes_odd_paths(self) -> None:
-        assert "'/work dir'" in patch_extraction_command("/work dir")
+        assert "'/work dir'" in patch_extraction_command("/work dir", "deadbeef")
 
     def test_strip_binary_diffs_drops_only_binary_sections(self) -> None:
         text = (
