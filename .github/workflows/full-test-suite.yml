@@ -78,7 +78,8 @@ jobs:
       - name: Test
         run: |
           source .venv/bin/activate
-          PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+          source scripts/ci/test_worker_env.sh
+          PYTEST_ADDOPTS='-m "not sandbox" -n 4 --dist=loadfile --cov-report= --cov-fail-under=0' ng_dev_test
           pytest --cov=. --cov-append --cov-report=term-missing \
             --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
@@ -128,11 +129,18 @@ jobs:
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: |
           source .venv/bin/activate
-          ng_test_all \
+          source scripts/ci/test_worker_env.sh
+          python scripts/ci/server_test_workers.py "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}" \
             +fail_on_total_and_test_mismatch=true \
-            +delete_venvs_after_each_test=true \
-            +num_shards=${{ env.NUM_SHARDS }} \
-            +shard_index=${{ matrix.shard }}
+            +delete_venvs_after_each_test=true
+
+      - name: Upload server worker logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-server-worker-logs-${{ matrix.shard }}
+          path: results/server-workers
+          if-no-files-found: warn
 
   server-suite-result:
     name: Server suite
