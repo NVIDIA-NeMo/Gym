@@ -15,6 +15,7 @@
 import argparse
 import asyncio
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import site
 import subprocess
 import sys
 import sysconfig
+import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -130,6 +132,7 @@ from nemo_gym.eval.eval_plan import (
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.orchestration.server_supervisor import RunHelper
 from nemo_gym.package_info import __version__
+from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
 from nemo_gym.utils.path_utils import materialized_path_for
@@ -824,7 +827,7 @@ def e2e_rollout_collection():  # pragma: no cover
             resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
-            asyncio.run(rch.run_from_config(rollout_collection_config))
+            _collect_and_rejudge(rch, rollout_collection_config, global_config_dict, output_fpath)
         collection_completed = True
     except KeyboardInterrupt:
         interrupted = True
@@ -868,6 +871,249 @@ def e2e_rollout_collection():  # pragma: no cover
         # A custom driver can return normally while saved coverage still rejects completion.
         mark_run_failed()
         raise
+
+    _finalize_live_exporters(output_fpath)
+
+
+def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
+    """Project the existing saved-evidence health calculation under the caller's run lock.
+
+    This is not tracking acceptance. Unknown health exports a known=0 signal, never a healthy rate.
+    Scientific aggregate entries and scores remain unchanged; only the reserved run metadata is replaced.
+    """
+    import tempfile
+
+    from nemo_gym.artifacts.exporters.base import _artifact_version
+    from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.orchestration.recovery import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+        IdentityState,
+        _observed_trial_operations,
+        decide_from_collected,
+        failure_facts,
+        fault_report,
+        response_health,
+        select_managed_evidence,
+        trial_faults,
+        trial_population,
+        trial_verdict,
+    )
+
+    artifacts = RunArtifacts(output)
+    version = _artifact_version(artifacts)
+    health_version = health_source_artifacts(artifacts, version)
+    try:
+        aggregate_bytes = artifacts.aggregate_metrics_json_fpath.read_bytes()
+        aggregate = json.loads(aggregate_bytes)
+    except (OSError, ValueError):
+        # The exporter's existing artifact validation owns missing or malformed aggregate errors.
+        return {}
+    if (
+        not isinstance(aggregate, list)
+        or not aggregate
+        or any(not isinstance(entry, dict) or not isinstance(entry.get("agent_ref"), dict) for entry in aggregate)
+    ):
+        return {}
+    health = output.parent / QUALITY_SUMMARY_FILENAME
+    health_bytes = health.read_bytes() if health.is_file() else None
+    try:
+        summary = json.loads(health_bytes) if health_bytes is not None else None
+    except ValueError:
+        summary = None
+    metrics: dict[str, int | float] = {
+        "health/response/known": 0,
+        "health/trial/known": 0,
+        "health/trial/passed": 0,
+        "health/grading_recovery/known": 0,
+        "health/upstream_recovery/known": 0,
+        "health/trial/counts_known": 0,
+    }
+    # The ordinary collector reads these exact conventional paths. Other layouts retain explicit UNKNOWN.
+    job = output.parent.parent
+    if output.name == "rollouts.jsonl" and output.parent.name == "artifacts":
+        raw = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+        )
+        collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
+        decision = decide_from_collected(collected, max_infra_retries=None, max_walltime_s=None, live_job=None)
+        quality = collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
+        response, _ = response_health(decision, quality)
+        if response is not None:
+            counts = quality["responses"]
+            metrics.update(
+                {
+                    "health/response/known": 1,
+                    "health/response/faulted": counts["faulted"],
+                    "health/response/selected": counts["selected"],
+                    "health/response/failure_rate": counts["faulted"] / counts["selected"],
+                }
+            )
+        # The trial family is evaluation health: the evaluation-side count and denominator (expected trials less
+        # accepted omissions, which are reported separately) the gate judges.
+        trials = trial_population(decision)
+        trial, _, evaluation = trial_verdict(decision, collected)
+        if evaluation is None and trials > 0:
+            # Not evaluated (the run is not complete): its known faults are a lower bound.
+            evaluation = fault_report(trial_faults(decision, collected), trials) | {"exact": False}
+        if evaluation is not None:
+            exact = evaluation["exact"]
+            failed = evaluation["evaluation"]["count"]
+            metrics.update(
+                {
+                    "health/trial/counts_known": int(exact),
+                    "health/trial/failed" if exact else "health/trial/failed_lower_bound": failed,
+                    "health/trial/expected": trials,
+                    "health/trial/omitted": decision.counts.get(IdentityState.OMITTED, 0),
+                    "health/trial/failure_rate" if exact else "health/trial/failure_rate_lower_bound": failed / trials,
+                }
+            )
+        if trial is not None:
+            metrics.update({"health/trial/known": 1, "health/trial/passed": int(trial)})
+        # Response and trial failures by cause: reported facts with no limit applied, for consumers to judge.
+        facts = failure_facts(decision, collected)
+        if facts is not None:
+            for family in ("response_failures", "trial_failures"):
+                metrics[f"health/{family}/rate"] = facts[family]["rate"]
+                for cause, fact in facts[family]["by_cause"].items():
+                    metrics[f"health/{family}/{cause}"] = fact["count"]
+            # Health metrics are numbers only: the source is the one key of its name set to 1.
+            coverage = facts["metric_coverage"]
+            metrics["health/metric_coverage/trials"] = coverage["trials"]
+            metrics["health/metric_coverage/expected"] = coverage["expected"]
+            metrics[f"health/metric_coverage/source/{coverage['source']}"] = 1
+        upstream = (quality or {}).get("observed_upstream_recovery")
+        upstream_keys = (
+            "observed_attempt_errors",
+            "observed_failed_operations",
+            "recovered_attempt_errors",
+            "recovered_operations",
+            "operations_without_terminal_observation",
+        )
+        if isinstance(upstream, dict) and all(
+            type(upstream.get(key)) is int and upstream[key] >= 0 for key in upstream_keys
+        ):
+            metrics["health/upstream_recovery/known"] = 1
+            metrics.update({f"health/upstream_recovery/{key}": upstream[key] for key in upstream_keys})
+        recovery = {}
+        if _observed_trial_operations(decision, collected, judge_recovery=recovery, grading_failures=[]):
+            metrics["health/grading_recovery/known"] = 1
+            metrics.update({f"health/grading_recovery/{key}": value for key, value in recovery.items()})
+    if (
+        _artifact_version(artifacts) != version
+        or health_source_artifacts(artifacts, version) != health_version
+        or (health.read_bytes() if health.is_file() else None) != health_bytes
+    ):
+        raise RuntimeError("Run artifacts changed while deriving health metrics.")
+    payload = {
+        "source_artifacts": health_version,
+        "metrics": metrics,
+    }
+    for entry in aggregate:
+        entry.pop("_ng_run_health_metrics", None)
+    aggregate[0]["_ng_run_health_metrics"] = payload
+    # Refuse collisions before changing artifacts or sending any health metric to a live exporter.
+    flatten_aggregate_metrics(aggregate, source_artifacts=health_version)
+
+    def atomic_json(path, value):
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+        try:
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    atomic_json(artifacts.aggregate_metrics_json_fpath, aggregate)
+    if (
+        isinstance(summary, dict)
+        and isinstance(summary.get("run"), dict)
+        and isinstance(summary["run"].get("stats"), dict)
+    ):
+        summary["run"]["stats"]["acceptance_health"] = payload
+        atomic_json(health, summary)
+    return metrics
+
+
+def _finalize_live_exporters(output: Path) -> None:
+    """Verify final persisted coverage and health before certifying an active live exporter."""
+    from nemo_gym.artifacts.exporters import get_exporters, run_failed
+    from nemo_gym.artifacts.exporters.base import _artifact_version
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.rollouts import RolloutStore
+    from nemo_gym.rollouts.rollout_health import _health_artifact_digests, _report_sources
+    from nemo_gym.rollouts.rollout_recovery import run_lock
+
+    exporters = get_exporters()
+    if not exporters or run_failed():
+        return
+    try:
+        with run_lock(output):
+            artifacts = RunArtifacts(output)
+            version = _artifact_version(artifacts)
+            store = RolloutStore.read(output, import_legacy=False)
+            if store is None or store.coverage().get("complete") is not True:
+                return
+            health = output.parent / QUALITY_SUMMARY_FILENAME
+            health_bytes = health.read_bytes()
+            summary = json.loads(health_bytes)
+            if summary["run"].get("rollouts") != _report_sources([output], output.parent):
+                return
+            if summary["run"]["provenance"].get("rollout_artifact_digests") != _health_artifact_digests([output]):
+                return
+            if any(version[key] is None for key in version):
+                return
+            if any(artifacts.export_done_fpath(exporter.name).exists() for exporter in exporters):
+                return
+            health_metrics = _prepare_run_health_metrics(output)
+            version = _artifact_version(artifacts)
+            health_bytes = health.read_bytes()
+            for exporter in exporters:
+                exporter.export_metrics(health_metrics)
+                if health.read_bytes() != health_bytes or _artifact_version(artifacts) != version:
+                    raise RuntimeError("Final run artifacts changed before live finalization.")
+                try:
+                    exporter.finalize_live(artifacts, version)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Live tracking completion remains unverified: %s", exc, exc_info=True
+                    )
+                _export_without_receipt(exporter, artifacts)
+    except Exception as exc:
+        # Tracking failure never changes scores or requests another model attempt.
+        logging.getLogger(__name__).warning("Live tracking completion remains unverified: %s", exc, exc_info=True)
+
+
+def _export_without_receipt(exporter, artifacts) -> None:
+    """Export the completed run after the fact when live finalization left it without a receipt.
+
+    A live run reopened by a later segment never certifies (`finalize_live` cannot vouch for rows an earlier segment
+    sent), nor does a live delivery it could not verify. Such a run gets Gym's post-run export, as `gym eval export`
+    sends it, from a fresh exporter of the same backend and config; the caller holds the run lock and has prepared the
+    health metrics. An exporter that never certifies a live run keeps no receipt, so it is not exported again, and an
+    existing receipt is never replaced. A failed export is logged; it never changes scores or the exit code.
+    """
+    from nemo_gym.artifacts.exporters.base import BaseExporter, ExportState
+
+    if (
+        type(exporter).finalize_live is BaseExporter.finalize_live
+        or artifacts.export_done_fpath(exporter.name).exists()
+    ):
+        return
+    result = type(exporter)(exporter.global_config_dict).export(artifacts)
+    if result.state is ExportState.FAILED:
+        logging.getLogger(__name__).warning(
+            "Post-run %s export after live finalization failed; the run has no export receipt: %s",
+            exporter.name,
+            result.error,
+        )
+    elif result.state is ExportState.SUCCEEDED and result.detail.get("live_run_id") and result.detail.get("run_id"):
+        # The evaluation now has two backend runs: name the run of record on both, after the receipt is written.
+        exporter.link_superseding_export(result.detail["live_run_id"], result.detail["run_id"])
 
 
 _terminated = False
@@ -966,6 +1212,287 @@ def _check_saved_completion(output: Path) -> None:
             )
 
 
+def _collect_and_rejudge(
+    rch: Any, config: Any, global_config_dict: DictConfig | Mapping[str, Any], output: Path
+) -> None:
+    """Run the built-in collection, then the saved-answer re-judge pass, before a strict run is rejected.
+
+    With ``require_complete``, ``run_from_config`` raises ``IncompleteEvaluationError`` when completed is below
+    expected, and a masked judge failure is not completed: the pass runs first, and the rejection stands unless the
+    saved run is complete afterwards, by the rule ``check_completion`` applies. Whether a rejected run is retried is
+    then read from the settled run (``_settled_rejection``). A non-strict run and a terminated run keep the error as
+    raised. A custom ``rollout_collection_driver`` runs neither this pass nor this check.
+
+    A resumed run grades its saved answers again first, while its servers are up, and only then runs its policy
+    work: a recovery that resumes a run with both re-verifies the saved answers before the missing and retryable
+    rollouts run.
+    """
+    from nemo_gym.rollouts import IncompleteEvaluationError, manifest_path_for
+
+    if getattr(config, "resume_from_cache", False) and manifest_path_for(output).exists():
+        _rejudge_saved_judge_failures(global_config_dict, output, config, aggregate=False)
+    try:
+        asyncio.run(rch.run_from_config(config))
+    except IncompleteEvaluationError as rejected:
+        if not config.require_complete or _terminated:
+            raise
+        _rejudge_saved_judge_failures(global_config_dict, output, config)
+        if not _saved_run_complete(output):
+            raise _settled_rejection(output, rejected) from None
+        return
+    _rejudge_saved_judge_failures(global_config_dict, output, config)
+
+
+def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
+    """The rejection of a strict run as its settled state decides it, after the saved-answer pass.
+
+    Whether unfinished work remains retryable is read from the Store again, so a pass that settled rows decides the
+    retry, not the state before it. The collection's own progress still counts. Unreadable evidence keeps the
+    original rejection.
+    """
+    from nemo_gym.rollouts import IncompleteEvaluationError, RolloutStore
+
+    try:
+        store = RolloutStore.read(output, import_legacy=False)
+        coverage = store.coverage() if store is not None else None
+    except Exception:
+        return rejected
+    if coverage is None:
+        return rejected
+    retryable = coverage["retryable"] > 0
+    guidance = (
+        "Resume unfinished work after resolving failures."
+        if retryable
+        else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
+    )
+    return IncompleteEvaluationError(
+        f"{coverage['successful'] - coverage.get('masked_retryable', 0) + coverage['final_zeros']}/{coverage['expected']} "
+        "samples completed after the "
+        f"saved-answer re-verification. Partial artifacts retained at {output}. {guidance}",
+        retryable=retryable,
+        # exit code 1 is a retryable rejection that made no progress; any other rejection keeps progress.
+        made_progress=getattr(rejected, "exit_code", 75) != 1,
+        failure_kind=getattr(rejected, "failure_kind", None),
+    )
+
+
+def _saved_run_complete(output: Path) -> bool:
+    """Whether the saved Store selection now meets ``check_completion``: unreadable evidence is not complete."""
+    from nemo_gym.rollouts import RolloutStore
+    from nemo_gym.rollouts.rollout_recovery import has_only_intentional_gaps
+
+    try:
+        store = RolloutStore.read(output, import_legacy=False)
+        if store is None:
+            return False
+        coverage = store.coverage()
+    except Exception:  # the original rejection stands
+        return False
+    completed = coverage["successful"] - coverage.get("masked_retryable", 0) + coverage["final_zeros"]
+    return completed == coverage["expected"] or has_only_intentional_gaps(
+        expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
+    )
+
+
+def _rejudge_saved_judge_failures(
+    global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any, *, aggregate: bool = True
+) -> None:
+    """Re-judge the run's saved judge failures while its servers are up, then recompute its metrics in place.
+
+    Collection calls it at the end of a run and of each resumed run (see ``rejudge_saved_judge_failures``), and at the
+    start of a resumed run, with ``aggregate`` off since its collection aggregates afterwards. The saved results to
+    grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
+    pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
+    """
+    from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+
+    # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
+    if isinstance(global_config_dict, DictConfig):
+        run_config = OmegaConf.to_container(global_config_dict, resolve=True)
+    else:
+        run_config = dict(global_config_dict)
+    try:
+        scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
+    except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
+        print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
+        return
+    if not scored:
+        return
+    print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
+    if collection_config.disable_aggregation or not aggregate:
+        return
+    try:
+        aggregation = RolloutAggregationConfig.model_validate(
+            run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
+        )
+        asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
+    except Exception as error:  # the settled rows are saved; only the metrics file is behind them
+        print(
+            f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
+            f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
+            flush=True,
+        )
+
+
+class _SettledHealthSettings(RunHealthConfig):
+    """The health-check settings of a run config, read for the quality summary of a run a judge-only job settled."""
+
+    disable_health_check: bool = False
+    health_check_workers: int | None = None
+    health_check_ignored_checks: List[str] = Field(default_factory=list)
+
+
+def _refresh_settled_source(
+    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path
+) -> dict[str, bool]:
+    """Recompute the settled run's aggregate metrics in place and rewrite its quality summary from the settled rows,
+    as the run's own completion does after its saved-answer pass.
+
+    A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it). A health
+    check that selects the Store's attempts itself reads it as it is; an earlier one reads it only through a
+    selected-result projection: the Store's selected rows are written under ``workdir`` for the check, which is bound
+    to the run's own artifacts, and removed after it. A step that fails is
+    printed and reported in the receipt, never raised: the settlement stands, and the operator reruns the step the
+    message names.
+    """
+    from nemo_gym.rollouts import RolloutStore, run_health_checks
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_health import capture_dirs_for_health, format_health_report, write_disabled_summary
+    from nemo_gym.rollouts.rollout_store import raw_outcomes_are_selected
+
+    if isinstance(run_config, DictConfig):
+        run_config = OmegaConf.to_container(run_config, resolve=True)
+    else:
+        run_config = dict(run_config)
+    refreshed = {"metrics_recomputed": False, "health_summary_recomputed": False}
+    try:
+        aggregation = RolloutAggregationConfig.model_validate(
+            run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
+        )
+        asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
+        refreshed["metrics_recomputed"] = True
+    except Exception as error:
+        print(
+            f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
+            f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
+            flush=True,
+        )
+    projection = None
+    try:
+        settings = _SettledHealthSettings.model_validate(run_config)
+        if settings.disable_health_check:
+            write_disabled_summary([output], output.parent)
+            return refreshed
+        store = RolloutStore.read(output, import_legacy=False)
+        # A health check that selects the Store's attempts itself (NVIDIA-NeMo/Gym#3881) takes the history as it is.
+        # An earlier one refuses a history with superseded outcomes and reads it only through a selected projection,
+        # which it names as a parameter; drop this branch once every supported Gym selects the attempts itself.
+        projected = {}
+        if (
+            "selected_projection" in inspect.signature(run_health_checks).parameters
+            and store is not None
+            and not raw_outcomes_are_selected(output, artifacts=(output,))
+        ):
+            workdir.mkdir(parents=True, exist_ok=True)
+            projection = workdir / "selected_rollouts.jsonl"
+            with projection.open("w", encoding="utf-8") as handle:
+                for row in store.selected("success"):
+                    handle.write(json.dumps(row) + "\n")
+            projected["selected_projection"] = projection
+        result = run_health_checks(
+            output,
+            **projected,
+            output_dir=output.parent,
+            workers=settings.health_check_workers,
+            ignored_checks=settings.health_check_ignored_checks,
+            limits=settings.run_health_limits,
+            run_coverage=[store.coverage()] if store is not None else None,
+            model_call_capture_dirs=capture_dirs_for_health(run_config),
+        )
+        print(format_health_report(result))
+        refreshed["health_summary_recomputed"] = True
+    except Exception as error:
+        print(
+            f"The quality summary was not recomputed after the re-judgment ({type(error).__name__}: {error}); "
+            f"run `gym eval health-check {output.parent}`.",
+            flush=True,
+        )
+    finally:
+        if projection is not None:
+            projection.unlink(missing_ok=True)
+    return refreshed
+
+
+def _settled_source_state(output: Path) -> tuple[dict[str, Any] | None, int | None]:
+    """The settled run's coverage and how many saved answers a later pass would still grade again, for the receipt;
+    None for what cannot be read."""
+    from nemo_gym.eval.rollout_reverification import due_judge_failures
+    from nemo_gym.rollouts import RolloutStore
+
+    try:
+        store = RolloutStore.read(output, import_legacy=False)
+        coverage = store.coverage() if store is not None else None
+    except Exception:
+        coverage = None
+    try:
+        due = len(due_judge_failures(output))
+    except Exception:
+        due = None
+    return coverage, due
+
+
+def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], config: Any) -> None:
+    """Run a re-verification; for the judge-only recovery job (``settle_receipt_fpath``), settle, refresh and write
+    the receipt.
+
+    The job grades the selected saved results again through the run's own settle path (``settle_into_source``: a
+    grade replaces a saved result only when it binds the same saved answer, run and attempt, and the policy is never
+    called), then recomputes the source run's aggregate metrics and quality summary from the settled rows, and ends
+    with a receipt: what was selected, judged, settled and left as it was, the run's coverage, and whether the refresh
+    happened. A pass that fails (the source changed while the job was queued, a verifier that cannot be reached)
+    leaves a failed receipt naming the error, with the saved answers as they were, and the error is raised as before.
+    """
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper, write_settle_receipt
+
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    helper = RolloutReverificationHelper()
+    receipt = Path(config.settle_receipt_fpath) if config.settle_receipt_fpath else None
+    source = str(config.rollouts_jsonl_fpath) if config.rollouts_jsonl_fpath else None
+    job_id = os.environ.get("SLURM_JOB_ID")
+    try:
+        asyncio.run(helper.run_from_config(config))
+    except BaseException as error:
+        if receipt is not None:
+            write_settle_receipt(
+                receipt,
+                state="failed",
+                source=source,
+                job_id=job_id,
+                settlement=helper.settlement,
+                started_at=started,
+                error=f"{type(error).__name__}: {error}",
+            )
+        raise
+    if receipt is None:
+        return
+    output = Path(config.rollouts_jsonl_fpath)
+    refreshed = _refresh_settled_source(global_config_dict, output, workdir=receipt.parent)
+    coverage, due_after = _settled_source_state(output)
+    write_settle_receipt(
+        receipt,
+        state="completed",
+        source=source,
+        job_id=job_id,
+        settlement=helper.settlement,
+        started_at=started,
+        coverage=coverage,
+        due_after=due_after,
+        refreshed=refreshed,
+    )
+    print(f"Judge-only receipt: {receipt}", flush=True)
+
+
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
@@ -988,7 +1515,7 @@ def collect_rollouts():  # pragma: no cover
     init_telemetry(server_name="driver", server_type="driver")
     _interrupt_on_sigterm()
     try:
-        asyncio.run(rch.run_from_config(config))
+        _collect_and_rejudge(rch, config, global_config_dict, Path(config.output_jsonl_fpath))
         _check_collection_completion(
             Path(config.output_jsonl_fpath), require_complete=config.require_complete, completed=True
         )
@@ -1002,6 +1529,7 @@ def collect_rollouts():  # pragma: no cover
     finally:
         shutdown_telemetry()
     _exit_if_terminated()
+    _finalize_live_exporters(Path(config.output_jsonl_fpath))
 
 
 @exit_cleanly_on_config_error
@@ -1057,7 +1585,24 @@ def export_run() -> None:  # pragma: no cover
     )
     name = global_config_dict.get("exporter") or DEFAULT_RUN_EXPORTER
     exporter = load_run_exporter_class(name).from_global_config(global_config_dict)
-    result = exporter.export(RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath))
+    from nemo_gym.rollouts.rollout_recovery import run_lock
+
+    artifacts = RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath)
+    from nemo_gym.artifacts.exporters.base import BaseExporter
+
+    if isinstance(exporter, BaseExporter) and artifacts.export_done_fpath(name).exists():
+        # An exported run's repeat only verifies its receipt and writes nothing: it must not take the run lock, whose
+        # holder record it would overwrite.
+        result = exporter.export(artifacts)
+    elif isinstance(exporter, BaseExporter):
+        with run_lock(artifacts.rollouts_jsonl_fpath):
+            # A racing exporter may have finished while this one waited for the lock: its receipt is then only
+            # verified, and the health metrics it prepared are not rewritten.
+            if not artifacts.export_done_fpath(name).exists():
+                _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+            result = exporter.export(artifacts)
+    else:
+        result = exporter.export(artifacts)
 
     print(f"Export {name}: {result.state.value}")
     for key, value in result.detail.items():
@@ -1069,15 +1614,17 @@ def export_run() -> None:  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reverify_rollouts():  # pragma: no cover
-    from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+    from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 
     rh = RunHelper()
     rh.start(None)
-
-    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
-    rrh = RolloutReverificationHelper()
-
-    asyncio.run(rrh.run_from_config(config))
+    try:
+        global_config_dict = get_global_config_dict()
+        config = RolloutReverificationConfig.model_validate(global_config_dict)
+        # The judge-only recovery job's pass settles, refreshes the run and ends with a receipt; any other runs as before.
+        _reverify_with_receipt(global_config_dict, config)
+    finally:
+        rh.shutdown()  # stop the servers this command started
 
 
 @exit_cleanly_on_config_error
