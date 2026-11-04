@@ -11,13 +11,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from typing_extensions import Self
 
-from nemo_gym.core.episode import TaskId
+from nemo_gym.core.episode_types import MaterializedTask, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig
 from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.data.tasks.harbor.task import HarborTask, is_task_folder
-from nemo_gym.server_runtime.episode_types import MaterializedTask
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"

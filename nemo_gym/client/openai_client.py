@@ -49,11 +49,11 @@ from nemo_gym.client.http_client import (
     raise_for_status,
     request,
 )
-from nemo_gym.core.episode import current_rollout_id
+from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.failure_transport import FailureHeader, observe_failure, observe_model_operation
-from nemo_gym.server_runtime.episode_types import FailureBoundary, ModelFailureDetails, SdkErrorDetails
-from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
+from nemo_gym.core.failure_records import FailureBoundary, ModelFailureDetails, SdkErrorDetails
+from nemo_gym.core.failure_transport import FailureHeader, observe_failure, observe_model_operation
+from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
 
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors

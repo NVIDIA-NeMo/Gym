@@ -64,8 +64,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.verification import call_judge, reraise_judge_errors
-from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure, reraise_judge_errors
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
 from resources_servers.sec_local_index.html_text import html_to_text
 from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch

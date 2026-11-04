@@ -21,8 +21,8 @@ from environment_servers.single_agent_turn.app import (
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import MaterializedTask, SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId
+from nemo_gym.server_runtime import SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
 class _Cookie:
@@ -325,35 +325,31 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
         )
 
 
-def _unbound_adapter() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
-    # A server that replaced a legacy_agent relay names no resources server and binds its agent's.
+def _adapter_with_different_agent_resources() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
     environment_server, client = _environment_server()
     client.global_config_dict.agent.responses_api_agents.test.update(
         {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
     )
-    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
-        {**environment_server.config.model_dump(), "resources_server": None}
-    )
-    return SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=client), client
+    return SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client), client
 
 
-@pytest.mark.parametrize("task_source", [None, "agents_resources"])
-def test_an_unbound_adapter_takes_its_agents_resources_server_as_the_taskset(task_source: str | None) -> None:
-    adapter, _ = _unbound_adapter()
+@pytest.mark.parametrize("task_source", [None, "resources"])
+def test_adapter_uses_its_own_resources_binding_as_the_taskset(task_source: str | None) -> None:
+    adapter, _ = _adapter_with_different_agent_resources()
     row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "responses_create_params": {"input": "task"}}
 
     request = adapter._episode_request_from_row(row if task_source is None else {**row, "task_source": task_source})
 
-    assert request.task.task_id.taskset == "agents_resources"
+    assert request.task.task_id.taskset == "resources"
 
 
-def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> None:
-    adapter, _ = _unbound_adapter()
+def test_adapter_rejects_a_row_naming_the_agents_other_resources_server() -> None:
+    adapter, _ = _adapter_with_different_agent_resources()
 
     with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
         adapter._episode_request_from_row(
             {
-                "task_source": "resources",
+                "task_source": "agents_resources",
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
                 "responses_create_params": {"input": "task"},
@@ -361,14 +357,14 @@ def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> N
         )
 
 
-def test_an_unbound_adapter_forwards_aggregate_metrics_to_its_agents_resources_server() -> None:
-    adapter, client = _unbound_adapter()
+def test_adapter_forwards_aggregate_metrics_to_its_own_resources_server() -> None:
+    adapter, client = _adapter_with_different_agent_resources()
     client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]
 
     response = TestClient(adapter.setup_webserver()).post("/aggregate_metrics", json={"verify_responses": []})
 
     assert response.status_code == 200
-    assert [(server, path) for server, path, _ in client.calls] == [("agents_resources", "/aggregate_metrics")]
+    assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
 async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
@@ -422,8 +418,9 @@ async def test_protocol_failure_metadata_survives_collection(
     from unittest.mock import AsyncMock
 
     import nemo_gym.rollouts.rollout_collection as collection
+    from nemo_gym.core import EpisodeFailure
     from nemo_gym.rollouts import RolloutFailureRecord, RolloutStore, logical_rollout_id
-    from nemo_gym.server_runtime import EpisodeFailure, SingleAgentTurnFailure, SingleAgentTurnResponse
+    from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResponse
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     environment, client = _environment_server()
@@ -597,8 +594,7 @@ async def test_legacy_rows_take_part_in_checkpoints() -> None:
 
 
 def _chain_report(model_status: int):
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import FailureBoundary, NgFailureEvent, failure_report_for
 
     model = NgFailureEvent(
         boundary=FailureBoundary.MODEL,
@@ -625,7 +621,7 @@ def _chain_report(model_status: int):
 
 @pytest.mark.parametrize("model_status", [200, 503])
 def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) -> None:
-    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.core import FailureReportRow
     from nemo_gym.rollouts.rollout_recovery import has_unclassified_execution_failure
     from nemo_gym.server_runtime import SingleAgentTurnResponse
 
@@ -651,13 +647,12 @@ def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) 
 
 @pytest.mark.parametrize("own_failure", [False, True])
 def test_the_flat_result_keeps_its_reward_selection_and_cleanup_observations(own_failure: bool) -> None:
-    from nemo_gym.failure_transport import FailureReportRow
-    from nemo_gym.server_runtime import FailureReport, SingleAgentTurnResponse
+    from nemo_gym.core import FailureReport, FailureReportRow
+    from nemo_gym.server_runtime import SingleAgentTurnResponse
 
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
-    from nemo_gym.server_runtime import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import FailureBoundary, NgFailureEvent, failure_report_for
 
     judge = failure_report_for(
         NgFailureEvent(boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="judge")

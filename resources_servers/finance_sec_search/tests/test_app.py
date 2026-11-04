@@ -32,17 +32,17 @@ from nemo_gym.core import (
     EpisodeId,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     TaskId,
 )
 from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    check_resources_session_contract,
 )
 from nemo_gym.server_runtime.request_handling.session_routing import ResourcesSessionLifetimes
-from nemo_gym.testing.session_conformance import check_resources_session_contract
-from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.verification.judge import is_judge_failure
+from nemo_gym.verification import is_judge_failure
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
