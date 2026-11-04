@@ -32,10 +32,10 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.models import ParentResolutionStatus, TokenEntry, resolve_terminal
 from nemo_gym.models.token_capture.consumer import _assemble
 from nemo_gym.models.token_capture.delivery import MASK_SAMPLE_KEY
-from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
-from nemo_gym.models.token_capture.terminal import resolve_terminal
+from nemo_gym.models.token_capture.records import stamp_lineage
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
