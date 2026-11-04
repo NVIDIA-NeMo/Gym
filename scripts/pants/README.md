@@ -43,7 +43,7 @@ gh run watch <run-id> -R NVIDIA-NeMo/Gym --interval 30 --exit-status
 gh run download <run-id> -R NVIDIA-NeMo/Gym --dir /absolute/results/hosted/<run-id>
 ```
 
-The authorized six-hour monitor refreshes the clean experiment branch against
+The authorized three-hour monitor refreshes the clean experiment branch against
 main, selects fresh main commits, dispatches these comparisons, and collects the
 results. It must avoid duplicate active runs, abort conflicting rebases, use
 verified force-with-lease for updates, and retain signed DCO commits.
