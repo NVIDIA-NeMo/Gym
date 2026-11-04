@@ -1133,13 +1133,13 @@ Three authoring shapes sit on top of Harbor's task folder, all rendered to plain
   `test.sh` runs (whole datasets ship that shape), so such a task is a plain `test.sh` task and the module an ordinary
   test file, uploaded with `tests/`. `verify` declares what it reads, `workspace` (the working directory, a `Path`), `task_data`, `response`
   (the agent's final response) or `state` (`{"workspace": Path}`), and returns a number or a dict with `reward`.
-  Helpers live in `nemo_gym.verifiers` (`final_text`, `exact_match`, `numeric_match`) and `nemo_gym.verifiers.files`
+  Helpers live in `nemo_gym.verification.python_verifier` (`final_text`, `exact_match`, `numeric_match`) and `nemo_gym.verification.python_verifier.files`
   (`read_text`, `file_exists`, `text_file_equals`), standard library only; in the sandbox they always resolve to the
   vendored copy under `/tests/.ng`, which the runner ranks ahead of the verifier's own folder, `/tests` and the
   image's packages (a `nemo_gym` shipped in, or planted into, the task's `tests/` never replaces them). No verifier code runs on the host: at
   verification this server uploads a shim folder over `/tests` after the task's own `tests/` (a `test.sh` that finds
   a Python 3.8 or newer in the image, refusing an older one with the version named, exit 127 and no reward; the
-  runner and the vendored helpers keep to 3.8, `.ng/run_verifier.py`, a vendored `nemo_gym/verifiers`, `.ng/task_data.json`,
+  runner and the vendored helpers keep to 3.8, `.ng/run_verifier.py`, a vendored `nemo_gym/verification/python_verifier`, `.ng/task_data.json`,
   `.ng/response.json` and, for a dataset-level module, `.ng/verifier.py`) and runs it under the usual `test.sh`
   wrapper, in shared or separate mode, with the session's working directory as the workspace. In separate mode the
   verifier sandbox is a fresh container, so a verifier that reads `workspace` (or `state`) needs the task's top-level

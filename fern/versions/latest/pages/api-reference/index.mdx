@@ -73,7 +73,7 @@ Read the diagram top to bottom, and left to right within a group: each package m
 | `server_runtime` | What runs inside every server, including the resources server and environment server bases. |
 | `artifacts` | The files a run writes and exports. |
 | `metrics` | Rollout metrics, such as reward profiles and pass@k. |
-| `verification` | Helpers resources servers share for verification, such as LLM judges. |
+| `verification` | Helpers resources servers share for verification, such as LLM judges, and the helpers a Harbor task's Python verifier imports. |
 | `trajectory` | Records of what happened in a rollout. |
 | `sandbox` | Isolated command execution and its providers. See [Sandbox](/main/infrastructure/sandbox). |
 | `client` | HTTP calls to Gym servers and model endpoints, including the OpenAI client. |
@@ -82,7 +82,7 @@ Read the diagram top to bottom, and left to right within a group: each package m
 | `utils` | General helpers, such as reading the causes, type name, and HTTP status of any Python exception. |
 | `config` | Loading the run config. |
 
-`nemo_gym.verifiers` sits outside the layers. It runs inside a Harbor task's verifier sandbox, so it uses only the standard library.
+`nemo_gym.verification.python_verifier` imports nothing from `nemo_gym`. It runs inside a Harbor task's verifier sandbox, so it uses only the standard library.
 
 Servers, benchmarks, and other code outside `nemo_gym/` import from the package, such as `from nemo_gym.server_runtime import ...`, rather than from the modules inside it.
 

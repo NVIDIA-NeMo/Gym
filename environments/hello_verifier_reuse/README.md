@@ -8,7 +8,7 @@ Python verifiers can reuse a complete verifier or build task-specific checks fro
 
 NeMo Gym packages the referenced code with each materialized task so the resulting task remains reproducible.
 
-The shared helpers come from `nemo_gym.verifiers.files`, which NeMo Gym vendors into the verifier sandbox beside the task's `verifier.py`, so nothing needs installing in the task image.
+The shared helpers come from `nemo_gym.verification.python_verifier.files`, which NeMo Gym vendors into the verifier sandbox beside the task's `verifier.py`, so nothing needs installing in the task image.
 
 For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
 

@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from nemo_gym.verifiers.files import read_text
+from nemo_gym.verification.python_verifier.files import read_text
 
 
 def verify(workspace: Path) -> float:

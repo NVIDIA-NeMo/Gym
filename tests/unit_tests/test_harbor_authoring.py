@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.verifiers as verifiers_package
+import nemo_gym.verification.python_verifier as verifiers_package
+from nemo_gym._moved_paths import MOVED_MODULES
 from nemo_gym.data.tasks.harbor import parameterized
 from nemo_gym.data.tasks.harbor.digest import DIGEST_KEY, content_hash
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
@@ -33,6 +34,7 @@ from nemo_gym.data.tasks.harbor.parameterized import (
 from nemo_gym.data.tasks.harbor.prepare import prepare_target
 from nemo_gym.data.tasks.harbor.publish import PublishError, answer_write_command, publish_harbor, strip_gym_table
 from nemo_gym.data.tasks.harbor.python_verifier import (
+    OLD_PATH_ALIAS,
     PYTHON_FLOOR,
     PythonVerifierError,
     VerifierShim,
@@ -46,10 +48,10 @@ from nemo_gym.data.tasks.harbor.records import read_built_images, read_image_con
 from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 from nemo_gym.data.tasks.harbor.task import load_task
 from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_FILE
-from nemo_gym.verifiers import exact_match, final_text, numeric_match
-from nemo_gym.verifiers.files import file_exists, read_text, text_file_equals
-from nemo_gym.verifiers.runner import main as run_verifier
-from nemo_gym.verifiers.runner import place_on_path
+from nemo_gym.verification.python_verifier import exact_match, final_text, numeric_match
+from nemo_gym.verification.python_verifier.files import file_exists, read_text, text_file_equals
+from nemo_gym.verification.python_verifier.runner import main as run_verifier
+from nemo_gym.verification.python_verifier.runner import place_on_path
 from tests.unit_tests.test_harbor_tasks import HELLO_TOML, write_task
 
 
@@ -68,7 +70,7 @@ def verify(workspace: Path, task_data: dict) -> float:
 # The publishable answer shape: the oracle (Gym's, and Harbor's through the published solve.sh) leaves answer.md in the
 # working directory, and the verifier reads it there.
 ANSWER_MD_VERIFIER = """
-from nemo_gym.verifiers.files import read_text
+from nemo_gym.verification.python_verifier.files import read_text
 
 
 def verify(workspace, task_data) -> float:
@@ -78,7 +80,7 @@ def verify(workspace, task_data) -> float:
 TASK_DATA_PY = "from pydantic import BaseModel\nclass TaskData(BaseModel):\n    question: str\n    answer: str\n"
 
 RESPONSE_VERIFIER = """
-from nemo_gym.verifiers import final_text
+from nemo_gym.verification.python_verifier import final_text
 
 
 def verify(task_data, response) -> float:
@@ -695,7 +697,7 @@ class TestPythonVerifierDetection:
         module.write_text(RESPONSE_VERIFIER)
         assert declared_arguments(module) == {"task_data", "response"} and reads_response(module)
         module.write_text(
-            "from functools import partial\nfrom nemo_gym.verifiers.files import text_file_equals\nverify = partial(text_file_equals, path='a', content='b')\n"
+            "from functools import partial\nfrom nemo_gym.verification.python_verifier.files import text_file_equals\nverify = partial(text_file_equals, path='a', content='b')\n"
         )
         assert declared_arguments(module) is None and not reads_response(module)
         module.write_text("def verify(:\n")
@@ -736,9 +738,11 @@ class TestShimAndRunner:
         files = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
         assert files == [
             ".ng/nemo_gym/__init__.py",
+            ".ng/nemo_gym/verification/__init__.py",
+            ".ng/nemo_gym/verification/python_verifier/__init__.py",
+            ".ng/nemo_gym/verification/python_verifier/files.py",
+            ".ng/nemo_gym/verification/python_verifier/runner.py",
             ".ng/nemo_gym/verifiers/__init__.py",
-            ".ng/nemo_gym/verifiers/files.py",
-            ".ng/nemo_gym/verifiers/runner.py",
             ".ng/run_verifier.py",
             ".ng/task_data.json",
             ".ng/verifier.py",
@@ -751,8 +755,9 @@ class TestShimAndRunner:
         )
         assert "--reward-dir /logs/verifier" in script and "--response" not in script
         assert json.loads((out / ".ng" / "task_data.json").read_text()) == {"answer": "4"}
-        # The vendored package never imports the real one: an empty nemo_gym/__init__.py shadows it.
+        # The vendored package never imports the real one: empty nemo_gym/ and verification/ __init__.py files shadow it.
         assert (out / ".ng" / "nemo_gym" / "__init__.py").read_text() == ""
+        assert (out / ".ng" / "nemo_gym" / "verification" / "__init__.py").read_text() == ""
         in_tests = VerifierShim(
             verifier=verifier, in_task_tests=True, workspace=None, task_data={}, response={"output": []}
         )
@@ -780,7 +785,13 @@ class TestShimAndRunner:
         modes = {p.relative_to(out).as_posix(): stat.S_IMODE(p.stat().st_mode) for p in out.rglob("*")}
         assert modes["test.sh"] == 0o755
         folders = {name for name, mode in modes.items() if (out / name).is_dir()}
-        assert folders == {".ng", ".ng/nemo_gym", ".ng/nemo_gym/verifiers"}
+        assert folders == {
+            ".ng",
+            ".ng/nemo_gym",
+            ".ng/nemo_gym/verification",
+            ".ng/nemo_gym/verification/python_verifier",
+            ".ng/nemo_gym/verifiers",
+        }
         assert all(modes[name] == 0o755 for name in folders)
         files = set(modes) - folders - {"test.sh"}
         assert {".ng/run_verifier.py", ".ng/verifier.py", ".ng/task_data.json", ".ng/response.json"} <= files
@@ -827,7 +838,7 @@ class TestShimAndRunner:
     def test_runner_grades_the_workspace_with_the_vendored_helpers(self, tmp_path):
         verifier = tmp_path / "verifier.py"
         verifier.write_text(
-            "from nemo_gym.verifiers.files import read_text, text_file_equals\n"
+            "from nemo_gym.verification.python_verifier.files import read_text, text_file_equals\n"
             "def verify(workspace, task_data, state):\n"
             "    assert state['workspace'] == workspace\n"
             "    return text_file_equals(workspace, path='answer.txt', content=task_data['answer'])\n"
@@ -849,7 +860,7 @@ class TestShimAndRunner:
     def test_runner_passes_the_response_and_writes_metric_dicts(self, tmp_path):
         verifier = tmp_path / "verifier.py"
         verifier.write_text(
-            "from nemo_gym.verifiers import final_text\n"
+            "from nemo_gym.verification.python_verifier import final_text\n"
             "def verify(task_data, response):\n"
             "    ok = final_text(response).strip() == task_data['answer']\n"
             "    return {'reward': float(ok), 'length': float(len(final_text(response)))}\n"
@@ -874,7 +885,7 @@ class TestShimAndRunner:
         # locations: the task's tests/verifier.py and a dataset-level module carried under .ng/.
         planted = "def exact_match(a, b):\n    return 42.0\n"
         source = (
-            "import nemo_gym.verifiers as helpers\nfrom nemo_gym.verifiers import exact_match\n"
+            "import nemo_gym.verification.python_verifier as helpers\nfrom nemo_gym.verification.python_verifier import exact_match\n"
             "def verify(workspace, task_data):\n"
             "    print('helpers from', helpers.__file__)\n"
             "    return exact_match((workspace / 'answer.md').read_text().strip(), task_data['answer'])\n"
@@ -885,9 +896,10 @@ class TestShimAndRunner:
         for in_task_tests in (True, False):
             folder = tmp_path / ("task" if in_task_tests else "dataset")
             tests = folder / "tests"
-            (tests / "nemo_gym" / "verifiers").mkdir(parents=True)
+            (tests / "nemo_gym" / "verification" / "python_verifier").mkdir(parents=True)
             (tests / "nemo_gym" / "__init__.py").write_text("")
-            (tests / "nemo_gym" / "verifiers" / "__init__.py").write_text(planted)
+            (tests / "nemo_gym" / "verification" / "__init__.py").write_text("")
+            (tests / "nemo_gym" / "verification" / "python_verifier" / "__init__.py").write_text(planted)
             verifier = tests / "verifier.py" if in_task_tests else folder / "verifier.py"
             verifier.write_text(source)
             shim = VerifierShim(
@@ -896,7 +908,8 @@ class TestShimAndRunner:
             write_shim(tests, shim)
             result = self._run(tests, workspace, folder / "reward", verifier=verifier if in_task_tests else None)
             assert result.returncode == 0, result.stderr
-            assert f"helpers from {tests / '.ng' / 'nemo_gym' / 'verifiers' / '__init__.py'}" in result.stdout
+            vendored = tests / ".ng" / "nemo_gym" / "verification" / "python_verifier" / "__init__.py"
+            assert f"helpers from {vendored}" in result.stdout
             assert (folder / "reward" / "reward.txt").read_text() == "1.0\n"
         # The ordering itself, in process: an entry the interpreter already placed (sys.path[0] as a script, or one
         # from PYTHONPATH) is moved to its rank, never left ahead of a higher one.
@@ -908,6 +921,74 @@ class TestShimAndRunner:
         place_on_path(ng, tests, tests)
         assert sys.path == [str(ng), str(tests), "/site-packages"]
 
+    def test_a_verifier_written_against_the_old_path_still_runs(self, tmp_path):
+        # nemo_gym.verifiers moved to nemo_gym.verification.python_verifier. A task whose verifier imports the old
+        # path keeps grading while _moved_paths keeps the entry, and the verifier log says where the helpers moved.
+        source = (
+            "import nemo_gym.verifiers as helpers\n"
+            "from nemo_gym.verifiers import exact_match\n"
+            "from nemo_gym.verifiers.files import read_text\n"
+            "def verify(workspace, task_data):\n"
+            "    print('helpers from', helpers.__file__)\n"
+            "    return exact_match(read_text(workspace, 'answer.md'), task_data['answer'])\n"
+        )
+        verifier = tmp_path / "verifier.py"
+        verifier.write_text(source)
+        out = write_shim(
+            tmp_path / "tests",
+            VerifierShim(verifier=verifier, in_task_tests=False, workspace=None, task_data={"answer": "4"}),
+        )
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "answer.md").write_text("4\n")
+        result = self._run(out, workspace, tmp_path / "reward")
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "reward" / "reward.txt").read_text() == "1.0\n"
+        vendored = out / ".ng" / "nemo_gym" / "verification" / "python_verifier" / "__init__.py"
+        assert f"helpers from {vendored}" in result.stdout
+        removed_in = MOVED_MODULES["nemo_gym.verifiers"].removed_in
+        assert (
+            "nemo_gym.verifiers is deprecated; import nemo_gym.verification.python_verifier instead. "
+            f"The old path is removed in {removed_in}." in result.stderr
+        )
+
+    def test_the_shim_drops_the_old_path_alias_with_its_moved_paths_entry(self, tmp_path, monkeypatch):
+        monkeypatch.delitem(MOVED_MODULES, "nemo_gym.verifiers")
+        verifier = tmp_path / "verifier.py"
+        verifier.write_text(ANSWER_VERIFIER)
+        out = write_shim(
+            tmp_path / "tests", VerifierShim(verifier=verifier, in_task_tests=False, workspace=None, task_data={})
+        )
+        assert not (out / ".ng" / "nemo_gym" / "verifiers").exists()
+        assert (out / ".ng" / "nemo_gym" / "verification" / "python_verifier" / "files.py").is_file()
+
+    def test_the_vendored_helpers_import_only_the_standard_library(self):
+        # The shim copies these modules into a sandbox that has nothing else from nemo_gym, and no third-party
+        # packages either.
+        package = verifiers_package.__name__
+        sources = {module.name: module.read_text() for module in Path(verifiers_package.__file__).parent.glob("*.py")}
+        sources["old path alias"] = OLD_PATH_ALIAS
+        outside = set()
+        for name, source in sources.items():
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    imported = [node.module]
+                else:
+                    continue
+                for module in imported:
+                    if (
+                        module.split(".")[0] in sys.stdlib_module_names
+                        or module == package
+                        or module.startswith(f"{package}.")
+                    ):
+                        continue
+                    outside.add((name, module))
+        # The alias reaches the vendored package through its parent, which the shim leaves empty.
+        allowed = {("old path alias", "nemo_gym.verification")}
+        assert outside <= allowed, outside - allowed
+
     def test_the_shim_refuses_a_python_older_than_the_floor(self, tmp_path):
         # The runner and the vendored helpers run under the image's own python3 and keep to Python 3.8 (no 3.9+
         # syntax or string methods: ubuntu:20.04's python3 is 3.8); test.sh checks that floor and says so, instead
@@ -917,6 +998,7 @@ class TestShimAndRunner:
             source = module.read_text()
             ast.parse(source, filename=str(module), feature_version=PYTHON_FLOOR)
             assert re.search(r"\.(removesuffix|removeprefix|is_relative_to)\(", source) is None, module.name
+        ast.parse(OLD_PATH_ALIAS, feature_version=PYTHON_FLOOR)
         script = shim_test_script(
             VerifierShim(verifier=tmp_path / "v.py", in_task_tests=False, workspace=None, task_data={})
         )
@@ -1088,7 +1170,7 @@ class TestShimAndRunner:
         monkeypatch.setattr(sys, "path", list(sys.path))
         verifier = tmp_path / "verifier.py"
         verifier.write_text(
-            "from functools import partial\nfrom nemo_gym.verifiers.files import text_file_equals\n"
+            "from functools import partial\nfrom nemo_gym.verification.python_verifier.files import text_file_equals\n"
             "verify = partial(text_file_equals, path='hello.txt', content='hi')\n"
         )
         workspace = tmp_path / "ws"

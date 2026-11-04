@@ -3,7 +3,7 @@
 
 from functools import partial
 
-from nemo_gym.verifiers.files import text_file_equals
+from nemo_gym.verification.python_verifier.files import text_file_equals
 
 
 verify = partial(

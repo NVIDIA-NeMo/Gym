@@ -5,8 +5,8 @@
 
 A Python verifier is a module with a ``verify`` function. It runs inside the task's verifier sandbox, never
 on the host: the ``harbor`` environment server (and ``gym dataset publish --harbor``) wraps it in a
-``tests/test.sh`` shim that carries this package along, so ``from nemo_gym.verifiers import ...`` works in
-the sandbox with nothing installed. Everything here is therefore standard library only, and this package
+``tests/test.sh`` shim that carries this package along, so ``from nemo_gym.verification.python_verifier import ...``
+works in the sandbox with nothing installed. Everything here is therefore standard library only, and this package
 imports nothing else from ``nemo_gym``.
 
 ``verify`` declares the arguments it wants and the runner passes those alone (by name, or by position for a

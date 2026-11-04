@@ -18,6 +18,9 @@ judge calls an LLM judge and routes a failed judge call to the failures sidecar 
 ``judge_failsafe``); verifier_fixture runs in-process contract tests of a server's verifier; and
 sandbox_verification grades a submission in a fresh, single-use sandbox. sandbox_verification uses only the
 provider-neutral API; core sandbox APIs and providers live in :mod:`nemo_gym.sandbox`.
+
+python_verifier holds the helpers a Harbor task's Python verifier imports, and the runner that calls it. It runs inside
+the verifier sandbox, so it uses only the standard library and imports nothing else from ``nemo_gym``.
 """
 
 # Public API

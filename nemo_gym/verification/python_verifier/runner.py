@@ -5,11 +5,11 @@
 
 Copied into the verifier sandbox by the ``test.sh`` shim (``nemo_gym.data.tasks.harbor.python_verifier``) and run
 there as a script, so it is standard library only and imports nothing from ``nemo_gym``. It puts its own
-``.ng`` folder first on ``sys.path``, where the shim vendored ``nemo_gym/verifiers``, then the verifier module's
-own folder, then the tests folder around the shim (a helper module beside the task's ``tests/verifier.py`` stays
-importable when the module was published under ``.ng/``), so the verifier's ``from nemo_gym.verifiers import ...``
-resolves without an install and always to the vendored copy: a ``nemo_gym`` package in the task's own ``tests/``,
-in the image's site-packages or on its ``PYTHONPATH`` never replaces the helpers. That order holds however the
+``.ng`` folder first on ``sys.path``, where the shim vendored ``nemo_gym/verification/python_verifier``, then the
+verifier module's own folder, then the tests folder around the shim (a helper module beside the task's
+``tests/verifier.py`` stays importable when the module was published under ``.ng/``), so the verifier's
+``from nemo_gym.verification.python_verifier import ...`` resolves without an install and always to the vendored
+copy: a ``nemo_gym`` package in the task's own ``tests/``, in the image's site-packages or on its ``PYTHONPATH`` never replaces the helpers. That order holds however the
 interpreter was started (as ``test.sh`` runs it, ``python3 /tests/.ng/run_verifier.py``, ``sys.path[0]`` is already
 this folder; under ``-I`` it is absent): each of the three entries is moved to its place, not merely added when
 missing. It loads the verifier module, calls ``verify`` with the arguments the function
