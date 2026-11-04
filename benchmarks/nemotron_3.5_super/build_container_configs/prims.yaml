@@ -35,6 +35,7 @@ shared_run_warmup_env_vars:
 warmup:
   env:
     _copy: shared_run_warmup_env_vars
+    ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS: 3600
     SBATCH_TIMELIMIT: "01:00:00"
     # Compilation
     MAX_JOBS: 64
