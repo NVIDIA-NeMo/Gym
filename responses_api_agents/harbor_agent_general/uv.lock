@@ -1809,6 +1809,7 @@ dependencies = [
     { name = "nemo-gym", extra = ["dev", "ray", "sandbox"] },
     { name = "openhands-sdk" },
     { name = "openhands-tools" },
+    { name = "opensandbox" },
 ]
 
 [package.optional-dependencies]
@@ -1823,6 +1824,7 @@ requires-dist = [
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
     { name = "openhands-sdk", specifier = "==1.54.0" },
     { name = "openhands-tools", specifier = "==1.54.0" },
+    { name = "opensandbox", specifier = ">=1.1" },
 ]
 provides-extras = ["telemetry"]
 
