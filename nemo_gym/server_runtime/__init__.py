@@ -85,6 +85,7 @@ if TYPE_CHECKING:
         ReverifyMode,
         SimpleResourcesServer,
         lost_session_verification,
+        reject_typed_resources_seed,
     )
     from nemo_gym.server_runtime.base_server import SimpleServer
     from nemo_gym.server_runtime.episode_types import (
@@ -216,6 +217,7 @@ _PUBLIC_API = {
     "observe_verifier_sandbox": "verifier_observability",
     "observe_verifier": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
+    "reject_typed_resources_seed": "base_resources_server",
     "seed_restarts": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
