@@ -418,3 +418,28 @@ def test_html_report_escapes_task_and_judge_content(tmp_path) -> None:
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in report
     assert "Title &lt;unsafe&gt;" in report
     assert "&lt;img src=&quot;x&quot;&gt;" in report
+
+
+@pytest.mark.asyncio
+async def test_harbor_transfers_large_tool_payload_without_command_arguments(tmp_path) -> None:
+    from resources_servers.legal_agent_bench.legal_harbor_agent import HarborToolExecutor
+
+    content = "legal work product\n" * 100_000
+
+    class Environment:
+        uploaded = None
+
+        async def upload_file(self, source, destination):
+            self.uploaded = (json.loads(Path(source).read_text()), destination)
+
+        async def exec(self, command, **kwargs):
+            assert len(command) < 1024
+            assert self.uploaded[1] in command
+            assert kwargs["cwd"] == "/workspace"
+            return MagicMock(stdout='{"result":"written","metrics":{"files_written":1}}', stderr="", return_code=0)
+
+    environment = Environment()
+    executor = HarborToolExecutor(environment, host_vdr_dir=tmp_path)
+    assert await executor.execute("write", {"path": "output/result.txt", "content": content}) == "written"
+    assert environment.uploaded[0]["content"] == content
+    assert executor.files_written == 1

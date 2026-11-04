@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import string
+from pathlib import Path
 
 from harbor.models.job.config import JobConfig
+from harbor.models.trial.paths import TrialPaths
+from harbor.models.trial.result import TrialResult
 from pydantic import model_validator
 
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
@@ -22,6 +25,12 @@ class LegalAgentBenchHarborConfig(HarborAgentConfig):
     """Harbor's native job configuration plus Gym policy routing."""
 
     model_server: ModelServerRef
+
+    @model_validator(mode="after")
+    def require_unmounted_agent_logs(self) -> LegalAgentBenchHarborConfig:
+        if self.job.environment.kwargs.get("auto_mounting"):
+            raise ValueError("LAB host logs must not be writable from the agent sandbox; disable auto_mounting")
+        return self
 
 
 class LegalAgentBenchHarborRequest(HarborRunRequest):
@@ -60,7 +69,28 @@ class LegalAgentBenchHarborBridge(HarborAgent):
         base_url = self.base_url_for_run(f"http://{model['host']}:{model['port']}", identity)
         kwargs = job_config.agents[0].kwargs
         kwargs["api_base"] = base_url + "/v1"
-        kwargs["responses_create_params"] = body.responses_create_params.model_dump(exclude_none=True)
+        kwargs["responses_create_params"] = body.responses_create_params.model_dump(exclude_unset=True)
+
+    def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
+        trial = TrialResult.model_validate_json(TrialPaths(trial_dir).result_path.read_text())
+        rewards = (trial.verifier_result.rewards if trial.verifier_result is not None else None) or {}
+        if rewards.get("verifier_error") or rewards.get("judge_error_count"):
+            raise RuntimeError("LAB verification did not complete; inspect the retained per-judge reports")
+        agent_metadata = (trial.agent_result.metadata if trial.agent_result is not None else None) or {}
+        if agent_metadata.get("model_error"):
+            raise RuntimeError(f"LAB model request failed: {agent_metadata['model_error']}")
+        response = super().success_response(body, trial_dir)
+        if agent_metadata.get("finished_cleanly") is False:
+            response.response = response.response.model_copy(
+                update={
+                    "status": "incomplete",
+                    "metadata": {
+                        **(response.response.metadata or {}),
+                        "lab_finish_reason": agent_metadata.get("finish_reason") or "incomplete",
+                    },
+                }
+            )
+        return response.model_copy(update={"lab_metrics": rewards})
 
     async def run(self, body: LegalAgentBenchHarborRequest) -> HarborVerifyResponse:
         """Execute a LAB pointer through the shared Harbor lifecycle."""

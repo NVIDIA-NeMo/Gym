@@ -50,11 +50,15 @@ CORPORA_DIRNAME = ".corpora"
 INDEX_FILENAME = "all.jsonl"
 DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
 CACHE_MARKER = ".nemo_gym_asset.json"
-CACHE_FORMAT_VERSION = 7
+CACHE_FORMAT_VERSION = 9
 REWARD_MODES = ("full_task", "criteria_pass_rate")
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
 LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "lab_harbor"
 TOOL_RUNNER_SOURCE = LAB_HARBOR_SOURCE_DIR / "container_tool_runner.py"
+BUILD_CONTEXT_FILES: dict[str, Path] = {
+    "install-pandoc.sh": PACKAGE_DIR / "install-pandoc.sh",
+    "LICENSE.harvey-labs": PACKAGE_DIR / "vendor" / "harvey_labs" / "LICENSE",
+}
 VERIFIER_TEMPLATE_SOURCES = {
     "tests/legal_agent_bench_verify.py": PACKAGE_DIR / "verifier.py",
     "tests/lab_harbor/__init__.py": LAB_HARBOR_SOURCE_DIR / "__init__.py",
@@ -66,6 +70,7 @@ REQUIRED_TASK_PATHS = (
     "task.toml",
     "task.json",
     "environment/Dockerfile",
+    *(f"environment/{name}" for name in BUILD_CONTEXT_FILES),
     "environment/harness/container_tool_runner.py",
     "tests/task.json",
     *VERIFIER_TEMPLATE_SOURCES,
@@ -82,8 +87,8 @@ ENV DEBIAN_FRONTEND=noninteractive \\
 RUN apt-get update \\
     && apt-get install -y --no-install-recommends \\
         bash ca-certificates coreutils curl file findutils fonts-liberation g++ \\
-        gawk gcc git grep jq libreoffice nodejs npm pandoc poppler-utils procps \\
-        iproute2 qpdf ripgrep sed tesseract-ocr \\
+        gawk gcc git grep jq libreoffice nodejs npm poppler-utils procps \\
+        iproute2 qpdf ripgrep sed tesseract-ocr unzip \\
     && rm -rf /var/lib/apt/lists/*
 
 # OpenShell executes commands as a restricted sandbox identity and requires
@@ -106,6 +111,10 @@ RUN python -m pip install --upgrade pip \\
 RUN npm install -g @marp-team/marp-cli docx pptxgenjs react react-dom react-icons sharp
 
 COPY harness/container_tool_runner.py /opt/legal-agent-bench/container_tool_runner.py
+
+COPY LICENSE.harvey-labs /opt/legal-agent-bench/LICENSE.harvey-labs
+COPY install-pandoc.sh /tmp/install-pandoc.sh
+RUN sh /tmp/install-pandoc.sh && rm /tmp/install-pandoc.sh
 
 WORKDIR /workspace/output
 """
@@ -250,6 +259,9 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
                 invalid.append(f"{task_dir.name}: {relpath} is stale")
         if (task_dir / "environment" / "harness" / "container_tool_runner.py").read_bytes() != tool_runner_template:
             invalid.append(f"{task_dir.name}: container tool runner is stale")
+        for filename, template in BUILD_CONTEXT_FILES.items():
+            if (task_dir / "environment" / filename).read_bytes() != template.read_bytes():
+                invalid.append(f"{task_dir.name}: {filename} is stale")
         if (task_dir / "environment" / "Dockerfile").read_text(encoding="utf-8") != _DOCKERFILE:
             invalid.append(f"{task_dir.name}: Dockerfile template is stale")
         if "lab_task_id:" not in (task_dir / "instruction.md").read_text(encoding="utf-8"):
@@ -780,6 +792,8 @@ def _build_task_cache(source_root: Path, output_dir: Path, *, task_ids: tuple[st
         )
         (task_dir / "task.toml").write_text(_task_toml(config, source_id), encoding="utf-8")
         (task_dir / "environment" / "Dockerfile").write_text(_DOCKERFILE, encoding="utf-8")
+        for filename, template in BUILD_CONTEXT_FILES.items():
+            shutil.copyfile(template, task_dir / "environment" / filename)
         shutil.copyfile(TOOL_RUNNER_SOURCE, task_dir / "environment" / "harness" / "container_tool_runner.py")
         for relpath, source in VERIFIER_TEMPLATE_SOURCES.items():
             target = task_dir / relpath
@@ -804,7 +818,7 @@ def _task_toml(config: dict[str, Any], source_id: str) -> str:
         "seniority": config.get("seniority", ""),
         "tags": config.get("tags", []),
     }
-    lines = ['version = "1.0"', "", "[metadata]"]
+    lines = ['version = "1.0"', 'artifacts = ["/logs/agent/artifacts/lab-run"]', "", "[metadata]"]
     for key, value in metadata.items():
         if value not in (None, "", []):
             lines.append(f"{key} = {json.dumps(value, ensure_ascii=False)}")
@@ -815,6 +829,7 @@ def _task_toml(config: dict[str, Any], source_id: str) -> str:
             "timeout_sec = 108000",
             "",
             "[verifier]",
+            'environment_mode = "separate"',
             "timeout_sec = 1800",
             "",
             "[environment]",
@@ -852,6 +867,9 @@ def _marker(kind: str, *, task_ids: tuple[str, ...] | None = None) -> dict[str, 
             {
                 "index_filename": INDEX_FILENAME,
                 "dockerfile_sha256": hashlib.sha256(_DOCKERFILE.encode()).hexdigest(),
+                "build_context_sha256": {
+                    name: _file_sha256(template) for name, template in BUILD_CONTEXT_FILES.items()
+                },
                 "tool_runner_sha256": _file_sha256(TOOL_RUNNER_SOURCE),
                 "verifier_files_sha256": {
                     relpath: _file_sha256(source) for relpath, source in VERIFIER_TEMPLATE_SOURCES.items()

@@ -11,10 +11,16 @@
 """Container-side implementation for non-bash Harbor agent tools.
 
 LegalAgentBenchHarborAgent invokes this script inside the Harbor environment
-with a tool name and a JSON argument payload. It returns one JSON object on
-stdout:
+with a tool name and a JSON argument payload. The native Gym agent passes the
+payload over stdin so large document writes do not exceed the operating
+system's argument-size limit. It returns one JSON object on stdout:
 
     {"result": "...", "metrics": {...}}
+
+Document parsing follows the MIT-licensed pinned upstream file:
+https://github.com/harveyai/harvey-labs/blob/9e9fa7fe126103de1fceb2227b7c70bf59b67f73/lab_core/sandbox/parsers/parse_doc.py
+The path-constrained tools retain Gym's pagination/telemetry adaptation of
+https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/harness/tools.py
 
 Keeping this logic in the image means document parsing uses the preinstalled
 runtime tools and libraries instead of whatever happens to be on the host.
@@ -43,13 +49,17 @@ MAX_READ_LINES = 200
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    if len(sys.argv) == 3:
+        raw_arguments = sys.argv[2]
+    elif len(sys.argv) == 2:
+        raw_arguments = sys.stdin.read()
+    else:
         _emit("Error: expected tool name and JSON arguments", {})
         return
 
     tool_name = sys.argv[1]
     try:
-        arguments = json.loads(sys.argv[2])
+        arguments = json.loads(raw_arguments)
     except json.JSONDecodeError as exc:
         _emit(f"Error: invalid JSON arguments: {exc}", {})
         return
@@ -58,6 +68,20 @@ def main() -> None:
     try:
         if tool_name == "preflight":
             result = _preflight()
+        elif tool_name == "finish":
+            listed = arguments.get("deliverables") or []
+            missing = []
+            if not isinstance(listed, list):
+                listed = [listed]
+            for item in listed:
+                if not isinstance(item, str) or not item.strip():
+                    missing.append(repr(item))
+                    continue
+                candidates = [Path(item)] if item.startswith("/") else [OUTPUT_DIR / item, WORKSPACE_DIR / item]
+                if not any(path.resolve().is_relative_to(OUTPUT_DIR) and path.is_file() for path in candidates):
+                    missing.append(item)
+            metrics["missing_deliverables"] = missing
+            result = "Completion checked."
         elif tool_name == "read":
             result = _read(arguments, metrics)
         elif tool_name == "write":
@@ -86,7 +110,9 @@ def _expand_tool_path(path_str: str) -> str:
     if not path_str:
         return path_str
     return (
-        path_str.replace("${VDR_DIR}", str(VDR_DIR))
+        path_str.replace("${DOCUMENTS_DIR}", str(VDR_DIR))
+        .replace("$DOCUMENTS_DIR", str(VDR_DIR))
+        .replace("${VDR_DIR}", str(VDR_DIR))
         .replace("$VDR_DIR", str(VDR_DIR))
         .replace("${OUTPUT_DIR}", str(OUTPUT_DIR))
         .replace("$OUTPUT_DIR", str(OUTPUT_DIR))
@@ -248,31 +274,17 @@ def _read_file_content(target: Path) -> str:
 
 
 def _parse_docx(path: Path) -> str:
-    try:
-        result = subprocess.run(
-            ["pandoc", str(path), "-t", "markdown", "--wrap=none"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode == 0:
-            return result.stdout
-    except FileNotFoundError:
-        pass
-
-    try:
-        from docx import Document
-
-        document = Document(path)
-        parts = [p.text for p in document.paragraphs if p.text.strip()]
-        for table in document.tables:
-            for row in table.rows:
-                parts.append("\t".join(cell.text for cell in row.cells))
-            parts.append("")
-        return "\n".join(parts)
-    except Exception as exc:
-        return f"Error parsing .docx file: {exc}"
+    result = subprocess.run(
+        ["pandoc", str(path), "-t", "markdown", "--wrap=none"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"pandoc failed: {result.stderr.strip()}")
+    return result.stdout
 
 
 def _parse_pptx(path: Path) -> str:
