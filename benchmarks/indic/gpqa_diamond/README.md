@@ -14,7 +14,8 @@ Preparation validates all 198 source records, unique Record IDs, and nonempty
 question/answer translations for each selected language. Missing translations
 are errors, never English fallbacks. Source whitespace is preserved. Explanations
 and translation-review fields are not included in model input. Stable row UUIDs
-are derived from the language and source Record ID.
+are derived from the language and source Record ID, and each row's `task_id` is
+`<language>/<Record ID>`, so it is unique across the selected languages.
 
 ## Configuration
 

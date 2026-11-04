@@ -1,7 +1,7 @@
 # Keep this server's resolver independent from any enclosing checkout. In the
 # complete training image Gym is a member of /opt/nemo-rl's uv workspace, whose
 # trainer dependencies are intentionally incompatible with this CPU agent venv.
-# setup_command.py passes this file explicitly via --config-file because
+# nemo_gym/orchestration/server_venv.py passes this file explicitly via --config-file because
 # --project has no effect in the `uv pip` interface.
 required-version = ">=0.11.25"
 constraint-dependencies = [
@@ -33,7 +33,6 @@ exclude-dependencies = [
     "fasttext-wheel",
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",

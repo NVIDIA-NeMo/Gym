@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.enterpriseops_gym.app import VERIFIER_FIXTURE
 from resources_servers.enterpriseops_gym.verifier import compare, extract_value
 

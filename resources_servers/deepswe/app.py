@@ -22,7 +22,25 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
+from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
+    SESSION_LOST,
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -30,12 +48,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,
     DeepSWETaskStore,
@@ -58,6 +73,10 @@ def _resolve_repo_path(path: Path) -> Path:
     if expanded.is_absolute():
         return expanded.resolve()
     return (NEMO_GYM_ROOT / expanded).resolve()
+
+
+# The longest failure_reason a failure event accepts.
+_MAX_FAILURE_REASON_CHARS = 2000
 
 
 class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -374,8 +393,18 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 test_output=combined_output,
             )
 
-        reward = float(reward_data.get("reward", 0.0))
-        if reward not in (0.0, 1.0):
+        if not isinstance(reward_data, dict) or "reward" not in reward_data:
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error="Verifier reward.json is missing its reward field",
+                test_output=combined_output,
+            )
+        reward = reward_data["reward"]
+        # Only a real 0 or 1 is a verdict: a bool is an int, and a numeric string is not a number, so
+        # neither may become a pass (or a fail) through float().
+        if type(reward) not in (int, float) or reward not in (0.0, 1.0):
             return VerifierResult(
                 evaluation_completed=False,
                 reward=0.0,
@@ -383,6 +412,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 verifier_error=f"Verifier returned non-binary reward: {reward!r}",
                 test_output=combined_output,
             )
+        reward = float(reward)
         if not present["ctrf.json"]:
             return VerifierResult(
                 evaluation_completed=False,
@@ -455,6 +485,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox_handle = body.sandbox_handle
         patch_collection_time_s = 0.0
         patch_error: str | None = None
+        failure_kind = VERIFIER_ERROR
+        failure_cause: Exception | None = None
 
         if self.config.is_verifying_golden_patch:
             model_patch = task_solution_patch_path(task).read_bytes()
@@ -463,6 +495,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             agent_session = self._agent_sessions.pop(session_id, None)
             if agent_session is None:
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
+                failure_kind = SESSION_LOST
             else:
                 sandbox_handle = agent_session.sandbox_handle
                 started = monotonic()
@@ -484,6 +517,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                         file=sys.stderr,
                     )
                     patch_error = f"{type(error).__name__}: {error}"
+                    failure_kind = ENVIRONMENT_SERVER_FAILED
+                    failure_cause = error
                 finally:
                     patch_collection_time_s = monotonic() - started
                     await self._stop_sandbox(agent_session.sandbox, task_id=current_task_id, phase="agent")
@@ -506,6 +541,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 verification_time_s = monotonic() - started
             except Exception as error:
                 print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
+                failure_cause = error
                 result = VerifierResult(
                     evaluation_completed=False,
                     reward=0.0,
@@ -519,6 +555,23 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
 
+        if not result.evaluation_completed:
+            # A lost session or failed patch collection happens before verification. Keep that
+            # boundary and its cause distinct from an inconclusive verifier result.
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=failure_kind,
+                # The event field is bounded; a long provider diagnostic must not cost the result and patch.
+                failure_reason=bounded_text(
+                    result.verifier_error or "DeepSWE verification did not complete", _MAX_FAILURE_REASON_CHARS
+                ),
+                operation="collect_model_patch" if patch_error is not None else "verify",
+                operation_id=current_verifier_invocation_id(),
+                stage="verification",
+            )
+            failure.__cause__ = failure_cause
+            observe_failure(failure)
+
         return DeepSWEVerifyResponse.model_validate(
             body.model_dump()
             | result.model_dump()
@@ -526,7 +579,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "task_id": current_task_id,
                 "sandbox_handle": sandbox_handle,
                 "model_patch": model_patch.decode("utf-8", errors="replace")
-                if self.config.include_model_patch_in_response
+                if self.config.include_model_patch_in_response and patch_error is None
                 else None,
                 "model_patch_sha256": patch_sha256,
                 "model_patch_bytes": len(model_patch),
@@ -534,7 +587,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "patch_collection_time_s": patch_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
+                "mask_sample": not result.evaluation_completed,
+                "failure_kind": None if result.evaluation_completed else failure_kind,
+                "failure_reason": None if result.evaluation_completed else result.verifier_error,
             }
+            | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})
         )
 
 
