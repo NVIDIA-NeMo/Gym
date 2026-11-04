@@ -1073,6 +1073,14 @@ async def test_a_tool_call_nooa_rejects_without_running_is_a_failed_tool_call_wi
     }
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "needs NOOA's skipped-tool-call results (labs-OO-Agents PR #518, open against main). The pinned dev/atom "
+        "revision gives a call after a failed cell no result, so NOOA's message builder drops the whole assistant "
+        "tool-call turn and the record has no entry for it. Remove this marker when the pin includes #518."
+    ),
+)
 @pytest.mark.asyncio
 async def test_a_tool_call_skipped_after_a_failed_cell_is_reported_with_nooas_answer_not_invented() -> None:
     trace = GymTraceHooks()
