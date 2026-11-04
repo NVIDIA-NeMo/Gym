@@ -34,6 +34,7 @@ from nemo_gym.orchestration.executors.otel import (
     resolve_token,
     scrape_targets,
 )
+from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME
@@ -512,6 +513,15 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
     assert tail.index("kill -0 $OTEL_COLLECTOR_PID") < tail.index("kill -TERM $OTEL_COLLECTOR_PID")
 
 
+def test_a_resumable_script_ends_its_own_chain_before_the_flush_reads_the_driver_status():
+    driver = {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {"resumable": {}}}}
+    script = _script(_config(driver=driver))
+    tail = script[script.index("--output=logs/driver-$SLURM_JOB_ID.log") :]
+    # The epilogue returns the driver's status, which the flush keeps as the job's.
+    assert render_resume_epilogue() + "\nDRIVER_RC=$?" in tail
+    assert tail.rstrip().endswith("exit $DRIVER_RC")
+
+
 def _driver_line(script):
     return next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
 
@@ -532,7 +542,7 @@ def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=default,verify" in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
     assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
-    assert 'uv pip install -e ".[telemetry,ray]"' in script
+    assert "uv sync --locked --extra telemetry" in script
 
 
 def test_script_installs_the_sdk_of_a_configured_exporter():
@@ -542,13 +552,13 @@ def test_script_installs_the_sdk_of_a_configured_exporter():
         "mlflow_run_name": "run",
     }
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": run}}}
-    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
+    assert "uv sync --locked --extra telemetry --extra mlflow" in _script(_config(driver=driver))
 
 
 def test_script_skips_the_sdk_of_a_partly_configured_exporter():
     # A tracking URI alone (a registry lookup) opens no exporter, so needs no SDK.
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": {"mlflow_tracking_uri": "https://x"}}}}
-    assert 'uv pip install -e ".[telemetry,ray]"' in _script(_config(driver=driver))
+    assert "uv sync --locked --extra telemetry" in _script(_config(driver=driver))
 
 
 @pytest.mark.parametrize("section", ["prepare", "run"])
@@ -556,7 +566,9 @@ def test_script_installs_mlflow_for_gitlab_dataset_storage(section):
     # A tracking URI and token without an experiment open no exporter, but a GitLab download needs mlflow.
     creds = {"mlflow_tracking_uri": "https://gitlab.example", "mlflow_tracking_token": "token"}
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {section: creds}}}
-    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
+    script = _script(_config(driver=driver))
+    assert 'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked --extra telemetry --extra mlflow' in script
+    assert "uv pip install" not in script
 
 
 def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
@@ -567,7 +579,10 @@ def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
         "mlflow_run_name": "run",
     }
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"prepare": run, "run": run}}}
-    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
+    script = _script(_config(driver=driver))
+    assert 'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked --extra telemetry --extra mlflow' in script
+    assert script.count("--extra mlflow") == 1
+    assert "uv pip install" not in script
 
 
 def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
@@ -667,7 +682,8 @@ def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
 def test_script_leaves_the_driver_alone_when_disabled():
     script = _script(_config(otel={"enabled": False}, driver=_DRIVER_WITH_INSTALL))
     assert "NEMO_GYM_OTEL" not in script
-    assert 'uv pip install -e ".[ray]"' in script
+    assert "uv sync --locked" in script
+    assert "[telemetry]" not in script
 
 
 def test_script_has_no_collector_when_disabled():
@@ -727,7 +743,7 @@ def test_gym_telemetry_off_keeps_the_collector_and_skips_lens():
     script = _script(_config(otel={"gym_telemetry": False}, driver=_DRIVER_WITH_INSTALL))
     assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
     assert "NEMO_GYM_OTEL_ENABLED" not in script
-    assert 'uv pip install -e ".[ray]"' in script
+    assert "uv sync --locked --extra ray" in script
 
 
 def test_submit_without_a_token_stages_and_persists_local_only_collection(tmp_path, monkeypatch, caplog):
