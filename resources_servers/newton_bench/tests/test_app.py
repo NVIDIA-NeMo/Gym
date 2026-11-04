@@ -27,8 +27,8 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSessionLostError,
+    check_resources_session_contract,
 )
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.newton_bench.app import (
     BaseSeedSessionResponse,
     ExecutePythonRequest,
@@ -1473,6 +1473,15 @@ def test_malformed_typed_seed_does_not_fall_back_to_legacy() -> None:
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=malformed).status_code == 422
     assert server.session_metadata == {}
+    assert server._session_episodes == {}
+
+
+def test_run_seed_keeps_a_row_with_its_own_task_id() -> None:
+    # A dataset row's scalar task_id is a row field, not a typed seed's TaskId.
+    server = _session_server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=dict(TASK_DATA) | {"task_id": "gravity-0"}).status_code == 200
+    assert len(server.session_metadata) == 1
     assert server._session_episodes == {}
 
 

@@ -116,7 +116,7 @@ gym env start \
     --model-type vllm_model
 
 gym eval run --no-serve \
-    --agent newton_bench_single_agent_turn \
+    --agent newton_bench_session_agent \
     --input resources_servers/newton_bench/data/example.jsonl \
     --output resources_servers/newton_bench/data/example_single_agent_turn_rollouts.jsonl \
     --limit 5

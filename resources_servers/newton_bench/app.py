@@ -96,7 +96,12 @@ def _load_module(module_name: str):
 
 
 def _reject_typed_seed(value: object) -> object:
-    if isinstance(value, dict) and ResourcesSeedSessionRequest.model_fields.keys() & value.keys():
+    # A body that names a resources_session_id, or carries typed episode_id and task_id objects, is a malformed typed
+    # seed and must not create a /run session. A dataset row's own scalar task_id does not make a body typed.
+    if isinstance(value, dict) and (
+        "resources_session_id" in value
+        or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
+    ):
         raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
     return value
 
@@ -398,6 +403,9 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         """Release live state after evaluation and replay only the same completed verification payload."""
         session_id = request.session[SESSION_ID_KEY]
         digest = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+        # Nothing below yields to the event loop (evaluate_law is synchronous), so a seed, close or resent verify for
+        # this session cannot interleave between the checks and the release. Hold self._fence.locked(session_id)
+        # across them if evaluation ever awaits.
         verified = self._verified_sessions.get(session_id)
         if self._fence.closed_episode(session_id) is not None or (verified is not None and verified[1] != digest):
             return NewtonBenchVerifyResponse(
