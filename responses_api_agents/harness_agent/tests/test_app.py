@@ -25,8 +25,7 @@ import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import (
     ConnectableProvider,
     LocalProvider,
@@ -893,7 +892,7 @@ def test_gym_tar_ships_the_data_package_but_not_the_agents_datasets(monkeypatch:
 
 @pytest.mark.parametrize("kind", ["provider_create_pending", "provider_setup_failed", "provider_pty_busy"])
 def test_typed_sandbox_failure_keeps_its_kind_without_message_inference(kind):
-    from nemo_gym.core.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import NgFailureEvent
     from responses_api_agents.harness_agent.app import sandbox_infra_failure_kind
 
     assert (
