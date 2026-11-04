@@ -61,6 +61,9 @@ LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# Non-process exec sentinel, shared with the other providers.
+SANDBOX_RUNTIME_RETURN_CODE = 125
+
 # Conservative direct-template shortcut. E2B also supports tagged names such
 # as ``name:v1`` and template IDs, but those must be explicit because ``:`` and
 # other punctuation overlap with OCI image syntax in ``SandboxSpec.image``.
@@ -801,6 +804,8 @@ class E2BProvider:
         kwargs["request_timeout"] = self._exec_request_timeout()
 
         timeout_exc = getattr(e2b, "TimeoutException", None)
+        # E2B 2.62+; a TimeoutException subclass, so check it first.
+        not_running_exc = getattr(e2b, "SandboxNotRunningException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
         try:
             if self._exec.background:
@@ -814,6 +819,15 @@ class E2BProvider:
                     stdout=getattr(exc, "stdout", None),
                     stderr=getattr(exc, "stderr", None),
                     return_code=int(getattr(exc, "exit_code", 1) or 1),
+                )
+            # The sandbox was killed, paused or reached its lifetime (ttl_s): the
+            # command has no exit code and retrying on this sandbox cannot help.
+            if isinstance(not_running_exc, type) and isinstance(exc, not_running_exc):
+                return SandboxExecResult(
+                    stdout=None,
+                    stderr=f"e2b sandbox is not running: {exc}",
+                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                    error_type="sandbox",
                 )
             # E2B uses one TimeoutException for stream-open timeouts, the
             # running stream deadline, sandbox expiry and server cancellation.

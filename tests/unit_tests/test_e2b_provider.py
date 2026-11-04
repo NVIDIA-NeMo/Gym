@@ -391,6 +391,11 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 
     assert isinstance(control_transport, GymAiohttpTransport)
     assert isinstance(envd_transport, GymAiohttpTransport)
+    # E2B 2.62 builds envd health-probe and streaming clients with these keywords.
+    assert isinstance(
+        client_async_module.get_transport(config, for_streaming=True, http_version="1.1", retry_connect=False),
+        GymAiohttpTransport,
+    )
     proxy = httpx.Proxy("http://proxy.example:8080", auth=("user", "password"))
     assert client_async_module.get_transport(types.SimpleNamespace(proxy=proxy)).proxy is proxy
     assert str(client_async_module.get_transport(types.SimpleNamespace(proxy="http://proxy.example")).proxy.url) == (
@@ -431,7 +436,9 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     ).get_async_httpx_client()
     assert str(api_client.base_url) == "http://gw:8080"
     assert (api_client.headers["X-API-KEY"], api_client.headers["Authorization"]) == ("k", "Bearer t")
-    for transport in (client_async.get_transport(connection), envd_client._transport, api_client._transport):
+    # E2B 2.62+ wraps the API client's transport in its response-retry transport.
+    api_transport = getattr(api_client._transport, "transport", api_client._transport)
+    for transport in (client_async.get_transport(connection), envd_client._transport, api_transport):
         assert isinstance(transport, GymAiohttpTransport)
     await envd_client.aclose()
     await api_client.aclose()
@@ -1156,6 +1163,25 @@ class TestExec:
 
         with pytest.raises(TimeoutError, match=r"deadline exceeded.*wait/stream budget=1s"):
             await provider.exec(handle, "sleep 999", timeout_s=1)
+
+    @pytest.mark.parametrize("background", [False, True])
+    async def test_sandbox_not_running_is_a_sandbox_error_result(
+        self, monkeypatch: pytest.MonkeyPatch, background: bool
+    ) -> None:
+        # E2B 2.62+ raises this TimeoutException subclass once the sandbox reached its lifetime.
+        not_running = type("FakeSandboxNotRunning", (FakeTimeout,), {})
+        sdk = _fake_sdk()
+        sdk.SandboxNotRunningException = not_running
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: sdk)
+        provider = E2BProvider(create={"template": "base"}, exec={"background": background})
+        handle = await provider.create(_spec())
+        handle.raw.exec_behaviour = not_running("The sandbox was killed or reached its timeout.")
+
+        result = await provider.exec(handle, "sleep 999", timeout_s=60)
+
+        assert result.error_type == "sandbox"
+        assert result.return_code == e2b_provider.SANDBOX_RUNTIME_RETURN_CODE
+        assert result.stderr == "e2b sandbox is not running: The sandbox was killed or reached its timeout."
 
     @pytest.mark.parametrize("timeout_s", [-1, float("nan"), float("inf"), True, "1"])
     async def test_invalid_timeout_is_rejected_before_command_start(self, timeout_s: object) -> None:
