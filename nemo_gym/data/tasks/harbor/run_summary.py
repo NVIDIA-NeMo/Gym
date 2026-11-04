@@ -70,7 +70,7 @@ from nemo_gym.utils.path_utils import (
 
 
 if TYPE_CHECKING:
-    from nemo_gym.data.tasks.harbor.cli import AgentSelection, PreparedTaskset
+    from nemo_gym.data.tasks.harbor.prepare import AgentSelection, PreparedTaskset
 
 RUN_SUMMARY_SCHEMA_VERSION = 1
 # What a verification leaves in its log folder, by the name the summary reports it under.

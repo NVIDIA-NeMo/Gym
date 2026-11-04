@@ -112,9 +112,12 @@ def _code_outside_the_library() -> list[Path]:
 
 
 def test_the_librarys_tests_import_from_the_module_that_defines_each_name() -> None:
-    # tests/ imports like nemo_gym/: from the defining module, which is also what it patches.
+    # tests/ imports like nemo_gym/: from the defining module, which is also what it patches. The exporter guide's
+    # examples are the guide's code blocks byte for byte, so they import like code outside the library.
     found = []
     for path in _tracked_python("tests"):
+        if path.is_relative_to("tests/unit_tests/artifacts/exporter_guide"):
+            continue
         try:
             tree = ast.parse((REPO / path).read_text(errors="replace"))
         except SyntaxError:
@@ -156,6 +159,34 @@ def test_code_outside_the_library_imports_exported_names_from_the_public_api() -
                 if package is not None:
                     found.append(f"{path.relative_to(REPO)}:{node.lineno} imports {alias.name} from {node.module}")
     assert not found, f"{found} should import from the package's public API: from nemo_gym.<package> import Name."
+
+
+def test_every_name_code_outside_the_library_imports_from_a_public_api_resolves() -> None:
+    # The converse of the check above: a name dropped from a package's public API breaks a server only when it loads.
+    # Server suites load them, but the unit suite does not, so a missing name would otherwise pass here.
+    packages = {f"nemo_gym.{package}" for package in PACKAGES}
+    found = []
+    for path in _code_outside_the_library():
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in packages):
+                continue
+            package = importlib.import_module(node.module)
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                where = f"{path.relative_to(REPO)}:{node.lineno} imports {alias.name} from {node.module}"
+                try:
+                    getattr(package, alias.name)
+                except AttributeError:
+                    if importlib.util.find_spec(f"{node.module}.{alias.name}") is None:
+                        found.append(where)
+                except ImportError as error:  # the public API names a submodule that does not import
+                    found.append(f"{where} ({error})")
+    assert not found, f"{found} are not served by the package's public API: add each to its _PUBLIC_API."
 
 
 def test_a_submodule_failing_with_attribute_error_reports_the_cause(

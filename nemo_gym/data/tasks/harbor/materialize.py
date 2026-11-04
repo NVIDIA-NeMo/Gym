@@ -11,13 +11,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from typing_extensions import Self
 
-from nemo_gym.core.episode import TaskId
+from nemo_gym.core.episode_types import MaterializedTask, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig
 from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.data.tasks.harbor.task import HarborTask, is_task_folder
-from nemo_gym.server_runtime.episode_types import MaterializedTask
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
@@ -247,7 +246,7 @@ def dataset_entry(taskset: str, rows_path: Path, dataset: GymDatasetConfig | Non
     the rows by it and the collector's run-level count would multiply on top, and the metrics sidecar beside
     the rows records the entry, so a count that moved with the command line would conflict run to run.
     ``[gym.defaults].num_repeats`` is the run config's top-level ``num_repeats`` instead (see
-    ``nemo_gym.data.tasks.harbor.cli.build_run``). A benchmark entry names no ``prepare_script``: the rows are
+    ``nemo_gym.data.tasks.harbor.prepare.build_run``). A benchmark entry names no ``prepare_script``: the rows are
     written by the preparation that generates this entry.
     """
     dataset = dataset or GymDatasetConfig()

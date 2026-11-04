@@ -49,6 +49,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import SESSION_ID_KEY, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -62,6 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    NgFailureEvent,
 )
 from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
@@ -88,6 +90,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 from responses_api_agents.opencode_agent.observability import (
     append_opencode_turns,
     opencode_tool_outcome,
@@ -713,6 +716,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             plugins.append("required-mcp.js")
         return plugins
 
+    @staticmethod
+    def _agent_sandbox_facts(sandbox: AsyncSandbox, **facts: Any) -> str:
+        """The failure_reason prefix for the agent's own command: its phase, provider, sandbox and command."""
+        handle = getattr(sandbox, "_handle", None)
+        provider = getattr(handle, "provider_name", None)
+        sandbox_id = getattr(handle, "sandbox_id", None)
+        return sandbox_failure_prefix(
+            phase="agent",
+            provider=provider if isinstance(provider, str) else None,
+            sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+            command="opencode_run",
+            **facts,
+        )
+
     def _agent_sandbox_observation(
         self,
         *,
@@ -1023,10 +1040,36 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
             )
-        except Exception as exc:
-            result = None
-            run_error_type = type(exc).__name__
-            print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+        except Exception as error:
+            # A provider exception does not establish how the command ended: report it at the agent boundary, with
+            # the sandbox facts known here, rather than grade a substituted partial run.
+            raise NgFailureEvent(
+                boundary="agent",
+                failure_kind=AGENT_ROUTE_FAILED,
+                failure_reason=self._agent_sandbox_facts(
+                    sandbox, reason=provider_error_reason(error), http_status=error_to_http_status(error)
+                )
+                + f"Agent operation agent.sandbox_exec failed: {type(error).__name__}",
+                operation="agent.sandbox_exec",
+                stage="agent",
+            ) from error
+
+        if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
+            # A native command deadline is a protocol result. The provider's -1 sentinel or an execution error
+            # does not establish a supported final cause; an ordinary nonzero exit still reaches the verifier.
+            raise NgFailureEvent(
+                boundary="agent",
+                failure_kind=AGENT_ROUTE_FAILED,
+                failure_reason=self._agent_sandbox_facts(
+                    sandbox,
+                    reason=result.error_type if isinstance(result.error_type, str) else None,
+                    exit_code=result.return_code if isinstance(result.return_code, int) else None,
+                )
+                + "Sandbox command outcome cannot be classified",
+                exception_type=str(result.error_type) if result.error_type is not None else None,
+                operation="agent.sandbox_exec",
+                stage="agent",
+            )
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -1309,6 +1352,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if trajectory is not None:
             response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
+        raw_verifier_sandbox_observations = response_dict.pop("verifier_sandbox_observations", None)
+        if raw_verifier_sandbox_observations is None:
+            raw_verifier_sandbox_observations = (
+                [raw_verifier_sandbox_observation] if raw_verifier_sandbox_observation is not None else []
+            )
         if rollout_id is not None:
             if observations is None:
                 observations = AgentObservationBundle(
@@ -1316,16 +1364,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     records=[AgentInvocation(invocation_id=rollout_id)],
                     gaps=[ObservationGap(code="observation_capture_failed")],
                 )
-            if raw_verifier_sandbox_observation is not None:
-                try:
-                    verifier_observation = SandboxObservation.model_validate(raw_verifier_sandbox_observation)
-                    if verifier_observation.role != "verifier":
-                        raise ValueError("resources server returned a non-verifier sandbox observation")
-                    observations.records.append(verifier_observation)
-                except Exception:
-                    observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
-            else:
+            if not isinstance(raw_verifier_sandbox_observations, list):
+                observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
+            elif not raw_verifier_sandbox_observations:
                 observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
+            else:
+                for raw_observation in raw_verifier_sandbox_observations:
+                    if raw_observation is None:
+                        observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
+                        continue
+                    try:
+                        verifier_observation = SandboxObservation.model_validate(raw_observation)
+                        if verifier_observation.role != "verifier":
+                            raise ValueError("resources server returned a non-verifier sandbox observation")
+                        observations.records.append(verifier_observation)
+                    except Exception:
+                        observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
             response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
 
