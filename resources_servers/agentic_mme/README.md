@@ -70,18 +70,18 @@ All prior messages and model token metadata are preserved between turns.
 ## Data
 
 The five checked-in examples are small **synthetic smoke tasks**, not official
-benchmark examples or a baseline. The official dataset can be converted with
-the companion prepare_gym.py script in the separate Agentic-MME source checkout:
+benchmark examples or a baseline. The official dataset is converted by the
+benchmark's preparation script, which downloads the pinned release (or reads a
+local snapshot from AGENTIC_MME_DATASET_ROOT):
 
-    uv run python /path/to/Agentic-MME-source/prepare_gym.py \
-      --dataset-root /path/to/downloaded/Agentic-MME \
-      --output resources_servers/agentic_mme/data/validation.jsonl
+    gym eval prepare --benchmark agentic_mme
 
 The converter retains task IDs, gold answers, process checkpoints and difficulty
 in verifier_metadata, never in the model prompt. It embeds input images and
 does not expose reference crops or search answers. The released HF split is
 called train, but it is an evaluation benchmark; do not train on it by default.
-Full converted datasets are ignored by git. No registry upload is performed.
+Full converted datasets are ignored by git. See
+[benchmarks/agentic_mme](../../benchmarks/agentic_mme/README.md) for the measurement contract.
 
 ## Run
 
