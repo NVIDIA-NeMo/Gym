@@ -40,8 +40,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
-from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, VerifierFixture, call_judge, is_judge_failure
 from resources_servers.agentic_if.episode import bundle
 from resources_servers.agentic_if.episode.agent_user import is_root_agent_user
 from resources_servers.agentic_if.episode.artifacts import (
