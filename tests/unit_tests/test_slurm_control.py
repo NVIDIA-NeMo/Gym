@@ -31,7 +31,8 @@ from nemo_gym.orchestration.jobs import BenchmarkJob, LogSource, SubmissionRecor
 def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """`squeue` and `scancel` that answer from files and log how they were called.
 
-    `squeue_rows` holds what squeue prints; a `squeue_rc` or `scancel_rc` file makes that tool fail.
+    `squeue_rows` holds what squeue prints, and `squeue_rows.N` what its Nth call prints instead; a
+    `squeue_rc` or `scancel_rc` file makes that tool fail. `sleep` returns at once.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -40,9 +41,14 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         script.write_text(
             f'#!/bin/bash\nd="$(dirname "$0")"\necho "$*" >> "$d/{tool}_calls"\n'
             f'if [ -f "$d/{tool}_rc" ]; then echo "{tool}: error: Access/permission denied" >&2; '
-            f'exit "$(cat "$d/{tool}_rc")"; fi\ncat "$d/{tool}_rows" 2>/dev/null\nexit 0\n'
+            f'exit "$(cat "$d/{tool}_rc")"; fi\n'
+            f'n=$(wc -l < "$d/{tool}_calls" | tr -d " ")\n'
+            f'if [ -f "$d/{tool}_rows.$n" ]; then cat "$d/{tool}_rows.$n"; else cat "$d/{tool}_rows" 2>/dev/null; fi\n'
+            "exit 0\n"
         )
         script.chmod(0o755)
+    (bin_dir / "sleep").write_text("#!/bin/bash\nexit 0\n")
+    (bin_dir / "sleep").chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
 
@@ -90,6 +96,30 @@ def test_a_pending_follow_up_is_cancelled_before_the_running_job_so_it_cannot_st
     _terminate(record, job)
 
     assert _calls(slurm_bin / "scancel_calls") == ["900", "800"]
+
+
+def test_a_follow_up_queued_while_its_parent_is_being_cancelled_is_cancelled_too(tmp_path, slurm_bin):
+    record, job = _job(tmp_path)
+    running = f"800|RUNNING|{job.job_dir}\n"
+    (slurm_bin / "squeue_rows.1").write_text(running)
+    (slurm_bin / "squeue_rows.2").write_text(running + f"900|PENDING|{job.job_dir}\n")
+    (slurm_bin / "squeue_rows.3").write_text("")
+
+    _terminate(record, job)
+
+    assert _calls(slurm_bin / "scancel_calls") == ["800", "900"]
+    assert len(_calls(slurm_bin / "squeue_calls")) == 3
+
+
+def test_a_job_that_is_slow_to_leave_the_queue_is_cancelled_once_and_waited_for(tmp_path, slurm_bin):
+    record, job = _job(tmp_path)
+    (slurm_bin / "squeue_rows").write_text(f"800|RUNNING|{job.job_dir}\n")
+    (slurm_bin / "squeue_rows.4").write_text("")
+
+    _terminate(record, job)
+
+    assert _calls(slurm_bin / "scancel_calls") == ["800"]
+    assert len(_calls(slurm_bin / "squeue_calls")) == 4
 
 
 def test_a_job_of_another_directory_is_left_alone(tmp_path, slurm_bin):
@@ -215,9 +245,24 @@ def test_a_log_with_bytes_that_are_not_utf8_is_read_with_replacements(tmp_path):
 
 def test_a_log_that_contains_the_words_of_the_protocol_is_still_just_a_log(tmp_path):
     record, job = _job(tmp_path)
-    (Path(job.job_dir) / "logs" / "driver-100.log").write_text("__GYM_CONTROL:missing\n__GYM_CONTROL:ok\nend\n")
+    (Path(job.job_dir) / "logs" / "driver-100.log").write_text("__GYM_LOG:missing\n__GYM_LOG:ok\nend\n")
 
-    assert _read(record, job) == ["__GYM_CONTROL:missing", "__GYM_CONTROL:ok", "end"]
+    assert _read(record, job) == ["__GYM_LOG:missing", "__GYM_LOG:ok", "end"]
+
+
+@pytest.mark.parametrize("tail", [None, 2])
+def test_a_reader_that_fails_is_an_error_and_not_a_short_log(tmp_path, monkeypatch, tail):
+    record, job = _job(tmp_path)
+    (Path(job.job_dir) / "logs" / "driver-100.log").write_text("one\ntwo\nthree\n")
+    bin_dir = tmp_path / "failing"
+    bin_dir.mkdir()
+    for reader in ("cat", "tail"):
+        (bin_dir / reader).write_text(f'#!/bin/bash\necho partial\necho "{reader}: Input/output error" >&2\nexit 1\n')
+        (bin_dir / reader).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(RuntimeError, match="Input/output error"):
+        _read(record, job, tail=tail)
 
 
 def test_a_log_in_a_directory_with_spaces_and_quotes_is_read(tmp_path):

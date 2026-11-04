@@ -77,12 +77,8 @@ from nemo_gym.orchestration.executors.slurm.script import (
     build_sbatch_script,
     planned_log_sources,
 )
-from nemo_gym.orchestration.executors.slurm_control import (
-    parse_log_output,
-    parse_terminate_output,
-    render_read_log_script,
-    render_terminate_script,
-)
+from nemo_gym.orchestration.executors.slurm_control import parse_terminate_output, render_terminate_script
+from nemo_gym.orchestration.executors.slurm_logs import parse_log_output, render_read_log_script
 from nemo_gym.orchestration.executors.slurm_status import (
     parse_read_files_output,
     parse_status_output,
