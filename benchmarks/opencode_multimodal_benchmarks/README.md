@@ -18,7 +18,7 @@ model separately. Existing compatibility configurations remain available in
 
 ## Run configuration
 
-Supply a policy model using Gym's [model configuration guide](../../../fern/versions/latest/pages/model-server/index.mdx).
+Supply a policy model using Gym's [model configuration guide](../../fern/versions/latest/pages/model-server/index.mdx).
 For judged tasks, explicitly configure the shared resources-server instance:
 
 ```yaml

@@ -67,5 +67,5 @@ for adapted evaluation code. No benchmark data is included in this entry.
 The OpenCode session path requires explicit sampling, embeds tool-produced images
 before cleanup, and rejects continuation and training-capture requests. The
 Environment Server owns activation, close and verification. See the
-[agent README](../../../../responses_api_agents/opencode_multimodal_agent/README.md)
+[agent README](../../../responses_api_agents/opencode_multimodal_agent/README.md)
 for runtime requirements and configurable limits.
