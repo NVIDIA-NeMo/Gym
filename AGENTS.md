@@ -73,6 +73,19 @@ BaseServer (Pydantic model with config + server_client)
     └── SimpleResponsesAPIAgent  →  implement responses(), run()
 ```
 
+`BaseServer` and `SimpleServer` live in `nemo_gym/server_runtime/base_server.py`, `SimpleResourcesServer` in
+`nemo_gym/server_runtime/base_resources_server.py`, `SimpleResponsesAPIModel` in
+`nemo_gym/models/base_responses_api_model.py`, and `SimpleResponsesAPIAgent` in
+`nemo_gym/agents/base_responses_api_agent.py`.
+
+`nemo_gym/` is split into layered packages. From top to bottom: `cli`, `environment`, `eval`, `orchestration`,
+`rollouts`, `data`, `agents`, `models`, `server_runtime`, `artifacts`, `metrics`, `verification`, `trajectory`,
+`sandbox`, `client`, `telemetry`, `core`, `utils`, `config`. A package imports only packages below it. The
+import-linter contract in `pyproject.toml` enforces the order; its `ignore_imports` list holds the known exceptions,
+which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sits outside the layers: it runs inside
+Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
+(`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
+
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
 ## Creating Environments
@@ -188,6 +201,29 @@ gym dev test
 # Dump merged config
 gym env resolve --config ...
 ```
+
+## Where code and tests go
+
+- New library code goes into the package of `nemo_gym/` whose job it is, never at the `nemo_gym/` root. The root
+  holds only package-wide modules: `__init__.py`, `package_info.py`, `_public_api.py` and `_moved_paths.py`. A
+  helper that imports nothing from `nemo_gym` goes into `nemo_gym/utils/`.
+- Core unit tests mirror the package they test: a test of `nemo_gym/<package>/<module>.py` goes in
+  `tests/unit_tests/<package>/`, and a subpackage gets its own folder where it has many tests
+  (`tests/unit_tests/data/tasks/harbor/`). Put a test with the module it is about; when it exercises several, pick
+  the one the test is named for.
+- Two folders have no `nemo_gym` package. `tests/unit_tests/tooling/` holds tests of `scripts/`, `docker/`, packaging
+  and CI configuration; it cannot be named `scripts/`, because pytest's `norecursedirs` skips that name and the tests
+  would silently stop running. `tests/unit_tests/benchmarks/` holds core-suite tests of benchmark and resources server
+  code.
+- Only tests of the `nemo_gym/` root modules and repository-wide checks stay flat in `tests/unit_tests/`.
+- Every folder of test modules has an `__init__.py`, so pytest imports each test under its package name and test
+  modules in different folders can share a file name.
+- A fixture lives in a `fixtures/` folder beside the tests that read it. A fixture that tests in several packages
+  read stays in `tests/unit_tests/fixtures/`.
+- Tests find the repository root with `Path(__file__).resolve().parents[N]`, where N is the test's folder depth
+  under the repository root. When you move a test, update N, the test's imports from other tests, its fixture paths,
+  its key in `scripts/ci/core_test_durations.json`, and any path built from separate segments, such as
+  `root / "tests" / "unit_tests" / "fixtures"`.
 
 ## Imports from nemo_gym
 
