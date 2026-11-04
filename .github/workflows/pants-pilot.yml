@@ -1,12 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-name: Pants pilot comparison
+name: Pants subset bootstrap (manual)
 
-# Scheduled workflows only run from the default branch. A local six-hour
-# heartbeat refreshes this experiment; dispatch/push can benchmark it here.
+# Historical subset harness. The full CI experiment owns recurring comparisons.
 on:
-  push:
-    branches: [glovisotto/pants-pilot]
   workflow_dispatch:
     inputs:
       repeats:

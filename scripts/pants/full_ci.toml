@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+[GLOBAL]
+pants_version = "2.30.2"
+backend_packages = ["pants.backend.shell"]
+build_patterns = ["BUILD.pants-full-ci"]
+pants_ignore.add = ["/.pants-bin", "/.venv", "/results", "/work"]
+
+[environments-preview]
+names = { full_ci = "//:workspace" }

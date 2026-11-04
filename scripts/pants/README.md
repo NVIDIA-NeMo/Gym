@@ -1,102 +1,74 @@
-# Pants CI demo
+# Full PR test workload comparison
 
-This branch measures whether Pants can reduce feedback time for a declared subset
-of Gym tests. Existing CI remains authoritative. It is an experiment, with no RFC
-or migration of the user-facing Gym commands.
+This experiment compares the same sampled `main` commit under Gym's existing
+execution and under Pants. Both lanes use clean source checkouts; experiment
+instrumentation lives in a separate controller checkout. The branch is
+`glovisotto/pants-pilot`.
 
-`pilot.json` declares the test files, target generators, Python version, and locked
-requirements. Python imports are inferred. YAML, fixtures, scripts, and subprocess
-inputs must be declared in BUILD dependencies. An unowned changed file forces a
-full pilot run rather than silently skipping tests.
+## Workload
 
-## Run one paired comparison
+The comparison preserves the source revision's CI commands and routing:
 
-Provision `uv`, Python 3.13.14, and the scie-pants launcher. The launcher version in
-`.github/workflows/pants-pilot.yml` is pinned; `pants.toml` pins the Pants engine.
-Stage the experiment files first so the complete overlay is captured. Use an
-output directory outside the checkout:
+- Four duration-balanced core shards on independent runners.
+- A separate sandbox job and the combined coverage gate.
+- Eight server shards for a full run, or the native changed-server selection.
+- Session-routing end-to-end tests when selected, and lint.
+- Existing runner types, system dependencies, test data, Python, uv and extras.
 
-```bash
-export PANTS_BIN="$PWD/.pants-bin/pants"
-uv run --no-project --python 3.13.14 python scripts/pants/compare.py \
-  --base <sampled-main-sha> --parent <sampled-main-parent-sha> \
-  --repeats 3 --output /absolute/path/to/new-results
-```
+Use `force_full=true` to exercise the full test workload, including all server
+shards. Use `false` to reproduce routing for a particular commit against its
+parent. Both lanes receive the same routing decisions, before experiment files
+could influence them.
 
-The checkout must contain the sampled main source plus the pilot overlay.
-`monitor.py` prepares those checkouts automatically. Do not pass an unrelated main
-SHA to an ordinary checkout. Capture dependencies with `refresh-locks.sh` after
-changes to the authoritative dependency configuration; do not edit both lock
-representations independently.
+PR metadata checks (copyright, secrets, guardwords and conditional documentation
+checks) are outside the paired test-runtime measurement. Optional harness
+conformance and scheduled container/GPU/release workloads are also outside it.
+This measures the complete routed CPU test workload plus lint, not every GitHub
+check or a release pipeline.
 
-Parent and target dependency inputs must both validate against their own uv lock.
-A dependency-change sample requiring a different parent lock fails explicitly;
-this initial runner does not benchmark mismatched dependency transitions.
-
-Each comparison retains JSON results, a Markdown summary, the exact experiment
-patch and hash, main/parent/pilot SHAs, commands, stdout/stderr, and JUnit outcomes.
-The runner checks exact test identity/status parity and withholds speed ratios
-when a pair fails. Commands time out after 15 minutes and terminate their process
-group. A comparison failure still writes its diagnostics and returns nonzero.
-
-## What is measured
-
-| Case | uv baseline | Pants |
-| --- | --- | --- |
-| Cold | New venv and empty download cache | Empty package/build/test caches |
-| Warm dependencies | Recreate venv from cached downloads; rerun tests | Cached dependencies; force test execution |
-| Warm results | Reuse venv; rerun tests | Reuse successful test results where valid |
-| Changed commit | Warm on parent, then run full pilot subset | Warm on parent, then run selected affected targets |
-
-Both engines use the same Python and pinned dependency versions. Tool binaries
-and Python provisioning happen before timing. Runs are serial on the same runner,
-with alternating engine order between repetitions. uv runs one pytest process;
-Pants schedules test files with its default parallelism, using the same available
-machine resources. CPU count and tool versions are recorded. Any speedup combines
-scheduling, packaging and caching effects; it is not attributed solely to caching. Changed selection includes
-transitive file dependencies in both parent and current graphs, so deleted inputs
-remain visible. The native `--changed-diffspec=parent..main` selection time is included. A separate
-full parent/current dependency-graph audit checks that selection and records its
-own overhead outside the timing, alongside the full-run correctness checks.
-Unknown input changes or disagreement with the graph audit force all pilot tests
-to rerun without cached test results.
-
-The changed baseline is the **full pilot subset**, not a reimplementation of
-Gym's existing CI routing. These results do not measure whole-suite CI, its
-parallel shards, queue delay, coverage, or GPU/live-service tests. Pants JUnit
-includes cached results; its testcase count is not an executed-test count. Cached/executed target counts
-come from the Pants summary (null when the output format is unrecognized); the
-raw summary and process logs are retained. Existing coverage gates
-are unchanged. Three repetitions yield a median but are still a small sample.
-
-## Keep the experiment current
+## Run
 
 ```bash
-uv run --no-project --python 3.13.14 python scripts/pants/monitor.py \
-  --once --max-samples 3 --repeats 3 --output /absolute/path/to/persistent-results
+gh workflow run pants-full-ci.yml -R NVIDIA-NeMo/Gym \
+  --ref glovisotto/pants-pilot \
+  -f source_sha=<full-main-commit-sha> -f force_full=true
 ```
 
-The monitor fetches main, rebases the clean pilot branch, samples recent real
-commits across core/server/configuration changes, and runs the comparisons.
-Reuse its output directory to preserve sampling state and daily scorecards. A
-local Codex heartbeat calls it every six hours; workflow cron is deliberately
-absent because GitHub schedules do not execute from an experimental branch.
-The optional Actions workflow runs on pushes to this branch or manual dispatch,
-uses read-only permissions, and uploads logs/artifacts for 14 days. Hosted runs
-skip branch mutation; the local monitor owns rebasing. A newly added workflow may
-need its branch push before it is available to dispatch.
-
-Run the harness checks independently of Gym's test dependencies:
+The workflow's push event only registers the branch workflow. Actual compute is
+explicitly dispatched. Inspect the returned run, wait for completion, and retain
+its artifacts:
 
 ```bash
-python -m unittest discover -s scripts/pants -p 'test_*.py'
+gh run watch <run-id> -R NVIDIA-NeMo/Gym --interval 30 --exit-status
+gh run download <run-id> -R NVIDIA-NeMo/Gym --dir /absolute/results/hosted/<run-id>
 ```
 
-Collect three to five days of comparisons initially. Judge correctness, timing
-and maintenance effort together; a faster run with fewer or skipped tests is not
-a valid result. Conflicting server dependency sets and the remaining Gym suite
-need separate expansion and parity checks before this could replace existing CI.
+The authorized six-hour monitor refreshes the clean experiment branch against
+main, selects fresh main commits, dispatches these comparisons, and collects the
+results. It must avoid duplicate active runs, abort conflicting rebases, use
+verified force-with-lease for updates, and retain signed DCO commits.
 
-Gym's lazy public exports currently connect much of the core dependency graph.
-The pilot preserves those edges; it does not suppress dependencies to improve its
-timings. Daily scorecards separate different test scopes and dependency locks.
+## What Pants does in this phase
+
+Pants orchestrates the complete existing CI commands through workspace processes.
+This preserves Git-dependent tests, nested server environments and shared test
+fixtures. The execution adapter records the full tracked-source input and keeps
+coverage/JUnit artifacts available to the same gates.
+
+This is a full-scope execution-parity phase, not yet a conversion of the complete
+suite to native per-test Pants targets. Unlocked server dependencies, mutable
+external resources and host tools make cross-session test-result reuse unsafe;
+those results are not reused. Do not interpret orchestration overhead as a verdict
+on native Pants caching or advertise selective test pruning that is absent.
+
+## Evidence
+
+Require matching job selections, command success, testcase identities and outcomes,
+and successful coverage gates before comparing speed. Missing results remain
+failures. Report both arm elapsed time and total runner-minutes, including setup
+and cache transfer, and distinguish queued time from execution. Preserve slower
+results and failures alongside faster runs.
+
+The historical six-file/103-test benchmark is documented in [SUBSET.md](SUBSET.md).
+Its workflow is manual only and its measurements do not establish production CI
+performance.
