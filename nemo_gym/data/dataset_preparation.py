@@ -857,7 +857,10 @@ class TrainDataProcessor(BaseModel):
                 state,
                 sample_idx,
                 sample_dict_str,
-                require_responses=dataset_config.taskset is None,
+                # Benchmark prompt templates create the input during collation;
+                # count the original task rows before validating rendered inputs.
+                require_responses=dataset_config.taskset is None
+                and not (dataset_config.type == "benchmark" and dataset_config.prompt_config),
                 dataset_metrics_hook=dataset_metrics_hook,
             )
 
@@ -865,7 +868,9 @@ class TrainDataProcessor(BaseModel):
 
         return state
 
-    def _validate_aggregate_metrics(self, aggregate_metrics_dict: Dict, metrics_fpath: Path) -> Optional[Path]:
+    def _validate_aggregate_metrics(
+        self, aggregate_metrics_dict: Dict, metrics_fpath: Path, *, source_metrics: bool = False
+    ) -> Optional[Path]:
         """
         Returns the conflicting metrics fpath if invalid. Else returns None
         """
@@ -943,7 +948,14 @@ class TrainDataProcessor(BaseModel):
                 diffs.append(f"Value differs at {path}: {prev_v} != {new_v}")
 
         diffs: List[str] = []
-        diff_values(previous_aggregate_metrics_dict, aggregate_metrics_dict, path="", diffs=diffs)
+        previous_comparison = previous_aggregate_metrics_dict
+        current_comparison = aggregate_metrics_dict
+        if source_metrics:
+            # A rendering template does not describe the original dataset. Keep it
+            # significant for collated-output metrics, including existing sidecars.
+            previous_comparison = {k: v for k, v in previous_comparison.items() if k != "prompt_config"}
+            current_comparison = {k: v for k, v in current_comparison.items() if k != "prompt_config"}
+        diff_values(previous_comparison, current_comparison, path="", diffs=diffs)
 
         if diffs:
             print("Differences found in aggregate metrics:")
@@ -980,7 +992,7 @@ class TrainDataProcessor(BaseModel):
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
 
                 maybe_conflicting_metrics_fpath = self._validate_aggregate_metrics(
-                    aggregate_metrics_dict, metrics_fpath
+                    aggregate_metrics_dict, metrics_fpath, source_metrics=True
                 )
                 if maybe_conflicting_metrics_fpath is not None:
                     conflicting_fpaths.append(str(maybe_conflicting_metrics_fpath))
