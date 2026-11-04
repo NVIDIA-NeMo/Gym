@@ -14,7 +14,7 @@ from omegaconf import DictConfig
 from pydantic import JsonValue
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.server_runtime.base_resources_server import (
@@ -1413,7 +1413,7 @@ async def test_a_restart_only_seed_waits_again_when_a_new_checkpoint_closes_befo
 
 @pytest.mark.parametrize("path", ["/ng-rollout/r/seed_session", "/close_session", "/verify"])
 async def test_a_session_change_survives_a_disconnect_once_the_reply_has_started(path: str) -> None:
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core.episode_context import rollout_context
     from nemo_gym.server_runtime._checkpoint.resources import ResourcesCheckpointMiddleware
 
     server, _ = make_server()

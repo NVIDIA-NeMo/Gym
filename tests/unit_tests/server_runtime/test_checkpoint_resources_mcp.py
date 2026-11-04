@@ -13,7 +13,7 @@ import httpx
 from omegaconf import DictConfig
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime.base_resources_server import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     BaseResourcesServerConfig,

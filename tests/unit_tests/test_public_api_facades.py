@@ -116,7 +116,7 @@ def test_the_librarys_tests_import_from_the_module_that_defines_each_name() -> N
     # examples are the guide's code blocks byte for byte, so they import like code outside the library.
     found = []
     for path in _tracked_python("tests"):
-        if path.is_relative_to("tests/unit_tests/exporter_guide"):
+        if path.is_relative_to("tests/unit_tests/artifacts/exporter_guide"):
             continue
         try:
             tree = ast.parse((REPO / path).read_text(errors="replace"))

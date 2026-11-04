@@ -1,0 +1,33 @@
+name: Component locks
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - '**/pyproject.toml'
+      - '**/uv.lock'
+      - '**/setup.py'
+      - 'scripts/component*'
+      - '.github/workflows/component-locks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check locks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh
+      - name: Check every managed lock and resolver policy
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run --no-project --python 3.13.14 python scripts/component_locks.py

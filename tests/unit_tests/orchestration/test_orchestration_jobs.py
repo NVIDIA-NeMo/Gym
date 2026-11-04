@@ -418,3 +418,89 @@ def test_a_record_written_before_gym_commit_still_loads():
 
     assert record.gym_commit is None
     assert record.schema_version == SCHEMA_VERSION
+
+
+def test_legacy_record_environment_remains_unknown():
+    record = _record()
+    assert record.environment is None
+    assert "environment" not in json.loads(record.dumps())
+    restored = SubmissionRecord.load(json.loads(record.dumps()))
+    assert restored.environment is None
+
+
+def test_submission_environment_records_names_not_values_and_preserves_updates(tmp_path, monkeypatch):
+    from nemo_gym.orchestration.jobs import SubmissionEnvironment
+
+    monkeypatch.setenv("SOURCE_KEY", "private-test-value")
+    raw = _submit_config(tmp_path).model_dump(mode="json")
+    raw["driver"]["env"] = {
+        "DEST_KEY": "host:SOURCE_KEY",
+        "RUNTIME_ONLY": "runtime:WORKER_KEY",
+        "LITERAL": "lit:host:NOT_A_REFERENCE",
+    }
+    config = SubmitConfig.model_validate(raw)
+    observation = BaseExecutor.submission_environment(
+        config, required_env=["FORWARDED_KEY"], forwarded_env=["FORWARDED_KEY", "FORWARDED_KEY"]
+    )
+    assert observation.required_env == ["FORWARDED_KEY", "SOURCE_KEY"]
+    assert observation.forwarded_env == ["FORWARDED_KEY"]
+    assert observation.telemetry.enabled is True  # actual resolved config default, not a legacy inference
+    assert observation.telemetry.token_env == "OTEL_TOKEN"
+    assert "private-test-value" not in observation.model_dump_json()
+    assert "NOT_A_REFERENCE" not in observation.model_dump_json() and "WORKER_KEY" not in observation.model_dump_json()
+    record = _record(environment=observation)
+    updated = record.with_benchmark(record.benchmarks[0].model_copy(update={"job_id": "new-job"}))
+    assert SubmissionRecord.load(json.loads(updated.dumps())).environment == observation
+    for bad in (
+        {"required_env": ["BAD=VALUE"], "forwarded_env": [], "telemetry": observation.telemetry},
+        {"required_env": [], "forwarded_env": [], "telemetry": {"token_env": "TOKEN"}},
+        {"required_env": [], "forwarded_env": [], "telemetry": observation.telemetry, "values": {"TOKEN": "x"}},
+    ):
+        with pytest.raises(ValueError):
+            SubmissionEnvironment.model_validate(bad)
+
+
+def test_persist_record_keeps_initial_environment_observation(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    observation = BaseExecutor.submission_environment(_submit_config(tmp_path), required_env=[], forwarded_env=[])
+    record = _record(environment=observation, run_dir=str(tmp_path / "run"))
+
+    class Executor(BaseExecutor):
+        def run(self, config, *, dry_run=False):
+            raise NotImplementedError
+
+        def resubmit(self, record, benchmark):
+            raise NotImplementedError
+
+    written = {}
+    updated = record.with_benchmark(record.benchmarks[0].model_copy(update={"job_id": "successor"}))
+    Executor().persist_record(updated, lambda path, text: written.__setitem__(path, text))
+    assert SubmissionRecord.load(json.loads(next(iter(written.values())))).environment == observation
+    index = tmp_path / "cache/nemo-gym/jobs" / (record.gym_job_id + ".json")
+    assert SubmissionRecord.load(json.loads(index.read_text())).environment == observation
+
+
+def test_submission_environment_includes_nested_service_host_references(tmp_path, monkeypatch):
+    for name in ("ROUTER_KEY", "PREFILL_KEY", "DECODE_KEY"):
+        monkeypatch.setenv(name, "private-nested-test-value")
+    raw = _submit_config(tmp_path).model_dump(mode="json")
+    raw["services"] = {
+        "policy": {
+            "type": "vllm_pd",
+            "container": "test/image",
+            "model": "test/model",
+            "env": {"API_KEY": "host:ROUTER_KEY"},
+            "prefill": {"env": {"API_KEY": "host:PREFILL_KEY"}},
+            "decode": {"env": {"API_KEY": "host:DECODE_KEY"}},
+        }
+    }
+    raw["compute"]["hsg"]["node_pools"] = {
+        name: {"partition": "test", "gpus_per_node": 1} for name in ("prefill", "decode")
+    }
+    for name in ("prefill", "decode"):
+        raw["services"]["policy"][name]["node_pool"] = name
+    config = SubmitConfig.model_validate(raw)
+    observation = BaseExecutor.submission_environment(config, required_env=[], forwarded_env=[])
+    assert observation.required_env == ["DECODE_KEY", "PREFILL_KEY", "ROUTER_KEY"]
+    assert observation.forwarded_env == []
+    assert "private-nested-test-value" not in observation.model_dump_json()
