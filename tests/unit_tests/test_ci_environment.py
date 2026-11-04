@@ -355,15 +355,17 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
 
 
 def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
+    """Publish the image on CPU capacity after the normal upstream checks."""
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert "name: Build Gym container" in workflow
     runner_label = (
-        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "${{ needs.pre-flight.outputs.runner_prefix == 'nemo-ci-aws-gpu-x2' "
+        "&& 'nemo-ci-aws-cpu-4-16' || (startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
         "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
-        "|| needs.pre-flight.outputs.runner_prefix }}"
+        "|| needs.pre-flight.outputs.runner_prefix) }}"
     )
-    assert runner_label in workflow
+    assert _cicd_main_jobs()["container_build"]["runs-on"] == runner_label
     assert "uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f" in workflow
     assert "uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25" in workflow
     assert "build-contexts: nemo-gym=." in workflow

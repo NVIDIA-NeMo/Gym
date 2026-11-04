@@ -113,10 +113,9 @@ jobs:
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]
-    # Nightly only: this job runs on the internal nemo-ci-aws-gpu-x2 runner
-    # pool, which is shared with NeMo-RL's H100 CI traffic and was queuing
-    # indefinitely on every PR push. Run it on the nightly schedule, or
-    # on-demand via workflow_dispatch, instead.
+    # Publish on the nightly schedule or on-demand via workflow_dispatch.
+    # The default AWS image build uses CPU capacity; its Dockerfile does not
+    # need a GPU. Other preflight routes retain their existing runner identity.
     #
     # GitHub applies an implicit success() check before a job's `if:` unless
     # the condition contains a status function. Evaluate this condition even
@@ -130,7 +129,11 @@ jobs:
         needs.classify_changes.result == 'success' &&
         (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
       }}
-    runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') && format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) || needs.pre-flight.outputs.runner_prefix }}
+    runs-on: >-
+      ${{ needs.pre-flight.outputs.runner_prefix == 'nemo-ci-aws-gpu-x2' && 'nemo-ci-aws-cpu-4-16'
+      || (startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-')
+      && format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt)
+      || needs.pre-flight.outputs.runner_prefix) }}
     environment: ${{ contains(needs.pre-flight.outputs.registry, 'azure') && 'nemo-ci' || '' }}
     outputs:
       image: ${{ steps.image.outputs.image }}
