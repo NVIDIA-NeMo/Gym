@@ -53,6 +53,7 @@ Each entry in `benchmarks`:
 | `job_dir` | The benchmark's directory inside the run directory. |
 | `job_id` | The Slurm job ID. `null` exactly when the executor failed to queue this benchmark. |
 | `error` | Why it failed, when `job_id` is `null`. |
+| `log_sources` | The logs the job was set up to write, planned at submit time by the same code that renders the job script's log flags. Each entry has a `name`, a `kind` (`driver` or `service`), an `instance` (`null` for a log that is not split by instance), and a `location`. For Slurm the location is a path relative to `job_dir` with a `{job_id}` placeholder, because the job id is not known at submit time and changes when a job is resumed; replace it with the id of the job you want. A planned log is not proof that the file exists, for example when a service never started. Empty for a record written before this field existed. |
 
 A submission with at least one entry whose `job_id` is `null` makes the command exit 1, but the record is still written for the benchmarks that were queued.
 

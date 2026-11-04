@@ -21,7 +21,7 @@ from typing import ClassVar
 import yaml
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
 
 
 class UnsupportedOperationError(RuntimeError):
@@ -29,6 +29,13 @@ class UnsupportedOperationError(RuntimeError):
 
 
 class BaseExecutor(ABC):
+    """What a new executor extends: implement `run` and it can submit.
+
+    Everything else is opt-in. `executors/capabilities.py` has an interface for each further feature
+    (`Resubmittable`, `Inspectable`, `Terminable`, `LogReadable`); an executor lists the ones it
+    supports in its bases and implements every abstract method of each.
+    """
+
     # Whether this executor can auto-resubmit a benchmark that gets killed by
     # the scheduler (time limit, preemption, node failure). False means asking
     # for `resumable` on this executor is a config error, not a silent no-op.
@@ -43,15 +50,6 @@ class BaseExecutor(ABC):
         Returns None on a dry run, which renders the scripts and stops before
         anything is submitted; every other path either returns a record or
         raises.
-        """
-
-    @abstractmethod
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
-        """Queue `benchmark` of `record` again, in place, and return its updated entry.
-
-        Refuses while a job of that benchmark is still active, so two jobs never write one run.
-        Persists the updated record before returning. An executor that cannot do this raises
-        `UnsupportedOperationError`.
         """
 
     def persist(
