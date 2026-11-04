@@ -537,7 +537,7 @@ async def test_journal_reverification_waits_for_followup_without_changing_files(
 
 
 @pytest.mark.parametrize("alias", [False, True])
-def test_journal_health_waits_for_followup_without_reporting_stale_results(prepared_run, alias):
+def test_health_selects_no_stale_result_after_interruption(prepared_run, alias):
     from nemo_gym.rollouts.rollout_health import run_health_checks
 
     output, prepare = prepared_run
@@ -551,9 +551,9 @@ def test_journal_health_waits_for_followup_without_reporting_stale_results(prepa
         shortcut.symlink_to(output)
         output = shortcut
     before = snapshot(output)
-    with pytest.raises(ConfigError, match="histories with superseded outcomes"):
-        run_health_checks(output, workers=1)
-    assert snapshot(output) == before
+    result = run_health_checks(output, workers=1)
+    assert result.rollouts == []
+    assert {name: data for name, data in snapshot(output).items() if name in before} == before
 
 
 @pytest.mark.parametrize("mismatch", ["run_id", "rollout_id", "attempt", "terminal", "failure_kind"])
