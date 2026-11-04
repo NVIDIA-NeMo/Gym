@@ -12,7 +12,9 @@ description: >
   evaluation itself (use run-and-babysit-eval) or adding a benchmark (use add-benchmark). Triggered by:
   "add a model", "new checkpoint", "serve this model in Gym", "model config", "vllm config",
   "enable thinking", "reasoning parser", "tool call parser", "compare two models fairly",
-  "eval config", "where does the benchmark config come from".
+  "eval config", "where does the benchmark config come from", "run evaluations on model Y on
+  benchmark Z with serving params X". To run the composed config, continue with
+  run-and-babysit-eval.
 ---
 
 # Add a Model Config to Gym
