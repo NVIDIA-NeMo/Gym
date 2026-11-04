@@ -55,7 +55,12 @@ from pydantic import Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    agent_route_failure,
+    observe_failure,
+)
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
@@ -601,21 +606,24 @@ class GdpPdfAgent(SimpleAgent):
                 )
                 await raise_for_status(verified)
                 result = await get_response_json(verified)
-            except Exception as error:  # noqa: BLE001
-                # Same reasoning as the model-call retry loop above: a /verify-side failure
-                # (upstream judge outage, a malformed row tripping a resources-server bug, etc.)
-                # must not take the whole evaluation run down over one row either. Score it as
-                # a zero attempt and keep going -- the warning below is what makes a real
-                # verifier bug (as opposed to a one-off transient failure) visible for follow-up.
-                print(f"[gdp_pdf_agent] WARNING: /verify failed on {manifest_relpath}: {error!r}", flush=True)
-                terminal_limit = terminal_limit or f"verify_failed_{type(error).__name__}"
-                result["reward"] = 0.0
+            except Exception as error:
+                # Return the real generated answer on the established masked-failure path. Raising
+                # here would discard it at the HTTP boundary and make a resume generate again.
+                failure = agent_route_failure(error, operation="verify", stage="verification")
+                failure.__cause__ = error
+                observe_failure(failure)
+                result.update(
+                    reward=0.0,
+                    mask_sample=True,
+                    failure_kind=failure.failure_kind,
+                    failure_reason=failure.failure_reason,
+                )
 
         result["document_delivery"] = delivery.record(terminal_limit) | {"rejected_attempts": delivery.attempts}
         if pages_truncated:
             print(f"[gdp_pdf_agent] WARNING: truncated {pages_truncated} page(s) of {manifest_relpath} (max_pages)")
             result.setdefault("verifier_metadata", meta)["pages_truncated"] = pages_truncated
-        if terminal_limit:
+        if terminal_limit and not result.get("mask_sample"):
             result["failure_reason"] = f"GDP.pdf terminal input limit: {terminal_limit}"
         if trajectory is not None:
             result["ng_trajectory"] = trajectory.model_dump(mode="json")

@@ -16,7 +16,6 @@ import json
 
 from rich.table import Table
 
-from nemo_gym.agent_registry import discover_agents
 from nemo_gym.cli.utils import (
     exit_unknown_component,
     fuzzy_matches,
@@ -32,6 +31,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.environment.agent_registry import discover_agents
 
 
 def _inspect_agent(name: str, agents: dict, global_config_dict) -> None:

@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, validate_failure_kind
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -757,7 +757,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         session. An app built without session routing, such as one under ``TestClient``, gives a new session a random
         ID instead, so release by ``body.resources_session_id`` to be correct either way.
 
-        ``nemo_gym.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
+        ``nemo_gym.server_runtime.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
         """
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 

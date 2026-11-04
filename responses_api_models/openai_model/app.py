@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
+from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.client import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
@@ -27,7 +28,6 @@ from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    ReasoningEffort,
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
 

@@ -1152,8 +1152,8 @@ def test_cli_collection_failure_status(
     import nemo_gym.artifacts.resolved_config as resolved_config
     import nemo_gym.cli.eval as cli
     import nemo_gym.telemetry.setup as telemetry
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
-    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
 
     output = tmp_path / "output.jsonl"
     prepared = tmp_path / "output" / "preprocessed_datasets" / "train.jsonl"
