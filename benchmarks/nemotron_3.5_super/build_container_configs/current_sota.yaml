@@ -4,7 +4,7 @@ output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_so
 slurm:
   account: nemotron_n4_post
   partition: batch
-  qos: interactive
+  qos: short
   gpus-per-node: "4"
   mem: "0"
 
