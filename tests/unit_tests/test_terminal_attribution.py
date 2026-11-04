@@ -96,7 +96,7 @@ def _tool_call_entry(
     else:
         item = _tool_call_item(tool_call_id)
     entry = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id=call_id,
         prompt_token_ids=prompt,
         generation_token_ids=gen,
@@ -121,7 +121,7 @@ def _entry(
 ) -> TokenEntry:
     output_items = [_assistant_item(text)] if text is not None else []
     entry = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id=call_id,
         prompt_token_ids=prompt,
         generation_token_ids=gen,
@@ -509,7 +509,7 @@ def test_item_id_witness_ignores_the_namespace_prefix_on_a_flattened_tool_name()
     call must still match the entry by served id and content."""
     a = _entry("a", [1, 2], [3], text="plan")
     b = TokenEntry(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="b",
         prompt_token_ids=[1, 2, 3, 4],
         generation_token_ids=[5],
@@ -774,7 +774,7 @@ def _delivery_case(tmp_path, result: dict, *, with_aux: bool = True) -> dict:
 
     async def go() -> dict:
         for entry in _aux_entries() if with_aux else _chain_entries():
-            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+            await store.put(entry.model_copy(update={"capture_key": "t0-r0"}))
         return await finalize_rollout_token_capture(result, store)
 
     return asyncio.run(go())
@@ -832,7 +832,7 @@ def _finalize_length_cut_rollout(
 
     async def go() -> dict:
         for entry in _length_cut_chain_entries():
-            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+            await store.put(entry.model_copy(update={"capture_key": "t0-r0"}))
         return await finalize_rollout_token_capture(result, store)
 
     return asyncio.run(go()), result
@@ -1127,7 +1127,7 @@ def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):
 
     async def go() -> dict:
         for entry in _completed_chain_entries():
-            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+            await store.put(entry.model_copy(update={"capture_key": "t0-r0"}))
         await store.begin_call("t0-r0", "call3")
         await store.record_engine_refusal(
             "t0-r0",

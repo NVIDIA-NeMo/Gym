@@ -18,6 +18,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 const MAX_RATE_LIMIT_RETRIES = 2;
+// Adapter-chosen memory cap for helper evidence, not a Codex protocol limit.
+// Larger responses still forward in full; only the buffered evidence is dropped.
+const MAX_COMPACTION_RESPONSE_BYTES = 8 * 1024 * 1024;
 // Codex gets only these inherited variables, plus the adapter's own.
 const INHERITED = [
     "PATH",
@@ -40,6 +43,72 @@ export function retryDelay(retryAfter, attempt) {
     return Number.isFinite(delay) ? Math.min(Math.max(delay, 0), 30) : 2 ** attempt;
 }
 
+const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Parse UTF-8 JSON bytes, or throw on malformed text, as Python's json.loads does. */
+const parseJson = (bytes) => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+
+function messageText(content) {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+        .filter((block) => isObject(block) && typeof block.text === "string")
+        .map((block) => block.text)
+        .join("");
+}
+
+/** Whether a Responses request body is Codex's compaction helper, by its native turn metadata. */
+export function compactionRequest(body) {
+    let payload;
+    try {
+        payload = parseJson(body);
+    } catch {
+        return false;
+    }
+    // Tested compaction formats and upstream sources are documented in observability.py.
+    const clientMetadata = isObject(payload) ? payload.client_metadata : undefined;
+    const metadata = isObject(clientMetadata) ? clientMetadata["x-codex-turn-metadata"] : undefined;
+    if (typeof metadata !== "string") return false;
+    try {
+        const turn = JSON.parse(metadata);
+        return isObject(turn) && turn.request_kind === "compaction";
+    } catch {
+        return false;
+    }
+}
+
+/** Read one completed helper's identity and text without changing the forwarded SSE. */
+export function compactionResponse(body) {
+    const responses = [];
+    // latin1 keeps one character per byte, so frames split exactly as the bytes do; each data field decodes alone.
+    const frames = body.toString("latin1").replaceAll("\r\n", "\n").split("\n\n");
+    // A final unterminated frame was never dispatched to the SSE consumer.
+    for (const frame of frames.slice(0, -1)) {
+        const data = frame
+            .split(/\r\n|\n|\r/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).replace(/^ +/, ""))
+            .join("\n");
+        let event;
+        try {
+            event = parseJson(Buffer.from(data, "latin1"));
+        } catch {
+            continue;
+        }
+        if (!isObject(event) || event.type !== "response.completed") continue;
+        const response = event.response;
+        if (!isObject(response) || response.status !== "completed") return null;
+        if (typeof response.id !== "string" || !response.id || !Array.isArray(response.output)) return null;
+        const summary = response.output
+            .filter((item) => isObject(item) && item.type === "message" && item.role === "assistant")
+            .map((item) => messageText(item.content))
+            .join("");
+        if (!summary) return null;
+        responses.push({ response_id: response.id, summary });
+    }
+    return responses.length === 1 ? responses[0] : null;
+}
+
 function post(url, headers, body, timeoutMs) {
     return new Promise((resolve, reject) => {
         const transport = url.protocol === "https:" ? https : http;
@@ -58,12 +127,13 @@ function post(url, headers, body, timeoutMs) {
     });
 }
 
-/** Forward one response body; resolves to the upstream error that cut it short, if any. */
-function relay(upstream, outgoing) {
+/** Forward one response body, showing each chunk to `observe`; resolves to the upstream error that cut it short. */
+function relay(upstream, outgoing, observe) {
     return new Promise((resolve) => {
         let error = null;
         let cancelled = false;
         upstream.on("data", (chunk) => {
+            observe?.(chunk);
             if (!outgoing.write(chunk)) {
                 upstream.pause();
                 outgoing.once("drain", () => upstream.resume());
@@ -96,6 +166,7 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
     const chunks = [];
     for await (const chunk of incoming) chunks.push(chunk);
     const body = Buffer.concat(chunks);
+    const compacting = compactionRequest(body);
     const headers = {};
     for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
         const name = incoming.rawHeaders[index].toLowerCase();
@@ -135,8 +206,21 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
             }
         }
         outgoing.writeHead(upstream.statusCode, [...responseHeaders, "Connection", "close"]);
-        const error = await relay(upstream, outgoing);
+        // Keep only bounded helper evidence. Policy response bodies are never buffered here; the shared model
+        // capture owns those.
+        let evidence = compacting && upstream.statusCode === 200 ? [] : null;
+        let evidenceBytes = 0;
+        const error = await relay(upstream, outgoing, (chunk) => {
+            if (evidence && evidenceBytes + chunk.length <= MAX_COMPACTION_RESPONSE_BYTES) {
+                evidence.push(chunk);
+                evidenceBytes += chunk.length;
+            } else {
+                evidence = null;
+            }
+        });
         if (error) attemptRecord.transport_error = error;
+        const helper = evidence && !error ? compactionResponse(Buffer.concat(evidence)) : null;
+        if (helper) attemptRecord.compaction_response = helper;
         record(attemptRecord);
         outgoing.end();
         return;

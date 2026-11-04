@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the Node launcher's 429 forwarder and native-session snapshot against real HTTP servers."""
 
+import base64
 import json
 import shutil
 import socket
@@ -93,6 +94,108 @@ def test_forwarder_retries_only_429_and_retains_every_attempt(tmp_path, statuses
             assert response.read() == b"data: first\n\ndata: last\n\n"
     assert requests == [("/v1/responses", "invocation", b'{"input":"task"}')] * len(statuses)
     assert [json.loads(line)["status"] for line in attempts_path.read_text().splitlines()] == statuses
+
+
+@pytest.mark.parametrize(
+    "damage", [None, "policy", "prompt_only", "failed", "missing_id", "duplicate", "oversize", "truncated"]
+)
+def test_forwarder_retains_only_completed_compaction_identity_without_changing_stream(tmp_path, damage):
+    response = {
+        "id": "helper-id",
+        "status": "completed",
+        "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Summary café"}]}
+        ],
+    }
+    if damage == "missing_id":
+        del response["id"]
+    if damage == "failed":
+        response["status"] = "failed"
+    event = json.dumps({"type": "response.completed", "response": response}, ensure_ascii=False).encode()
+    wire = b": keepalive\r\n\r\nevent: response.completed\r\ndata: " + event + b"\r\n\r\n"
+    if damage == "truncated":
+        wire = wire.rstrip(b"\r\n")
+    if damage == "duplicate":
+        wire += wire
+    # A comment frame larger than the launcher's 8 MiB evidence cap; the stream must still arrive whole.
+    padding = b": " + b"x" * (8 * 1024 * 1024) + b"\n\n" if damage == "oversize" else b""
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(padding)
+            for start in range(0, len(wire), 7):
+                self.wfile.write(wire[start : start + 7])
+                self.wfile.flush()
+
+    prompt = (
+        "You are performing a CONTEXT CHECKPOINT COMPACTION."
+        if damage in {"policy", "prompt_only"}
+        else "Summarize the current conversation using a different prompt."
+    )
+    payload = {"input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]}
+    if damage != "prompt_only":
+        payload["client_metadata"] = {
+            "x-codex-turn-metadata": json.dumps({"request_kind": "turn" if damage == "policy" else "compaction"})
+        }
+    attempts_path = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
+        with urlopen(Request(f"{proxy}/responses", data=json.dumps(payload).encode())) as forwarded:
+            assert forwarded.read() == padding + wire
+    [attempt] = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    assert attempt["status"] == 200
+    assert attempt.get("compaction_response") == (
+        {"response_id": "helper-id", "summary": "Summary café"} if damage is None else None
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b"\xff",
+        b"null",
+        b"[]",
+        b"{}",
+        b'{"client_metadata":null}',
+        b'{"client_metadata":[]}',
+        b'{"client_metadata":{}}',
+        *[
+            json.dumps({"client_metadata": {"x-codex-turn-metadata": value}}).encode()
+            for value in (
+                None,
+                {},
+                1,
+                '{"request_kind":',
+                "null",
+                "[]",
+                '"compaction"',
+                "{}",
+                '{"request_kind":"turn"}',
+                '{"request_kind":"prewarm"}',
+                '{"request_kind":["compaction"]}',
+            )
+        ],
+    ],
+)
+def test_compaction_request_rejects_missing_or_malformed_metadata(body):
+    script = (
+        "const { compactionRequest } = await import(process.argv[1]);"
+        "console.log(JSON.stringify(compactionRequest(Buffer.from(process.argv[2], 'base64'))));"
+    )
+    checked = subprocess.run(
+        ["node", "--input-type=module", "-e", script, LAUNCHER.as_uri(), base64.b64encode(body).decode()],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(checked.stdout) is False
 
 
 @pytest.mark.parametrize(

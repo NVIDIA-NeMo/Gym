@@ -85,6 +85,7 @@ from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, B
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
+    associate_codex_compaction_calls,
     parse_codex_observations,
     parse_codex_usage,
     read_codex_observations,
@@ -1145,7 +1146,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable"),
-            ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
@@ -1199,7 +1199,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 error_type=invocation_error,
                 gaps=gaps,
             )
+            state.observations = associate_codex_compaction_calls(
+                state.observations, state.model_attempts or [], model_ref=self.config.model_server
+            )
         else:
+            gaps.append(ObservationGap(code="compaction_observations_unavailable"))
             gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))
             tools = []
             starts = {}

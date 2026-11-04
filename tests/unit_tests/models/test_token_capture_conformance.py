@@ -67,21 +67,21 @@ class _MemorySink:
 
     async def put(self, entry: TokenEntry) -> None:
         backend = self.backend
-        if entry.rollout_id in backend.retired:
+        if entry.capture_key in backend.retired:
             raise TokenCaptureRetiredError("retired")
-        if entry.rollout_id in backend.frozen:
-            backend.versions[entry.rollout_id] = backend.versions.get(entry.rollout_id, 0) + 1
+        if entry.capture_key in backend.frozen:
+            backend.versions[entry.capture_key] = backend.versions.get(entry.capture_key, 0) + 1
             raise RuntimeError("frozen")
-        rollout = backend.entries.setdefault(entry.rollout_id, {})
+        rollout = backend.entries.setdefault(entry.capture_key, {})
         previous = rollout.get(entry.model_call_id)
         if previous is not None:
             if previous != entry:
-                backend.incomplete.add(entry.rollout_id)
-                backend.versions[entry.rollout_id] = backend.versions.get(entry.rollout_id, 0) + 1
+                backend.incomplete.add(entry.capture_key)
+                backend.versions[entry.capture_key] = backend.versions.get(entry.capture_key, 0) + 1
                 raise ValueError("conflicting payload")
             return
         rollout[entry.model_call_id] = entry
-        backend.versions[entry.rollout_id] = backend.versions.get(entry.rollout_id, 0) + 1
+        backend.versions[entry.capture_key] = backend.versions.get(entry.capture_key, 0) + 1
         await backend.lineage.put(entry)
 
     async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
@@ -105,7 +105,7 @@ class _MemorySource:
             backend.frozen[rollout_id] = (f"snap-{rollout_id}", backend.versions[rollout_id])
         snapshot_id, version = backend.frozen[rollout_id]
         return TokenCaptureSnapshot(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             entries=tuple(backend.entries.get(rollout_id, {}).values()),
             incomplete=rollout_id in backend.incomplete,
             snapshot_id=snapshot_id,
@@ -231,7 +231,7 @@ class _UntypedLateWriteSink(_MemorySink):
     """Rejects a late write with a plain error, which the capture sink would report as a capture failure."""
 
     async def put(self, entry: TokenEntry) -> None:
-        if entry.rollout_id in self.backend.retired:
+        if entry.capture_key in self.backend.retired:
             raise RuntimeError("retired")
         await super().put(entry)
 
@@ -255,7 +255,7 @@ class _FrozenNotRetiredSink(_MemorySink):
     """Rejects a late write as frozen, not retired, contrary to ``TokenSource.retire``."""
 
     async def put(self, entry: TokenEntry) -> None:
-        if entry.rollout_id in self.backend.retired:
+        if entry.capture_key in self.backend.retired:
             raise TokenCaptureFrozenError("frozen")
         await super().put(entry)
 
