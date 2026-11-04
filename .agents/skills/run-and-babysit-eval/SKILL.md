@@ -47,8 +47,11 @@ SHA=<the full 40-character commit>
 git clone -q https://github.com/NVIDIA-NeMo/Gym.git ~/gym-${SHA:0:12} && cd ~/gym-${SHA:0:12} && git checkout -q $SHA && uv venv --seed .venv && . .venv/bin/activate && uv pip install -e ".[mlflow]" && gym --help
 ```
 
-Without `uv`, install it with `curl -LsSf https://astral.sh/uv/install.sh | sh` and
-`export PATH="$HOME/.local/bin:$PATH"`. The submitted run installs its own extras and `ray`; the launcher
+Gym needs `uv` 0.13.4 or newer (`uv --version`); an older one stops with "Required uv version `>=0.13.4` does
+not match the running version". Without `uv`, or to replace an older one, install it with
+`curl -LsSf https://astral.sh/uv/install.sh | sh` and `export PATH="$HOME/.local/bin:$PATH"`. `uv self update`
+upgrades only a `uv` that this installer put there; one from pip or a package manager is upgraded there.
+The submitted run installs its own extras and `ray`; the launcher
 needs only the `mlflow` extra, which the MLflow delivery check in `--inspect` uses.
 
 1. Pin Gym: `driver.gym_install.ref` is a full commit, not a branch. Recovery reads a run with the Gym
