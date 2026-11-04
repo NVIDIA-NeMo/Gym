@@ -7,12 +7,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from omegaconf import DictConfig
 
 from benchmarks.agentic_if_realworld import prepare
+from nemo_gym.config_types import ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.train_data_utils import TrainDataProcessor, TrainDataProcessorConfig
 from resources_servers.agentic_if_realworld.benchmark.core import Dataset
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create
-from tests.unit_tests.test_train_data_utils import _make_agent_instance_config
 
 
 @pytest.fixture
@@ -53,9 +54,19 @@ def test_prepare_and_real_collation_keep_adjacent_files_private(preparation, mon
     assert [json.loads(line) for line in target.open()] == dataset.prepared()
     assert prepare.prepare() == configured
 
+    server_config = {
+        "responses_api_agents": {
+            "simple_agent": {
+                "entrypoint": "app.py",
+                "datasets": [{"name": "synthetic", "type": "example", "jsonl_fpath": str(configured)}],
+                "resources_server": {"type": "resources_servers", "name": "synthetic_resources_server"},
+                "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            }
+        }
+    }
     configs = [
-        _make_agent_instance_config(
-            "synthetic", [{"name": "synthetic", "type": "example", "jsonl_fpath": str(configured)}]
+        ResponsesAPIAgentServerInstanceConfig(
+            name="synthetic", server_type_config_dict=DictConfig(server_config), **server_config
         )
     ]
     processor = TrainDataProcessor()

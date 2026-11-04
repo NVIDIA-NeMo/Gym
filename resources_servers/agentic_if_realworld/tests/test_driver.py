@@ -528,7 +528,8 @@ def test_runtime_fingerprint_covers_active_agent_and_core(monkeypatch):
     before = core.runtime_identity()
     assert before["gym_commit"] == "runtime-revision"
     assert before["source_gym_commit"] == core.read(core.ROOT / "source_manifest.json")["gym_commit"]
-    paths = ["gym/responses_api_agents/simple_agent/app.py", "gym/nemo_gym/rollout_collection.py"]
+    collection_path = Path(rollout_collection.__file__).resolve().relative_to(core.ROOT.parents[2])
+    paths = ["gym/responses_api_agents/simple_agent/app.py", f"gym/{collection_path}"]
     assert all(path in before["sources"] for path in paths)
     digest = core.digest
     monkeypatch.setattr(
