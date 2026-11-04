@@ -15,6 +15,7 @@
 """Same-run live delivery certification through the actual SDK exporter and managed Store."""
 
 import json
+import stat
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -757,6 +758,18 @@ def test_postrun_exports_the_same_bound_health_metric_snapshot(live, monkeypatch
     assert [key for key in values if key.startswith("health/metric_coverage/source/")] == [
         "health/metric_coverage/source/saved_rows"
     ]
+
+
+@pytest.mark.parametrize("mode", [0o664, 0o640])
+def test_postrun_health_rewrite_keeps_each_files_mode(live, mode):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, _, _ = live
+    summary = artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json"
+    for path in (artifacts.aggregate_metrics_json_fpath, summary):
+        path.chmod(mode)
+    _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    assert [stat.S_IMODE(p.stat().st_mode) for p in (artifacts.aggregate_metrics_json_fpath, summary)] == [mode, mode]
 
 
 def test_postrun_exports_a_benchmark_declared_metric_coverage(live):
