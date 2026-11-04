@@ -38,7 +38,7 @@ ng_e2e_collect_rollouts \
 
 ## Run through the Environment Server
 
-`config.yaml` now runs the benchmark through `single_agent_turn_legacy` with sandboxed agent and resources tool execution. It requires a Docker daemon by default; compose another provider config to change the provider. `config_single_agent_turn.yaml` is a compatibility alias. A crash then repeats only the current step (seed, agent turn, agent close, verify, close) rather than the whole episode. Use it in place of `config.yaml` in step 3:
+`config.yaml` now runs the benchmark through `single_agent_turn_legacy` with sandboxed agent and resources tool execution. It requires a Docker daemon by default. Replace the included Docker provider config and both sandbox images when selecting another provider; do not merge two provider blocks under `sandbox`. `config_single_agent_turn.yaml` is a compatibility alias. A crash then repeats only the current step (seed, agent turn, agent close, verify, close) rather than the whole episode. Use it in place of `config.yaml` in step 3:
 
 ```bash
 config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\

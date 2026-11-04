@@ -4,7 +4,7 @@ The repository-native research loop runs inside a task sandbox through an agent 
 
 ## Execution and composition
 
-`benchmarks/browsecomp/config.yaml` runs `single_agent_turn_legacy`: resources seed → agent seed → one activation → agent close → verify → resources close. `config_single_agent_turn.yaml` remains an alias. Docker is the default provider; compose another provider config to use Enroot or OpenSandbox. Both the Model Server and granted Resources endpoints must be reachable from the agent sandbox (`use_absolute_ip: true`).
+`benchmarks/browsecomp/config.yaml` runs `single_agent_turn_legacy`: resources seed → agent seed → one activation → agent close → verify → resources close. `config_single_agent_turn.yaml` remains an alias. Docker is the default provider. To use Enroot or OpenSandbox, replace the included Docker provider config and set the matching sandbox images; do not merge two provider blocks under `sandbox`. Both the Model Server and granted Resources endpoints must be reachable from the agent sandbox (`use_absolute_ip: true`).
 
 The agent borrows `sandbox_access` when supplied. Otherwise `sandbox_provider` and `sandbox_config` create an owned sandbox. Missing sandbox configuration, the unisolated Local provider, required MCP grants, and more than one direct HTTP grant are refused. No sandbox error falls back to host execution. Close stops the harness through `SandboxSession`, captures output, then disconnects a borrowed sandbox or destroys an owned one.
 

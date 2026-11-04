@@ -81,7 +81,7 @@ The example pairing uses `single_agent_turn_legacy`: existing flat dataset rows 
 server owns resources/agent session setup, verification, and close. The agent loop runs in its own sandbox and
 receives the resources session through the `direct_http` transport; its `resources_server` config is `null`.
 The config includes the Docker provider and `use_absolute_ip: true` so the sandbox can reach the Gym servers.
-Compose another provider config to run on a different backend and set both sandbox image fields for that provider.
+Replace the included Docker provider config to run on a different backend, and set both sandbox image fields for that provider. Do not merge two provider blocks under `sandbox`.
 
 The example dataset exposes only `search` and `browse`, so the example config keeps `workspace: none` and inline
 page content. To enable the resources-owned tool sandbox, use `workspace: per_session` with dataset rows exposing
