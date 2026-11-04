@@ -1,63 +1,56 @@
 {
-  "description": "Historical Gym test-mini runs; scores recomputed from persisted rollout and offline reward records. Not a rerun of current main.",
+  "description": "Saved Gym evaluations, audited offline; no new model calls. Both runs use category-level revision feedback and the same 539 task IDs and reference hashes. Not rerun against the final PR checkout.",
   "runs": {
     "pass1": {
-      "run_directory": "qwen38_27b_test_mini_c64_20261021T205807Z",
+      "run_directory": "qwen27b_sol_20261028T192218Z/pass1",
       "expected": 539,
-      "scored": 511,
-      "masked": 28,
+      "scored": 539,
+      "masked": 0,
+      "render_success": 503,
       "policy_model": "nvidia/qwen/qwen3.8-27b",
-      "judge_model": "nvidia/qwen/qwen3.8-flash-next",
+      "judge_model": "openai/openai/gpt-6.1-sol",
       "temperature": 0.0,
       "max_output_tokens": 32768,
       "reward_power_during_collection": 1,
       "num_repeats": 1,
+      "max_passes": 1,
+      "means": {
+        "linear_reward": 0.7946567717996289,
+        "squared_reward": 0.7000534322820037,
+        "blend_a_reward": 0.6621539517625232
+      },
       "source_sha256": {
-        "rollouts.jsonl": "473fde6a4df426ffd8f4d53c8e8cf8ff7d2b2f4289fb910438cef9ca939e9053",
-        "rollouts_failures.jsonl": "3cb6196423238c18f033d6e1b3d0646c884bfd055fe7c97a20492d5eb0da0d5a",
+        "rollouts.jsonl": "30b6e2a5bd786c7da0725c095e546494869550029a5a83051a4c1f856acb2264",
+        "rollouts_failures.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "rollouts_materialized_inputs.jsonl": "a9ed3519d075a52d8a8a5a68a47503e9652bcc3d0883e881a0b5734133869c76",
-        "reward_scores.jsonl": "bd96e3eb20ec3980938d88f2d15d63c075b0fffd455b1a0c9246168fa1653a4f"
+        "reward_scores.jsonl": "e720de50711be856f99859d742111ef06b6b7bf8eaa90579d49cfbb4ab0222a0"
       }
     },
     "pass3": {
-      "run_directory": "qwen_test_mini_pass3_20261021T224800Z",
+      "run_directory": "qwen27b_sol_20261028T192218Z/pass3",
       "expected": 539,
-      "scored": 460,
-      "masked": 79,
+      "scored": 539,
+      "masked": 0,
+      "render_success": 528,
       "policy_model": "nvidia/qwen/qwen3.8-27b",
-      "judge_model": "nvidia/qwen/qwen3.8-flash-next",
+      "judge_model": "openai/openai/gpt-6.1-sol",
       "temperature": 0.0,
       "max_output_tokens": 32768,
       "reward_power_during_collection": 1,
       "num_repeats": 1,
+      "max_passes": 3,
+      "means": {
+        "linear_reward": 0.8814842300556587,
+        "squared_reward": 0.820374025974026,
+        "blend_a_reward": 0.7266945454545455
+      },
       "source_sha256": {
-        "rollouts.jsonl": "d7c6cdf28e6b2c9f5e0d31912897164959df5196ad4e5d952f19a3f09a773e4b",
-        "rollouts_failures.jsonl": "9d963302e4eb55b3d40ad4a9399c7e110a08fea57a94b0c7ad0795a35123832a",
+        "rollouts.jsonl": "4171b64ed69b8f5a488a6921a300e0b3054989e540150429b0b3247c7591de70",
+        "rollouts_failures.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "rollouts_materialized_inputs.jsonl": "a9ed3519d075a52d8a8a5a68a47503e9652bcc3d0883e881a0b5734133869c76",
-        "reward_scores.jsonl": "7737d23880bc37fcf0f4e1708ae6ba560a7e684f5470130e60c1a283f25b3069"
+        "reward_scores.jsonl": "5c86a627f97a08653206170bd18ae2692015a123bc05a62bf2d4e2c5f44e4fc7"
       }
     }
   },
-  "paired": {
-    "n": 446,
-    "linear_reward": {
-      "pass1": 0.8530044843049327,
-      "pass3": 0.9245739910313902
-    },
-    "squared_reward": {
-      "pass1": 0.7943013452914799,
-      "pass3": 0.8895964125560538
-    },
-    "blend_a_reward": {
-      "pass1": 0.703117802690583,
-      "pass3": 0.7482206278026906
-    }
-  },
-  "scoring": "Equal weight per scored task (micro mean); model/render failures score zero. Judge failures are masked. Squared and Blend A are offline rescoring of the final attempt; stopping used linear reward.",
-  "upstream": {
-    "source": "https://github.com/image2code/vision2code/blob/84821d92fe59033e7845025bdc49f3c0bc2676c4/results/paper_outputs/main_leaderboard/main_benchmark_ratings.csv",
-    "source_sha256": "dea96e579aa378b6a5a3786b325e05d7fa39088db84a4cd4f2d170e04cfb0694",
-    "summary_created_at": "2026-04-27T20:50:47+00:00",
-    "aggregation": "Equal-weight mean of the 15 dataset means, original 0\u20135 rubric scale. Historical upstream report, not a Gym reproduction. Judge and generation settings are not fully recorded in this summary; do not compare directly with Gym rewards."
-  }
+  "scoring": "Equal weight per task; code/render failures score zero. All 539 tasks in each run are unmasked. Squared and Blend A are offline rescoring of final attempts; generation and stopping used linear reward."
 }

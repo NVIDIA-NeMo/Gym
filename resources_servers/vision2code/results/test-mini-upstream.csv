@@ -1,6 +1,0 @@
-model_slug,num_filtered_samples,num_rated_final,num_missing_rating,num_render_success,macro_mean_final_rating_0_to_5
-qwen35_9b,539,539,0,405,1.5970000000
-kimi_k2_5,539,539,0,477,3.0648000000
-kimi_k2_5_reasoning,539,539,0,490,3.2930000000
-qwen35_397b_a17b,539,538,1,474,2.4072000000
-qwen35_397b_a17b_reasoning,539,539,0,440,3.0013000000
