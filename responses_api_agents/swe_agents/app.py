@@ -65,6 +65,7 @@ from nemo_gym.config.global_config import OmegaConf
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
 )
 from nemo_gym.server_runtime import (
@@ -3828,7 +3829,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
-            install_openhands_capture_overlay=token_capture_enabled,
+            # The overlay points OpenHands at the per-run URL, which it otherwise ignores: needed whenever that URL
+            # carries what the model server requires, the capture prefix or the rollout's sampling segment.
+            install_openhands_capture_overlay=token_capture_enabled or current_model_sampling_segment() is not None,
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
