@@ -4,8 +4,6 @@ description: "The contract a task folder's tests/ must meet: reward files, Pytho
 position: 4
 ---
 
-# Task Folder Verifiers
-
 A task folder carries its own verifier in `tests/`, unless the dataset's `verifier.py` grades it. After the agent's
 session closes, the `harbor` Environment Server runs it inside a sandbox and reads the reward it writes. No
 Resources Server takes part. This page is the contract a verifier must meet. The `[verifier]` fields are listed in

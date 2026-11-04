@@ -4,8 +4,6 @@ description: "Define tasks as JSONL rows served by a Resources Server: the row f
 position: 2
 ---
 
-# JSONL Datasets
-
 A JSONL dataset for reinforcement learning (RL) training runs through an **Environment Server**, which orders each episode: it drives an **Agent Server** (runs the agent harness) and seeds and verifies on a **Resources Server** (provides tools and computes rewards). On the `legacy_agent` path the Agent Server runs the whole episode itself.
 
 JSONL rows fit many tasks that share one verifier and toolset, such as math, instruction following or tool calling. See [Two kinds of task formats](/main/data#two-kinds-of-task-formats) to compare them with Harbor task folders.

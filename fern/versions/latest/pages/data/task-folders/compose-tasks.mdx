@@ -4,8 +4,6 @@ description: "Author a task folder whose environment runs sidecar containers bes
 position: 6
 ---
 
-# Multi-Container Tasks
-
 Some tasks need more than one container: a database the agent queries, an API it calls, a simulated user, or a
 service that records what the agent did. Describe them with a Docker Compose file in the task's `environment/`
 folder. The `harbor` Environment Server starts each service as its own sandbox, joins them into one group for the

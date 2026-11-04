@@ -4,12 +4,10 @@ description: "Write a task folder, check it with the oracle, run an agent on it,
 position: 2
 ---
 
-# Author Task Folders
-
-A task folder holds everything one task needs: the instruction, the software environment, the verifier and a
-reference solution. NeMo Gym reads task folders in the [Harbor](https://github.com/harbor-framework/harbor) task
-format and runs them on the `harbor` Environment Server, which starts a sandbox from the folder, runs the agent
-session in it, then runs the task's own verifier, in that sandbox or in a fresh one. No Resources Server takes part.
+A task folder holds everything one task needs: the instruction, the software environment, the verifier and a reference
+solution. NeMo Gym reads task folders in the Harbor task format and runs them on the `harbor` Environment Server, which
+starts a sandbox from the folder, runs the agent session in it, then runs the task's own verifier, in that sandbox or
+in a fresh one. No Resources Server takes part.
 
 ```text
 my-dataset/
@@ -27,14 +25,15 @@ run. [Task Folder Format](/main/data/task-folders/task-folder-format) lists ever
 
 ## Coming from Harbor
 
-Harbor task folders, and hub datasets by their `harbor:` reference, run in Gym without changes, within the subset
-Gym supports. What differs is who runs them. Gym starts the sandboxes through its own sandbox providers, and the
-agent is a Gym harness chosen with `--agent`, not a Harbor agent. Gym records a digest of every task folder and
-refuses a task edited after it was prepared, until you prepare it again. In a pulled hub dataset, an edited task
+Task folders written for [Harbor](https://github.com/harbor-framework/harbor), and hub datasets by their `harbor:`
+reference, run in Gym without changes, within the subset Gym supports. What differs is who runs them. Gym starts the
+sandboxes through its own sandbox providers, the agent is a Gym harness chosen with `--agent`, not a Harbor agent, and
+the results are Gym rollouts, the same output as every other Gym environment. Gym records a digest of every task folder
+and refuses a task edited after it was prepared, until you prepare it again. In a pulled hub dataset, an edited task
 stops every prepare, so copy its folder into your own dataset to change it. Gym's dataset settings live in a `[gym]`
-table in `dataset.toml`, which `harbor add`, `harbor remove` and `harbor sync` drop when they rewrite the file, so
-keep the dataset in git. See
-[Compatibility with Harbor](/main/data/task-folders/task-folder-format#compatibility-with-harbor) for that subset.
+table in `dataset.toml`, which `harbor add`, `harbor remove` and `harbor sync` drop when they rewrite the file, so keep
+the dataset in git. See [Compatibility with
+Harbor](/main/data/task-folders/task-folder-format#compatibility-with-harbor) for that subset.
 
 ## Before you start
 

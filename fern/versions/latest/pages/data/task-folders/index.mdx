@@ -4,12 +4,11 @@ description: "Write, validate and run tasks as task folders in the Harbor format
 position: 3
 ---
 
-# Harbor Task Folders
-
-A task folder holds one task in the [Harbor](https://github.com/harbor-framework/harbor) format: `task.toml`, and
-usually `instruction.md`, `environment/`, `tests/` and `solution/`. The task carries its own environment and verifier,
-and the `harbor` Environment Server runs it, so no Resources Server takes part. See
-[Two kinds of task formats](/main/data#two-kinds-of-task-formats) to decide whether task folders fit your tasks.
+A task folder holds one task: `task.toml`, and usually `instruction.md`, `environment/`, `tests/` and `solution/`. The
+task carries its own environment and verifier, and the `harbor` Environment Server runs it, so no Resources Server
+takes part. Task folders use the Harbor task format, so tasks written for Harbor also run in Gym, within the subset Gym
+supports. See [Two kinds of task formats](/main/data#two-kinds-of-task-formats) to decide whether task folders fit your
+tasks.
 
 ## Start here
 

@@ -4,8 +4,6 @@ description: "Define the tasks NeMo Gym runs, as JSONL rows served by a Resource
 position: 1
 ---
 
-# Prepare Tasks
-
 A task is one unit of work that an agent attempts and a verifier scores. NeMo Gym reads tasks in two forms.
 
 ## Two kinds of task formats
@@ -16,7 +14,7 @@ A task is one unit of work that an agent attempts and a verifier scores. NeMo Gy
 | What you write | One JSONL line per task (`responses_create_params` plus the fields your verifier reads), a Resources Server that holds the tools and `verify()`, and a YAML config that wires them to an Agent Server. | One folder per task in the Harbor format, holding `task.toml` and usually `instruction.md`, `environment/`, `tests/` and `solution/`. See [Task folder layout](/main/data/task-folders/task-folder-format#task-folder-layout) for which are required. |
 | Where verification runs | In the Resources Server's `verify()`. | In the task's sandbox, or a fresh one for separate verification, where the task's `tests/`, or the dataset's shared `verifier.py`, writes the reward. |
 
-JSONL rows run on an Environment Server, such as `single_agent_turn`, that drives an Agent Server and calls your Resources Server to seed each task and verify the attempt. See [Design Agent Interactions](/main/agent-interactions) to choose the Environment Server, and [Build Environments](/main/environment-tutorials) to build a Resources Server end to end.
+JSONL rows run on an Environment Server, such as `single_agent_turn`, that drives an Agent Server and calls your Resources Server to seed each task and verify the attempt. See [Design Agent-Environment Interactions](/main/agent-interactions) to choose the Environment Server, and [Build Environments](/main/environment-tutorials) to build a Resources Server end to end.
 
 Harbor task folders run on the `harbor` Environment Server, which starts a sandbox from each folder, runs the agent session in it, then runs the task's verifier in that sandbox, or in a fresh one for separate verification. No Resources Server takes part. Start with [Author Task Folders](/main/data/task-folders/harbor-tasks), and see [Harbor Environment Server](/main/agent-interactions/harbor) for how an episode runs.
 
