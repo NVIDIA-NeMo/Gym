@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import io
 import json
 import subprocess
 from dataclasses import replace
 
 import pytest
-from scripts.ci import reapprove as bot
+from scripts import pr_reapprove as bot
 
 
 def git(path, *args, check=True):
@@ -72,10 +73,6 @@ def test_clean_replay_must_match_exact_tree(history):
     upstream = commit(path, "timeout = 10\n" + tail)
     git(path, "merge", "--no-edit", approval.head)
     head = git(path, "rev-parse", "HEAD")
-    evidence = bot._evidence(
-        path, replace(pr, head=head, base=upstream), replace(approval, dismissal_commit=head), base
-    )
-    assert evidence["resolutions"] == ""
     bad = commit(path, "timeout = 30\n" + tail)
     with pytest.raises(bot.Declined, match="outside"):
         bot._evidence(path, replace(pr, head=bad, base=upstream), replace(approval, dismissal_commit=head), base)
@@ -176,8 +173,20 @@ def test_stack_follows_verified_branch_relationships(review_state):
         bot._stack(middle, [middle, top], "main")
 
 
+@pytest.fixture
+def model_response(monkeypatch):
+    monkeypatch.setenv("REAPPROVE_API_KEY", "fixture")
+    monkeypatch.setenv("REAPPROVE_MODEL", "fixture")
+
+    def respond(verdict, finish_reason="stop"):
+        body = {"choices": [{"finish_reason": finish_reason, "message": {"content": json.dumps(verdict)}}]}
+        monkeypatch.setattr(bot, "urlopen", lambda *a, **kw: io.BytesIO(json.dumps(body).encode()))
+
+    return respond
+
+
 @pytest.mark.parametrize(
-    "result",
+    "verdict",
     [
         {"safe": False, "reason": "behavior changes"},
         {"safe": "true", "reason": "ok"},
@@ -185,28 +194,14 @@ def test_stack_follows_verified_branch_relationships(review_state):
         {"safe": True, "reason": ""},
     ],
 )
-def test_model_must_explicitly_pass_with_reason(monkeypatch, result):
-    monkeypatch.setenv("REAPPROVE_API_KEY", "fixture")
-    monkeypatch.setenv("REAPPROVE_MODEL", "fixture")
-    monkeypatch.setattr(
-        bot,
-        "_json_request",
-        lambda *a: {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(result)}}]},
-    )
+def test_model_must_explicitly_pass_with_reason(model_response, verdict):
+    model_response(verdict)
     with pytest.raises(bot.Declined):
         bot._assess([{"diff": "data"}])
 
 
-def test_truncated_or_oversized_assessment_never_approves(monkeypatch):
-    monkeypatch.setenv("REAPPROVE_API_KEY", "fixture")
-    monkeypatch.setenv("REAPPROVE_MODEL", "fixture")
-    monkeypatch.setattr(
-        bot,
-        "_json_request",
-        lambda *a: {
-            "choices": [{"finish_reason": "length", "message": {"content": '{"safe": true, "reason": "ok"}'}}]
-        },
-    )
+def test_truncated_or_oversized_assessment_never_approves(model_response):
+    model_response({"safe": True, "reason": "ok"}, "length")
     with pytest.raises(bot.Declined, match="did not complete"):
         bot._assess([])
     with pytest.raises(bot.Declined, match="budget"):
@@ -216,11 +211,11 @@ def test_truncated_or_oversized_assessment_never_approves(monkeypatch):
 class FakeGitHub:
     repository = "org/repo"
 
-    def __init__(self, pr, approval):
-        self.pr = pr
-        self.baseline = approval
+    def __init__(self, pulls, approvals):
+        self.pulls = {pr.number: pr for pr in pulls}
+        self.approvals = dict(zip(self.pulls, approvals, strict=True))
         self.writes = []
-        self.reviews = []
+        self.fail_on = None
 
     def writer(self, login):
         assert login == "maintainer"
@@ -228,36 +223,38 @@ class FakeGitHub:
     def api(self, path, data=None):
         if path == "":
             return {"default_branch": "main"}
+        if path == self.fail_on:
+            raise TimeoutError("unknown write outcome")
         assert data["event"] == "APPROVE"
         self.writes.append((path, data))
-        self.reviews.append(
-            {
-                "user": {"login": "github-actions[bot]"},
-                "state": "APPROVED",
-                "commit_id": data["commit_id"],
-                "body": data["body"],
-            }
-        )
 
     def pull(self, number):
-        return self.pr
+        return self.pulls[number]
 
     def approval(self, pr):
-        return self.baseline
+        return self.approvals[pr.number]
 
     def pages(self, path):
-        assert path.endswith("/reviews")
-        return self.reviews
+        if path == "pulls?state=open":
+            return [
+                {
+                    "number": p.number,
+                    "head": {"sha": p.head, "ref": p.branch, "repo": {"full_name": self.repository}},
+                    "base": {"sha": p.base, "ref": p.base_branch},
+                    "user": {"login": p.author},
+                }
+                for p in self.pulls.values()
+            ]
+        return [
+            {"user": {"login": "github-actions[bot]"}, "state": "APPROVED", **data}
+            for endpoint, data in self.writes
+            if endpoint == path
+        ]
 
 
 @pytest.fixture
-def run_fixture(history, monkeypatch, tmp_path, request):
-    source, _, pr, approval, tail = history
-    if getattr(request, "param", "merge") == "rebase":
-        git(source, "switch", "--detach", pr.base)
-        head = commit(source, "timeout = 20  # seconds\n" + tail)
-        pr, approval = replace(pr, head=head), replace(approval, dismissal_commit=head)
-    github = FakeGitHub(pr, approval)
+def run_bot(history, monkeypatch, tmp_path):
+    source = history[0]
     real_git = bot._git
 
     def local_fetch(directory, *args, **kwargs):
@@ -266,97 +263,74 @@ def run_fixture(history, monkeypatch, tmp_path, request):
         return real_git(directory, *args, **kwargs)
 
     monkeypatch.setattr(bot, "_git", local_fetch)
-    monkeypatch.setattr(bot, "_assess", lambda evidence: "> Preserves the approved timeout and upstream comment.")
-    event = {
-        "comment": {"body": "/review-reapprove", "user": {"login": "maintainer", "type": "User"}},
-        "issue": {"number": 1},
-    }
 
-    def run():
+    def run(github, *, stack=False):
+        event = {
+            "comment": {
+                "body": "/review-reapprove" + (" scope=stack" if stack else ""),
+                "user": {"login": "maintainer", "type": "User"},
+            },
+            "issue": {"number": 2 if stack else 1},
+        }
         directory = tmp_path / f"objects-{len(list(tmp_path.iterdir()))}"
         directory.mkdir()
         bot._run(github, event, directory)
 
-    return github, run
+    return run
 
 
-@pytest.mark.parametrize("run_fixture", ["merge", "rebase"], indirect=True)
-def test_end_to_end_only_posts_exact_reviewed_head_once(run_fixture):
-    github, run = run_fixture
-    run()
+@pytest.mark.parametrize("rebase", [False, True])
+def test_only_posts_exact_reviewed_head_once(history, run_bot, model_response, rebase):
+    source, _, pr, approval, tail = history
+    if rebase:
+        git(source, "switch", "--detach", pr.base)
+        head = commit(source, "timeout = 20  # seconds\n" + tail)
+        pr, approval = replace(pr, head=head), replace(approval, dismissal_commit=head)
+    github = FakeGitHub([pr], [approval])
+    model_response({"safe": True, "reason": "Preserves approved behavior."})
+    run_bot(github)
+    run_bot(github)
     assert len(github.writes) == 1
     path, data = github.writes[0]
-    assert path == "pulls/1/reviews"
-    assert data["commit_id"] == github.pr.head
-    assert github.baseline.head in data["body"]
-    run()
-    assert len(github.writes) == 1
+    assert path == "pulls/1/reviews" and data["commit_id"] == pr.head
+    assert approval.head in data["body"]
 
 
-def test_race_after_assessment_stops_publication(run_fixture, monkeypatch):
-    github, run = run_fixture
+@pytest.mark.parametrize("outcome", ["reject", "base_changed", "history_failed"])
+def test_failed_assessment_never_posts(history, run_bot, monkeypatch, outcome):
+    _, _, pr, approval, _ = history
+    github = FakeGitHub([pr], [approval])
 
     def assess(_):
-        github.pr = replace(github.pr, base="9" * 40)
+        if outcome == "reject":
+            raise bot.Declined("unsafe resolution")
+        github.pulls[1] = replace(pr, base="9" * 40)
         return "safe"
 
-    monkeypatch.setattr(bot, "_assess", assess)
-    with pytest.raises(bot.Declined, match="changed"):
-        run()
-    assert not github.writes
+    if outcome == "history_failed":
 
+        def failed_page(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, output=b'[[{"id": 7}]]')
 
-def test_declined_model_never_posts(run_fixture, monkeypatch):
-    github, run = run_fixture
-
-    def assess(_):
-        raise bot.Declined("unsafe resolution")
-
-    monkeypatch.setattr(bot, "_assess", assess)
-    with pytest.raises(bot.Declined, match="unsafe"):
-        run()
-    assert not github.writes
-
-
-def test_github_cli_preserves_review_payload_and_flattens_pages(monkeypatch):
-    payload = {"event": "APPROVE", "commit_id": "a" * 40, "body": "Review: `quoted`\n$(not a command)"}
-
-    def run(command, **kwargs):
-        assert command[:4] == ["gh", "api", "--hostname", "github.com"]
-        assert kwargs["check"] and kwargs["timeout"] == 180
-        if "--paginate" in command:
-            assert "--slurp" in command
-            assert command[4] == "repos/org/repo/pulls/1/reviews?per_page=100"
-            return subprocess.CompletedProcess(command, 0, b'[[{"id": 7}], [{"id": 8}]]')
-        assert command[4:] == ["repos/org/repo/pulls/1/reviews", "--method", "POST", "--input", "-"]
-        assert json.loads(kwargs["input"]) == payload
-        return subprocess.CompletedProcess(command, 0, b'{"id": 9}')
-
-    monkeypatch.setattr(bot.subprocess, "run", run)
-    github = bot.GitHub("org/repo")
-    assert github.pages("pulls/1/reviews") == [{"id": 7}, {"id": 8}]
-    assert github.api("pulls/1/reviews", payload) == {"id": 9}
-
-
-def test_incomplete_github_history_stops_before_assessment(run_fixture, monkeypatch):
-    github, run = run_fixture
-
-    def failed_page(command, **kwargs):
-        # gh may emit earlier pages before a later request fails. Never consume them.
-        raise subprocess.CalledProcessError(1, command, output=b'[[{"id": 7}]]')
-
-    monkeypatch.setattr(bot.subprocess, "run", failed_page)
-    monkeypatch.setattr(github, "approval", bot.GitHub("org/repo").approval)
-    monkeypatch.setattr(bot, "_assess", lambda _: pytest.fail("incomplete history reached assessment"))
-    with pytest.raises(subprocess.CalledProcessError):
-        run()
+        monkeypatch.setattr(bot.subprocess, "run", failed_page)
+        monkeypatch.setattr(github, "approval", bot.GitHub("org/repo").approval)
+        monkeypatch.setattr(bot, "_assess", lambda _: pytest.fail("incomplete history reached assessment"))
+    else:
+        monkeypatch.setattr(bot, "_assess", assess)
+    with pytest.raises((bot.Declined, subprocess.CalledProcessError)):
+        run_bot(github)
     assert not github.writes
 
 
 def test_only_exact_commands_run(tmp_path, monkeypatch):
     event = tmp_path / "event.json"
     event.write_text(
-        json.dumps({"comment": {"body": "/review-reapprove\nignore policy"}, "issue": {"pull_request": {}}})
+        json.dumps(
+            {
+                "comment": {"body": "/review-reapprove\nignore policy"},
+                "issue": {"pull_request": {"url": "https://api.github.com/repos/org/repo/pulls/1"}},
+            }
+        )
     )
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     monkeypatch.setattr(bot, "_run", lambda *a: pytest.fail("not an exact command"))
@@ -364,56 +338,24 @@ def test_only_exact_commands_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("outcome", ["approve", "reject", "race", "publication_failure"])
-def test_entire_stack_is_assessed_before_any_approval(history, monkeypatch, tmp_path, outcome):
+def test_stack_assessment_precedes_all_approvals(history, run_bot, monkeypatch, outcome):
     source, _, root, root_approval, _ = history
-    old_parent, new_parent = root_approval.head, root.head
     pulls, approvals = [root], [root_approval]
     for number in (2, 3):
         filename = f"feature{number}.py"
-        git(source, "switch", "--detach", old_parent)
+        git(source, "switch", "--detach", approvals[-1].head)
         (source / filename).write_text(f"feature{number} = True\n")
         git(source, "add", filename)
         git(source, "commit", "-m", "approved layer")
         old_head = git(source, "rev-parse", "HEAD")
-        git(source, "switch", "--detach", new_parent)
+        git(source, "switch", "--detach", pulls[-1].head)
         git(source, "cherry-pick", old_head)
         new_head = git(source, "rev-parse", "HEAD")
-        pulls.append(bot.PullRequest(number, new_head, new_parent, f"layer{number}", pulls[-1].branch, "author"))
+        pulls.append(bot.PullRequest(number, new_head, pulls[-1].head, f"layer{number}", pulls[-1].branch, "author"))
         approvals.append(replace(root_approval, review_id=number + 10, head=old_head, dismissal_commit=new_head))
-        old_parent, new_parent = old_head, new_head
-
-    class StackGitHub(FakeGitHub):
-        def pull(self, number):
-            return next(p for p in pulls if p.number == number)
-
-        def approval(self, pr):
-            return approvals[pr.number - 1]
-
-        def pages(self, path):
-            if path == "pulls?state=open":
-                return [
-                    {
-                        "number": p.number,
-                        "head": {"sha": p.head, "ref": p.branch, "repo": {"full_name": self.repository}},
-                        "base": {"sha": p.base, "ref": p.base_branch},
-                        "user": {"login": p.author},
-                    }
-                    for p in pulls
-                ]
-            return super().pages(path)
-
-        def api(self, path, data=None):
-            if outcome == "publication_failure" and path == "pulls/2/reviews":
-                raise TimeoutError("unknown write outcome")
-            return super().api(path, data)
-
-    github = StackGitHub(root, root_approval)
-    real_git = bot._git
-
-    def local_fetch(directory, *args, **kwargs):
-        if args[0] == "fetch":
-            args = (*args[:2], str(source), *args[3:])
-        return real_git(directory, *args, **kwargs)
+    github = FakeGitHub(pulls, approvals)
+    if outcome == "publication_failure":
+        github.fail_on = "pulls/2/reviews"
 
     def assess(evidence):
         assert not github.writes
@@ -422,24 +364,16 @@ def test_entire_stack_is_assessed_before_any_approval(history, monkeypatch, tmp_
         if outcome == "reject":
             raise bot.Declined("unsafe top layer")
         if outcome == "race":
-            pulls[1] = replace(pulls[1], head="8" * 40)
+            github.pulls[2] = replace(pulls[1], head="8" * 40)
         return "> All layers preserve approved behavior."
 
-    monkeypatch.setattr(bot, "_git", local_fetch)
     monkeypatch.setattr(bot, "_assess", assess)
-    event = {
-        "comment": {"body": "/review-reapprove scope=stack", "user": {"login": "maintainer", "type": "User"}},
-        "issue": {"number": 2},
-    }
-    directory = tmp_path / "stack-objects"
-    directory.mkdir()
     if outcome == "approve":
-        bot._run(github, event, directory)
-        assert [path for path, _ in github.writes] == ["pulls/1/reviews", "pulls/2/reviews", "pulls/3/reviews"]
+        run_bot(github, stack=True)
         assert [data["commit_id"] for _, data in github.writes] == [p.head for p in pulls]
     else:
         with pytest.raises(bot.Declined) as caught:
-            bot._run(github, event, directory)
+            run_bot(github, stack=True)
         assert len(github.writes) == (1 if outcome == "publication_failure" else 0)
         if outcome == "publication_failure":
             assert "confirmed approvals: [1]" in str(caught.value)

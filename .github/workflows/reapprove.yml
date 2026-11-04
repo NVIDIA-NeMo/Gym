@@ -46,4 +46,4 @@ jobs:
           REAPPROVE_API_KEY: ${{ secrets.REAPPROVE_API_KEY }}
           REAPPROVE_API_URL: ${{ vars.REAPPROVE_API_URL }}
           REAPPROVE_MODEL: ${{ vars.REAPPROVE_MODEL }}
-        run: python scripts/ci/reapprove.py
+        run: python scripts/pr_reapprove.py

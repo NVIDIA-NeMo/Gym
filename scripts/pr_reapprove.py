@@ -57,20 +57,6 @@ class Approval:
     dismissal_commit: str | None
 
 
-def _json_request(url: str, token: str, data: dict | None = None) -> dict | list:
-    request = Request(
-        url,
-        data=json.dumps(data).encode() if data is not None else None,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
-    )
-    with urlopen(request, timeout=180) as response:
-        return json.load(response)
-
-
 class GitHub:
     def __init__(self, repository: str) -> None:
         self.repository = repository
@@ -257,6 +243,7 @@ def _evidence(directory: Path, pr: PullRequest, approval: Approval, old_base: st
             "AGENTS.md",
             "CLAUDE.md",
             ".gitattributes",
+            "pr_reapprove.py",
         }:
             raise Declined(f"#{pr.number}: review or automation policy conflict requires a human.")
         entries = [_git(directory, "ls-tree", revision, "--", path).split() for revision in (tree, pr.head)]
@@ -288,27 +275,30 @@ def _assess(evidence: list[dict]) -> str:
     url = os.environ.get("REAPPROVE_API_URL") or "https://api.openai.com/v1/chat/completions"
     if not url.startswith("https://"):
         raise Declined("REAPPROVE_API_URL must use HTTPS.")
-    response = _json_request(
+    request = Request(
         url,
-        key,
-        {
-            "model": model,
-            "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": content}],
-            "response_format": {"type": "json_object"},
-        },
+        data=json.dumps(
+            {
+                "model": model,
+                "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": content}],
+                "response_format": {"type": "json_object"},
+            }
+        ).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
-    choice = response["choices"][0]
+    with urlopen(request, timeout=180) as response:
+        choice = json.load(response)["choices"][0]
     if choice.get("finish_reason") != "stop":
         raise Declined("The model did not complete its assessment.")
     verdict = json.loads(choice["message"]["content"])
     reason = verdict.get("reason")
-    if verdict.get("safe") is not True or not isinstance(reason, str) or not reason.strip():
-        detail = (
-            "\n\n" + "\n".join("> " + line for line in reason[:3000].splitlines()) if isinstance(reason, str) else ""
-        )
-        raise Declined("The model could not establish that the resolutions preserve approved behavior." + detail)
+    if not isinstance(reason, str) or not reason.strip():
+        raise Declined("The model did not explain its assessment.")
     # Quoting prevents model output from masquerading as the bot's command or audit marker.
-    return "\n".join("> " + line for line in reason[:3000].splitlines())
+    reason = "\n".join("> " + line for line in reason[:3000].splitlines())
+    if verdict.get("safe") is not True:
+        raise Declined("The model could not establish that the resolutions preserve approved behavior.\n\n" + reason)
+    return reason
 
 
 def _run(github: GitHub, event: dict, directory: Path) -> None:
@@ -318,14 +308,14 @@ def _run(github: GitHub, event: dict, directory: Path) -> None:
         return
     requester = comment["user"]["login"]
     github.writer(requester)
-    target = github.pull(event["issue"]["number"])
     default = github.api("")["default_branch"]
 
     def scope() -> list[PullRequest]:
+        target = github.pull(event["issue"]["number"])
         if not COMMANDS[command]:
             if target.base_branch != default:
                 raise Declined("For a stacked PR, use /review-reapprove scope=stack.")
-            return [github.pull(target.number)]
+            return [target]
         pulls = github.pages("pulls?state=open")
         # Keep draft entries: if they belong to this stack, pull() will reject them.
         candidates = [
@@ -335,7 +325,7 @@ def _run(github: GitHub, event: dict, directory: Path) -> None:
             for p in pulls
             if (p["head"]["repo"] or {}).get("full_name") == github.repository
         ]
-        selected = _stack(github.pull(target.number), candidates, default)
+        selected = _stack(target, candidates, default)
         refreshed = [github.pull(p.number) for p in selected]
         if refreshed != selected:
             raise Declined("Stack changed while it was being read. Retry the command.")
@@ -374,12 +364,18 @@ def _run(github: GitHub, event: dict, directory: Path) -> None:
         )
     reason = _assess(evidence)
     digest = hashlib.sha256(repr((pulls, approvals)).encode()).hexdigest()
+
+    def check_current() -> None:
+        github.writer(requester)
+        if scope() != pulls or [github.approval(p) for p in pulls] != approvals:
+            raise Declined(
+                "Heads, bases, stack membership, or human approvals changed; existing reviews may be stale."
+            )
+
     posted = []
     try:
         for pr, approval in zip(pulls, approvals, strict=True):
-            github.writer(requester)
-            if scope() != pulls or [github.approval(p) for p in pulls] != approvals:
-                raise Declined("Heads, bases, stack membership, or human approvals changed; retry.")
+            check_current()
             if approval.dismissal_commit is None:
                 continue
             marker = f"<!-- gym-reapprove:{digest}:{pr.number} -->"
@@ -399,8 +395,7 @@ def _run(github: GitHub, event: dict, directory: Path) -> None:
             )
             github.api(f"pulls/{pr.number}/reviews", {"event": "APPROVE", "commit_id": pr.head, "body": body})
             posted.append(pr.number)
-            if scope() != pulls or [github.approval(p) for p in pulls] != approvals:
-                raise Declined("The reviewed scope changed during publication; existing bot reviews may be stale.")
+            check_current()
     except Exception as exc:
         # Do not retry a POST with unknown outcome. A rerun reconciles its exact marker.
         detail = str(exc) if isinstance(exc, Declined) else "GitHub request failed; the last write may have succeeded."
