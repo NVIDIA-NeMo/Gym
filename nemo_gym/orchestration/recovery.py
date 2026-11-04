@@ -62,7 +62,6 @@ from nemo_gym.agents.agent_outcome import (
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import mask_url_passwords
-from nemo_gym.core.episode_types import FailureBoundary
 from nemo_gym.core.failure_kinds import (
     AGENT_SANDBOX_OOM_KILLED,
     AGENT_TIMEOUT_INFRASTRUCTURE,
@@ -93,6 +92,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
     is_server_status,
 )
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.orchestration.collect_evidence import (
     COLLECT_SCRIPT,
@@ -1427,9 +1427,22 @@ def decide_recovery(
         return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON)
     segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
+        # A chain stops once less than a minute of its walltime remains, so name that budget too when it is spent.
+        walltime_spent = (
+            budget.walltime_capped
+            and budget.walltime_used_s is not None
+            and budget.max_walltime_s is not None
+            and budget.max_walltime_s - budget.walltime_used_s < 60
+        )
         return decision(
             RecoveryAction.STOP,
-            f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})",
+            f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})"
+            + (
+                f", and the stored walltime budget is used ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s"
+                "; less than a minute is left): raise both in one call"
+                if walltime_spent
+                else ""
+            ),
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
@@ -3120,7 +3133,7 @@ def _observed_trial_operations(
     attempt is an event of that operation and of the row, and the answer is the final attempt's.
     """
     decision = _health_view(decision)
-    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     # A settled model failure (MODEL_FINAL) or a rollout that ended on a failed policy request is a counted trial
     # failure with its recorded kind; only the other trials need their operations and grading observed. A row an

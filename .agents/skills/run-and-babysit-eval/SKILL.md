@@ -1,5 +1,5 @@
 ---
-name: gym-eval
+name: run-and-babysit-eval
 description: >
   Take a NeMo Gym evaluation from a ready config to a trusted result: submit it, let the resumable
   Slurm chain continue through walltime limits, preemption and node loss, inspect and recover the
@@ -7,7 +7,7 @@ description: >
   gates, and decide when to stop a chain or start a fresh run. Use when a working Gym config
   (benchmark, model, compute) exists and the run has to finish with a result you can rely on. Not
   for building a benchmark or harness (use add-benchmark or add-harness) or for setting up a
-  model's serving config (use gym-add-model-config). Triggered by: "run the eval", "submit this
+  model's serving config (use add-model-eval-config). Triggered by: "run the eval", "submit this
   benchmark", "the job timed out", "the chain stopped", "resume the run", "recover the run",
   "is the run done", "inspect the run", "gate the score", "restart the evaluation".
 ---
@@ -78,6 +78,10 @@ needs only the `mlflow` extra, which the MLflow delivery check in `--inspect` us
    only adds (for example `++compute.cluster.walltime=00:40:00`). Check with `--resolve-only`.
 7. Not tracking in MLflow on purpose: `mlflow_tracking_required: false` in each benchmark's `run`. The
    delivery state is then `not_required`; health checks still run.
+8. For a large model, a fresh install or a loaded cluster, raise
+   `++driver.benchmarks.<name>.run.server_spinup_timeout_seconds` (default 600 s, which covers dependency
+   installation and model loading); a spin-up timeout is an infra stop that leaves rows untouched and never a
+   zero, and the chain waits for `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"`.
 
 ## 2. Submit and let the chain run
 
@@ -231,14 +235,22 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | STOP typed `provider_credentials_rejected` (the sandbox provider answered 401 or 403) | Fix the credentials, then `--recover`. |
 | STOP typed `collection_resume_refused`, or a **semantic** configuration difference (data, limits, repeats, model, sampling, judge or grading) | Usually a fresh run (step 8). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"` (records the reason and the user; never bypasses corrupt history). Operational differences (timeouts, retries, ports, concurrency, paths, tracking) resume by themselves with a warning. If the saved fingerprint no longer matches, continue at the run's own pin and report it; a resume on a newer Gym can be refused after setup, which costs an allocation. |
 | STOP: a resumed segment saved no rollout (its walltime was shorter than setup plus one rollout) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. |
-| The chain's walltime cap is spent, or the chain's accounting is unknown (a requeued segment) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`, never below the recorded walltime; journaled. For unknown accounting the explicit budget is what continues it, optionally with `--extend-retries`. |
-| The infra-retry budget is spent | `--recover --extend-retries N`; the spent count is kept; journaled. It raises infra retries only, not the per-row attempt cap. |
+| The chain's walltime cap is spent, or the chain's accounting is unknown (a requeued segment) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`, never below the recorded walltime; journaled. For unknown accounting the explicit budget is what continues it, optionally with `--extend-retries`. When both budgets are spent, give `--extend-retries N` and `--max-walltime HH:MM:SS --walltime-reason "<why>"` in one call. |
+| The infra-retry budget is spent | `--recover --extend-retries N`; the spent count is kept; journaled. It raises infra retries only, not the per-row attempt cap. When both budgets are spent, give `--extend-retries N` and `--max-walltime HH:MM:SS --walltime-reason "<why>"` in one call. |
 | Rows used every attempt (`exhausted`, `max_rollout_attempts`) | `--recover --extend-attempts N`. Only rollouts the Store would run again are reopened (infrastructure failures, allocation cuts); a model failure or a saved result never is. Recorded in `artifacts/rollouts_attempt_extension`. |
 | A Gym fix is needed to continue, or the launcher's Gym differs from the run's pin | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | STOP: N completed result(s) are masked and not measured | They are kept and a resume would run nothing; the run is not complete. Report the count and the reason. Nothing re-grades a masked row that has a saved answer but neither a gradeable artifact (no intact patch, say) nor a recorded grade; `--inspect` names those rows apart ("without a gradeable artifact") and keeps them masked. Only when the operator wants them sampled again: `--recover --rerun-masked-without-artifact --rerun-reason "<why>"` (below the table). |
 | `fresh-restart` (no task inventory) | Step 8. |
 | NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (warning `MLflow delivery <state>: <reasons>`) | The results are complete; delivery is reported beside the gate, never inside it. Close it: `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values from the run's `artifacts/rollouts_resolved_config.yaml`, and the token as `+mlflow_tracking_token=<token>` or `MLFLOW_TRACKING_TOKEN`. A repeat on an exported run verifies without touching the run lock; `--recover` on a complete run that requires tracking and has no receipt runs the export too. "although the saved config snapshot names a tracking URI...": tracking was required and the export did not finish: read the exporter's failure in the driver log, repair, export. "does not name all of the tracking URI, experiment and run name": nothing tracked the run; set `mlflow_tracking_required: false` next time. From a host without access to the tracking server the inspect reports `unverified` with `status query failed: ...`: inspect with `--mlflow-run-id <receipt run_id> --mlflow-status FINISHED` once you observed that status yourself (`GET <tracking uri>/api/2.0/mlflow/runs/get?run_id=<id>`, field `info.status`); `ModuleNotFoundError` means the reader's environment lacks `mlflow`. When the reason says the rollouts were not uploaded and the run sets `upload_rollouts: false`, the delivery stays `unverified` by configuration: report it; an export does not change it. |
 | `SUCCESS` | Done. Keep the run directory as the record. Nothing needs cancelling: the finishing job cancelled its successor and sentinel (`chain-end-journal.jsonl`). |
+
+A judge-only re-judge takes the judge key and the other forwarded credentials from the environment of the shell
+that dispatches it; the run keeps none of them. Export the valid key before dispatching: a stale key in that
+shell fails every judge call again.
+
+A rollout cut by a segment end restarts from its first step; there is no step-level resume. So the
+segment walltime (`compute.cluster.walltime`) must exceed the longest single task's runtime: shorter
+segments restart the same task every time, and chaining more of them repeats the same work.
 
 Three limits, each counting something different: the **chain cap** (`max_walltime`, summed over
 segments) is raised with `--max-walltime`; the **infra-retry budget** (preemptions, node failures) with
@@ -338,7 +350,7 @@ again, not the evaluation. For the evaluation itself, only `num_repeats` and the
 (`--concurrency`) may change from the command line or a benchmark's `run`; a smoke run also sets `limit`
 (step 1). Never change the benchmark, the judge, or its token budgets and timeouts, which are the
 evaluation's identity. The model section is yours
-([gym-add-model-config](../gym-add-model-config/SKILL.md)). A slow deployment produces timeouts and
+([add-model-eval-config](../add-model-eval-config/SKILL.md)). A slow deployment produces timeouts and
 truncated answers that count as model failures: a policy-model response timeout is the model's unless
 the call sets `--policy-timeout-counts-as-model false` (for a self-hosted evaluation that owns its
 serving; it moves the timeout to the evaluation side and changes nothing else). Keep the default whenever

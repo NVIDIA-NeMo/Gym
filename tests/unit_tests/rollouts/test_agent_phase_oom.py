@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
-from nemo_gym.core.episode_types import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.failure_transport import FailureHeader
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.rollouts.rollout_collection import (

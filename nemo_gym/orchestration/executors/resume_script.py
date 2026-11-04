@@ -799,7 +799,7 @@ if (( _gym_accumulated >= {seconds} )); then
 fi
 # Slurm rounds time limits up to minutes. Round the remaining allowance down instead, never granting extra time.
 _gym_remaining_minutes=$((({seconds} - _gym_accumulated) / 60))
-(( _gym_remaining_minutes > 0 )) || _gym_stop_incomplete "Less than one minute remains in the walltime budget."
+(( _gym_remaining_minutes > 0 )) || _gym_stop_incomplete "Less than one minute remains in the walltime budget (${{_gym_accumulated}}s of {seconds}s); continue with gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT, with HH:MM:SS above the cap: the retry and walltime budgets carry over."
 _gym_allocation_limit_seconds() {{
     _gym_job_info=$(scontrol show job "$SLURM_JOB_ID" -o) || return 1
     [[ "$_gym_job_info" =~ (^|[[:space:]])TimeLimit=([^[:space:]]+) ]] || return 1

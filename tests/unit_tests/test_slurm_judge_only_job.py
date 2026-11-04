@@ -37,7 +37,9 @@ from tests.unit_tests.test_reverify_saved_results import verifier as verifier  #
 from tests.unit_tests.test_reverify_saved_results import verify_transport_masked
 
 
-def _model_served_run(tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str | None = None) -> Path:
+def _model_served_run(
+    tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str | None = None, run: dict | None = None
+) -> Path:
     """A submitted run with a vLLM policy on a GPU pool, whose managed Store holds one scored row and one result
     masked by a verify call lost in transport, with its chain accounting complete. With ``judge_pool`` it also serves
     its judge as a vLLM service ``wildguard`` on that pool: "judge", a GPU pool of its own, or "gpu", the policy's."""
@@ -74,7 +76,7 @@ def _model_served_run(tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str
                 "gym_install": {"ref": "a" * 40},
                 "benchmarks": {
                     "bench": {
-                        "run": {"config_paths": ["fixture.yaml"]},
+                        "run": {"config_paths": ["fixture.yaml"], **(run or {})},
                         "resumable": {"max_retries": 3, "max_walltime": "16:00:00"},
                     }
                 },
@@ -398,6 +400,15 @@ def test_the_queued_job_settles_the_run_through_its_own_settle_path_and_inspect_
     assert (job_dir / "artifacts" / "quality_summary.json").exists()
     # The chain accounting is still the policy chain's.
     assert (job_dir / ".gym_job_chain").read_text() == "100\n"
+
+
+def test_the_judge_only_job_does_not_inherit_the_collection_limit(tmp_path, judge_slurm_bin) -> None:
+    # A collection `limit` counts tasks; in the job's reverify it would cap the rows it re-judges.
+    job_dir = _model_served_run(tmp_path, run={"limit": 1})
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.dispatched == "reverify", out.decision.reason
+    assert _queued_reverify_config(_queued_script(job_dir)).limit is None
 
 
 @pytest.mark.parametrize("render", ["judge-only job", "judge-only job on a saved CPU pool", "the run's own job"])

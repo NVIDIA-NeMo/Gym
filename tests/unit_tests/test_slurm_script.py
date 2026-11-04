@@ -335,7 +335,7 @@ def test_build_vllm_ray_command_not_ray_serve_library():
 def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
     # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI.
     cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
-    assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
+    assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default,serve]==2.59.0"' in cmd
 
 
 def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_service):
@@ -498,7 +498,7 @@ def test_build_vllm_ray_serve_command_single_node_ensures_ray_installed(vllm_ser
     # Regression test: the single-node path invokes python3 directly, so ray isn't guaranteed
     # importable there unlike the multi-node path (gated via `ray symmetric-run`/`ray start`).
     cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
-    assert 'command -v ray >/dev/null 2>&1 || pip install -q \\"ray[default]\\"' in cmd
+    assert 'command -v ray >/dev/null 2>&1 || pip install -q \\"ray[default,serve]==2.59.0\\"' in cmd
     assert cmd.index("command -v ray") < cmd.index("python3 ray_serve_gateway.py")
 
 

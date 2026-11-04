@@ -33,7 +33,7 @@ from nemo_gym.config.global_config import (
     TASK_SOURCE_KEY_NAME,
     rollout_run_key,
 )
-from nemo_gym.core.episode_types import FailureBoundary, FailureEvent, FailureReport
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.failure_transport import FailureHeader
 from nemo_gym.eval.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,

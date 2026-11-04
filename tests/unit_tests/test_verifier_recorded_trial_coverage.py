@@ -4,7 +4,7 @@
 
 import pytest
 
-from nemo_gym.core.episode import rollout_context
+from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.orchestration.recovery import (
     _observed_trial_operations,
     decide_from_collected,
