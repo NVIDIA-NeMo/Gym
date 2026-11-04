@@ -13,10 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Accept renamed config keys and arguments under their old names, with a warning, until nemo_gym 0.10.0.
+"""Accept renamed config keys and arguments under their old names, with a warning, until ``RENAMED_KEYS_REMOVED_IN``.
 
-A config that sets an old key behaves exactly as if it set the new one.
-Setting both keys to different values is an error, because neither one can win silently.
+The config parser renames old keys in each config source before merging, so an old key overrides the new key from a
+config of lower precedence, and the other way round, as any key does. Setting both keys in one config to different
+values is an error, because neither one can win silently.
+
+Only keys are renamed. A reference to an old key from elsewhere, such as ``${old_key.dir}``, ``${inherit_from:...}``,
+``_copy`` or ``_delete_key``, still names the old key and has to be updated by hand.
 """
 
 import functools
@@ -33,9 +37,10 @@ from nemo_gym.config.config_types import ConfigError
 
 logger = logging.getLogger(__name__)
 
+# The nemo_gym release that stops accepting the old names.
 RENAMED_KEYS_REMOVED_IN = "0.10.0"
 
-# Top-level config keys renamed: old key -> new key. The config parser moves each one after every merge.
+# Top-level config keys renamed: old key -> new key.
 RENAMED_TOP_LEVEL_KEYS: dict[str, str] = {}
 # Keys renamed inside each server instance of a server type, such as `responses_api_agents`:
 # server type -> {old key: new key}.
@@ -51,9 +56,10 @@ class ConflictingRenamedKeyError(ConfigError, ValueError):
 
 
 def rename_deprecated_keys(config: MutableMapping, renamed: Mapping[str, str], *, where: str = "") -> None:
-    """Move each old key in ``config`` to its new name in place, warning once per key moved.
+    """Move each old key in ``config`` to its new name in place, warning for each key moved.
 
-    ``where`` is the dotted path of ``config`` in the global config, used in messages.
+    If ``config`` sets both names to equal values, the new key keeps its value; to different values, this raises
+    ``ConflictingRenamedKeyError``. ``where`` is the dotted path of ``config`` in the global config, used in messages.
     """
     prefix = f"{where}." if where else ""
     for old, new in renamed.items():
