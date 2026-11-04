@@ -23,7 +23,6 @@ import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, RequestInfo
 from fastapi import HTTPException
 from multidict import CIMultiDict, CIMultiDictProxy
-from pydantic import ValidationError
 from yarl import URL
 
 import resources_servers.genrm_compare.app as genrm
@@ -36,6 +35,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
 from nemo_gym.metrics import RewardProfiler
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.verification import judge_failsafe
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member
@@ -502,14 +502,22 @@ async def test_reordered_rubric_ids_share_cohort_and_completed_replay(
     assert error.value.status_code == 409
 
 
-@pytest.mark.parametrize("mode,allowed", [("fixed_baseline", False), ("rollout_cohort", True)])
-def test_singleton_worker_guard(config: genrm.GenRMCompareConfig, mode: str, allowed: bool) -> None:
-    values = config.model_dump() | {"comparison_mode": mode, "num_rollouts_per_prompt": 1, "num_workers": 2}
+@pytest.mark.parametrize(
+    "mode,rollouts,allowed",
+    [("fixed_baseline", 1, False), ("rollout_cohort", 2, False), ("rollout_cohort", 1, True)],
+)
+def test_several_workers_are_refused_only_for_cohort_verification(
+    config: genrm.GenRMCompareConfig, mode: str, rollouts: int, allowed: bool
+) -> None:
+    values = config.model_dump() | {"comparison_mode": mode, "num_rollouts_per_prompt": rollouts, "num_workers": 2}
+    server = genrm.GenRMCompareResourcesServer.model_construct(
+        config=genrm.GenRMCompareConfig.model_validate(values), server_client=MagicMock()
+    )
     if allowed:
-        assert genrm.GenRMCompareConfig.model_validate(values).num_workers == 2
+        refuse_unsupported_num_workers(server)
     else:
-        with pytest.raises(ValidationError, match="one HTTP worker"):
-            genrm.GenRMCompareConfig.model_validate(values)
+        with pytest.raises(ValueError, match="needs num_workers=1: cohort verification"):
+            refuse_unsupported_num_workers(server)
 
 
 @pytest.mark.parametrize("ids,clean", [([1, 2], True), ("1,2", False)])

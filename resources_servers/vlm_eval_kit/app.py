@@ -16,7 +16,7 @@ from asyncio import Event
 from collections import defaultdict
 from pathlib import Path
 from subprocess import run
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -56,6 +56,12 @@ class VlmEvalKitResourcesServer(SimpleResourcesServer):
     config: VlmEvalKitResourcesServerConfig
 
     MMBench_DEV_EN_V11_sets: Dict[str, Coordinator] = Field(default_factory=lambda: defaultdict(Coordinator))
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "MMBench scoring waits in this process's memory for every row of a group, "
+            "keyed by the group in the request body, so a group split across workers never completes"
+        )
 
     def setup_webserver(self):
         self.setup_VLMEvalKit()
