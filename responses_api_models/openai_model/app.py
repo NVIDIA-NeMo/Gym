@@ -30,6 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
+from nemo_gym.telemetry import MeteredSemaphore
 
 
 LOG = logging.getLogger(__name__)
@@ -263,7 +264,13 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             max_rate_limit_wait_seconds=self.config.max_rate_limit_wait_seconds,
         )
         self._semaphore = (
-            asyncio.Semaphore(self.config.max_concurrent_requests)
+            MeteredSemaphore(
+                self.config.max_concurrent_requests,
+                component="model_server",
+                limit_name="upstream_requests",
+                server_name=self.config.name,
+                admission_timeout_s=self.config.upstream_pool_timeout_seconds,
+            )
             if self.config.max_concurrent_requests is not None
             else nullcontext()
         )
@@ -286,10 +293,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             return
 
         try:
-            await asyncio.wait_for(
-                self._semaphore.acquire(),
-                timeout=self.config.upstream_pool_timeout_seconds,
-            )
+            # The semaphore applies upstream_pool_timeout_seconds and counts the timeout.
+            await self._semaphore.acquire()
         except TimeoutError as exc:
             raise TimeoutError(
                 "Timed out acquiring an upstream provider slot after "

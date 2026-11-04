@@ -177,6 +177,6 @@ Run the shared lifecycle tests on Linux to exercise process supervision and clea
 
 ```bash
 python -m pytest tests/unit_tests/agents/test_sandbox_session.py \
-  tests/unit_tests/test_sandbox_supervisor_client.py \
-  tests/unit_tests/test_process_supervisor.py -q -o addopts=''
+  tests/unit_tests/agents/test_sandbox_supervisor_client.py \
+  tests/unit_tests/agents/test_process_supervisor.py -q -o addopts=''
 ```
