@@ -40,7 +40,8 @@ from typing import Any, Optional
 
 from openai import APITimeoutError
 
-from nemo_gym.deliverables import IGNORE_FILES
+from nemo_gym.environment import IGNORE_FILES
+from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS, merge_create_kwargs, sample_judge
 from resources_servers.gdpval.judge_telemetry import (
     JudgeTelemetrySink,
@@ -766,7 +767,7 @@ def build_file_section(
 ) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
-    Skips run-state files (``nemo_gym.deliverables.IGNORE_FILES``). Extracts zips into per-call tempdirs
+    Skips run-state files (``nemo_gym.environment.deliverables.IGNORE_FILES``). Extracts zips into per-call tempdirs
     (the dirs are appended to ``clean_up_list`` for the caller to ``rmtree``).
     Returns a list of content block dicts suitable for OpenAI messages.
 
@@ -2237,7 +2238,7 @@ def compute_comparison_reward(winner: str) -> float:
 
 def task_attempted(task_dir: str) -> bool:
     """Return True if the task directory has a ``finish_params.json`` (completed run)."""
-    return os.path.exists(task_dir) and os.path.exists(os.path.join(task_dir, "finish_params.json"))
+    return os.path.exists(task_dir) and os.path.exists(os.path.join(task_dir, persisted_layout.FINISH_PARAMS_FILE))
 
 
 def clean_up_paths(paths: list[Path]) -> None:

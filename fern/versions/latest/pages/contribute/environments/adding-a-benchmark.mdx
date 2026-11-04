@@ -131,6 +131,8 @@ gym eval run --benchmark my_benchmark --model-type openai_model \
     --output results/my_benchmark_smoke.jsonl
 ```
 
+`--limit` counts tasks, not rows: each kept task brings every copy saved in the data and its `--num-repeats`. The run log confirms the size, for example `Limiting to 5 tasks (20 rows with their repeats)`; check it before reading a smoke score.
+
 ### 5. Check local publication
 
 For workloads with a verifier fixture, finish the local onboarding checks with `gym env publish my_benchmark`. This reruns validation and the fixture, rejects unfinished metadata, and confirms catalog discovery. It does not upload data, register a hosted workload, or push changes.

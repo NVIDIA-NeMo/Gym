@@ -47,6 +47,14 @@ gym eval run --no-serve \
 `prepare.py` writes `data/swebench_verified.jsonl`. Each row must resolve to a
 task image through its `image` field or `container_formatter`.
 
+With the Apptainer sandbox provider, `container_formatter` may instead be one or
+more local `.sif` path templates, for example `/images/r2e_gym/{instance_id}.sif`.
+A `.sif` template takes precedence over the row's `image` / `docker_image`, so
+rollouts never pull from a registry. Like `swe_agents`, the resolver tries the raw
+`instance_id`, R2E-Gym's `<repo>_final_<hash>` name, and the `__` to `_1776_` /
+`_s_` rewrites, and accepts exact file names only. A row can also pin an image
+with `sif_path` in its metadata.
+
 ## Agents
 
 The included configurations run Hermes Agent, Claude Code, Cline, Pi, OpenClaw, or OpenCode
@@ -66,20 +74,70 @@ agent into each task image. `agent_runtime_source` controls other delivery modes
 
 - `baked` uses the runtime in the task image and is the default.
 - `auto` builds the portable runtime with `setup_scripts/<agent>_deps.sh` once
-  and uploads the resulting archive to each sandbox.
+  and uploads the resulting archive to each sandbox. The runtime is rebuilt when
+  the setup scripts, the agent's sources, `nemo_gym` or `pyproject.toml` change.
 - A local tarball path uploads a prebuilt runtime.
 - An HTTP(S) URL downloads a prebuilt runtime inside the sandbox.
 
 Each archive must contain the runtime's `bin/python` at its root.
 
+The runner itself starts with `python -I`, so the task image's `PYTHONPATH` and
+user site cannot shadow the runtime's packages. For the CLI harnesses (Claude
+Code, Cline, OpenCode, OpenClaw and Pi), only the harness executable, plus `node`
+when the executable is a node script, is put on the agent's `PATH`. The agent's
+`python`, `pip` and `node` therefore resolve to the task image, not the runtime.
+
+`agent_network_policy` sets an OpenSandbox `network_policy` on the agent sandbox only (grading keeps its network):
+
+```yaml
+agent_network_policy:
+  defaultAction: deny
+  egress:
+    - action: allow
+      target: <model server CIDR>
+```
+
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
+
+With the Apptainer provider, anyswe always adds `--no-home` to
+`create.extra_start_args`. Apptainer would otherwise bind the Gym server's home
+(`/root` when the server runs as root) over the task image's `/root` in every
+sandbox, hiding toolchains that images keep there, such as R2E-Gym's
+`/root/.local/share/uv` interpreters.
 
 ## Reward
 
 SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and
 `get_eval_report` path. R2E-Gym requires every fail-to-pass and pass-to-pass test
-to report `PASSED`.
+to report `PASSED` (or `XFAIL`). Required tests match pytest node ids, unittest-style
+`Class.test` names and colored output. A supplied class or file must match; it
+never falls back to an unrelated test with the same method name. Shortened or
+bare names must identify one logged test or tests that all report the same status;
+different statuses remain ambiguous. Parameter IDs are preserved.
+R2E-Gym rows without test lists are graded
+with R2E-Gym's own rule: the test-status map from the run's short test summary must
+equal the row's `expected_output_json` exactly. Statuses come from the leading
+summary token, so status words inside parameter IDs or failure diagnostics do not
+change the verdict. ANSI colors are removed consistently from logs and expected
+keys. Expected maps retain the upstream encoding: file names are omitted, every
+`::` becomes `.`, and ` - ` suffixes are removed. The last reported phase wins,
+including an expected teardown `ERROR` after a passing test body. This legacy
+encoding can merge distinct parameter IDs; restoring their identity requires a
+dataset format decision. Explicit test lists use their separate identity rules;
+passing summary lines preserve arbitrary brackets in parameter IDs. Failure
+diagnostics are removed by matching complete names observed in passing or verbose
+lines first, so teardown errors retain the same identity even with unmatched
+brackets in parameter IDs. Failure-only names still inherit pytest's text-format
+ambiguity when no complete identity was observed.
+
+Set `save_eval_output: true` to save the last 200,000 characters of the grading
+transcript as `eval_output.txt` next to the rollout artifacts. This diagnostic
+option defaults to `false` for both R2E-Gym and SWE-bench to avoid accumulating
+transcripts during training. Grading always receives the complete output.
+
+Before running an R2E-Gym image's `run_tests.sh`, the grader links the image's
+`/r2e_tests` into `/testbed`, as R2E-Gym's own runtime does.
 
 Resolved patches receive reward `1`; other completed attempts receive `0`.
 Agent timeouts, evaluation timeouts, sandbox failures, and accidental successes
@@ -87,3 +145,8 @@ after max-iteration or context-window termination set `mask_sample=true`.
 
 Each rollout includes the trajectory, patch, reward, grading fields, and
 `mask_sample`.
+
+The patch is the agent's change to the task repository since it started. Binary
+files are left out, because a "Binary files differ" stanza makes `git apply`
+reject the whole patch. The diff is kept byte for byte, so changes to CRLF or
+non-UTF-8 files apply in the grading sandbox.

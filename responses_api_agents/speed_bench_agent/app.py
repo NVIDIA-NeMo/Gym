@@ -44,25 +44,20 @@ model call (same shape as simple_agent).
 
 import json
 import logging
+from time import perf_counter, time
 from typing import List
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -70,7 +65,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 
 
 LOG = logging.getLogger(__name__)
@@ -112,8 +107,6 @@ def _content_text(content) -> str:
 class SpeedBenchAgent(SimpleResponsesAPIAgent):
     """Multi-turn fixed-replay agent for SPEED-Bench."""
 
-    ray_enabled = False
-
     config: SpeedBenchAgentConfig
 
     async def responses(
@@ -122,6 +115,9 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        generation_started_at = time()
+        generation_start = perf_counter()
+        request_metrics: list[dict[str, JsonValue] | None] = []
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -176,6 +172,9 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
                 parsed = NeMoGymResponse.model_validate(payload)
             except ValidationError as e:
                 raise RuntimeError(f"Received an invalid response from model server: {json.dumps(payload)}") from e
+            # Retain every turn, including missing metrics, so partial reporting
+            # cannot silently produce an apparently complete acceptance rate.
+            request_metrics.append(parsed.metrics)
             return parsed, model_response.cookies
 
         # First turn (always at least one).
@@ -215,6 +214,13 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
 
         last_response.output = accumulated_outputs
         last_response.usage = usage
+        duration = perf_counter() - generation_start
+        last_response.metrics = {
+            "requests": request_metrics,
+            "generation_started_at": generation_started_at,
+            "generation_finished_at": generation_started_at + duration,
+            "generation_duration": duration,
+        }
         return last_response
 
     async def run(self, request: Request, body: SpeedBenchAgentRunRequest) -> SpeedBenchAgentVerifyResponse:

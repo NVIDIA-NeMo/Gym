@@ -97,7 +97,7 @@ current authoritative default branch (`upstream/main` for a fork or
 **Quick Start:**
 
 ```bash
-# Install uv 0.11.21 or newer (required for the repository's Python version).
+# Install uv 0.13.4 or newer (required by the managed lockfiles).
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 
@@ -112,6 +112,11 @@ uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev --extra telemetry --extra mlflow --extra wandb
 pre-commit install
 ```
+
+Existing contributors using an older uv release should run `uv self update`
+(or rerun the installer), then verify `uv --version` is at least 0.13.4. The
+managed lockfiles reject older uv versions; no lock regeneration is needed
+when upgrading uv.
 
 The `dev` extra provides development tools, but it does not install the optional
 SDKs exercised by the core unit tests. Include `telemetry`, `mlflow`, and `wandb`
@@ -184,7 +189,7 @@ If DCO checks fail after you have already pushed, see the [Development Setup Gui
 
 - Declare each new import in the narrowest appropriate dependency file. Keep
   environment-, agent-, and model-specific packages in that component's
-  `pyproject.toml` or `requirements.txt`; add a root dependency only when shared
+  `pyproject.toml` (with its `uv.lock`); add a root dependency only when shared
   Gym runtime code requires it.
 - Root dependencies in `pyproject.toml` must record why they are needed, when
   they were updated, and their license. Do not introduce a license incompatible
@@ -209,7 +214,8 @@ Gym has three CI entry points:
 workflows run automatically for verified commits from NVIDIA-NeMo members. If
 your commits are unverified, or you are an external contributor, these trusted
 workflows do not start until a qualified NVIDIA-NeMo vetter comments
-`/ok to test <full commit SHA>` on the PR. Approval applies to the current
+`/ok to test <full commit SHA>` on the PR. Use the full 40-character SHA
+(`git rev-parse HEAD`), not an abbreviation. Approval applies to the current
 head; after an unverified head changes, a qualified vetter must approve the new
 full SHA.
 GitHub-hosted checks such as lint, copyright, secrets, DCO, and the Fern preview
@@ -366,3 +372,21 @@ dispatch, with no change detection:
 - **Wheel install test** — builds the wheel, installs it in a fresh venv against a mock inference endpoint, and runs `ng_help`, `ng_dump_config`, `ng_init_resources_server`, `ng_run`, and `ng_collect_rollouts` end-to-end.
 - **Slack notification** — reports failures for eligible `main` or release refs;
   a manually dispatched run may disable notification.
+
+## Pull-request reviews
+
+Comment `/review` on a pull request for the formal review service. Use
+`/review mode=strict` for deeper analysis, or add `model=claude` to select a
+Claude reviewer instead of the default Codex reviewer. `/review help` lists
+all options. Reviews are explicitly requested, not automatically run on
+pull-request events.
+
+The retired `/claude review` and `/claude strict-review` commands only reply
+with migration instructions when posted as an exact command by an
+owner, member, or collaborator. Other commenters, bots, and quoted mentions
+do not trigger a notice. These commands never run or automatically request a review.
+
+The repository policy lives in `.agents/skills/pr-review/SKILL.md`. The review service
+must load this rubric from protected `main`, not the pull-request branch.
+Before relying on repository-specific reviews, publish the rubric, register
+its repository profile, and verify a Ready plugin snapshot containing it.

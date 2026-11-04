@@ -61,6 +61,11 @@ class TaskData(BaseModel):
         description="Stable row hash. Never read by server code; dropped in transit (extra='ignore' wire).",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     dataset: Optional[str] = Field(
         default=None,
         description="Source dataset label (e.g. 'taco'). Never read; dropped in transit.",

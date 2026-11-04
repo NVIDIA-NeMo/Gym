@@ -104,6 +104,9 @@ async def run_instance(
     container = None
     eval_completed = False
     report = {}
+    # Why the evaluation did not complete: the model's patch could not be applied, and the error that ended it.
+    patch_apply_failed = False
+    error = None
     try:
         # Original code:
         # Build + start instance container (instance image should already be built)
@@ -155,6 +158,7 @@ async def run_instance(
                 applied_patch = True
 
         if not applied_patch:
+            patch_apply_failed = True
             logger.info(f"{APPLY_PATCH_FAIL}:\n{val.output.decode(UTF8)}")
             raise EvaluationError(
                 instance_id,
@@ -232,6 +236,7 @@ async def run_instance(
         error_msg = traceback.format_exc()
         logger.info(error_msg)
         print(e)
+        error = f"{type(e).__name__}: {e}"
     except Exception as e:
         error_msg = (
             f"Error in evaluating model for {instance_id}: {e}\n"
@@ -239,6 +244,7 @@ async def run_instance(
             f"Check ({logger.log_file}) for more information."
         )
         logger.error(error_msg)
+        error = f"{type(e).__name__}: {e}"
     finally:
         # Original code:
         # Remove instance container + image, close logger
@@ -253,6 +259,8 @@ async def run_instance(
         return {
             "completed": eval_completed,
             "resolved": report.get(instance_id, {}).get("resolved", False),
+            "patch_apply_failed": patch_apply_failed,
+            "error": error,
         }
 
 
@@ -328,7 +336,9 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
     return eval_sh
 
 
-async def patch_swebench_multilingual_sandbox(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
+async def patch_swebench_multilingual_sandbox(
+    repo: str, instance_id: str, sandbox: AsyncSandbox, *, overwrite_maven_settings: bool = True
+) -> None:
     if MAP_REPO_TO_EXT.get(repo) == "java":
         base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
         settings_xml_path = base_path / "settings.xml"
@@ -347,10 +357,11 @@ find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.grad
 fi""")
 
         # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
+        if overwrite_maven_settings:
+            await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
+        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
 
     # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
     # requires Cargo 1.85 while its image provides Cargo 1.81.

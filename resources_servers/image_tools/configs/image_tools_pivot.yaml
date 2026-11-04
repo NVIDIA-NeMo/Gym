@@ -1,7 +1,7 @@
 image_tools_pivot:
   resources_servers:
     # Nested key is the server TYPE and Gym resolves it to
-    # resources_servers/<type>/ (cli/env.py:415 _resolve_server_dir), so it must
+    # resources_servers/<type>/ (_resolve_server_dir in nemo_gym/orchestration/server_supervisor.py), so it must
     # match the directory. The top-level key above is the INSTANCE name that
     # agent_ref and resources_server.name point at -- left alone so the 15,498
     # dataset rows carrying image_tools_pivot_agent keep resolving.
@@ -26,9 +26,10 @@ image_tools_pivot:
 
 image_tools_pivot_agent:
   responses_api_agents:
-    tool_simulation_agent:
+    simple_agent:
       entrypoint: app.py
-      # A pivot is a single decision: one model call, no tool execution.
+      # One model call; its tool calls go to the verifier unexecuted.
+      execute_tools: false
       max_steps: 1
       resources_server:
         type: resources_servers
@@ -53,8 +54,11 @@ image_tools_pivot_agent:
 
 image_tools_pivot_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: image_tools_pivot
       agent_server:
         type: responses_api_agents
         name: image_tools_pivot_agent

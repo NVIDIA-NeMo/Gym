@@ -12,33 +12,35 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import hashlib
 import json
 import re
+import time
 import traceback
 from pathlib import Path
 from typing import List, Optional
 
 import aiohttp
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -48,8 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from responses_api_models.vllm_model.app import VLLMConverter
 
 
@@ -141,6 +142,10 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = 400
+    # Wall-clock budget per rollout, measured from the start of the rollout loop. Past it the loop
+    # stops, the response carries `timed_out`, and the harness scores the sample 0 without
+    # a judge call. None keeps the loop bounded by max_steps only.
+    rollout_timeout_s: Optional[float] = Field(default=None, ge=0)
     keep_rounds: int = 9999
     nudge_steps: bool = True
     max_context_tokens: int = 196608
@@ -183,6 +188,29 @@ class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+class _RolloutDeadline(Exception):
+    """A model or tool call was still running when the rollout's wall-clock limit ran out."""
+
+
+async def _before_deadline(deadline: Optional[float], awaitable):
+    # Bounds a single in-flight call: the per-step check alone cannot stop a call that hangs.
+    if deadline is None:
+        return await awaitable
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        awaitable.close()
+        raise _RolloutDeadline()
+    limit = asyncio.timeout(remaining)
+    try:
+        async with limit:
+            return await awaitable
+    except TimeoutError as e:
+        # A TimeoutError raised by the call itself is not the rollout deadline.
+        if limit.expired():
+            raise _RolloutDeadline() from e
+        raise
+
+
 def _is_infrastructure_failure(exc: BaseException) -> bool:
     """True when the harness failed, not the sample.
 
@@ -201,7 +229,6 @@ def _is_infrastructure_failure(exc: BaseException) -> bool:
 
 
 class BrowsecompAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: BrowsecompAgentConfig
     _policy_model_openai_client: Optional[NeMoGymAsyncOpenAI] = None
 
@@ -287,6 +314,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
         reset_threshold = self._reset_threshold(self.config)
+        loop_started = time.monotonic()
+        deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
+        timed_out = False
+        model_response = None
 
         # --- Progress board state (ported from the reference harness) ---
         # The board lives in the system prompt and is re-rendered only at the
@@ -352,6 +383,19 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         max_reset_count = self.config.max_reset_count
 
         while True:
+            if (
+                self.config.rollout_timeout_s is not None
+                and step > 0
+                and time.monotonic() - loop_started > self.config.rollout_timeout_s
+            ):
+                print(
+                    f"[browsecomp][timeout][{qid}] step={step} "
+                    f"elapsed_min={(time.monotonic() - loop_started) / 60:.1f} "
+                    f"limit_min={self.config.rollout_timeout_s / 60:.1f}",
+                    flush=True,
+                )
+                timed_out = True
+                break
             step += 1
 
             if self.config.keep_rounds is not None and new_outputs:
@@ -364,7 +408,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # threshold, reset now and skip the (otherwise wasted) generation.
             # (ported from gym-gitlab b66e37c6)
             if self.config.save_model_call_using_vllm_tokenize_endpoint:
-                pre_prompt_tokens = await self._count_prompt_tokens(new_body)
+                try:
+                    pre_prompt_tokens = await _before_deadline(deadline, self._count_prompt_tokens(new_body))
+                except _RolloutDeadline:
+                    print(f"[browsecomp][timeout][{qid}] step={step} in=tokenize", flush=True)
+                    timed_out = True
+                    break
                 if (
                     reset_threshold
                     and pre_prompt_tokens > reset_threshold
@@ -414,21 +463,37 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         for n in range(self.config.context_reset_keep_rounds, -1, -1):
                             cand = self._extract_last_rounds(new_outputs, n=n)
                             cand_body = body.model_copy(update={"input": body.input + cand})
-                            if await self._count_prompt_tokens(cand_body) <= reset_threshold:
+                            try:
+                                cand_tokens = await _before_deadline(deadline, self._count_prompt_tokens(cand_body))
+                            except _RolloutDeadline:
+                                print(f"[browsecomp][timeout][{qid}] step={step} in=tokenize", flush=True)
+                                timed_out = True
+                                break
+                            if cand_tokens <= reset_threshold:
                                 chosen = cand
                                 break
+                        if timed_out:
+                            break
                         new_outputs = chosen if chosen is not None else []
                         continue
 
-            model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
-                json=new_body,
-                cookies=model_server_cookies,
-            )
-            # We raise for status here since we expect model calls to always work.
-            await raise_for_status(model_response)
-            model_response_json = await get_response_json(model_response)
+            async def _model_call():
+                response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path=self.url_path_for_request("/v1/responses", request),
+                    json=new_body,
+                    cookies=model_server_cookies,
+                )
+                # We raise for status here since we expect model calls to always work.
+                await raise_for_status(response)
+                return response, await get_response_json(response)
+
+            try:
+                model_response, model_response_json = await _before_deadline(deadline, _model_call())
+            except _RolloutDeadline:
+                print(f"[browsecomp][timeout][{qid}] step={step} in=model_call", flush=True)
+                timed_out = True
+                break
             model_server_cookies = model_response.cookies
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
@@ -539,16 +604,24 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             "system prompt across context resets." % len(progress_board)
                         )
                 else:
-                    api_response = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=tool_args,
-                        cookies=resources_server_cookies,
-                    )
+
+                    async def _tool_call():
+                        response = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path=f"/{output_function_call.name}",
+                            json=tool_args,
+                            cookies=resources_server_cookies,
+                        )
+                        return response, (await response.content.read()).decode()
+
+                    try:
+                        api_response, tool_output = await _before_deadline(deadline, _tool_call())
+                    except _RolloutDeadline:
+                        print(f"[browsecomp][timeout][{qid}] step={step} in=tool_call", flush=True)
+                        timed_out = True
+                        break
                     # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
                     resources_server_cookies = api_response.cookies
-
-                    tool_output = (await api_response.content.read()).decode()
                     # reference-harness parity: the resources server wraps every tool result in a one-field
                     # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
                     # model then sees a single escaped line instead of raw multi-line text. This was
@@ -582,6 +655,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
                 full_trajectory.append(tool_response)
+            if timed_out:
+                break
 
             # --- Pre-reset warning: last chance to save the progress board ---
             if pre_reset_nudge_due and new_outputs and new_outputs[-1].type == "function_call_output":
@@ -721,9 +796,21 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
 
         # Propogate any extra cookies necessary for downstream verification
-        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
+        for k, v in (*resources_server_cookies.items(), *(model_server_cookies or {}).items()):
             response.set_cookie(k, v)
 
+        if model_response is None:
+            # The first model call was still running at the limit: there is no response to extend.
+            model_response = NeMoGymResponse(
+                id=f"resp_timeout_{qid}",
+                created_at=time.time(),
+                model=body.model or "",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[],
+            )
         model_response.output = full_trajectory
         model_response.usage = usage
         # Surface counters for downstream analysis (ported from gym-gitlab fe9845ee).
@@ -731,6 +818,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.reset_count = reset_count
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
+        model_response.timed_out = timed_out
+        if timed_out:
+            model_response.status = "incomplete"
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
@@ -787,13 +877,31 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
                 # Need to get last_verify_response if all attempts are exhausted
-                if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
+                # A timed-out rollout is final: retrying would spend the budget twice.
+                if (
+                    not cleaned_output_text
+                    and not response_json.get("timed_out")
+                    and attempt != self.config.max_run_retries - 1
+                ):
                     print(
                         f"[browsecomp][retry][{qid}] attempt={attempt + 1}/{self.config.max_run_retries} "
                         f"reason=empty_output_after_think_strip",
                         flush=True,
                     )
                     continue
+
+                if response_json.get("timed_out"):
+                    # Past rollout_timeout_s: wrong by construction, so the judge is not called.
+                    last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
+                        body.model_dump()
+                        | {
+                            "response": response_json,
+                            "reward": 0.0,
+                            "num_tool_calls": response_json.get("num_tool_calls", 0),
+                            "reset_count": response_json.get("reset_count", 0),
+                        }
+                    )
+                    break
 
                 verify_request = BrowsecompAgentVerifyRequest.model_validate(
                     body.model_dump() | {"response": response_json}
@@ -812,6 +920,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
                 break
 
+            if last_verify_response is not None:
+                # Every row carries timed_out, so its mean is the share of samples stopped by the limit.
+                last_verify_response = last_verify_response.model_copy(
+                    update={"timed_out": int(bool((last_response_json or {}).get("timed_out")))}
+                )
             reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
             outcome = "success" if (reward is not None and reward > 0) else "failure"
             print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}", flush=True)
@@ -825,7 +938,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 flush=True,
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
-            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollouts/rollout_collection.py)
             # and every remaining sample dies with it — that cost two full multi-node
             # allocations, each dying part-way through a run on one bad sample.
             #
@@ -844,12 +957,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     tool_choice="none",
                     tools=[],
                 ).model_dump()
-            # EXCEPT when the HARNESS is what broke. Then nothing about this sample failed, so
-            # scoring it 0 is wrong, and persisting a row is worse: _load_from_cache keys on
-            # (task_index, rollout_index) and would treat it as permanently done. NG_NO_PERSIST_KEY
-            # writes no row at all (nemo_gym/rollout_collection.py), so resume's set-difference
-            # re-dispatches it on the next chain-hop. The 4h cluster cap makes chain-hops
-            # unavoidable on a 1266-sample run, so this path is load-bearing, not a corner case.
+            # A harness failure is not a scored model outcome. Gym's manifest-backed collector
+            # persists nonterminal kill_shaped in the failure sidecar without charging the
+            # counted-failure budget, leaving it eligible for resume. Retain NG_NO_PERSIST_KEY
+            # for legacy consumers.
             # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
             routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
             return BrowsecompAgentVerifyResponse.model_validate(
@@ -858,6 +969,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     "response": last_response_json,
                     "reward": 0.0,
                     "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
+                    "timed_out": 0,
                 }
                 | routing
             )

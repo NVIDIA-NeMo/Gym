@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 
 from pydantic import Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -41,7 +41,6 @@ class XlamFcVerifyResponse(BaseVerifyResponse):
 
 
 class XlamFcResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: XlamFcResourcesServerConfig
 
     @staticmethod

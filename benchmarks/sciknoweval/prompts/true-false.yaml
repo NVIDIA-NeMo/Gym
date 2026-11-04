@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# SciKnowEval true/false tasks. The gold labels are always "Yes"/"No", so the answer contract is
+# stated that way for every question - one upstream variant asks for "true"/"false" against
+# Yes/No labels, and its grader silently maps between them.
+
+system: |-
+  {instruction}
+
+user: |-
+  Answer the following true or false question. The last line of your response should be in the following format: 'Answer: Yes' or 'Answer: No'.
+
+  {problem}

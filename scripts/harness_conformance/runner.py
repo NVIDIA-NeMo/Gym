@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Launch, witness, and inspect isolated episodes for the local P0 probe suite."""
+"""Launch, witness, and inspect isolated episodes for the local conformance suite."""
 
 import argparse
 import hashlib
@@ -15,12 +15,22 @@ from pathlib import Path
 
 import psutil
 
-from nemo_gym import harness_capabilities
-from nemo_gym.harness_capabilities.behavior import inspect_behavior
-from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
-from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
-from nemo_gym.harness_capabilities.health import inspect_health
-from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
+from nemo_gym.config import ConfigError
+from nemo_gym.rollouts import harness_capabilities
+from nemo_gym.rollouts.harness_capabilities import (
+    NAMES,
+    EvidenceScope,
+    PriorityTier,
+    digest_file,
+    gate_passes,
+    inspect_behavior,
+    inspect_bundle,
+    inspect_compaction,
+    inspect_health,
+    inspect_record,
+    json_rows,
+    render_matrices,
+)
 
 from .episode import HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
@@ -102,11 +112,26 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     """Inspect artifacts, behavior and health independently of process exit status."""
     witness_path = directory / "witness.json"
     witness = json.loads(witness_path.read_text()) if witness_path.exists() else None
-    bundle = directory / "rollouts.jsonl"
+    rollouts_path = directory / "rollouts.jsonl"
+    failures_path = directory / "rollouts_failures.jsonl"
     health_report = directory / "health" / "quality_summary.json"
+
+    bundle = rollouts_path
     records = list(json_rows(bundle)) if bundle.exists() else []
+    if not records and scenario.terminal_error and failures_path.is_file():
+        # A terminal model error fails the episode, so its evidence is retained in the failures file.
+        bundle = failures_path
+        records = list(json_rows(bundle))
+
     record = records[0][1] if len(records) == 1 else None
-    scope = EvidenceScope(tools=scenario.tool_steps > 0, verifier=not scenario.terminal_error, steps=scenario.steps)
+    if record is not None and bundle == rollouts_path:
+        delivery = "rollout"
+    elif failures_path.exists() and failures_path.stat().st_size:
+        delivery = "failure_record"
+    else:
+        delivery = "missing"
+
+    scope = EvidenceScope(tools=scenario.tool_steps > 0, steps=scenario.steps, verifier=not scenario.terminal_error)
     artifact = inspect_record(record, scope=scope)
     checks = artifact["checks"] + inspect_behavior(
         witness,
@@ -115,15 +140,20 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         terminal_error=scenario.terminal_error,
         tool_steps=scenario.tool_steps,
         expected_reward=scenario.expected_reward,
+        judge_verifier=scenario.judge_verifier,
         fingerprint=_fingerprint,
     )
-    health_inputs = [path for path in (bundle, directory / "rollouts_failures.jsonl") if path.is_file()]
+    health_inputs = [path for path in [rollouts_path, failures_path] if path.is_file()]
     checks += inspect_health(
         health_inputs,
         output=health_report.parent,
         expectations=scenario.health_expectations,
         steps=scenario.steps,
     )
+    if scenario.compaction is not None:
+        checks += inspect_compaction(
+            witness, record, expected=scenario.compaction, policy_responses=scenario.tool_steps + 1
+        )
     summary, report = None, None
     if record is not None:
         destination, summary = inspect_bundle(bundle, output=directory / "evidence", scope=scope)
@@ -134,19 +164,19 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         evidence[key] = {"verdict": verdict, "artifact_verdict": verdict}
     behavioral = [c for c in checks if c["kind"] == "behavioral"]
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
+    p0_passed = gate_passes(checks)
+    passed = p0_passed and (scenario.tier == "P0" or gate_passes(checks, tier=scenario.tier))
     return {
         "scenario": scenario.name,
+        "tier": scenario.tier,
         "exercised": record is not None,
-        "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
+        "verdict": "fulfilled" if passed else "not_fulfilled",
+        "p0_verdict": "fulfilled" if p0_passed else "not_fulfilled",
         "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
         "checks": checks,
         "behavioral_status": "pass" if behavior_passed else "fail",
         "execution": execution,
-        "delivery": "rollout"
-        if record is not None
-        else "failure_record"
-        if (directory / "rollouts_failures.jsonl").exists() and (directory / "rollouts_failures.jsonl").stat().st_size
-        else "missing",
+        "delivery": delivery,
         "model_attempts": len((witness or {}).get("attempts", [])),
         "evidence": evidence,
         "artifact_report": report,
@@ -154,8 +184,8 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         "hashes": {
             path.name: digest_file(path)
             for path in (
-                bundle,
-                directory / "rollouts_failures.jsonl",
+                rollouts_path,
+                failures_path,
                 witness_path,
                 directory / "runtime.json",
                 directory / "launch.json",
@@ -167,11 +197,18 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
 
 
 def run_suite(
-    *, harnesses: list[str], scenarios: tuple[Scenario, ...], output: Path, timeout: float
+    *,
+    harnesses: list[str],
+    scenarios: tuple[Scenario, ...],
+    output: Path,
+    timeout: float,
+    gate_tier: PriorityTier = "P0",
 ) -> tuple[dict, int]:
     """Run each requested harness/scenario in a fresh process and publish the completed report."""
     if not harnesses or not scenarios:
         raise ValueError("at least one harness and one scenario are required")
+    if not any(s.tier <= gate_tier for s in scenarios):
+        raise ValueError("no selected scenarios are covered by --gate-tier; use --gate-tier P1 for compaction")
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     manifest = suite_manifest(scenarios)
@@ -185,7 +222,10 @@ def run_suite(
         },
         health_sources={
             str(p.relative_to(ROOT)): digest_file(p)
-            for p in [ROOT / "nemo_gym/rollout_health.py", *sorted((ROOT / "nemo_gym/health").glob("*.py"))]
+            for p in [
+                ROOT / "nemo_gym/rollouts/rollout_health.py",
+                *sorted((ROOT / "nemo_gym/rollouts/health").glob("*.py")),
+            ]
         },
     )
     (output / "suite.json").write_text(_json(manifest))
@@ -211,17 +251,19 @@ def run_suite(
                 str(timeout),
             ]
             execution = run_process(command, directory=directory, timeout=timeout + 30)
-            execution_error |= execution["returncode"] != 0 or execution["timed_out"]
+            execution_error |= scenario.tier <= gate_tier and (execution["returncode"] != 0 or execution["timed_out"])
             try:
                 result = inspect_episode(scenario, directory, execution)
-            except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-                execution_error = True
+            except (ConfigError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+                execution_error |= scenario.tier <= gate_tier
                 result = {
                     "scenario": scenario.name,
+                    "tier": scenario.tier,
                     "exercised": False,
                     "verdict": "not_fulfilled",
                     "execution": execution,
                     "checker_error": type(exc).__name__,
+                    "checks": [],
                     "issues": ["could not inspect this episode's artifacts"],
                     "artifact_report": None,
                     "evidence": {
@@ -242,12 +284,15 @@ def run_suite(
         rows[harness] = {
             "scenarios": results,
             "evidence": counts,
-            "verdict": "fulfilled" if all(r["verdict"] == "fulfilled" for r in results) else "not_fulfilled",
+            "verdict": "fulfilled"
+            if all(r["verdict"] == "fulfilled" for r in results if r["tier"] <= gate_tier)
+            else "not_fulfilled",
         }
     passed = all(row["verdict"] == "fulfilled" for row in rows.values())
     summary = {
         "schema_version": "harness-probe-report/v1",
         "suite": SUITE,
+        "gate_tier": gate_tier,
         "runner_status": "completed",
         "full_suite": scenarios == SCENARIOS,
         "verdict": "fulfilled" if passed else "not_fulfilled",
@@ -255,8 +300,10 @@ def run_suite(
         "harnesses": rows,
         "limits": [
             "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
-            "all current checks are P0, including ownership and call-to-step checks",
-            "multimodal, compaction, parallelism and deployment health are outside this suite",
+            "existing general checks stay P0; compaction scenarios and their new checks are P1",
+            "compaction trigger support depends on the selected harness runtime and configuration",
+            "context before/after measurements are outside this fixture",
+            "multimodal, parallelism and deployment health are outside this suite",
         ],
     }
     (output / "conformance_report.md").write_text(render_matrices(rows))
@@ -269,13 +316,22 @@ def run_suite(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--harness", action="append", choices=HARNESSES, help="repeat for a matrix; defaults to all four"
+        "--harness",
+        action="append",
+        choices=HARNESSES,
+        help="repeat for a matrix; defaults to all registered harnesses",
     )
     parser.add_argument(
         "--scenario", action="append", choices=[s.name for s in SCENARIOS], help="run a diagnostic subset"
     )
     parser.add_argument("--output", type=Path, help="new directory for rollouts, captures, witnesses and reports")
     parser.add_argument("--timeout", type=float, default=90, help="seconds per harness episode (default: 90)")
+    parser.add_argument(
+        "--gate-tier",
+        choices=("P0", "P1"),
+        default="P0",
+        help="fail for scenarios through this priority (default: P0)",
+    )
     parser.add_argument("--list-scenarios", action="store_true")
     args = parser.parse_args(argv)
     if args.list_scenarios:
@@ -288,8 +344,14 @@ def main(argv: list[str] | None = None) -> int:
     harnesses = list(dict.fromkeys(args.harness or HARNESSES))
     scenarios = tuple(s for s in SCENARIOS if not args.scenario or s.name in args.scenario)
     try:
-        _, code = run_suite(harnesses=harnesses, scenarios=scenarios, output=args.output, timeout=args.timeout)
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+        _, code = run_suite(
+            harnesses=harnesses,
+            scenarios=scenarios,
+            output=args.output,
+            timeout=args.timeout,
+            gate_tier=args.gate_tier,
+        )
+    except (ConfigError, OSError, ValueError, TypeError, KeyError) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)
         return 2
     if os.environ.get("GITHUB_ACTIONS") == "true":

@@ -12,7 +12,7 @@
 #     --config nemo_gym/sandbox/providers/e2b/configs/e2b.yaml \
 #     --config responses_api_models/vllm_model/configs/vllm_model.yaml
 #
-# Requires the SDK: `pip install 'e2b>=2.36.0,<3.0.0'`.
+# Requires the SDK: `pip install 'e2b>=2.46.0,<3.0.0'`.
 #
 # Works against e2b.dev and against any e2b-compatible gateway -- point
 # `connection.api_url`/`connection.sandbox_url` at the gateway.
@@ -64,10 +64,24 @@ sandbox:
       template_map: {}
       # Default sandbox lifetime. SandboxSpec.ttl_s overrides this per sandbox.
       timeout_s: 3600.0
+      # false deletes at timeout; true pauses and resumes on the next request (AgentENV).
+      # null sends no lifecycle, which can leave timed-out sandboxes paused on AgentENV.
+      auto_resume: false
       # Secure the sandbox envd service with an access token.
       secure: true
       # Permit outbound internet access. Set false for offline/untrusted workloads.
       allow_internet_access: true
+      # Outbound traffic rules (CIDRs, IPs or hostnames). deny_out 0.0.0.0/0
+      # with an allow_out list permits only the listed hosts, e.g.:
+      #   network:
+      #     deny_out: ["0.0.0.0/0"]
+      #     allow_out: [pypi.org, files.pythonhosted.org, deb.debian.org, security.debian.org]
+      network: null
+      # AgentEnv create parameters, sent as customExtensionParams. Setting this
+      # creates sandboxes through POST /sandboxes instead of the SDK, e.g.
+      # {sandbank: all} serves package registries from the node-local cache:
+      #   custom_extension_params: {sandbank: all}
+      custom_extension_params: null
       # Resource limits are fixed when a template is built. False warns when a
       # SandboxSpec requests resources; true rejects the request.
       strict_resources: false
@@ -102,3 +116,20 @@ sandbox:
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+    # Job attribution merged into every sandbox's metadata, so the list API's metadata
+    # filter (`GET /v2/sandboxes?metadata=k=v` on E2B and AgentENV) finds a team's, user's
+    # or run's sandboxes. Unset fields auto-detect from NEMO_GYM_TEAM / NEMO_GYM_USER /
+    # NEMO_GYM_WORKLOAD, then Slurm job env vars (SLURM_JOB_ACCOUNT / SLURM_JOB_USER /
+    # SLURM_JOB_NAME), then the OS login name for `user` ("root" is ignored) and the gym
+    # CLI's NEMO_GYM_CONFIG_PATH server instance name for `workload`; unresolvable fields
+    # are omitted. `run` scopes sandboxes to one launch of the creating process
+    # (NEMO_GYM_RUN_ID, else generated per process and logged). Explicit
+    # sandbox_spec.metadata and default_metadata keys always win over attribution keys.
+    attribution:
+      enabled: true
+      # Namespace for the injected keys; "" for bare team/user/workload/run keys.
+      key_prefix: nemo-gym.nvidia.com/
+      # team: my-team
+      # user: my-user
+      # workload: my-benchmark
+      # run: my-run-id
