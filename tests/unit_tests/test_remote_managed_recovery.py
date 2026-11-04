@@ -223,4 +223,4 @@ def test_the_remote_reader_installs_the_mlflow_client_with_the_pinned_gym(tmp_pa
     _remote_managed_evidence(conn, raw, tmp_path, config())
 
     script = "\n".join(conn.commands)
-    assert 'uv pip install -e ".[mlflow,ray]"' in script
+    assert 'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked --extra mlflow --extra ray' in script

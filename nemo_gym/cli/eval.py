@@ -30,7 +30,8 @@ from copy import deepcopy
 from dataclasses import replace
 from multiprocessing import Pool
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import yaml
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -38,7 +39,7 @@ from pydantic import Field, ValidationError
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, WORKING_DIR, _resolve_under_cwd_or_install
 from nemo_gym.artifacts.exporters import mark_run_failed
 from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME as QUALITY_SUMMARY_FILENAME
 from nemo_gym.artifacts.run_files import ROLLOUT_VERDICTS_FILENAME as ROLLOUT_VERDICTS_FILENAME
@@ -271,6 +272,7 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     ```
     """
 
+    uv_venv_dir: Path = Field(default=WORKING_DIR, description="Writable root for isolated preparation environments")
     use_cached_prepared_benchmarks: bool = Field(
         default=False, description="Skip benchmark preparation if the prepared file is already present"
     )
@@ -286,11 +288,24 @@ def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
     prepare_script_args: Dict[str, Any]
-    (benchmark_config, prepare_module_path, prepare_script_args) = args
+    (benchmark_config, prepare_module_path, prepare_script_args, python) = args[:4]
+    config = args[4] if len(args) > 4 else None
 
     print(f"Preparing dataset: {benchmark_config.name}")
 
-    module = importlib.import_module(prepare_module_path)
+    if python is not None:
+        _run_isolated_prepare(
+            python,
+            prepare_module_path,
+            "prepare",
+            Path(benchmark_config.dataset.jsonl_fpath),
+            prepare_script_args,
+            config=config,
+        )
+        return
+    from nemo_gym.cli._prepare_worker import load_preparer
+
+    module = load_preparer(prepare_module_path)
     output_fpath = module.prepare(**prepare_script_args)
     expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
     if output_fpath.absolute() != expected_output_fpath:
@@ -326,6 +341,98 @@ def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
         raise ConfigError(
             f"Could not install prepare_dependencies for dataset '{benchmark_config.name}': {' '.join(dependencies)}"
         ) from exc
+
+
+def _prepare_environment(benchmark_config: "BenchmarkConfig", venv_root: Path | None = None) -> Path | None:
+    """Use explicit dependency arguments as before, or sync an isolated locked project."""
+    from nemo_gym.cli._locked_env import sync_environment
+
+    dataset = benchmark_config.dataset
+    if dataset.prepare_dependencies:
+        # Explicit arguments retain their existing meaning, including editable installs
+        # and requirements-file options. Do not silently ignore caller overrides.
+        _install_prepare_dependencies(benchmark_config)
+        return None
+    if dataset.prepare_project is None:
+        return None
+    project = _resolve_under_cwd_or_install(dataset.prepare_project).resolve()
+    venv = project / ".venv"
+    if venv_root is not None:
+        try:
+            relative = project.relative_to(PARENT_DIR.resolve())
+        except ValueError:
+            import hashlib
+
+            relative = Path("external") / (project.name + "-" + hashlib.sha256(str(project).encode()).hexdigest()[:12])
+        venv = venv_root.absolute() / "preparation" / relative / ".venv"
+    try:
+        sync_environment(project, venv, sys.executable, [], [])
+    except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError) as exc:
+        raise ConfigError(
+            f"Could not sync locked prepare_project for dataset '{benchmark_config.name}': {exc}"
+        ) from exc
+    return venv / "bin/python"
+
+
+def _run_isolated_prepare(
+    python: Path, module: str, action: str, expected: Path, args: dict, *, config: DictConfig | dict | None = None
+) -> dict:
+    """Keep preparer stdout visible and pass structured results over a separate file."""
+    from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, maybe_get_global_config_dict
+
+    worker = Path(__file__).with_name("_prepare_worker.py")
+    if module.endswith(".py"):
+        root = Path(module).parent
+    else:
+        relative = Path(*module.split(".")).with_suffix(".py")
+        script = _resolve_under_cwd_or_install(relative)
+        root = script.parents[len(relative.parts) - 1]
+    with TemporaryDirectory(prefix="gym-prepare-") as tmp:
+        result = Path(tmp) / "result.json"
+        options = Path(tmp) / "arguments.json"
+        if config is None:
+            config = maybe_get_global_config_dict()
+        serialized_config = (
+            OmegaConf.to_container(config, resolve=True) if OmegaConf.is_config(config) else config or {}
+        )
+        serialized_args = OmegaConf.to_container(args, resolve=True) if OmegaConf.is_config(args) else args
+        options.write_text(json.dumps(serialized_args, default=_prepare_json_default))
+        subprocess.run(
+            [
+                str(python),
+                str(worker),
+                "--root",
+                str(root.absolute()),
+                "--module",
+                module,
+                "--action",
+                action,
+                "--expected",
+                str(expected.absolute()),
+                "--args-file",
+                str(options),
+                "--result",
+                str(result),
+            ],
+            check=True,
+            env=os.environ
+            | {
+                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),
+                "NEMO_GYM_PREPARE_VENV": str(python.parent.parent),
+                "VIRTUAL_ENV": str(python.parent.parent),
+                "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
+            },
+        )
+        return json.loads(result.read_text())
+
+
+def _prepare_json_default(value: Any) -> Any:
+    """Serialize path arguments without silently coercing unsupported values."""
+    if isinstance(value, Path):
+        return str(value)
+    if OmegaConf.is_config(value):
+        return OmegaConf.to_container(value, resolve=True)
+    raise TypeError(f"Cannot serialize preparation value of type {type(value).__name__}")
 
 
 def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
@@ -394,41 +501,63 @@ def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig
 
 def _prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_config: PrepareBenchmarkConfig) -> None:
     """Run each dataset's prepare script, after validating all of them."""
+    from nemo_gym.config.global_config import maybe_get_global_config_dict
+
+    config = maybe_get_global_config_dict()
     # Validate all datasets before preparing any
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
-    validated: List[Tuple[BenchmarkConfig, str]] = []
+    validated: list[tuple[BenchmarkConfig, str, dict, Path | None, DictConfig | None]] = []
     already_prepared: List[BenchmarkConfig] = []
     for benchmark_config in datasets:
         prepare_script = benchmark_config.dataset.prepare_script
         if prepare_script is None:
             raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
-        prepare_script_path = Path(prepare_script)
+        prepare_script_path = _resolve_under_cwd_or_install(prepare_script)
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
 
-        prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
-        _install_prepare_dependencies(benchmark_config)
-        module = importlib.import_module(prepare_module_path)
-        if not hasattr(module, "prepare"):
-            prepare_function_missing.append(benchmark_config)
-            continue
-
-        is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
-        if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-            is_current = getattr(module, "is_prepared_data_current", None)
-            if callable(is_current) and not is_current(benchmark_config.dataset.jsonl_fpath):
-                print(
-                    f"The cached file for {benchmark_config.name} ({benchmark_config.dataset.jsonl_fpath}) "
-                    "is out of date, so it will be prepared again."
-                )
-            else:
+        prepare_module_path = (
+            str(prepare_script)
+            if Path(prepare_script).is_absolute()
+            else ".".join(Path(prepare_script).with_suffix("").parts)
+        )
+        python = _prepare_environment(benchmark_config, prepare_benchmark_config.uv_venv_dir)
+        if python is not None:
+            probe = _run_isolated_prepare(
+                python,
+                prepare_module_path,
+                "inspect",
+                Path(benchmark_config.dataset.jsonl_fpath),
+                {"check_cache": prepare_benchmark_config.use_cached_prepared_benchmarks},
+                config=config,
+            )
+            if not probe["has_prepare"]:
+                prepare_function_missing.append(benchmark_config)
+                continue
+            if probe["cache_current"]:
                 already_prepared.append(benchmark_config)
                 continue
+        else:
+            from nemo_gym.cli._prepare_worker import load_preparer
 
-        validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
+            module = load_preparer(prepare_module_path)
+            if not hasattr(module, "prepare"):
+                prepare_function_missing.append(benchmark_config)
+                continue
+            is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
+            if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
+                is_current = getattr(module, "is_prepared_data_current", None)
+                if not callable(is_current) or is_current(benchmark_config.dataset.jsonl_fpath):
+                    already_prepared.append(benchmark_config)
+                    continue
+                print(f"The cached file for {benchmark_config.name} is out of date, so it will be prepared again.")
+
+        validated.append(
+            (benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args), python, config)
+        )
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
@@ -752,7 +881,6 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     This is not tracking acceptance. Unknown health exports a known=0 signal, never a healthy rate.
     Scientific aggregate entries and scores remain unchanged; only the reserved run metadata is replaced.
     """
-    import tempfile
 
     from nemo_gym.artifacts.exporters.base import _artifact_version
     from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
@@ -775,6 +903,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial_faults,
         trial_population,
     )
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file
 
     artifacts = RunArtifacts(output)
     version = _artifact_version(artifacts)
@@ -892,16 +1021,9 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     flatten_aggregate_metrics(aggregate, source_artifacts=health_version)
 
     def atomic_json(path, value):
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
-        ) as stream:
-            temporary = Path(stream.name)
-            json.dump(value, stream, indent=2)
-            stream.write("\n")
-        try:
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        # Exclusive creation under the caller's umask; a rewrite keeps the file's existing mode.
+        with atomic_output_file(path) as stream:
+            stream.write((json.dumps(value, indent=2) + "\n").encode("utf-8"))
 
     atomic_json(artifacts.aggregate_metrics_json_fpath, aggregate)
     if (

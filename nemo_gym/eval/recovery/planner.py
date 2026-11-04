@@ -37,8 +37,6 @@ from nemo_gym.eval.recovery.decision import (
     LIVE_JOB_STATES,
     OPERATOR_CONTINUATION,
     UNKNOWN_BUDGET_HINT,
-    UNKNOWN_BUDGET_REASON,
-    UNKNOWN_WALLTIME_REASON,
     IdentityEvidence,
     IdentityState,
     RecoveryAction,
@@ -413,10 +411,7 @@ def _decide_from_collected(
                 "reason": "the results file is absent; collection cannot safely resume its saved history",
             }
         )
-    unknown = decision.action == RecoveryAction.STOP and decision.reason in (
-        UNKNOWN_BUDGET_REASON,
-        UNKNOWN_WALLTIME_REASON,
-    )
+    unknown = decision.action == RecoveryAction.STOP and decision.accounting_unknown is not None
     if operator_budget is not None:
         # An operator continuation needs the scheduler's answer that no job of the run waits or runs.
         accounting_unknown = (

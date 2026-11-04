@@ -856,6 +856,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             _judge_job_unsettled _known_kind MAX_ATTEMPTS MAX_EXTEND_ATTEMPTS NO_INVENTORY
             OPERATOR_CONTINUATION_NOTE RERUN_MASKED_FLAGS RERUN_MASKED_REASON RerunMaskedApproval
             RESERVATION_WITHOUT_OUTCOME SCORED_UNPARSEABLE_REASON STORE_DOES_NOT_REPLAY TERMINAL
+            UNKNOWN_BUDGET_REASON UNKNOWN_WALLTIME_REASON
             """,
         ),
         **_names(

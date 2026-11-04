@@ -37,8 +37,18 @@ def source_tree(tmp_path: Path) -> Path:
     (agent / "install_nooa_runtime.sh").write_text("#!/bin/bash\necho packaged-installer\n")
     (agent / "results.json").write_text("secret")
     pin = "a" * 40
-    (agent / "requirements.txt").write_text(
-        f"-e nemo-gym[dev] @ ../../\njsonschema>=4\nnooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@{pin}\n"
+    import json
+
+    (agent / "pyproject.toml").write_text(
+        "[project]\ndependencies = "
+        + json.dumps(
+            [
+                "nemo-gym[dev]",
+                "jsonschema>=4",
+                f"nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@{pin}",
+            ]
+        )
+        + "\n"
     )
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     subprocess.run(
@@ -53,7 +63,7 @@ def source_tree(tmp_path: Path) -> Path:
             "nemo_gym/module.py",
             "responses_api_agents/nooa_agent/runner.py",
             "responses_api_agents/nooa_agent/install_nooa_runtime.sh",
-            "responses_api_agents/nooa_agent/requirements.txt",
+            "responses_api_agents/nooa_agent/pyproject.toml",
         ],
         check=True,
     )
@@ -66,7 +76,7 @@ def test_archive_uses_current_source_without_private_files(source_tree: Path) ->
         assert set(archive.getnames()) == {
             "pyproject.toml",
             "MANIFEST.in",
-            "responses_api_agents/nooa_agent/requirements.txt",
+            "responses_api_agents/nooa_agent/pyproject.toml",
             "README.md",
             "LICENSE",
             "nemo_gym/module.py",

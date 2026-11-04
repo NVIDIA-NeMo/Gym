@@ -16,7 +16,7 @@
 
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -262,6 +262,9 @@ class RecoveryDecision(BaseModel):
     evidence: list[IdentityEvidence]
     duplicate_results: list[Identity] = Field(default_factory=list)
     scheduler_live: bool = False
+    # Which chain accounting is unknown when this STOP is the unknown-budget or unknown-walltime stop: "budget" or
+    # "walltime". The reason is display text that later notes extend; an operator continuation keys on this field.
+    accounting_unknown: Literal["budget", "walltime"] | None = Field(default=None, exclude=True)
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None

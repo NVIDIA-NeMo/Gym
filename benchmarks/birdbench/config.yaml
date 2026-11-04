@@ -31,6 +31,7 @@ birdbench_bird_sql_simple_agent:
           jsonl_fpath: benchmarks/birdbench/data/birdbench_benchmark.jsonl
           prompt_config: benchmarks/birdbench/prompts/default.yaml
           prepare_script: benchmarks/birdbench/prepare.py
+          prepare_project: benchmarks/birdbench
           num_repeats: 16
 
 birdbench_bird_sql_environment_server:

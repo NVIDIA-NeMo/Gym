@@ -674,7 +674,7 @@ def decide_recovery(
     # servers are up, and then runs the missing and retryable identities.
     reverify_first = sorted(by_state.get(IdentityState.JUDGE_RECOVERABLE.value, []))
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
-        return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON)
+        return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON, accounting_unknown="budget")
     segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         # A chain stops once less than a minute of its walltime remains, so name that budget too when it is spent.
@@ -696,7 +696,7 @@ def decide_recovery(
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
-            return decision(RecoveryAction.STOP, UNKNOWN_WALLTIME_REASON)
+            return decision(RecoveryAction.STOP, UNKNOWN_WALLTIME_REASON, accounting_unknown="walltime")
         if budget.walltime_used_s >= budget.max_walltime_s:
             return decision(
                 RecoveryAction.STOP,
