@@ -24,9 +24,9 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}
 
 
-def _run(tmp_path: Path, *, judge_failures: int) -> tuple[Path, list[dict]]:
-    """A managed run of three rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
-    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(3)]
+def _run(tmp_path: Path, *, judge_failures: int, rollouts: int = 3) -> tuple[Path, list[dict]]:
+    """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
     source = tmp_path / "source.jsonl"
     source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
     prepare = Mock(
@@ -140,6 +140,53 @@ async def test_the_pass_settles_saved_answers_in_place_once_and_counts_what_it_s
     assert store.manifest.pending_rejudge == {}  # the admission is closed
     # The settled rollout is no longer due; the one whose judge stayed down is, while it has attempts left.
     assert due_judge_failures(output) == [logical_rollout_id(failures[1])]
+
+
+async def test_a_collection_limit_does_not_cap_the_rows_a_re_judge_pass_re_verifies(tmp_path, monkeypatch):
+    # A collection `limit` counts tasks; in reverify `limit` caps the rows re-verified. The pass must cover every due
+    # judge failure, so the run's limit stays with its collection.
+    output, _ = _run(tmp_path, judge_failures=2)
+    passes: list[RolloutReverificationConfig] = []
+
+    async def judge_saved_answers(self, config):
+        passes.append(config)
+
+    monkeypatch.setattr(rollout_reverification.RolloutReverificationHelper, "run_from_config", judge_saved_answers)
+    await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output), "limit": 1}, output)
+
+    (config,) = passes
+    assert config.limit is None
+
+
+async def test_a_run_collected_with_a_limit_re_judges_every_due_judge_failure(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    output, _ = _run(tmp_path, judge_failures=10, rollouts=10)
+    posted: list[str] = []
+
+    async def post(*, server_name, url_path, json, **kwargs):
+        posted.append(url_path)
+        reply = MagicMock()
+        reply.verified = json | {"reward": 1.0}
+        return reply
+
+    monkeypatch.setattr(
+        "nemo_gym.eval.rollout_reverification.setup_server_client",
+        lambda: MagicMock(global_config_dict={}, post=post),
+    )
+    monkeypatch.setattr(
+        "nemo_gym.eval.rollout_reverification._build_agent_to_resources_server_mapping",
+        lambda _: {"agent": "judge_rs"},
+    )
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.raise_for_status", AsyncMock())
+    monkeypatch.setattr(
+        "nemo_gym.eval.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda reply: reply.verified)
+    )
+
+    # The run was collected with `limit: 4` (tasks); the pass still re-judges all 10 judge failures.
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output), "limit": 4}, output) == 10
+    assert posted == ["/verify"] * 10
+    assert due_judge_failures(output) == []
 
 
 async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_policy_call(tmp_path, monkeypatch):

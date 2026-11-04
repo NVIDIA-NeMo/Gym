@@ -272,3 +272,24 @@ def test_the_store_and_the_plan_agree_on_a_legacy_run_5xx_route_failure(tmp_path
     decision = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
     assert decision.action.value == "resubmit", decision.reason
     assert decision.counts == {"scored": 1, "retryable": 1}
+
+
+@pytest.mark.parametrize(
+    "walltime_used_s,named",
+    [(2727.0, True), (2000.0, False)],
+    ids=["walltime-also-spent", "walltime-left"],
+)
+def test_a_spent_infra_retry_budget_also_names_a_spent_walltime(walltime_used_s, named):
+    budget = _BUDGET.model_copy(
+        update={
+            "infra_retries_used": 2,
+            "walltime_capped": True,
+            "max_walltime_s": 2745.0,
+            "walltime_used_s": walltime_used_s,
+        }
+    )
+    spent = _decide(_INFRA_RETRY["collection_dispatch_failed"], budget=budget)
+
+    assert spent.action.value == "stop" and spent.reason.startswith("the stored infra-retry budget is used (2 of 2)")
+    assert ("the stored walltime budget is used (2727 of 2745 s" in spent.reason) is named
+    assert ("raise both in one call" in spent.reason) is named

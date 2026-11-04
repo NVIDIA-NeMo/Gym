@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config.global_config import GlobalConfigDictParser
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.data.dataset_preparation import TrainDataProcessor
 from nemo_gym.data.task_data import TaskDataValidator
 from nemo_gym.data.task_materialization import materialize_task
