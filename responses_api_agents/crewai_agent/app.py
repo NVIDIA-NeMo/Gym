@@ -54,7 +54,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
-    TaskId,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -71,9 +70,7 @@ from nemo_gym.trajectory import (
     ModelCallRef,
     ObservationGap,
     SandboxObservation,
-    TrajectoryRecord,
     TrajectoryToolCall,
-    TrajectoryTurn,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.crewai_agent import mcp_client
@@ -220,10 +217,9 @@ class _ModelRequestError(Exception):
 class _Episode:
     """One activation's crew run and what it observed, recorded on the event loop."""
 
-    def __init__(self, *, invocation_id: str, task_id: str, rollout_id: str, model_ref: ModelServerRef) -> None:
+    def __init__(self, *, invocation_id: str, rollout_id: str, model_ref: ModelServerRef) -> None:
         self.crew_run = CrewRun(asyncio.get_running_loop())
         self.invocation_id = invocation_id
-        self.task_id = task_id
         self.rollout_id = rollout_id
         self.model_ref = model_ref
         # CrewAI's name for each tool the crew has, to the tool's own name, which the transcript records.
@@ -231,7 +227,7 @@ class _Episode:
         self.started = monotonic()
         self.output: list[Any] = []
         self.model_calls: list[ModelCallRef] = []
-        self.turns: list[TrajectoryTurn] = []
+        self.turn_count = 0
         self.tool_runs: list[_ToolRun] = []
         self.gaps: list[ObservationGap] = []
         self.model_cookies: dict[str, str] = {}
@@ -260,22 +256,21 @@ class _Episode:
                 )
             )
 
-    def record_model_response(self, data: dict[str, Any], question: list[dict[str, Any]], started: float) -> dict:
+    def record_model_response(self, data: dict[str, Any]) -> dict:
         """Add a Chat Completions response to the transcript; return its assistant message for CrewAI."""
         choice = (data.get("choices") or [{}])[0]
         message = dict(choice.get("message") or {})
         self.finish_reason = choice.get("finish_reason")
+        self.turn_count += 1
         response_id = data.get("id")
-        refs = []
         if response_id:
-            refs.append(ModelCallRef(model_ref=self.model_ref, response_id=response_id))
-            self.model_calls.append(refs[0])
+            self.model_calls.append(ModelCallRef(model_ref=self.model_ref, response_id=response_id))
         else:
             self.gaps.append(
                 ObservationGap(
                     code="model_call_reference_unavailable",
                     invocation_id=self.invocation_id,
-                    detail=f"turn:{len(self.turns) + 1}",
+                    detail=f"turn:{self.turn_count}",
                 )
             )
         self._add_usage(data.get("usage"))
@@ -321,20 +316,6 @@ class _Episode:
             )
         message["tool_calls"] = tool_calls
         self.output.extend(items)
-        self.turns.append(
-            TrajectoryTurn(
-                invocation_id=self.invocation_id,
-                task_id=self.task_id,
-                rollout_id=self.rollout_id,
-                turn_no=len(self.turns) + 1,
-                timestamp=started,
-                question=question,
-                answer=[item for item in items if not isinstance(item, NeMoGymResponseReasoningItem)],
-                reasoning_content=[item for item in items if isinstance(item, NeMoGymResponseReasoningItem)] or None,
-                step_count=len(self.tool_runs),
-                model_calls=refs,
-            )
-        )
         return message
 
     def _add_usage(self, usage: Any) -> None:
@@ -448,12 +429,8 @@ class CrewAISessionState(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     episode: _Episode | None = None
     observations: AgentObservationBundle | None = None
-    trajectory: TrajectoryRecord | None = None
-
-
-def _collector_task_identity(task_id: TaskId) -> str:
-    """The task identity rollout collection expects on a session run's trajectory (see ``terminus_2_sandboxed_agent``)."""
-    return str(task_id.model_dump(mode="json"))
+    # How the crew's use of its sandbox ended (outcome, error type): cancelled unless an activation finished.
+    run_end: tuple[str, str | None] = ("cancelled", None)
 
 
 def _chat_messages(messages: list[Any]) -> list[dict[str, Any]]:
@@ -620,11 +597,16 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 )
             self._record_observations(state, status="incomplete")
         if sandbox_record is not None:
+            if sandbox_record["outcome"] == "unknown":
+                # Teardown went through, so the sandbox's outcome is that of the crew's work in it.
+                sandbox_record["outcome"], error_type = state.run_end
+                sandbox_record["error_type"] = sandbox_record["error_type"] or error_type
             state.observations.records.append(SandboxObservation.model_validate(sandbox_record))
+        # No trajectory: rollout collection builds the turns from the captured calls, and joins every call, failed
+        # attempts included, to the invocation by its session header.
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations,
-            trajectory=state.trajectory,
             cleanup_confirmed=True,
         )
 
@@ -740,7 +722,6 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
         async with self._semaphore:
             episode = _Episode(
                 invocation_id=state.request.episode_id.capture_key,
-                task_id=_collector_task_identity(state.request.task_id),
                 rollout_id=state.request.episode_id.capture_key,
                 model_ref=self.config.model_server,
             )
@@ -777,10 +758,13 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             finally:
                 episode.crew_run.cancel()
             if episode.infrastructure_error is not None:
+                state.run_end = ("failed", "infrastructure_error")
                 self._record_observations(state, status="failed", error_type="infrastructure_error")
                 raise HTTPException(503, f"CrewAI episode infrastructure failed: {episode.infrastructure_error}")
+            error_type = type(error).__name__ if error else None
+            state.run_end = ("timeout" if status == "incomplete" else status, error_type)
             response = self._response(state, instruction, status=status, error=error)
-            self._record_observations(state, status=status, error_type=type(error).__name__ if error else None)
+            self._record_observations(state, status=status, error_type=error_type)
             return response
 
     def _crew_tools(self, state: CrewAISessionState, episode: _Episode, instruction: _Instruction) -> list[Any]:
@@ -879,7 +863,6 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             payload["tools"] = tools
             if not instruction.parallel_tool_calls:
                 payload["parallel_tool_calls"] = False
-        started = time()
         retry = 0
         while True:
             try:
@@ -914,7 +897,7 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
         episode.model_cookies.update({name: morsel.value for name, morsel in response.cookies.items()})
         # A model call that went through clears an earlier failure that CrewAI recovered from.
         episode.model_failure = None
-        return episode.record_model_response(data, question, started)
+        return episode.record_model_response(data)
 
     def _response(
         self, state: CrewAISessionState, instruction: _Instruction, *, status: str, error: Exception | None
@@ -985,17 +968,8 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             model_calls=episode.model_calls,
             conversation=[*input_items, *episode.output],
         )
-        gaps = [*state.gaps, *episode.gaps]
         state.observations = AgentObservationBundle(
-            source="crewai_agent", records=[invocation, *tool_calls], gaps=gaps
-        )
-        state.trajectory = TrajectoryRecord(
-            task_id=episode.task_id,
-            rollout_id=episode.rollout_id,
-            invocations=[invocation],
-            turns=episode.turns,
-            tool_calls=tool_calls,
-            gaps=gaps,
+            source="crewai_agent", records=[invocation, *tool_calls], gaps=[*state.gaps, *episode.gaps]
         )
 
     async def run(self, request: Request, body: BaseRunRequest = Body()) -> None:

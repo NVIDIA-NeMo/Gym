@@ -195,8 +195,7 @@ def test_an_episode_runs_one_crew_turn_with_its_shell_in_the_borrowed_sandbox(ro
     assert (tool["tool_call_id"], tool["tool_name"], tool["status"]) == ("chatcmpl-1-call-0", "shell", "completed")
     # The agent used a lent sandbox: it observed it, and left its teardown to the owner.
     assert (sandbox["kind"], sandbox["role"], sandbox["provider"]) == ("sandbox", "agent", "local")
-    assert sandbox["teardown_confirmed"] is None
-    assert [turn["turn_no"] for turn in closed["trajectory"]["turns"]] == [1, 2]
+    assert (sandbox["outcome"], sandbox["error_type"], sandbox["teardown_confirmed"]) == ("completed", None, None)
     assert {gap["code"] for gap in closed["agent_observations"]["gaps"]} == {
         "cached_token_usage_unavailable",
         "reasoning_token_usage_unavailable",
@@ -327,7 +326,7 @@ def test_close_before_an_activation_reports_the_missing_evidence_and_releases_th
 
     assert closed.status_code == 200
     bundle = closed.json()["agent_observations"]
-    assert [record["kind"] for record in bundle["records"]] == ["sandbox"]
+    assert [(record["kind"], record["outcome"]) for record in bundle["records"]] == [("sandbox", "cancelled")]
     assert [gap["code"] for gap in bundle["gaps"]] == ["observation_capture_failed"]
     assert list((tmp_path / "sessions").iterdir()) == []
 
@@ -352,6 +351,7 @@ def test_close_stops_a_running_crew_and_kills_its_command(root, tmp_path):
     assert closed.status_code == 200, closed.text
     bundle = closed.json()["agent_observations"]
     assert bundle["records"][0]["status"] == "incomplete"
+    assert bundle["records"][-1]["outcome"] == "cancelled"
     assert "agent_activation_interrupted" in {gap["code"] for gap in bundle["gaps"]}
     time.sleep(3.5)
     assert not (root / "late.txt").exists()
@@ -377,6 +377,7 @@ def test_a_crew_that_runs_out_of_time_answers_incomplete(root):
     assert response.json()["metadata"]["crewai_stop_reason"] == "timeout"
     assert (root / "partial.txt").read_text() == "partial\n"
     assert "agent_run_timeout" in {gap["code"] for gap in closed["agent_observations"]["gaps"]}
+    assert closed["agent_observations"]["records"][-1]["outcome"] == "timeout"
 
 
 def test_a_rejected_model_request_fails_the_activation_with_its_status(root):
@@ -392,7 +393,9 @@ def test_a_rejected_model_request_fails_the_activation_with_its_status(root):
         "failure_kind": "model_request_error",
         "status_code": 400,
     }
-    assert closed["agent_observations"]["records"][0]["status"] == "failed"
+    invocation, sandbox = closed["agent_observations"]["records"]
+    assert invocation["status"] == "failed"
+    assert (sandbox["outcome"], sandbox["error_type"]) == ("failed", invocation["error_type"])
 
 
 def test_a_model_request_that_times_out_fails_the_activation_instead_of_ending_it_early(root):
@@ -414,9 +417,14 @@ def test_a_transient_model_status_is_retried(root):
     with TestClient(_agent(model).setup_webserver()) as client:
         _seed(client, sandbox_access=_sandbox_access(root))
         response = _respond(client)
+        closed = _close(client).json()
 
     assert response.json()["status"] == "completed"
     assert len(model.requests) == 2
+    # Both attempts carried the session header. Close sends no trajectory of its own, so rollout collection joins the
+    # failed attempt, which has no response ID, to the invocation by that header.
+    assert all(request["headers"] == {"x-session-id": _EPISODE.capture_key} for request in model.requests)
+    assert "trajectory" not in closed
 
 
 def test_usage_is_unknown_when_a_model_call_reports_none(root):
@@ -451,9 +459,10 @@ def test_a_sandbox_that_fails_under_the_crew_fails_the_episode_instead_of_gradin
     # The crew stopped instead of showing the model the failure.
     assert len(model.requests) == 1
     assert closed.status_code == 200
-    invocation, tool, _ = closed.json()["agent_observations"]["records"]
+    invocation, tool, sandbox = closed.json()["agent_observations"]["records"]
     assert (invocation["status"], invocation["error_type"]) == ("failed", "infrastructure_error")
     assert tool["error_type"] == "infrastructure_error"
+    assert (sandbox["outcome"], sandbox["error_type"]) == ("failed", "infrastructure_error")
 
 
 @pytest.fixture
@@ -498,7 +507,7 @@ def test_without_a_lent_sandbox_the_agent_runs_its_shell_in_its_own_and_stops_it
     assert spec.metadata["nemo_gym_agent"] == "crewai_agent" and spec.metadata["agent_session"] == "agent-session"
     assert len(owned["stopped"]) == 1
     sandbox = closed["agent_observations"]["records"][-1]
-    assert (sandbox["role"], sandbox["teardown_confirmed"]) == ("agent", True)
+    assert (sandbox["role"], sandbox["outcome"], sandbox["teardown_confirmed"]) == ("agent", "completed", True)
     assert list((tmp_path / "sessions").iterdir()) == []
 
 

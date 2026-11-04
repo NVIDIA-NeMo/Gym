@@ -10,8 +10,8 @@ or, when it lends none and `sandbox_provider` is set, one the adapter starts and
 - Execution: in process, under an Environment Server such as `single_agent_turn`. There is no `/run` route and no
   host path: `/v1/responses` without a seeded agent session answers 409.
 - Capability level: Evaluation, plus Environment tools and task sandboxes. The close bundle carries an invocation
-  record with every model-call reference, tool-call records with executor timing, and the turns, but the
-  [harness conformance probes](../../scripts/harness_conformance/README.md) are not registered for this adapter;
+  record with every model-call reference, tool-call records with executor timing, and the agent's sandbox record, but
+  the [harness conformance probes](../../scripts/harness_conformance/README.md) are not registered for this adapter;
   see [Limitations](#limitations).
 - Training: not qualified. `token_id_capture` is untested.
 
@@ -111,7 +111,7 @@ gym eval run --no-serve --config run.yaml --agent crewai_agent \
 | --- | --- |
 | Seed (`/v1/agent_sessions`) | Lists the tools of each MCP grant, then connects to the lent sandbox, or starts its own with `sandbox_config`, and uploads the shell's runner to `/tmp/nemo-gym-crewai-sessions/<id>`, outside the task directory. |
 | Activation (`/ng-rollout/<capture key>/v1/responses`) | Builds one CrewAI agent and one task from the request and runs `Crew.akickoff()` once. Identical retries join the same run; a different request answers 409. |
-| Close (`/v1/agent_sessions/close`) | Cancels the crew's calls in flight and fails its later ones, cancels the activation, kills shell commands still running, removes the session directory, then disconnects from a lent sandbox or stops its own. Returns the observations and the turns. |
+| Close (`/v1/agent_sessions/close`) | Cancels the crew's calls in flight and fails its later ones, cancels the activation, kills shell commands still running, removes the session directory, then disconnects from a lent sandbox or stops its own. Returns the observations. |
 
 CrewAI 1.15 runs its agent loop as a Flow whose steps call the model and the tools synchronously from worker threads
 of the event loop's default executor, even under `akickoff()`. Each of those calls is handed back to the event loop,
@@ -177,6 +177,12 @@ joined to the model's calls by name and arguments; an execution that cannot be j
 `tool_call_identity_unavailable` gap. Cached and reasoning token counts that a call does not report are gaps. A close
 before any activation returns an `observation_capture_failed` gap; a close that interrupts a run adds
 `agent_activation_interrupted`.
+
+The bundle also holds the agent's `SandboxObservation` of the sandbox it used. Its outcome is how the crew's run
+ended: `completed`, `failed` with the invocation's error type, `timeout` at the run's deadline, or `cancelled` when
+close came before the run finished. A failed provider teardown makes it `sandbox_error`. Close sends no trajectory of
+its own: rollout collection builds the turns from the captured calls, and joins every call that carried the session
+header to the invocation, including failed attempts that have no response ID.
 
 ## Configuration
 

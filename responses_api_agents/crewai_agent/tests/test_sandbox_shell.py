@@ -25,8 +25,9 @@ async def shell(tmp_path, monkeypatch):
     workdir.mkdir()
     provider = create_provider(resolve_provider_config("sandbox", {"sandbox": {"local": {}}}))
     sandbox = await AsyncSandbox(provider).start(SandboxSpec(workdir=str(workdir)))
+    # Room for a loaded machine; the deadline tests shorten it.
     shell = SandboxShell(
-        sandbox, workdir=str(workdir), env={"TASK_LABEL": "owner"}, timeout_seconds=1, max_output_bytes=1000
+        sandbox, workdir=str(workdir), env={"TASK_LABEL": "owner"}, timeout_seconds=10, max_output_bytes=1000
     )
     await shell.setup()
     try:
@@ -60,6 +61,7 @@ async def test_the_runner_adds_nothing_to_output_from_a_provider_that_merges_std
     monkeypatch.setattr(shell.sandbox, "exec", merged)
 
     finished = await asyncio.wait_for(shell.run("echo done"), 10)
+    shell.timeout_seconds = 1
     killed = await asyncio.wait_for(shell.run("echo begun; exec sleep 5"), 10)
 
     # Job control reports the killed watchdog, or the killed command, only on the runner's stderr.
@@ -69,6 +71,7 @@ async def test_the_runner_adds_nothing_to_output_from_a_provider_that_merges_std
 
 @_LINUX_PROCESS_GROUPS
 async def test_the_deadline_kills_the_commands_whole_process_group(shell):
+    shell.timeout_seconds = 1
     workdir = Path(shell.workdir)
     started = asyncio.get_running_loop().time()
 
