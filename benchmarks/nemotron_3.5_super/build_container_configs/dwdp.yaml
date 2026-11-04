@@ -19,7 +19,7 @@ flashinfer:
   repo: https://github.com/bxyu-nvidia/flashinfer
   branch: bxyu/v0.7.0.post1-dwdp
   invalidate_modules:
-  - fused_moe_trtllm_sm100
+  - trtllm_gen_routing
   cpus_per_task: 128
 
 shared_run_warmup_env_vars:
