@@ -31,9 +31,18 @@ def _runtime() -> SandboxPythonRuntime:
         for raw in importlib.metadata.requires("nemo-gym") or ()
         if (requirement := Requirement(raw)).marker is None or requirement.marker.evaluate({"extra": ""})
     )
+    # Hydra/OmegaConf need this pure-Python dependency, whose pinned release has no wheel.
+    # The direct, hash-checked sdist opts only this package into the shared runtime's host build path.
+    # Version and digest match this adapter's uv.lock; all other packages still require target wheels.
+    antlr = (
+        "antlr4-python3-runtime @ https://files.pythonhosted.org/packages/3e/38/"
+        "7859ff46355f76f8d19459005ca000b6e7012f2f1ca597746cbcd1fbfe5e/"
+        "antlr4-python3-runtime-4.9.3.tar.gz"
+        "#sha256=f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b"
+    )
     return SandboxPythonRuntime(
         harness="browsecomp",
-        requirements=requirements,
+        requirements=(*requirements, antlr),
         import_check="import aiohttp, openai, pydantic, fastapi, omegaconf",
     )
 
