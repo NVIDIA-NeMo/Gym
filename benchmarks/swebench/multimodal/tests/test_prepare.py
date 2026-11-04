@@ -21,6 +21,7 @@ import urllib.request
 import pytest
 
 from benchmarks.swebench.multimodal import prepare
+from resources_servers.swebench.task_data import TaskData
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"png-body"
@@ -116,6 +117,29 @@ def test_build_row_matches_the_swebench_row_format() -> None:
     assert (out["subset"], out["split"]) == ("multimodal", "dev")
     assert (out["environment_setup_commit"], out["difficulty"]) == ("", "")
     assert out["instance_id"] == "chartjs__Chart.js-1"
+
+
+def test_build_row_stores_the_test_patch_files_for_the_verifier() -> None:
+    files = {"https://example.com/ref-a.png": PNG, "https://example.com/ref-b.gif": GIF}
+    test_assets = [{"path": f"test/fixtures/{url.rsplit('/', 1)[1]}", "url": url} for url in files]
+    image_assets = {"problem_statement": [], "patch": [], "test_patch": test_assets}
+    row = _row(json.dumps(image_assets)) | {
+        "base_commit": "abc123",
+        "patch": "",
+        "test_patch": "",
+        "hints_text": "",
+        "created_at": "",
+        "version": "3.7",
+    }
+
+    out = prepare.build_row(row, TEMPLATE, fetch=files.__getitem__)
+
+    stored = out["image_assets"]["test_patch"]
+    assert [(asset["path"], asset["url"]) for asset in stored] == [(a["path"], a["url"]) for a in test_assets]
+    assert [base64.b64decode(asset["content_base64"], validate=True) for asset in stored] == [PNG, GIF]
+    assert out["image_assets"]["patch"] == [] and out["image_assets"]["problem_statement"] == []
+    # The swebench resources server accepts the row and reads the same bytes.
+    assert [asset.content for asset in TaskData.model_validate(out).image_assets.test_patch] == [PNG, GIF]
 
 
 def test_fetch_url_retries_transient_failures(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,6 +21,10 @@ attached to the user turn as ``input_image`` data URIs after the prompt text, be
 sandbox has no internet access. An asset that is not a PNG, JPEG, GIF or WebP image (the formats
 OpenCode attaches) is left out; its URL stays in the issue text.
 
+The test patch's binary files (``image_assets["test_patch"]``, the reference images of 11 Chart.js
+tasks) are downloaded too and stored in the row as ``content_base64``. The evaluation copies them
+into place, so the verifier sandbox needs no internet access either.
+
 The test split is not prepared: the SWE-bench harness pinned by the swebench resources server
 (swebench 4.1.0) has no environment specs for its repositories.
 """
@@ -75,11 +79,29 @@ def fetch_url(url: str) -> bytes:
     raise AssertionError("unreachable")
 
 
-def issue_image_urls(image_assets: dict | str | None) -> list[str]:
-    """The problem-statement image URLs of a row (``image_assets`` is a dict, or a JSON string in older copies)."""
+def parse_image_assets(image_assets: dict | str | None) -> dict:
+    """A row's ``image_assets``: a dict, or a JSON string in older copies."""
     if isinstance(image_assets, str):
         image_assets = json.loads(image_assets) if image_assets else {}
-    return list((image_assets or {}).get("problem_statement") or [])
+    return dict(image_assets or {})
+
+
+def issue_image_urls(image_assets: dict | str | None) -> list[str]:
+    """The problem-statement image URLs of a row."""
+    return list(parse_image_assets(image_assets).get("problem_statement") or [])
+
+
+def with_test_asset_contents(image_assets: dict, fetch: Callable[[str], bytes] = fetch_url) -> dict:
+    """``image_assets`` with the bytes of each of the test patch's binary files (Chart.js reference images).
+
+    SWE-bench's evaluation script downloads these files before running the tests; the swebench resources server
+    copies the stored bytes into place instead, so the verifier sandbox needs no internet access.
+    """
+    test_assets = [
+        asset | {"content_base64": base64.b64encode(fetch(asset["url"])).decode("ascii")}
+        for asset in image_assets.get("test_patch") or []
+    ]
+    return image_assets | {"test_patch": test_assets} if test_assets else image_assets
 
 
 def issue_image_parts(urls: list[str], fetch: Callable[[str], bytes] = fetch_url) -> list[dict]:
@@ -100,10 +122,12 @@ def build_row(row: dict, prompt_template: str, fetch: Callable[[str], bytes] = f
     prompt = prompt_template.replace("{{ workspace_path }}", "/testbed").replace(
         "{{ instance.problem_statement }}", row["problem_statement"]
     )
-    images = issue_image_parts(issue_image_urls(row.get("image_assets")), fetch)
+    image_assets = parse_image_assets(row.get("image_assets"))
+    images = issue_image_parts(issue_image_urls(image_assets), fetch)
     content = [{"type": "input_text", "text": prompt}, *images] if images else prompt
 
     row = row | {
+        "image_assets": with_test_asset_contents(image_assets, fetch),
         "responses_create_params": {"input": [{"role": "user", "content": content}]},
         "subset": "multimodal",
         "split": SPLIT,
