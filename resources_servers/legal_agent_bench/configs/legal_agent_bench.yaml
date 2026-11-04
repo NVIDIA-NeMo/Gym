@@ -10,7 +10,10 @@ legal_agent_bench:
       harbor_tasks_dir: ${oc.env:LEGAL_AGENT_BENCH_RUNTIME_TASKS_DIR,resources_servers/legal_agent_bench/data/runtime/harbor_tasks/legal_agent_bench}
       harness_skills_dir: ${oc.env:LEGAL_AGENT_BENCH_SKILLS_DIR,resources_servers/legal_agent_bench/data/cache/harness/skills}
       auto_prepare_assets: true
-      reward_mode: full_task  # official all-criteria score; criteria_pass_rate is diagnostic
+      reward_mode: full_task  # average of per-judge all-criteria task scores
+      judge_profile: official_dual
+      judges: ${oc.select:lab_judges,null}
+      judge_reasoning_effort: ${oc.select:judge_reasoning_effort,null}
       judge_base_url: ${oc.select:judge_base_url,null}
       judge_api_key: ${oc.select:judge_api_key,null}
       judge_model_name: ${oc.select:judge_model_name,null}

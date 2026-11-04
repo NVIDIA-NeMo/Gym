@@ -17,8 +17,7 @@ timeout remains a graded outcome under the shared Harbor bridge's rules.
 Benchmark version 0.2.0 pins Harvey LAB commit
 `9e9fa7fe126103de1fceb2227b7c70bf59b67f73`: 2,010 tasks, including nested
 scenarios and 250 firm-knowledge tasks backed by a shared document corpus.
-Skills come from `lab_core/harness/skills`. This source update retains the
-existing single-judge scoring until the grading layer is applied. Historical
+Skills come from `lab_core/harness/skills`. Historical
 example rollouts describe the former 1,749-task snapshot; they are not new
 validation evidence.
 
@@ -32,3 +31,37 @@ The selected rows keep their sampling parameters and the full benchmark index
 is left untouched. Preparation fetches only missing tasks and required shared
 corpora, with atomic replacement and cross-process cache locking. Cache markers
 include the source revision, so old caches cannot silently serve the new pin.
+
+## Judge profiles and score comparability
+
+The refreshed configuration selects `judge_profile: official_dual`: independent
+`claude-sonnet-4-6` and `gpt-5.5` judges grade every criterion, and the reported
+full-task reward is the mean of their all-criteria task scores: 0, 0.5, or 1.
+`all_pass` means both judges passed every criterion. Criterion pass rate remains
+a diagnostic metric. Each judge's report is retained; `scores_dual.json` is
+written only when both judges finish grading all criteria. Grading errors route
+to failure handling rather than becoming completed zero-score tasks. Harbor
+collects the declared LAB artifacts, stops the agent environment, then grades
+in its separate verifier environment. Writable automatic host log mounts are
+rejected for LAB.
+
+Set `judge_profile: single` to use the existing `judge_model_name`,
+`judge_base_url`, and `judge_api_key` settings. For the official pair, `judges`
+accepts two entries with `model_name`, and optional `base_url`, `api_key`, and
+`reasoning_effort`; omitted connection settings inherit the shared judge
+endpoint. Provider route prefixes may precede the canonical model names.
+Keep credentials in local configuration, outside committed YAML.
+
+The verifier records the source revision, judge profile, per-judge results,
+Python/document-library versions, and pandoc version. The image installs the
+upstream-pinned pandoc 3.11 with its published checksum and includes `unzip`.
+DOCX margin comments are graded with their anchored passages; converter failures
+remain ungraded errors. The structured judge schema asks for reasoning before
+verdict. These changes and the 2,010-task source refresh require new baselines;
+the old PR's single-judge 1,749-task scores are historical evidence.
+
+The LAB tool loop exposes the upstream six workspace tools plus `finish`.
+Completion checks only the files the agent claims to have produced, never the
+hidden rubric. Missing files reject completion twice before the soft gate
+accepts it; the verifier still scores the resulting output. CLI harnesses use
+their own tools and termination conventions.

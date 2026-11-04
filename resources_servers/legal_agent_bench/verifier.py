@@ -22,7 +22,9 @@ import html as html_lib
 import json
 import os
 import sys
+from copy import copy
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +86,17 @@ def _write_report(scores: dict[str, Any], output_dir: Path) -> None:
     (output_dir / "report.html").write_text(report_html, encoding="utf-8")
 
 
-def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
+def _document_tool_versions() -> dict[str, str | None]:
+    versions: dict[str, str | None] = {"python": sys.version.split()[0]}
+    for package in ("python-docx", "openpyxl", "pandas", "python-pptx", "pdfplumber", "markitdown"):
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = None
+    return versions
+
+
+def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, Any] | None = None) -> dict[str, Any]:
     task_config = json.loads(Path(args.task_json).read_text(encoding="utf-8"))
     run_dir = Path(args.run_dir)
     verifier_dir = Path(args.verifier_dir)
@@ -93,12 +105,18 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
     config = _read_json_if_exists(run_dir / "config.json")
     metrics = _read_json_if_exists(run_dir / "metrics.json")
 
-    judge_model = os.environ.get("LAB_JUDGE_MODEL", args.judge_model)
+    override = judge_override or {}
+    judge_model = override.get("model_name") or os.environ.get("LAB_JUDGE_MODEL", args.judge_model)
     judge_kwargs = {
         "model": judge_model,
-        "base_url": os.environ.get("LAB_JUDGE_BASE_URL") or args.judge_base_url,
-        "api_key": os.environ.get("LAB_JUDGE_API_KEY") or args.judge_api_key,
+        "base_url": override.get("base_url") or os.environ.get("LAB_JUDGE_BASE_URL") or args.judge_base_url,
+        "api_key": (
+            override["api_key"]
+            if override.get("api_key") is not None
+            else os.environ.get("LAB_JUDGE_API_KEY") or args.judge_api_key
+        ),
         "temperature": _optional_float(os.environ.get("LAB_JUDGE_TEMPERATURE")),
+        "reasoning_effort": override.get("reasoning_effort") or os.environ.get("LAB_JUDGE_REASONING_EFFORT"),
         "timeout_seconds": float(
             os.environ.get("LAB_JUDGE_REQUEST_TIMEOUT_SECONDS") or os.environ.get("LAB_JUDGE_TIMEOUT_SECONDS", "90")
         ),
@@ -137,6 +155,11 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
         "judge_model_base_url": judge.base_url,
         "judge_parallelism": judge_parallelism,
         "scored_at": datetime.now(timezone.utc).isoformat(),
+        "source_revision": (task_config.get("metadata") or {}).get("lab_source_revision"),
+        "harness_pin": config.get("harness_pin") or config.get("harness_config"),
+        "gym_commit": config.get("gym_commit"),
+        "judge_profile": "single",
+        "document_tool_versions": _document_tool_versions(),
     }
     if metrics:
         scores["cost"] = {
@@ -175,9 +198,83 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
     scores["reported_reward_mode"] = reward_mode
     (verifier_dir / "scores.json").write_text(json.dumps(scores, indent=2), encoding="utf-8")
     _write_report(scores, verifier_dir)
+    if scores.get("judge_error_count"):
+        raise RuntimeError(f"LAB criteria could not be graded: {scores['judge_error_count']}")
     reward_path = Path(args.reward_json)
     reward_path.parent.mkdir(parents=True, exist_ok=True)
     reward_path.write_text(json.dumps(reward, indent=2), encoding="utf-8")
+    return scores
+
+
+STANDARD_JUDGE_MODELS = ("claude-sonnet-4-6", "gpt-5.5")
+
+
+def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
+    """Score one run with an explicit single or official averaged dual-judge profile."""
+    profile = os.environ.get("LAB_JUDGE_PROFILE", "official_dual")
+    if profile == "single":
+        return _run_single_verifier(args)
+    if profile != "official_dual":
+        raise ValueError(f"Unknown LAB judge profile: {profile!r}")
+    raw = os.environ.get("LAB_JUDGES")
+    judges = json.loads(raw) if raw else [{"model_name": name} for name in STANDARD_JUDGE_MODELS]
+    if not isinstance(judges, list) or len(judges) != 2 or any(not isinstance(item, dict) for item in judges):
+        raise ValueError("Official dual judging requires two judge configurations")
+    canonical = [str(item.get("model_name", "")).removeprefix("openai-compatible/").split("/")[-1] for item in judges]
+    if set(canonical) != set(STANDARD_JUDGE_MODELS):
+        raise ValueError("Official dual judging requires claude-sonnet-4-6 and gpt-5.5")
+    verifier_dir = Path(args.verifier_dir)
+    verifier_dir.mkdir(parents=True, exist_ok=True)
+    aggregate_path = verifier_dir / "scores_dual.json"
+    aggregate_path.unlink(missing_ok=True)
+    Path(args.reward_json).unlink(missing_ok=True)
+    per_judge = {}
+    errors = []
+    for index, spec in enumerate(judges):
+        child_args = copy(args)
+        child_dir = verifier_dir / f"judge-{index + 1}"
+        child_args.verifier_dir = str(child_dir)
+        child_args.reward_json = str(child_dir / "reward.json")
+        try:
+            per_judge[canonical[index]] = _run_single_verifier(child_args, judge_override=spec)
+        except Exception as exc:
+            # Retain that judge's completed criteria and still attempt the other judge.
+            errors.append(f"{canonical[index]}: {type(exc).__name__}: {exc}")
+    if errors:
+        raise RuntimeError("Dual grading incomplete: " + "; ".join(errors))
+    values = list(per_judge.values())
+    task_score = sum(float(value["score"]) for value in values) / 2
+    criterion_rate = (
+        sum(value["n_passed"] / value["n_criteria"] if value["n_criteria"] else 0.0 for value in values) / 2
+    )
+    scores = {
+        "judge_profile": "lab-standard-dual-v1",
+        "judges": canonical,
+        "per_judge": per_judge,
+        "score": task_score,
+        "dual_all_pass_rate": task_score,
+        "dual_criterion_pass": criterion_rate,
+        "all_pass": task_score == 1.0,
+        "n_passed": sum(value["n_passed"] for value in values),
+        "n_criteria": sum(value["n_criteria"] for value in values),
+        "judge_error_count": 0,
+        "run_id": values[0]["run_id"],
+        "task": values[0]["task"],
+        "source_revision": values[0].get("source_revision"),
+        "harness_pin": values[0].get("harness_pin"),
+        "gym_commit": values[0].get("gym_commit"),
+        "pandoc_version": values[0].get("pandoc_version"),
+        "document_tool_versions": values[0]["document_tool_versions"],
+        "summary": f"Dual task all-pass: {task_score:.1f}; criterion pass: {criterion_rate:.4f}",
+        "scored_at": datetime.now(timezone.utc).isoformat(),
+    }
+    mode = _validate_reward_mode(os.environ.get(REWARD_MODE_ENV_KEY, DEFAULT_REWARD_MODE))
+    reward = _build_reward(scores, mode)
+    scores.update(reported_reward=reward["reward"], reported_reward_mode=mode)
+    aggregate_path.write_text(json.dumps(scores, indent=2), encoding="utf-8")
+    output = Path(args.reward_json)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(reward, indent=2), encoding="utf-8")
     return scores
 
 
@@ -283,12 +380,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         scores = run_verifier(args)
     except Exception as exc:
-        # Harbor expects reward.json even when judging fails. Preserve a
-        # structured trial result and expose verifier_error/judge_error metrics
-        # instead of turning the infrastructure failure into a missing result.
+        # Preserve error diagnostics while allowing the caller to route an
+        # unavailable verifier as a failure, never as a completed scored zero.
         scores = write_failure_outputs(args, exc)
+        (Path(args.verifier_dir) / "scores_dual.json").unlink(missing_ok=True)
         print(scores["summary"], file=sys.stderr)
-        return 0
+        return 1
     print(scores["summary"])
     return 0
 

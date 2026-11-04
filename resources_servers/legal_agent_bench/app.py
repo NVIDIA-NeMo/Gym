@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 from fastapi import FastAPI
-from pydantic import ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt
+from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveFloat, PositiveInt, model_validator
 
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -26,6 +27,8 @@ from resources_servers.legal_agent_bench.prepare import (
 
 RewardMode = Literal["full_task", "criteria_pass_rate"]
 JUDGE_CONFIG_TO_ENV = {
+    "judge_profile": "LAB_JUDGE_PROFILE",
+    "judge_reasoning_effort": "LAB_JUDGE_REASONING_EFFORT",
     "judge_base_url": "LAB_JUDGE_BASE_URL",
     "judge_api_key": "LAB_JUDGE_API_KEY",  # pragma: allowlist secret
     "judge_model_name": "LAB_JUDGE_MODEL",
@@ -40,6 +43,15 @@ JUDGE_CONFIG_TO_ENV = {
 }
 
 
+class LabJudgeConfig(BaseModel):
+    """One judge's API route; omitted transport settings inherit the shared judge endpoint."""
+
+    model_name: str = Field(min_length=1)
+    base_url: str | None = None
+    api_key: str | None = None
+    reasoning_effort: str | None = None
+
+
 class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     model_config = ConfigDict(extra="allow")
 
@@ -48,6 +60,9 @@ class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     harness_skills_dir: str = str(DEFAULT_SKILLS_DIR)
     auto_prepare_assets: bool = True
     reward_mode: RewardMode = "full_task"
+    judge_profile: Literal["official_dual", "single"] = "official_dual"
+    judges: list[LabJudgeConfig] | None = None
+    judge_reasoning_effort: str | None = None
     judge_base_url: str | None = Field(default=None, description="OpenAI-compatible base URL for the LAB judge.")
     judge_api_key: str | None = Field(default=None, description="API key for the LAB judge endpoint.")
     judge_model_name: str | None = Field(default=None, description="Model identifier sent to the LAB judge endpoint.")
@@ -75,6 +90,16 @@ class LegalAgentBenchResourcesServerConfig(BaseResourcesServerConfig):
     )
     judge_max_tokens: PositiveInt = Field(default=4096, description="Maximum output tokens for LAB judge requests.")
     judge_parallelism: PositiveInt = Field(default=6, description="Maximum concurrent LAB judge requests per task.")
+
+    @model_validator(mode="after")
+    def validate_judge_profile(self) -> LegalAgentBenchResourcesServerConfig:
+        if self.judge_profile == "single" and self.judges is not None:
+            raise ValueError("Single judging uses judge_model_name and the shared judge connection settings")
+        if self.judges is not None:
+            canonical = [judge.model_name.removeprefix("openai-compatible/").split("/")[-1] for judge in self.judges]
+            if len(canonical) != 2 or set(canonical) != {"claude-sonnet-4-6", "gpt-5.5"}:
+                raise ValueError("Official dual judging requires claude-sonnet-4-6 and gpt-5.5")
+        return self
 
 
 class LegalAgentBenchResourcesServer(SimpleResourcesServer):
@@ -112,6 +137,8 @@ def _build_verifier_env(config: LegalAgentBenchResourcesServerConfig) -> dict[st
         if config_key == "judge_model_name" and not str(value).startswith("openai-compatible/"):
             value = f"openai-compatible/{value}"
         env[env_key] = str(value).lower() if isinstance(value, bool) else str(value)
+    if config.judges is not None:
+        env["LAB_JUDGES"] = json.dumps([judge.model_dump(exclude_none=True) for judge in config.judges])
     return env
 
 

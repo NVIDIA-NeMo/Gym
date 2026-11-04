@@ -48,6 +48,7 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
         judge_temperature=0.2,
     )
     judge_env = {
+        "LAB_JUDGE_PROFILE": "official_dual",
         "LAB_JUDGE_BASE_URL": "https://judge.example/v1",
         "LAB_JUDGE_API_KEY": "test-key",  # pragma: allowlist secret
         "LAB_JUDGE_MODEL": "openai-compatible/provider/model-name",

@@ -166,6 +166,9 @@ async def test_agent_run_preserves_artifacts_and_distinguishes_failures(
         async def upload_dir(self, source: Path, destination: str) -> None:
             pass
 
+        async def upload_file(self, source: Path, destination: str) -> None:
+            pass
+
         async def exec(self, command: str, **kwargs: object) -> SimpleNamespace:
             result = ""
             if command.startswith("python "):
@@ -293,9 +296,6 @@ def test_lab_bridge_routes_model_calls_without_mutating_template(
         "temperature": 0.25,
         "top_p": 0.8,
         "max_output_tokens": 2048,
-        "parallel_tool_calls": True,
-        "tool_choice": "auto",
-        "tools": [],
     }
     assert bridge.config.job.model_dump(mode="json") == template
 
@@ -358,3 +358,72 @@ def test_lab_configs_keep_schema_and_paths_when_loaded_outside_gym(
     )
     assert job.datasets[0].task_names == ["domain__task"]
     assert not agent_config.job.datasets[0].task_names
+
+
+def test_harbor_verifier_operational_error_does_not_become_a_task_zero(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from harbor.models.trial.paths import TrialPaths
+
+    from resources_servers.legal_agent_bench import harbor_bridge
+
+    monkeypatch.setattr("responses_api_agents.harbor_agent_general.app.get_global_config_dict", lambda: {})
+    paths = TrialPaths(tmp_path)
+    paths.result_path.write_text("{}")
+    monkeypatch.setattr(
+        harbor_bridge.TrialResult,
+        "model_validate_json",
+        lambda _value: SimpleNamespace(verifier_result=SimpleNamespace(rewards={"reward": 0, "verifier_error": 1})),
+    )
+    with pytest.raises(RuntimeError, match="verification did not complete"):
+        _bridge().success_response(None, tmp_path)
+
+
+def test_lab_harbor_declares_separate_verification_and_transferred_run_artifacts(monkeypatch):
+    monkeypatch.setattr("responses_api_agents.harbor_agent_general.app.get_global_config_dict", lambda: {})
+    from harbor.models.task.config import TaskConfig, VerifierEnvironmentMode
+
+    from resources_servers.legal_agent_bench.prepare import _task_toml
+
+    task = TaskConfig.model_validate_toml(_task_toml({"title": "Task"}, "area/task"))
+    assert task.verifier.environment_mode == VerifierEnvironmentMode.SEPARATE
+    assert "/logs/agent/artifacts/lab-run" in task.artifacts
+    settings = _bridge().config.model_dump(exclude_unset=True)
+    settings["job"].setdefault("environment", {}).setdefault("kwargs", {})["auto_mounting"] = True
+    with pytest.raises(ValidationError, match="host logs"):
+        LegalAgentBenchHarborConfig.model_validate(settings)
+
+
+@pytest.mark.parametrize("reason", ["max_turns_exceeded", "context_overflow"])
+def test_lab_limits_remain_scoreable_incomplete_outcomes(tmp_path, monkeypatch, reason):
+    from types import SimpleNamespace
+
+    from harbor.models.trial.paths import TrialPaths
+
+    from nemo_gym.core import NeMoGymResponse
+    from resources_servers.legal_agent_bench import harbor_bridge
+    from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborVerifyResponse
+
+    monkeypatch.setattr("responses_api_agents.harbor_agent_general.app.get_global_config_dict", lambda: {})
+    TrialPaths(tmp_path).result_path.write_text("{}")
+    trial = SimpleNamespace(
+        verifier_result=SimpleNamespace(rewards={"reward": 0.5}),
+        agent_result=SimpleNamespace(metadata={"finished_cleanly": False, "finish_reason": reason}),
+    )
+    monkeypatch.setattr(harbor_bridge.TrialResult, "model_validate_json", lambda _: trial)
+    response = NeMoGymResponse(
+        id="r",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[],
+        status="completed",
+        tools=[],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+    )
+    parent = HarborVerifyResponse(responses_create_params={"input": []}, response=response, reward=0.5)
+    monkeypatch.setattr(HarborAgent, "success_response", lambda *args: parent)
+    result = _bridge().success_response(None, tmp_path)
+    assert result.reward == 0.5 and not result.mask_sample
+    assert result.response.status == "incomplete" and result.response.metadata["lab_finish_reason"] == reason

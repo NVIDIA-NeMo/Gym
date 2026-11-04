@@ -262,6 +262,13 @@ modifications are recorded in the
 Task documents and public skills are downloaded at runtime rather than checked
 into this repository.
 
+The LAB runtime refresh additionally adapts tools, the system prompt, rubric
+scoring/prompt, document parsing, and the Pandoc installer from
+[revision 9e9fa7fe126103de1fceb2227b7c70bf59b67f73](https://github.com/harveyai/harvey-labs/tree/9e9fa7fe126103de1fceb2227b7c70bf59b67f73).
+Exact per-file provenance remains in the modified source headers and the local
+attribution notice linked above. Original MIT notices and the unchanged MIT
+license are retained; NVIDIA modifications remain Apache-2.0 licensed.
+
 ---
 
 ## Cloned and Modified Components
