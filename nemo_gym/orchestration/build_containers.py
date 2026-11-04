@@ -150,12 +150,6 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
             self.log_file = self.output_container_fpath.with_suffix(".log")
         self.log_file = self.log_file.resolve()
 
-        print(f"""Resolved fpaths:
-- Input container: {self.input_container_fpath}
-- Output container: {self.output_container_fpath}
-- Log file: {self.log_file}
-""")
-
 
 class CommandOutput(BaseModel):
     returncode: int
@@ -971,6 +965,11 @@ def main() -> None:
 
     async def execute() -> None:
         if not bch.config.run_only:
+            print(f"""Resolved fpaths:
+- Input container: {bch.config.input_container_fpath}
+- Output container: {bch.config.output_container_fpath}
+- Log file: {bch.config.log_file}
+""")
             await bch.run()
         if bch.config.run_only or bch.config.run_after_build:
             await bch._run_container()
