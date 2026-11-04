@@ -50,8 +50,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode import TaskId
-from nemo_gym.core.episode_types import is_materialized_task_row
+from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.dataset_metrics import (
     DatasetMetricHook,
     DatasetMetricsHookError,

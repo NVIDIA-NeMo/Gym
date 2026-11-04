@@ -40,7 +40,7 @@ from fastapi import Request, Response
 from pydantic import BaseModel, model_validator
 
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (

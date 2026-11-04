@@ -386,8 +386,8 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
 ):  # noqa: F811
     import asyncio
 
-    from nemo_gym.core.episode import EpisodeId
-    from nemo_gym.core.episode_types import EpisodeFailure
+    from nemo_gym.core.episode_types import EpisodeId
+    from nemo_gym.core.failure_records import EpisodeFailure
     from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollouts.rollout_records import logical_rollout_id
     from nemo_gym.rollouts.rollout_store import RolloutStore
