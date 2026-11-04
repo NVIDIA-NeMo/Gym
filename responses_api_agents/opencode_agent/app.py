@@ -111,6 +111,7 @@ from responses_api_agents.opencode_agent.runtime import (
     TASK_ENVIRONMENT_PLUGIN_FILE,
     TASK_ENVIRONMENT_PLUGIN_SOURCE,
     apply_observability_patch,
+    command_failure_reason,
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
@@ -963,8 +964,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 operation="opencode.setup",
-                failure_reason=f"OpenCode setup failed: command={command!r}, "
-                f"error={result.error_type}; stderr={result.stderr}; stdout={result.stdout}",
+                failure_reason=command_failure_reason(f"OpenCode setup failed: command={command!r}", result),
             )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
