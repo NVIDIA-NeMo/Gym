@@ -1318,6 +1318,7 @@ def bind_judge_failures(
 
 # Settings of the run's own collection that the in-place re-judgment of its judge failures replaces.
 _COLLECTION_ONLY_KEYS = (
+    "limit",
     "output_jsonl_fpath",
     "materialized_inputs_jsonl_fpath",
     "resume_from_cache",
