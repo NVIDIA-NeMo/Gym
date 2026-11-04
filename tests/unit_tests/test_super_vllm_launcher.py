@@ -615,9 +615,15 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
         shutdown_signal: str = "",
         profile: bool = False,
         shutdown_before_registration: bool = False,
+        config_path: Path | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> tuple[int, str, str, dict[str, list[str]]]:
         """Execute generated commands with mock services, recording argv and GPU assignments."""
-        gpu_groups = ("GPU-d,GPU-b", "GPU-a,GPU-c") if engines_per_node == 2 else ("GPU-d", "GPU-b", "GPU-a", "GPU-c")
+        gpu_groups = {
+            1: (visible_gpus,),
+            2: ("GPU-d,GPU-b", "GPU-a,GPU-c"),
+            4: ("GPU-d", "GPU-b", "GPU-a", "GPU-c"),
+        }[engines_per_node]
         with TemporaryDirectory(prefix="gym-engines-") as directory:
             root = Path(directory)
             config = root / "model.sh"
@@ -636,10 +642,10 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                 "NUM_DECODE_NODES": "1",
                 "ALL_NODES": "node0" if mode == "aggregated" else "node0 node1",
                 "SLURM_PROCID": str(rank),
-                "VLLM_CONFIG": str(config),
+                "VLLM_CONFIG": str(config_path or config),
                 "CUDA_VISIBLE_DEVICES": visible_gpus,
                 "TEST_STATE_DIR": directory,
-                "TEST_EXIT_ROLE": exit_role or f"engine-{gpu_groups[1]}",
+                "TEST_EXIT_ROLE": exit_role or f"engine-{gpu_groups[min(1, len(gpu_groups) - 1)]}",
                 "TEST_GPU_GROUPS": " ".join(gpu_groups),
                 "TEST_EXIT_STATUS": str(exit_status),
                 "TEST_SHUTDOWN_SIGNAL": shutdown_signal,
@@ -647,6 +653,7 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                 "PREFILL_PROFILE_DELAY_SECONDS": "0",
                 "PREFILL_PROFILE_DIR": str(root / "profiles"),
             }
+            env.update(env_overrides or {})
             _, command, _, submissions = self.capture_submission(env=env)
             self.assertIn(f"--nodes={env['NUM_NODES']}", submissions[0])
             if shutdown_before_registration:
@@ -761,6 +768,92 @@ sleep() { "$TEST_SLEEP" 0.01; }
                             self.assertIn("router-stopped", stdout)
                         else:
                             self.assertNotIn("router", recorded)
+
+    def test_dwdp_prefill_and_dp_decode_launch(self) -> None:
+        config = SCRIPT.parent / "vllm_configs/nemotron_3.5_super_dwdp.sh"
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                status, _, stderr, recorded = self.run_independent_services(
+                    mode="pd",
+                    rank=rank,
+                    engines_per_node=4 if rank == 0 else 1,
+                    config_path=config,
+                    env_overrides={
+                        "VLLM_PREFILL_ENGINES_PER_NODE": "4",
+                        "VLLM_DECODE_ENGINES_PER_NODE": "1",
+                        "ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE": "1",
+                    },
+                )
+                self.assertEqual(status, 7, stderr)
+                engines = {key: args for key, args in recorded.items() if key.startswith("engine-")}
+                self.assertEqual(len(engines), 4 if rank == 0 else 1)
+                for index, gpu in enumerate(
+                    ("GPU-d", "GPU-b", "GPU-a", "GPU-c") if rank == 0 else ("GPU-d,GPU-b,GPU-a,GPU-c",)
+                ):
+                    device, _, nixl_port, *args = engines[f"engine-{gpu}"]
+                    self.assertEqual(device, gpu)
+                    self.assertEqual(nixl_port, str((5600 if rank == 0 else 5700) + index))
+                    self.assertEqual(args[args.index("--port") + 1], str(8001 + index))
+                    self.assertEqual(args[args.index("--tensor-parallel-size") + 1], "1")
+                    self.assertEqual(args[args.index("--data-parallel-size") + 1], "1" if rank == 0 else "4")
+                    self.assertNotIn("--speculative-config", args)
+                    self.assertNotIn("--use-replayssm", args)
+                    if rank == 0:
+                        self.assertNotIn("--enable-expert-parallel", args)
+                        self.assertIn("--enforce-eager", args)
+                        self.assertEqual(args[args.index("--moe-backend") + 1], "flashinfer_prims")
+                        self.assertEqual(
+                            json.loads(args[args.index("--dwdp-config") + 1]),
+                            {
+                                "rank": index,
+                                "world_size": 4,
+                                "port": 29590,
+                                "timeout_seconds": 3600,
+                                "merge_free": True,
+                            },
+                        )
+                    else:
+                        self.assertNotIn("--dwdp-config", args)
+                        self.assertNotIn("--enforce-eager", args)
+                        self.assertIn("--enable-expert-parallel", args)
+                        self.assertEqual(args[args.index("--moe-backend") + 1], "flashinfer_trtllm")
+                if rank == 0:
+                    self.assert_router_arguments(
+                        recorded["router"],
+                        [f"http://node0:{port}" for port in range(8001, 8005)],
+                        ["http://node1:8001"],
+                    )
+                    router = recorded["router"]
+                    self.assertEqual(router[router.index("--intra-node-data-parallel-size") + 1], "1")
+
+    def test_asymmetric_pool_metrics_and_warmup_endpoints(self) -> None:
+        env = {
+            "VLLM_PREFILL_ENGINES_PER_NODE": "4",
+            "VLLM_DECODE_ENGINES_PER_NODE": "1",
+            "NUM_PREFILL_NODES": "2",
+            "NUM_DECODE_NODES": "2",
+            "ALL_NODES": "node0 node1 node2 node3",
+            "SAVE_WARMED_CONTAINER": f"{self.workdir}/new.sqsh",
+        }
+        command, _, batch, _ = self.capture_submission(env=env)
+        expected = [
+            f"http://node{node}:{8001 + engine}" for node in range(4) for engine in range(4 if node < 2 else 1)
+        ]
+        start = 'read -r -a nodes <<< "$ALL_NODES"'
+        setup = start + command.split(start, 1)[1].split("gym_config_args+=(--config", 1)[0]
+        path = Path(self.workdir) / "metrics.yaml"
+        status, _, stderr = self.run_shell(setup, env=env | {"inference_metrics_config": str(path)})
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(
+            yaml.safe_load(path.read_text())["inference_metrics"]["endpoints"],
+            {f"node{i}": f"{url}/metrics" for i, url in enumerate(expected)},
+        )
+        setup = "cache_urls=()" + batch.split("cache_urls=()", 1)[1].split("    python3 -c", 1)[0]
+        status, stdout, stderr = self.run_shell(
+            "nodes=(node0 node1 node2 node3)\n" + setup + '\nprintf "%s\\n" "${cache_urls[@]}"', env=env
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stdout.splitlines(), expected)
 
     def test_independent_engine_and_router_exits_stop_all_peers(self) -> None:
         for engines_per_node in (2, 4):

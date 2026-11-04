@@ -47,6 +47,9 @@ if [[ ! "$VLLM_CACHE_INVENTORY_INTERVAL" =~ ^(0|[1-9][0-9]{1,5})$ ]]; then
 fi
 VLLM_MODE="${VLLM_MODE:-pd}"
 VLLM_ENGINES_PER_NODE="${VLLM_ENGINES_PER_NODE:-1}"
+# PD pools can use independent TP1 prefill engines and a full-node decode engine.
+VLLM_PREFILL_ENGINES_PER_NODE="${VLLM_PREFILL_ENGINES_PER_NODE:-$VLLM_ENGINES_PER_NODE}"
+VLLM_DECODE_ENGINES_PER_NODE="${VLLM_DECODE_ENGINES_PER_NODE:-$VLLM_ENGINES_PER_NODE}"
 case "$VLLM_MODE" in
     pd)
         NUM_PREFILL_NODES=${NUM_PREFILL_NODES:?Required in PD mode}
@@ -63,13 +66,19 @@ case "$VLLM_MODE" in
         exit 1
         ;;
 esac
-case "$VLLM_ENGINES_PER_NODE" in
-    1 | 2 | 4) ;;
-    *)
-        echo "ERROR: VLLM_ENGINES_PER_NODE must be 1, 2, or 4." >&2
-        exit 1
-        ;;
-esac
+for setting in VLLM_ENGINES_PER_NODE VLLM_PREFILL_ENGINES_PER_NODE VLLM_DECODE_ENGINES_PER_NODE; do
+    case "${!setting}" in
+        1 | 2 | 4) ;;
+        *)
+            echo "ERROR: $setting must be 1, 2, or 4." >&2
+            exit 1
+            ;;
+    esac
+done
+if [[ "$VLLM_MODE" == aggregated ]]; then
+    VLLM_PREFILL_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
+    VLLM_DECODE_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
+fi
 MODEL=$MODEL
 MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
@@ -169,8 +178,8 @@ if [[ "$VLLM_MODE" == aggregated && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; th
     echo "ERROR: VLLM_MODE=aggregated does not support VLLM_PD_DEPLOYMENT_MODE=coupled." >&2
     exit 1
 fi
-if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
-    echo "ERROR: VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE requires VLLM_PD_DEPLOYMENT_MODE=independent." >&2
+if (( VLLM_PREFILL_ENGINES_PER_NODE > 1 || VLLM_DECODE_ENGINES_PER_NODE > 1 )) && [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+    echo "ERROR: Multiple independent engines require VLLM_PD_DEPLOYMENT_MODE=independent." >&2
     exit 1
 fi
 
@@ -205,7 +214,7 @@ ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
 ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS="${ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS:-1800}"
 VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
-if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
+if (( VLLM_PREFILL_ENGINES_PER_NODE > 1 || VLLM_DECODE_ENGINES_PER_NODE > 1 )) && [[ "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
     echo "ERROR: Multiple independent engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
     exit 1
 fi
@@ -254,11 +263,17 @@ read -r -a nodes <<< "\$ALL_NODES"
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
             continue
         fi
-        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
-            replica_index=\$(( node_index * $VLLM_ENGINES_PER_NODE + engine_index ))
+        engines_per_node=$VLLM_PREFILL_ENGINES_PER_NODE
+        replica_index=\$((node_index * engines_per_node))
+        if [[ "$VLLM_MODE" == pd ]] && (( node_index >= $NUM_PREFILL_NODES )); then
+            engines_per_node=$VLLM_DECODE_ENGINES_PER_NODE
+            replica_index=\$(($NUM_PREFILL_NODES * $VLLM_PREFILL_ENGINES_PER_NODE + (node_index - $NUM_PREFILL_NODES) * engines_per_node))
+        fi
+        for (( engine_index = 0; engine_index < \$engines_per_node; engine_index++ )); do
             worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
             printf '    node%s: "http://%s:%s/metrics"\n' \
                 "\$replica_index" "\${nodes[node_index]}" "\$worker_port"
+            replica_index=\$((replica_index + 1))
         done
     done
     if (( $VLLM_CACHE_INVENTORY_INTERVAL > 0 )); then
@@ -349,6 +364,10 @@ export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 export MOONCAKE_CACHE_TRACE=$MOONCAKE_CACHE_TRACE
 export VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
 source "$VLLM_CONFIG"
+engines_per_node=$VLLM_PREFILL_ENGINES_PER_NODE
+if [[ "$VLLM_MODE" == pd ]] && (( SLURM_PROCID >= $NUM_PREFILL_NODES )); then
+    engines_per_node=$VLLM_DECODE_ENGINES_PER_NODE
+fi
 
 if [[ -f /opt/flashinfer-autotune-cache/warmed-manifest.json ]]; then
     python3 -c "\$warm_cache_helper" inspect
@@ -893,12 +912,14 @@ else
         local nixl_base_port=\$1
         shift
         local arg skip_value engine_index worker_port service_pid failed_status gpu_start gpu_mask
-        local tensor_parallel_size=$(( 4 / VLLM_ENGINES_PER_NODE ))
+        local tensor_parallel_size=\$(( 4 / engines_per_node ))
+        local dwdp_config=""
+        local -a per_engine_args
         local -a visible_gpus engine_args service_pids serve_command
         # Respect the allocation's GPU order, including UUID-based masks.
         IFS=',' read -r -a visible_gpus <<< "\${CUDA_VISIBLE_DEVICES-0,1,2,3}"
         if (( \${#visible_gpus[@]} < 4 )); then
-            echo "ERROR: $VLLM_ENGINES_PER_NODE independent engines require at least four visible GPUs." >&2
+            echo "ERROR: \$engines_per_node independent engines require at least four visible GPUs." >&2
             exit 1
         fi
 
@@ -907,11 +928,18 @@ else
         engine_args=()
         skip_value=0
         for arg in "\$@"; do
-            if (( skip_value )); then
+            if [[ "\$skip_value" == 1 ]]; then
+                skip_value=0
+                continue
+            fi
+            if [[ "\$skip_value" == dwdp ]]; then
+                dwdp_config=\$arg
                 skip_value=0
                 continue
             fi
             case "\$arg" in
+                (--dwdp-config) skip_value=dwdp ;;
+                (--dwdp-config=*) dwdp_config=\${arg#*=} ;;
                 (--tensor-parallel-size|--pipeline-parallel-size|--data-parallel-size|--data-parallel-size-local|--api-server-count|-tp|-pp|-dp)
                     skip_value=1 ;;
                 (--tensor-parallel-size=*|--pipeline-parallel-size=*|--data-parallel-size=*|--data-parallel-size-local=*|--api-server-count=*|-tp=*|-pp=*|-dp=*)
@@ -926,7 +954,20 @@ else
             (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
             ensure_nsys || return 1
         fi
-        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+        for (( engine_index = 0; engine_index < \$engines_per_node; engine_index++ )); do
+            per_engine_args=()
+            if [[ -n "\$dwdp_config" ]]; then
+                # Each independent process owns a distinct shard in a same-host group.
+                per_engine_args=(--dwdp-config "\$(python3 -c '
+import json, sys
+config = json.loads(sys.argv[1])
+world_size = int(sys.argv[3])
+if config.get("world_size", world_size) != world_size or world_size != 4:
+    raise ValueError("DWDP requires four independent TP1 engines per node")
+config.update(rank=int(sys.argv[2]), world_size=world_size)
+print(json.dumps(config))
+' "\$dwdp_config" "\$engine_index" "\$engines_per_node")")
+            fi
             worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
             serve_command=(vllm serve)
             if [[ "$VLLM_MODE" == pd ]] && (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
@@ -939,7 +980,7 @@ else
             CUDA_VISIBLE_DEVICES="\$gpu_mask" \
             VLLM_NIXL_SIDE_CHANNEL_HOST="\$this_node_hostname" \
             VLLM_NIXL_SIDE_CHANNEL_PORT=\$(( nixl_base_port + engine_index )) \
-            "\${serve_command[@]}" "$MODEL" --served-model-name "$MODEL_NAME" "\${engine_args[@]}" \
+            "\${serve_command[@]}" "$MODEL" --served-model-name "$MODEL_NAME" "\${engine_args[@]}" \${per_engine_args[@]+"\${per_engine_args[@]}"} \
                 --host "\$this_node_hostname" --port "\$worker_port" &
             worker_pids+=("\$!")
         done
@@ -984,14 +1025,14 @@ else
                 --vllm-pd-disaggregation
             )
             for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-                for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+                for (( engine_index = 0; engine_index < $VLLM_PREFILL_ENGINES_PER_NODE; engine_index++ )); do
                     worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
                     router_args+=(--prefill "http://\${nodes[i]}:\$worker_port")
                 done
             done
             for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
                 node_idx=\$(( $NUM_PREFILL_NODES + i ))
-                for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+                for (( engine_index = 0; engine_index < $VLLM_DECODE_ENGINES_PER_NODE; engine_index++ )); do
                     worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
                     router_args+=(--decode "http://\${nodes[node_idx]}:\$worker_port")
                 done
@@ -1047,7 +1088,7 @@ else
                 --host \$this_node_hostname \
                 --port $WORKER_SERVER_PORT
         fi
-    elif (( $VLLM_ENGINES_PER_NODE > 1 )); then
+    elif (( \$engines_per_node > 1 )); then
         if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
             serve_independent_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
                 "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
@@ -1136,7 +1177,11 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
             continue
         fi
-        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+        engines_per_node=$VLLM_PREFILL_ENGINES_PER_NODE
+        if [[ "$VLLM_MODE" == pd ]] && (( node_index >= $NUM_PREFILL_NODES )); then
+            engines_per_node=$VLLM_DECODE_ENGINES_PER_NODE
+        fi
+        for (( engine_index = 0; engine_index < \$engines_per_node; engine_index++ )); do
             cache_urls+=("http://\${nodes[node_index]}:\$(( $WORKER_SERVER_PORT + engine_index ))")
         done
     done

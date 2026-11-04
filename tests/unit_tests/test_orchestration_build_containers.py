@@ -935,6 +935,25 @@ def test_warmup_rejects_invalid_or_managed_env(key):
         WarmupConfig(env={key: "value"})
 
 
+def test_dwdp_example_builds_matching_branches_and_reuses_pool_layout(monkeypatch):
+    monkeypatch.setenv("PWD", str(ROOT))
+    monkeypatch.setattr(
+        sys, "argv", ["test", f"+config_paths=[{ROOT / BENCHMARK / 'build_container_configs/dwdp.yaml'}]"]
+    )
+    config = GlobalConfigDictParser().parse(GlobalConfigDictParserConfig(skip_load_from_dotenv=True))
+    resolved = BuildContainerConfig.model_validate(config)
+    assert resolved.vllm.branch == "bxyu/v0.32.0-dwdp"
+    assert resolved.flashinfer.branch == "bxyu/v0.7.0.post1-dwdp"
+    assert str(resolved.output_container_fpath).endswith("___dwdp.sqsh")
+    for stage in (resolved.warmup, resolved.run):
+        assert stage.env["VLLM_CONFIG"] == str(BENCHMARK / "vllm_configs/nemotron_3.5_super_dwdp.sh")
+        assert stage.env["VLLM_PREFILL_ENGINES_PER_NODE"] == 4
+        assert stage.env["VLLM_DECODE_ENGINES_PER_NODE"] == 1
+        assert stage.env["ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE"] == 1
+    assert resolved.warmup.env["ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS"] == 3600
+    assert resolved.warmup.env["SBATCH_TIMELIMIT"] == "01:30:00"
+
+
 def test_warmup_example_uses_shared_slurm_config(monkeypatch):
     monkeypatch.setenv("PWD", str(ROOT))
     monkeypatch.setattr(
