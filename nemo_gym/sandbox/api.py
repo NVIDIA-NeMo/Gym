@@ -905,6 +905,9 @@ class _AsyncLoopRunner:
         try:
             return future.result(timeout=self._wait_timeout_s)
         except FutureTimeoutError as e:
+            # FutureTimeoutError also catches TimeoutError raised by the operation itself.
+            if future.done():
+                raise
             future.cancel()
             raise TimeoutError(
                 f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
@@ -933,6 +936,9 @@ class _AsyncLoopRunner:
         try:
             return future.result(timeout=self._wait_timeout_s)
         except FutureTimeoutError as e:
+            # FutureTimeoutError also catches TimeoutError raised by the operation itself.
+            if future.done():
+                raise
             future.cancel()
             raise TimeoutError(
                 f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
