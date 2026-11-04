@@ -1456,7 +1456,7 @@ def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setu
         factory.connect.assert_not_awaited()
 
 
-def test_network_access_and_explicit_policy_conflict_before_creation(setup):
+def test_network_access_and_explicit_policy_conflict_is_a_terminal_seed_refusal(setup):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {
@@ -1470,10 +1470,12 @@ def test_network_access_and_explicit_policy_conflict_before_creation(setup):
     with (
         patch(f"{module}.AsyncSandbox") as factory,
         patch(f"{module}.create_provider", return_value=provider),
-        TestClient(agent.setup_webserver(), raise_server_exceptions=True) as client,
-        raises_agent_failure(ValueError, match="not both"),
+        TestClient(agent.setup_webserver()) as client,
     ):
-        client.post("/v1/agent_sessions", json=owned_seed_with_search_grant())
+        refused = client.post("/v1/agent_sessions", json=owned_seed_with_search_grant())
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert "not both" in refused.text
     factory.assert_not_called()
     provider.aclose.assert_awaited_once()
 
