@@ -603,6 +603,36 @@ class TestResourceHandling:
             await provider.create(_spec(resources=resources))
         assert FakeSandbox.instances == []
 
+    async def test_scheduling_resource_requests_warn_instead_of_failing(self, caplog) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        with caplog.at_level("WARNING"):
+            await provider.create(_spec(provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 2048}}))
+        warnings = [r for r in caplog.records if "fixes sandbox resources" in r.message]
+        assert len(warnings) == 1
+        assert "resource_requests.cpu=0.5" in warnings[0].message
+        assert "resource_requests.memory_mib=2048" in warnings[0].message
+        assert len(FakeSandbox.instances) == 1
+
+    async def test_strict_resources_rejects_scheduling_resource_requests(self) -> None:
+        provider = E2BProvider(create={"template": "base", "strict_resources": True})
+        with pytest.raises(E2BCreateError, match="fixes sandbox resources"):
+            await provider.create(_spec(provider_options={"resource_requests": {"cpu": 0.5}}))
+        assert FakeSandbox.instances == []
+
+    async def test_limits_resource_requests_add_no_scheduling_warning(self, caplog) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        with caplog.at_level("WARNING"):
+            await provider.create(_spec(provider_options={"resource_requests": "limits"}))
+        assert not [r for r in caplog.records if "fixes sandbox resources" in r.message]
+        assert len(FakeSandbox.instances) == 1
+
+    @pytest.mark.parametrize("requests", ["cpu=1", [], 0, False])
+    async def test_invalid_resource_requests_are_rejected_before_create(self, requests: object) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        with pytest.raises(TypeError, match="resource_requests"):
+            await provider.create(_spec(provider_options={"resource_requests": requests}))
+        assert FakeSandbox.instances == []
+
     async def test_no_warning_without_resource_request(self, caplog) -> None:
         provider = E2BProvider(create={"template": "base"})
         with caplog.at_level("WARNING"):

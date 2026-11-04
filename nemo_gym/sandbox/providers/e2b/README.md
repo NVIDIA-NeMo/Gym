@@ -106,7 +106,7 @@ command timeout. `exec.default_timeout_s` is only the fallback when the provider
 | `metadata` | Passed to E2B as string metadata. |
 | `resources` | Fixed by the E2B template, not applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
 | `entrypoint` | Unsupported and rejected before creating a billable sandbox; define it in the E2B template. |
-| `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
+| `provider_options` | Supports `template` and `resource_requests` (a mapping or `"limits"`). Scheduling `resource_requests` (for example from OpenSandbox-oriented agent configs) are treated like `resources`: they warn, or raise when `create.strict_resources` is true. Other keys and invalid values are rejected before allocation. |
 
 The bundled template builder can set CPU count and memory. Disk and GPU requirements need a
 suitable E2B template prepared through E2B tooling.
