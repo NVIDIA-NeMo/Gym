@@ -116,7 +116,7 @@ def restore_tracked_modes(root: Path) -> None:
                 temporary.unlink(missing_ok=True)
 
 
-def expose_editable_to_children(root: Path, distribution: Path, installed: Path) -> None:
+def expose_editable_to_children(root: Path, distribution: Path, installed: Path, *, wheel_site: Path) -> None:
     """Relocate the actual editable finder into a sandbox-local child Python site."""
     manifest = json.loads((distribution / "editable.json").read_text())
     original = manifest["source_root"]
@@ -137,13 +137,32 @@ def expose_editable_to_children(root: Path, distribution: Path, installed: Path)
     shutil.copy2(distribution / manifest["hook"], child_site / manifest["hook"])
     shutil.copytree(installed, child_site / installed.name)
     (child_site / "sitecustomize.py").write_text(
-        "import site, sys\nfrom pathlib import Path\nfrom importlib.machinery import PathFinder\n"
+        "import importlib, site, sys\nfrom pathlib import Path\nfrom importlib.machinery import PathFinder\n"
         "previous = {id(finder) for finder in sys.meta_path}\n"
         "site.addsitedir(str(Path(__file__).parent))\n"
         "editable = [finder for finder in sys.meta_path if id(finder) not in previous]\n"
-        "for finder in editable:\n    sys.meta_path.remove(finder)\n"
+        f"mapping = importlib.import_module({Path(manifest['finder']).stem!r}).MAPPING\n"
+        f"wheel_site = Path({str(wheel_site)!r})\n"
+        "wheel_packages = [(wheel_site / name.replace('.', '/')).resolve() for name in mapping]\n"
+        # The genuine wheel supplies console scripts, but only its own package
+        # code should yield to the sampled editable sources. Preserve ordinary
+        # script, vendor, and PYTHONPATH precedence and editable fallback order.
+        "class SampledWheelOverlay:\n"
+        "    @classmethod\n"
+        "    def find_spec(cls, fullname, path=None, target=None):\n"
+        "        regular = PathFinder.find_spec(fullname, path, target)\n"
+        "        if regular is None or regular.origin is None:\n"
+        "            return None\n"
+        "        origin = Path(regular.origin).resolve()\n"
+        "        if not any(origin.is_relative_to(package) for package in wheel_packages):\n"
+        "            return None\n"
+        "        for finder in editable:\n"
+        "            sampled = finder.find_spec(fullname, path, target)\n"
+        "            if sampled is not None:\n"
+        "                return sampled\n"
+        "        return None\n"
         "index = next((i for i, finder in enumerate(sys.meta_path) if finder is PathFinder), len(sys.meta_path))\n"
-        "sys.meta_path[index:index] = editable\n"
+        "sys.meta_path.insert(index, SampledWheelOverlay)\n"
     )
     previous = os.environ.get("PYTHONPATH")
     os.environ["PYTHONPATH"] = str(child_site) + (os.pathsep + previous if previous else "")
@@ -167,10 +186,12 @@ def pytest_load_initial_conftests(early_config, parser, args):
     if len(distributions) != 1:
         raise RuntimeError("Native sandbox is missing the sampled editable distribution")
     expected = importlib.metadata.Distribution.at(distributions[0])
-    validate_distribution(distributions[0], importlib.metadata.distribution(expected.metadata["Name"]))
+    wheel = importlib.metadata.distribution(expected.metadata["Name"])
+    validate_distribution(distributions[0], wheel)
+    wheel_site = Path(wheel.locate_file(""))
     installed = root / distributions[0].name
     shutil.copytree(distributions[0], installed)
     # Relocate the original editable metadata alongside the relocated source.
     (installed / "direct_url.json").write_text(json.dumps({"dir_info": {"editable": True}, "url": root.as_uri()}))
-    expose_editable_to_children(root, metadata.parent / "distribution", installed)
+    expose_editable_to_children(root, metadata.parent / "distribution", installed, wheel_site=wheel_site)
     exclude_instrumentation(root, (installed.name + "/",))

@@ -82,7 +82,7 @@ class NativeCoreTest(unittest.TestCase):
             (wheel_package / "__init__.py").touch()
             (wheel_package / "main.py").write_text("def main():\n    return 'wrong wheel copy'\n")
             with patch.dict(os.environ, {"PYTHONPATH": str(extra)}):
-                expose_editable_to_children(root, distribution, installed)
+                expose_editable_to_children(root, distribution, installed, wheel_site=extra)
                 self.assertEqual(
                     os.environ["PYTHONPATH"].split(os.pathsep), [str(root / ".native-child-site"), str(extra)]
                 )
@@ -98,6 +98,32 @@ class NativeCoreTest(unittest.TestCase):
                     cwd=base,
                     text=True,
                 )
+                vendor = base / "vendored"
+                vendor_package = vendor / "native_fixture/cli"
+                vendor_package.mkdir(parents=True)
+                (vendor / "native_fixture/__init__.py").touch()
+                (vendor_package / "__init__.py").touch()
+                (vendor_package / "main.py").write_text("def main():\n    return 'vendored entrypoint'\n")
+                script = vendor / "runner.py"
+                script.write_text("from native_fixture.cli.main import main; print(main())\n")
+                with self.subTest(precedence="script directory before installed wheel"):
+                    output = subprocess.check_output([sys.executable, str(script)], cwd=base, text=True)
+                    self.assertEqual(output.strip(), "vendored entrypoint")
+                with self.subTest(precedence="explicit sys.path before installed wheel"):
+                    output = subprocess.check_output(
+                        [
+                            sys.executable,
+                            "-c",
+                            f"import sys; sys.path.insert(0, {str(vendor)!r}); " + script.read_text(),
+                        ],
+                        cwd=base,
+                        text=True,
+                    )
+                    self.assertEqual(output.strip(), "vendored entrypoint")
+                with self.subTest(precedence="ordinary editable fallback without wheel"):
+                    shutil.rmtree(extra / "native_fixture")
+                    output = subprocess.check_output([sys.executable, "-c", script.read_text()], cwd=base, text=True)
+                    self.assertEqual(output.strip(), "sampled entrypoint")
             self.assertEqual(result.strip(), "sampled entrypoint")
             self.assertNotIn(original, (root / ".native-child-site/fixture_finder.py").read_text())
 
