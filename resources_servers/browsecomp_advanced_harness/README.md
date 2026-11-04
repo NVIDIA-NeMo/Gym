@@ -77,13 +77,25 @@ session's metrics after reporting them, unless `dump_session_id_to_metrics_on_ex
 
 ## Running
 
+The example pairing uses `single_agent_turn_legacy`: existing flat dataset rows still work, while the environment
+server owns resources/agent session setup, verification, and close. The agent loop runs in its own sandbox and
+receives the resources session through the `direct_http` transport; its `resources_server` config is `null`.
+The config includes the Docker provider and `use_absolute_ip: true` so the sandbox can reach the Gym servers.
+Compose another provider config to run on a different backend and set both sandbox image fields for that provider.
+
+The example dataset exposes only `search` and `browse`, so the example config keeps `workspace: none` and inline
+page content. To enable the resources-owned tool sandbox, use `workspace: per_session` with dataset rows exposing
+`bash_command`, as the BrowseComp benchmark does. This preserves the example prompts and tool schemas.
+
 ```bash
-# If you want to run with browsecomp benchmark instead of the example samples, need to change the datasets part to the one like `benchmarks/browsecomp/config.yaml` in `resources_servers/browsecomp_advanced_harness/configs/browsecomp_advanced_harness.yaml`
 config_paths="resources_servers/browsecomp_advanced_harness/configs/browsecomp_advanced_harness.yaml,\
 responses_api_models/vllm_model/configs/vllm_model.yaml"
 
 ng_run "+config_paths=[${config_paths}]"
 ```
+
+To run the benchmark instead, use `benchmarks/browsecomp/config.yaml` as the first config path. Its dataset,
+workspace, and tool schemas are configured together.
 
 
 # Licensing information
