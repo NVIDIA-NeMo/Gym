@@ -10,6 +10,8 @@ misalignment_monitored_environment_server:
       monitor_server:
         type: resources_servers
         name: misalignment_monitor
+      # Longest wait for the monitor's end-of-run drain. Keep it above the monitor's drain_timeout_s (600).
+      monitor_drain_timeout_s: 660
       # Required by BaseEnvironmentServerConfig. A relay applies none of them, and the agent keeps its own limits.
       max_concurrent_episodes: null
       queue_timeout_seconds: null

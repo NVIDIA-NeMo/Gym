@@ -146,6 +146,16 @@ class MisalignmentActivationConnector(ExampleHiddenStatesConnector):
         normed = transported * torch.rsqrt(transported.pow(2).mean(-1, keepdim=True) + readout["eps"])
         return (normed * readout["norm"]).to(readout["unembed"].dtype) @ readout["unembed"].T
 
+    def _extraction_window(self, pending: PendingSave) -> tuple[int, int]:
+        """The positions copied out of the cache. The probe reads only the last prompt token, however long the
+        generation was. The lens reads the end of the request, up to max_positions."""
+        if self._mode == "probe":
+            # A save without its prompt length copies nothing, and _read reports the call as not screened.
+            end = getattr(pending, "num_prompt_tokens", 0)
+            return max(0, end - 1), end
+        num_tokens = pending.token_ids.shape[0]
+        return max(0, num_tokens - self._max_positions), num_tokens
+
     def _submit_async_write(self, pending: PendingSave) -> None:
         """Copy the request's activations out of the cache, then score them in a writer thread."""
         if not self._is_tp_rank_zero:
@@ -159,8 +169,7 @@ class MisalignmentActivationConnector(ExampleHiddenStatesConnector):
         try:
             if self._readout is None:
                 self._readout = self._build_readout()
-            num_tokens = pending.token_ids.shape[0]
-            first = max(0, num_tokens - self._max_positions)
+            first, last = self._extraction_window(pending)
             blocks = torch.tensor(pending.block_ids, dtype=torch.long)
             slots = (
                 torch.arange(self._block_size).reshape(1, -1) + blocks.reshape(-1, 1) * self._block_size
@@ -170,9 +179,9 @@ class MisalignmentActivationConnector(ExampleHiddenStatesConnector):
             ready.record()
             stream.wait_event(ready)
             with torch.cuda.stream(stream):
-                window = slots[first:num_tokens].to(self._kv_cache.device, non_blocking=True)
+                window = slots[first:last].to(self._kv_cache.device, non_blocking=True)
                 # Indexing copies, so the cache blocks can be freed once ``copied`` completes.
-                residual = extract_from_kv_cache(self._kv_cache, window, num_tokens - first)[:, 0, :]
+                residual = extract_from_kv_cache(self._kv_cache, window, last - first)[:, 0, :]
             copied = torch.cuda.Event()
             copied.record(stream)
             self._req_copy_events[pending.req_id] = copied
@@ -211,7 +220,7 @@ class MisalignmentActivationConnector(ExampleHiddenStatesConnector):
     def _read(self, pending: PendingSave, residual: torch.Tensor, first: int) -> dict[str, Any]:
         readout = self._readout
         if self._mode == "probe":
-            position = getattr(pending, "num_prompt_tokens", pending.token_ids.shape[0]) - 1
+            position = getattr(pending, "num_prompt_tokens", 0) - 1
             if position < first:
                 # The probe's position was not read, so the call is not screened rather than clean.
                 return {"mode": "probe", "flagged": False, "position": position, "error": "probe position not read"}

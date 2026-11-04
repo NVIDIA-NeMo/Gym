@@ -97,7 +97,7 @@ def turn_items(dialect: str, request: dict, response: dict) -> tuple[list[dict],
     return _responses_items(request), list(response.get("output") or [])
 
 
-def _item_text(item: dict) -> tuple[str, str]:
+def item_text(item: dict) -> tuple[str, str]:
     kind = item.get("type", "message")
     if kind == "message":
         return str(item.get("role", "user")), _text(item.get("content"))
@@ -113,7 +113,7 @@ def _item_text(item: dict) -> tuple[str, str]:
 
 def render_items(items: list[dict], max_chars: int) -> str:
     """Items as labeled plain text. A longer text loses its middle."""
-    text = "\n\n".join("[{}]\n{}".format(*_item_text(item)) for item in items)
+    text = "\n\n".join("[{}]\n{}".format(*item_text(item)) for item in items)
     if len(text) <= max_chars:
         return text
     half = max_chars // 2

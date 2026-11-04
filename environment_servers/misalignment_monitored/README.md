@@ -25,7 +25,8 @@ my_benchmark_environment_server:
 - Posts that fail are counted, and the first and every hundredth failure are printed. Shutdown waits up to a minute
   for posts in flight and prints the counts.
 - When `gym eval run` finishes, `/aggregate_metrics` first asks the monitor to finish its reviews (`/drain`), so the
-  last rollouts are reviewed before the judge stops.
+  last rollouts are reviewed before the judge stops. The wait is capped at `monitor_drain_timeout_s` (660 seconds),
+  after which metrics go on without the monitor. Raise it with the monitor's `drain_timeout_s`.
 
 # Licensing information
 

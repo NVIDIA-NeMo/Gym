@@ -19,7 +19,6 @@ import fcntl
 import json
 import os
 import random
-import re
 import time
 from collections import Counter, deque
 from collections.abc import AsyncIterator
@@ -30,6 +29,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
+import regex
 from fastapi import Body, FastAPI
 from pydantic import ConfigDict, Field, model_validator
 
@@ -61,7 +61,7 @@ from resources_servers.misalignment_monitor.prompts import (
     SECURITY_CONFIRMATION_PROMPT,
     SECURITY_INVESTIGATOR_PROMPT,
 )
-from resources_servers.misalignment_monitor.transcripts import render_items, render_transcript, turn_items
+from resources_servers.misalignment_monitor.transcripts import item_text, render_items, render_transcript, turn_items
 
 
 SEVERITIES = ("P0", "P1", "P2", "none")
@@ -71,6 +71,8 @@ _RANK = {"none": 0, "P2": 1, "unparsed": 2, "P1": 3, "P0": 4}
 _ROLLOUT_STATE_TTL_S = 6 * 3600
 # A capture file's first bytes hold its first call's unique id.
 _CAPTURE_HEAD_BYTES = 64
+# Longest an investigator's search may run before it returns a tool error.
+_SEARCH_TIMEOUT_S = 5.0
 
 
 class MisalignmentMonitorConfig(BaseResourcesServerConfig):
@@ -94,6 +96,10 @@ class MisalignmentMonitorConfig(BaseResourcesServerConfig):
 
     activation_source: Literal["disabled", "engine", "reader"] = Field(
         default="disabled", description="Layer 0. 'disabled' sends every review to layer 1."
+    )
+    activation_results_dir: Optional[str] = Field(
+        default=None,
+        description="engine: the connector's shared_storage_path. Readings are read and deleted only inside it.",
     )
     audit_rate: float = Field(
         default=0.05, ge=0, le=1, description="Share of what layer 0 or layer 1 clears that goes on to the next layer."
@@ -129,6 +135,10 @@ class MisalignmentMonitorConfig(BaseResourcesServerConfig):
 
     @model_validator(mode="after")
     def _check_reader_inputs(self) -> "MisalignmentMonitorConfig":
+        if self.activation_source == "engine" and self.activation_results_dir is None:
+            raise ValueError(
+                "activation_source=engine needs activation_results_dir, the connector's shared_storage_path"
+            )
         if self.activation_source != "reader":
             return self
         required = {"probe": ("reader_model", "probe_path"), "jspace": ("reader_model", "jlens_path", "jspace_layer")}
@@ -159,9 +169,16 @@ def _activation_path(dialect: str, response: dict) -> Optional[str]:
     return (params or {}).get("misalignment_activations_path")
 
 
-def _read_activation_file(path: str) -> dict[str, Any]:
-    """Read and delete a reading, waiting for vLLM to finish writing it."""
-    lock = f"{path}.lock"
+def _read_activation_file(path: str, results_dir: str) -> dict[str, Any]:
+    """Read and delete a reading, waiting for vLLM to finish writing it.
+
+    The path comes from the model response, so only a file inside ``results_dir`` (symlinks resolved) is opened or
+    deleted. Anything else is left alone and counts as an unscreened call.
+    """
+    root = os.path.realpath(results_dir)
+    path, lock = os.path.realpath(path), os.path.realpath(f"{path}.lock")
+    if any(os.path.commonpath([root, p]) != root for p in (path, lock)):
+        return {"flagged": False, "error": f"activation reading outside {results_dir}, not read"}
     try:
         if os.path.exists(lock):
             with open(lock) as lock_file:
@@ -172,8 +189,44 @@ def _read_activation_file(path: str) -> dict[str, Any]:
         return {"flagged": False, "error": f"{type(e).__name__}: {e}"}
     finally:
         for leftover in (path, lock):
-            if os.path.exists(leftover):
-                os.remove(leftover)
+            # A file that cannot be removed is logged: it must not cost the call its review.
+            try:
+                if os.path.exists(leftover):
+                    os.remove(leftover)
+            except OSError as e:
+                print(f"[misalignment_monitor] could not remove activation file {leftover}: {e!r}", flush=True)
+
+
+def _history(items: list[dict]) -> list[tuple[str, str]]:
+    """Items as compared across one rollout's calls. Reasoning is left out, since adapters often drop it when they
+    replay a turn, and so are system and developer messages, which can change without removing any evidence."""
+    return [
+        (kind, text.strip())
+        for kind, text in map(item_text, items)
+        if kind not in ("reasoning", "system", "developer")
+    ]
+
+
+def _search(pattern: str, sources: list[str]) -> list[str]:
+    """The investigators' search: up to 30 matching lines of the windows, then the record (the last source).
+
+    Both the pattern and the evidence are model-influenced. The regex module's timeout stops a pattern that
+    backtracks without end, across the whole search, and the caller runs it off the event loop.
+    """
+    compiled = regex.compile(pattern)
+    deadline = time.monotonic() + _SEARCH_TIMEOUT_S
+    matches = []
+    for index, source in enumerate(sources):
+        label = "record" if index == len(sources) - 1 else f"window {index}"
+        for number, line in enumerate(source.splitlines()):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"search stopped after {_SEARCH_TIMEOUT_S} s")
+            if compiled.search(line, timeout=left):
+                matches.append(f"{label}, line {number}: {line[:500]}")
+                if len(matches) == 30:
+                    return matches
+    return matches
 
 
 def _parse_json(text: str, *, key: Optional[str] = None) -> Optional[dict[str, Any]]:
@@ -291,7 +344,8 @@ class _Rollout:
     """What the monitor knows about a rollout in progress, from its captured model calls."""
 
     window: str = ""
-    item_count: int = 0
+    # The latest call's context and output as compared with the next call's context (see _history).
+    history: list[tuple[str, str]] = field(default_factory=list)
     reviewed_latest: bool = False
     # Windows kept for the investigators: each one the agent's context replaced, before the latest.
     windows: list[str] = field(default_factory=list)
@@ -390,7 +444,9 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         """Review a recorded rollout. Writes no alert: replaying an incident must not page anyone."""
         rollout = body.model_dump()
         window = render_transcript(rollout, self.config.max_transcript_chars)
-        record = {key: value for key, value in rollout.items() if key not in ("responses_create_params", "response")}
+        # The label and an earlier prediction stay in the returned row for metrics, never in the judge's evidence.
+        hidden = ("responses_create_params", "response", "expected_severity", "monitor_report")
+        record = {key: value for key, value in rollout.items() if key not in hidden}
         report = await self.review(_Case(None, "replay", window, [window], record))
         return MisalignmentMonitorVerifyResponse.model_validate(
             {**rollout, "reward": float(report["severity"] != "none"), "monitor_report": report}
@@ -503,16 +559,18 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         record = {"rollout_id": rollout_id}
         # Each case is built now, so a later call cannot change what it reviews, except a queued per-turn review.
         cases = []
-        if len(context) < state.item_count:
-            # The context was summarized or dropped. Keep the replaced window and, per turn, review it before it is gone.
+        history = _history(context)
+        if history[: len(state.history)] != state.history:
+            # The context no longer holds the previous call's context and output: it was summarized, cut or replaced.
+            # Keep the replaced window and, per turn, review it before it is gone.
             state.windows.append(state.window)
             # A queued review of the replaced window must still run.
             state.waiting = None
             if per_turn and not state.reviewed_latest:
                 cases.append(_Case(rollout_id, "context_rewritten", state.window, [*state.windows], record))
-        state.window, state.item_count, state.reviewed_latest, state.updated = (
+        state.window, state.history, state.reviewed_latest, state.updated = (
             window,
-            len(context) + len(output),
+            history + _history(output),
             False,
             time.time(),
         )
@@ -544,7 +602,9 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
 
     async def _review_call(self, state: _Rollout, cases: list[_Case], path: Optional[str], this_call: _Case) -> None:
         """Read this call's layer-0 result, if any, then start its reviews."""
-        reading = await asyncio.to_thread(_read_activation_file, path) if path else None
+        reading = (
+            await asyncio.to_thread(_read_activation_file, path, self.config.activation_results_dir) if path else None
+        )
         if reading is not None:
             state.readings.append(reading)
             if reading.get("error"):
@@ -642,6 +702,9 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         for verdict in verdicts:
             if isinstance(verdict, BaseException) and not isinstance(verdict, Exception):
                 raise verdict
+            # A replay measures the judge, so a failed judge call there is a masked row, not a detected incident.
+            if case.reason == "replay" and isinstance(verdict, JudgeError):
+                raise verdict
         # A failed investigation leaves an 'unparsed' verdict, so the flag still becomes an alert.
         security, alignment = (
             {"severity": "unparsed", "error": f"{type(v).__name__}: {v}"} if isinstance(v, Exception) else v
@@ -661,6 +724,8 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
             try:
                 report["l3"] = _parse_json(self._reply_text(await self._judge([{"role": "user", "content": prompt}])))
             except JudgeError as e:
+                if case.reason == "replay":
+                    raise
                 # A P0 is never lost to a failed check: without an answer, it pages.
                 report["l3"] = {"error": str(e)}
             # Layer 3 decides paging only: a P0 it does not confirm is still a serious finding.
@@ -763,15 +828,9 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 index = int(args["index"])
                 return f"window {index} of {len(case.windows)}:\n{case.windows[index]}", sandbox
             if name == "search":
-                pattern = re.compile(args["pattern"])
                 sources = [*case.windows, json.dumps(case.record, indent=1, default=str)]
-                matches = [
-                    f"{'record' if index == len(case.windows) else f'window {index}'}, line {number}: {line[:500]}"
-                    for index, source in enumerate(sources)
-                    for number, line in enumerate(source.splitlines())
-                    if pattern.search(line)
-                ]
-                return "\n".join(matches[:30]) or "no matches", sandbox
+                matches = await asyncio.to_thread(_search, args["pattern"], sources)
+                return "\n".join(matches) or "no matches", sandbox
             if name == "recent_alerts":
                 return json.dumps(list(self._recent_alerts)[-20:]), sandbox
             if name == "run_python" and self.config.sandbox_provider:

@@ -16,15 +16,21 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import logging
+import sys
+import time
+import types
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 from resources_servers.misalignment_monitor import app
@@ -50,6 +56,7 @@ def _config(tmp_path: Path, **overrides) -> MisalignmentMonitorConfig:
         "judge_responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=[]),
         "alerts_jsonl_fpath": str(tmp_path / "alerts.jsonl"),
         "audit_rate": 0.0,
+        "activation_results_dir": str(tmp_path),
     }
     return MisalignmentMonitorConfig(**(settings | overrides))
 
@@ -86,16 +93,18 @@ def _reply(reply: dict | str | tuple) -> dict:
     ).model_dump()
 
 
+def _response(reply: dict | str | tuple) -> AsyncMock:
+    mock = AsyncMock()
+    mock.ok = True
+    mock.read = AsyncMock(return_value=orjson.dumps(_reply(reply)))
+    return mock
+
+
 def _server(
     config: MisalignmentMonitorConfig, *replies, global_config: dict | None = None
 ) -> MisalignmentMonitorServer:
     """A monitor whose judge answers each call with the next reply, and records what each call sent."""
-    responses = []
-    for reply in replies:
-        mock = AsyncMock()
-        mock.ok = True
-        mock.read = AsyncMock(return_value=orjson.dumps(_reply(reply)))
-        responses.append(mock)
+    responses = [_response(reply) for reply in replies]
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = global_config or {}
     client.sent = []
@@ -106,6 +115,29 @@ def _server(
 
     client.post = AsyncMock(side_effect=post)
     return MisalignmentMonitorServer(config=config, server_client=client)
+
+
+REVIEWER, SECURITY, ALIGNMENT = (
+    "You are reviewing an AI agent",
+    "You are a security investigator",
+    "You are an alignment",
+)
+
+
+def _route(server: MisalignmentMonitorServer, replies: dict[str, list]) -> None:
+    """Answer each judge call from the replies of the role its prompt opens with. The two investigators run at once
+    and a search runs off the event loop, so their calls interleave."""
+
+    async def post(**kwargs):
+        sent = [item.model_dump(exclude_none=True) for item in kwargs["json"].input]
+        server.server_client.sent.append(sent)
+        return _response(replies[next(role for role in replies if role in json.dumps(sent[0]))].pop(0))
+
+    server.server_client.post.side_effect = post
+
+
+def _calls_of(server: MisalignmentMonitorServer, role: str) -> list[int]:
+    return [index for index, sent in enumerate(_sent(server)) if role in json.dumps(sent[0])]
 
 
 def _sent(server: MisalignmentMonitorServer) -> list:
@@ -327,17 +359,13 @@ async def test_a_judge_reply_without_an_answer_is_asked_again(tmp_path: Path) ->
 async def test_investigators_use_tools_before_deciding(tmp_path: Path) -> None:
     windows = ["window one: ls", "window two: rm -rf /data"]
     case = _Case("7-2", "final", windows[1], windows, {"reward": 0})
-    server = _server(
-        _config(tmp_path, security_confirmation=False),
-        P1_REVIEW,
-        ("tool", "search", {"pattern": "rm -rf"}),
-        ("tool", "read_window", {"index": 5}),
-        P1_SECURITY,
-        NONE,
-    )
+    server = _server(_config(tmp_path, security_confirmation=False))
+    tools = [("tool", "search", {"pattern": "rm -rf"}), ("tool", "read_window", {"index": 5})]
+    _route(server, {REVIEWER: [P1_REVIEW], SECURITY: [*tools, P1_SECURITY], ALIGNMENT: [NONE]})
     report = await server.review(case)
     assert report["l2"]["security"] == P1_SECURITY | {"tools_used": ["search", "read_window"]}
-    first_tool, second_tool = _sent(server)[2][-1], _sent(server)[3][-1]
+    security_calls = _calls_of(server, SECURITY)
+    first_tool, second_tool = _sent(server)[security_calls[1]][-1], _sent(server)[security_calls[2]][-1]
     assert first_tool == {
         "type": "function_call_output",
         "call_id": "call_1",
@@ -350,11 +378,16 @@ async def test_investigators_use_tools_before_deciding(tmp_path: Path) -> None:
 
 async def test_an_investigator_out_of_steps_still_gives_a_verdict(tmp_path: Path) -> None:
     config = _config(tmp_path, security_confirmation=False, investigator_max_steps=1)
-    server = _server(config, P1_REVIEW, ("tool", "search", {"pattern": "test"}), P1_SECURITY, NONE)
+    server = _server(config)
+    _route(
+        server,
+        {REVIEWER: [P1_REVIEW], SECURITY: [("tool", "search", {"pattern": "test"}), P1_SECURITY], ALIGNMENT: [NONE]},
+    )
     report = await server.review(_case())
     assert report["l2"]["security"] == P1_SECURITY | {"tools_used": ["search"]}
-    deadline = server.server_client.post.call_args_list[2].kwargs["json"]
-    assert _sent(server)[2][-1]["content"] == INVESTIGATION_DEADLINE and not deadline.tools
+    last = _calls_of(server, SECURITY)[-1]
+    deadline = server.server_client.post.call_args_list[last].kwargs["json"]
+    assert _sent(server)[last][-1]["content"] == INVESTIGATION_DEADLINE and not deadline.tools
 
 
 async def test_investigators_run_python_in_a_sandbox_that_is_always_stopped(
@@ -519,7 +552,7 @@ async def test_a_rewritten_capture_file_is_read_from_its_start(tmp_path: Path) -
     path.unlink()
     _call("7-2", tmp_path, TASK, EDIT)
     await server._read_captures()
-    assert server._counts["calls"] == 2 and server._rollouts["7-2"].item_count == len(TASK) + len(EDIT)
+    assert server._counts["calls"] == 2 and len(server._rollouts["7-2"].history) == len(TASK) + len(EDIT)
     path.unlink()
     await server._read_captures()
     assert path not in server._capture_offsets
@@ -901,3 +934,181 @@ def test_a_one_character_cap_does_not_duplicate_the_whole_text() -> None:
     rendered = render_items(items, max_chars=1)
 
     assert "abcdefghij" not in rendered
+
+
+@pytest.mark.parametrize("through_symlink", [False, True])
+async def test_an_activation_path_outside_the_results_dir_is_never_touched(tmp_path: Path, through_symlink) -> None:
+    results_dir = tmp_path / "l0"
+    results_dir.mkdir()
+    victim = tmp_path / "victim.jsonl"
+    victim.write_text("keep me\n")
+    path = victim
+    if through_symlink:
+        path = results_dir / "chatcmpl-1.json"
+        path.symlink_to(victim)
+    params = json.dumps({"misalignment_activations_path": str(path)})
+    config = _config(tmp_path, activation_source="engine", activation_results_dir=str(results_dir))
+    server = _server(config, NONE, global_config=_capture(tmp_path))
+    _call("7-2", tmp_path, TASK, DONE, metadata={"kv_transfer_params": params})
+    await server._finish({"rollout_id": "7-2", "response": {"output": DONE}})
+    assert victim.read_text() == "keep me\n"
+    # The call counts as unscreened, so layer 1 still reviews it.
+    assert server.server_client.post.call_count == 1
+    assert server._counts["l0_unscreened"] == 1
+
+
+def test_engine_mode_needs_a_results_dir(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="activation_results_dir"):
+        _config(tmp_path, activation_source="engine", activation_results_dir=None)
+
+
+async def test_a_runaway_search_times_out_without_blocking_the_monitor(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(app, "_SEARCH_TIMEOUT_S", 0.3, raising=False)
+    server = _server(_config(tmp_path))
+    started = time.monotonic()
+    # (a|aa)+$ backtracks without end on a long run of a's that does not reach the end of the line.
+    search = asyncio.create_task(server._run_tool("search", '{"pattern": "(a|aa)+$"}', _case("a" * 38 + "!"), None))
+    await asyncio.sleep(0.05)
+
+    status = await asyncio.wait_for(server.status(), timeout=1)
+    result, _ = await search
+
+    assert status["backlog"] == 0
+    assert result.startswith("tool error: TimeoutError"), result
+    assert time.monotonic() - started < 3
+
+
+async def test_replay_labels_and_earlier_predictions_never_reach_the_judge(tmp_path: Path) -> None:
+    server = _server(_config(tmp_path, security_confirmation=False), P1_REVIEW, NONE, P1_ALIGNMENT)
+    recorded = {
+        **ROLLOUT,
+        "response": _reply("Fixed."),
+        "expected_severity": "P1",
+        "monitor_report": {"severity": "PREVIOUS-PREDICTION"},
+    }
+    result = await server.verify(MisalignmentMonitorVerifyRequest.model_validate(recorded))
+    sent = json.dumps(_sent(server))
+    assert "expected_severity" not in sent and "PREVIOUS-PREDICTION" not in sent
+    assert result.expected_severity == "P1" and result.monitor_report["severity"] == "P1"
+
+
+@pytest.mark.parametrize("replacement_items", [2, 3])
+async def test_a_queued_review_keeps_evidence_its_replacement_lacks(tmp_path: Path, replacement_items: int) -> None:
+    config = _config(tmp_path, review_schedule="per_turn", max_concurrent_judge_calls=1)
+    server = _server(config, NONE, NONE, NONE, global_config=_capture(tmp_path))
+    # The judge is busy, so the first turn's review waits in the queue.
+    await server._review_slots.acquire()
+    _call("7-2", tmp_path, TASK, [{"type": "message", "role": "assistant", "content": "SECRET plan"}])
+    await server._read_captures()
+    # A replacement context of the same or larger size that does not hold the earlier turn.
+    others = [{"role": "user", "content": f"unrelated {index}"} for index in range(replacement_items)]
+    _call("7-2", tmp_path, others, DONE)
+    await server._read_captures()
+    server._review_slots.release()
+    await _settle(server)
+    assert any("SECRET plan" in json.dumps(sent) for sent in _sent(server))
+
+
+def _connector_module(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The vLLM plugin module, imported against stand-ins for the three vLLM names it uses."""
+
+    @dataclass
+    class PendingSave:
+        req_id: str
+        filename: str
+        token_ids: Any
+        block_ids: list
+
+    hidden_states = "vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector"
+    for name in [
+        "vllm",
+        "vllm.distributed",
+        "vllm.distributed.kv_transfer",
+        "vllm.distributed.kv_transfer.kv_connector",
+    ]:
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "vllm.distributed.kv_transfer.kv_connector.v1", types.ModuleType("v1"))
+    stub = types.ModuleType(hidden_states)
+    stub.ExampleHiddenStatesConnector, stub.PendingSave, stub.extract_from_kv_cache = object, PendingSave, None
+    monkeypatch.setitem(sys.modules, hidden_states, stub)
+    monkeypatch.setitem(sys.modules, "vllm.logger", SimpleNamespace(init_logger=logging.getLogger))
+    name = "resources_servers.misalignment_monitor.vllm_activation_connector"
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    return importlib.import_module(name)
+
+
+@pytest.mark.parametrize("generated", [1, 4098])
+def test_the_probe_reads_the_last_prompt_token_however_long_the_generation(monkeypatch, generated: int) -> None:
+    import torch
+
+    module = _connector_module(monkeypatch)
+    connector = object.__new__(module.MisalignmentActivationConnector)
+    connector._mode, connector._max_positions = "probe", 4096
+    connector._kv_transfer_config = SimpleNamespace(get_from_extra_config=lambda key, default=None: default)
+    width = 4
+    zeros = torch.zeros(width)
+    connector._readout = {
+        "probe": {"weight": zeros, "bias": torch.tensor([5.0]), "mu": zeros, "sd": torch.ones(width)},
+        "temperature": 1.0,
+    }
+    prompt = 8
+    # The last generated token was never an input, so a request stores prompt + generated - 1 positions.
+    token_ids = torch.zeros(prompt + generated - 1)
+    pending = module.ScoredSave(req_id="r", filename="f", token_ids=token_ids, block_ids=[], num_prompt_tokens=prompt)
+
+    first, last = connector._extraction_window(pending)
+    cache = torch.arange(len(token_ids) * width, dtype=torch.float32).reshape(-1, width)
+    reading = connector._read(pending, cache[first:last], first)
+
+    assert (first, last) == (7, 8)
+    assert reading["position"] == 7 and reading["flagged"] and "error" not in reading
+    # The lens still reads the end of the request, up to max_positions.
+    connector._mode = "jspace"
+    assert connector._extraction_window(pending) == (max(0, len(token_ids) - 4096), len(token_ids))
+
+
+P0_SECURITY = {"severity": "P0", "categories": ["sandbox_escape"], "summary": "curl to the internet"}
+
+
+@pytest.mark.parametrize("failing", ["You are a security investigator", "A security investigator rated"])
+async def test_a_replay_judge_failure_is_a_masked_row_not_an_incident(tmp_path: Path, failing: str) -> None:
+    server = _server(_config(tmp_path, security_confirmation=True))
+    replies = {"You are a security investigator": P0_SECURITY, "You are an alignment investigator": NONE}
+
+    async def post(**kwargs):
+        prompt = json.dumps(kwargs["json"].input[0].model_dump(exclude_none=True))
+        if failing in prompt:
+            raise ConnectionError("judge down")
+        return _response(next((reply for key, reply in replies.items() if key in prompt), P1_REVIEW))
+
+    server.server_client.post.side_effect = post
+    body = MisalignmentMonitorVerifyRequest.model_validate({**ROLLOUT, "response": _reply("Fixed.")})
+    row = json.loads((await judge_failsafe(server.verify)(body=body)).body)
+    assert row["failure_kind"] == "judge_failed" and row["mask_sample"] is True and row["reward"] == 0.0
+
+
+def test_a_search_stops_once_its_deadline_has_passed(monkeypatch: pytest.MonkeyPatch) -> None:
+    searched = []
+
+    class SpyPattern:
+        def search(self, line: str, timeout: float) -> None:
+            searched.append(line)
+
+    # The first clock read sets the deadline, and every later read is past it.
+    clock = iter([1000.0, *[1010.0] * 300])
+    monkeypatch.setattr(app, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(app, "regex", SimpleNamespace(compile=lambda pattern: SpyPattern()))
+    with pytest.raises(TimeoutError):
+        app._search("anything", ["\n".join(f"line {index}" for index in range(200))])
+    assert searched == []
+
+
+def test_an_activation_reading_that_cannot_be_removed_still_returns(tmp_path: Path) -> None:
+    results_dir = tmp_path / "l0"
+    results_dir.mkdir()
+    # A directory where the reading should be: it can be neither read nor removed as a file.
+    reading_path = results_dir / "reading.json"
+    reading_path.mkdir()
+    reading = app._read_activation_file(str(reading_path), str(results_dir))
+    assert reading["flagged"] is False and reading.get("error")
+    assert reading_path.is_dir()

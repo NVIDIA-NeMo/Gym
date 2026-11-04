@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+
 import orjson
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +16,10 @@ from environment_servers.misalignment_monitored.app import (
 )
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
+
+
+# A reply that never comes, like a monitor that accepts no connection while the client keeps retrying.
+NEVER = object()
 
 
 class _Upstream:
@@ -33,7 +39,10 @@ class _Client(ServerClient):
     replies: dict[str, list]
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Upstream:
-        return self._answer(server_name, url_path, kwargs)
+        reply = self._answer(server_name, url_path, kwargs)
+        if reply is NEVER:
+            await asyncio.Event().wait()
+        return reply
 
     async def get(self, server_name: str, url_path: str, **kwargs) -> _Upstream:
         return self._answer(server_name, url_path, kwargs)
@@ -142,3 +151,14 @@ def test_a_monitor_that_cannot_drain_does_not_block_metrics() -> None:
     app, _, _ = _app(drain=[ConnectionError("monitor down")], aggregate_metrics=[_Upstream(orjson.dumps(METRICS))])
     with app:
         assert app.post("/aggregate_metrics", json={"verify_responses": []}).status_code == 200
+
+
+async def test_a_drain_that_never_answers_is_cut_off_and_metrics_still_come_back() -> None:
+    _, client, server = _app(drain=[NEVER], aggregate_metrics=[_Upstream(orjson.dumps(METRICS))])
+    server.config.monitor_drain_timeout_s = 0.2
+
+    request = monitored.AggregateMetricsRequest(verify_responses=[])
+    metrics = await asyncio.wait_for(server.aggregate_metrics(request), timeout=5)
+
+    assert metrics.agent_metrics == {"mean/reward": 1.0}
+    assert [path for _, path, _ in client.calls] == ["/drain", "/aggregate_metrics"]

@@ -89,7 +89,8 @@ vllm serve Qwen/Qwen3-4B --no-enable-chunked-prefill \
   comes on top of vLLM's own memory, so lower `gpu_memory_utilization` a little.
 - The extraction uses vLLM's speculative-decoding slot, so it cannot run with MTP or EAGLE drafts, and it needs
   chunked prefill off. Results go to `shared_storage_path`, which the monitor must be able to read: `/dev/shm` on one
-  node, a shared filesystem across nodes.
+  node, a shared filesystem across nodes. Set the monitor's `activation_results_dir` to that directory: the monitor
+  reads and deletes readings only inside it, since the path comes back in the model response.
 - With `local_vllm_model`, put these under `vllm_serve_kwargs`. In NeMo RL, under `policy.generation.vllm_kwargs`.
 - Agents that call the model through the Anthropic Messages API get no engine reading: that conversion drops it.
 
@@ -115,7 +116,9 @@ what it misses. A J-space concept must be a single token of the model's vocabula
 
 `/verify` runs the same review on a recorded rollout and returns it as `monitor_report`, scoring a flagged rollout
 1.0. It writes no alerts, so replaying an incident pages no one. With rows labeled `expected_severity`, the
-aggregate metrics report recall and false-positive rate at each threshold (`monitor/recall@P1`, ...):
+aggregate metrics report recall and false-positive rate at each threshold (`monitor/recall@P1`, ...). The label and
+any earlier `monitor_report` stay out of the evidence the judge sees, and a failed judge call gives a masked row
+(`failure_kind: judge_failed`), not a detected incident:
 
 ```bash
 gym eval reverify \
@@ -133,7 +136,9 @@ gym eval reverify \
   logs or system telemetry.
 - Pausing holds new rollouts. It does not stop rollouts in flight or roll a run back, and paging beyond the webhook
   is up to the receiver.
-- Rollout state is in memory: a monitor restart forgets open P0 alerts and rollouts in progress.
+- Rollout state is in memory: a monitor restart forgets open P0 alerts and rollouts in progress. For the same
+  reason the monitor runs as one process and refuses `num_workers` above 1.
+- An investigator's search stops after 5 seconds and returns a tool error, so a runaway pattern cannot stall reviews.
 
 # Licensing information
 

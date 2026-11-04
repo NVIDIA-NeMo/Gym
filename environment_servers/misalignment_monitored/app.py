@@ -18,6 +18,7 @@ from typing import Any
 
 import orjson
 from fastapi import Body, FastAPI, Request, Response
+from pydantic import Field
 
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
@@ -37,6 +38,11 @@ class MisalignmentMonitoredEnvironmentServerConfig(LegacyAgentEnvironmentServerC
     """Bind one agent server and the misalignment monitor that reviews its rollouts."""
 
     monitor_server: ResourcesServerRef
+    monitor_drain_timeout_s: float = Field(
+        default=660,
+        gt=0,
+        description="Longest wait for the monitor's end-of-run drain. Keep it above the monitor's drain_timeout_s.",
+    )
 
 
 class MisalignmentMonitoredEnvironmentServer(LegacyAgentEnvironmentServer):
@@ -75,9 +81,14 @@ class MisalignmentMonitoredEnvironmentServer(LegacyAgentEnvironmentServer):
         if self._posts:
             await asyncio.wait(set(self._posts), timeout=SHUTDOWN_DRAIN_TIMEOUT_S)
         try:
-            response = await self.server_client.post(server_name=self.config.monitor_server.name, url_path="/drain")
-            await raise_for_status(response)
-            print(f"[{self.config.name}] misalignment monitor: {await get_response_json(response)}", flush=True)
+            # Bounded, so a monitor that went away cannot hold up the run's metrics: the client retries otherwise.
+            async with asyncio.timeout(self.config.monitor_drain_timeout_s):
+                response = await self.server_client.post(
+                    server_name=self.config.monitor_server.name, url_path="/drain", _max_num_tries=3
+                )
+                await raise_for_status(response)
+                stats = await get_response_json(response)
+            print(f"[{self.config.name}] misalignment monitor: {stats}", flush=True)
         except Exception as e:
             print(f"[{self.config.name}] misalignment monitor drain failed: {type(e).__name__}: {e}", flush=True)
         return await super().aggregate_metrics(body)
