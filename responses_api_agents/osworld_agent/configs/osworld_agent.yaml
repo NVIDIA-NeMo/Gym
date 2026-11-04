@@ -91,7 +91,8 @@ osworld_simple_agent:
       agent_contract_parity_mode: strict
       # 3 = bounded post-evaluation transport; use 2 only when a caller needs
       # the complete validation/debug envelope on the wire.
-      exact_trace_transport_version: ${oc.decode:${oc.env:OSWORLD_EXACT_TRACE_TRANSPORT_VERSION,3}}
+      # A string default: oc.decode takes only strings, and an oc.env stand-in may return its default as is.
+      exact_trace_transport_version: ${oc.decode:${oc.env:OSWORLD_EXACT_TRACE_TRANSPORT_VERSION,'3'}}
       mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
       step_timeout: 60          # per-action transport/provider timeout; task_timeout remains the hard fallback
       task_timeout: 1800        # end-to-end attempt deadline: VM create/setup + agent steps + evaluation

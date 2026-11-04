@@ -47,6 +47,7 @@ from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
     AmbiguousAgentRenameError,
+    AmbiguousResourcesRenameError,
     BaseServerConfig,
     ConfigError,
     ConfigInterpolationError,
@@ -110,6 +111,7 @@ USE_ABSOLUTE_IP = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+COMPONENT_EXTRAS_KEY_NAME = "component_extras"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
@@ -118,6 +120,8 @@ DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
 SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME = "server_shutdown_timeout_seconds"
+# How long the Gym servers may take to become ready when the config sets no limit.
+DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS = 600
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
@@ -167,6 +171,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ABSOLUTE_IP_SERVER_TYPES_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
+    COMPONENT_EXTRAS_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
@@ -1272,24 +1277,35 @@ For example, on the command line:
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
         original_agents = {agent.name for agent in self._agent_instances(frozen_dict_config)}
+        original_resources = {
+            name
+            for name, instance in frozen_dict_config.items_ex(resolve=False)
+            if isinstance(instance, DictConfig)
+            and isinstance(instance.get(RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
+        }
         destinations: dict[str, list[str]] = defaultdict(list)
-        # Only a top-level move of an agent can retarget its environment server. Copies and
-        # nested inheritance do not rename the instance, and multiple destinations are ambiguous.
+        # Only a top-level move retargets an environment participant. Copies and
+        # nested inheritance keep the original binding; multiple destinations need an explicit choice.
         for name, value in frozen_dict_config.items_ex(resolve=False):
             source = None
             if isinstance(value, str) and value.startswith("${inherit_from:"):
                 source = value.removeprefix("${inherit_from:").removesuffix("}")
             elif isinstance(value, DictConfig) and not OmegaConf.is_missing(value, INHERIT_FROM_KEY_NAME):
                 source = value.get(INHERIT_FROM_KEY_NAME)
-            if isinstance(source, str) and source in original_agents:
+            if isinstance(source, str) and source in original_agents | original_resources:
                 destinations[source].append(name)
 
         with open_dict(dict_config):
             self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+            self._retarget_environment_resources(
+                dict_config,
+                {source: targets for source, targets in destinations.items() if source in original_resources},
+            )
             final_agents = {agent.name for agent in self._agent_instances(dict_config)}
             destinations = {
                 source: [target for target in targets if target in final_agents]
                 for source, targets in destinations.items()
+                if source in original_agents
             }
             renames = {
                 source: targets[0]
@@ -1305,6 +1321,51 @@ For example, on the command line:
                 self._raise_on_ambiguous_environment_agent_renames(dict_config, ambiguous)
             if renames:
                 self._retarget_environment_servers(dict_config, renames)
+
+    @staticmethod
+    def _retarget_environment_resources(dict_config: DictConfig, destinations: dict[str, list[str]]) -> None:
+        # The Environment Server owns its resources binding. Follow only a consumed resources
+        # instance, without consulting the agent's compatibility /run configuration.
+        destinations = {
+            source: [
+                target
+                for target in targets
+                if isinstance(dict_config.get(target), DictConfig)
+                and isinstance(dict_config[target].get(RESOURCES_SERVER_TYPE_KEY_NAME), DictConfig)
+            ]
+            for source, targets in destinations.items()
+            if source not in dict_config
+        }
+        for name, instance in dict_config.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server_type, server in servers.items_ex(resolve=False):
+                if not isinstance(server, DictConfig):
+                    continue
+                for field, reference in server.items_ex(resolve=False):
+                    if not isinstance(reference, DictConfig):
+                        continue
+                    if OmegaConf.is_missing(reference, "type") or OmegaConf.is_missing(reference, "name"):
+                        continue
+                    if reference.get("type") != RESOURCES_SERVER_TYPE_KEY_NAME and not (
+                        field == "resources_server" and reference.get("type") is None
+                    ):
+                        continue
+                    source = reference.get("name")
+                    targets = destinations.get(source, [])
+                    if len(targets) == 1:
+                        reference["name"] = targets[0]
+                    elif len(targets) > 1:
+                        path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
+                        raise AmbiguousResourcesRenameError(
+                            f"Resources server '{source}' was inherited into several names: "
+                            f"{', '.join(repr(target) for target in targets)}. "
+                            f"'{path}' still references '{source}'. "
+                            "Set this Environment Server's resources reference to the intended instance."
+                        )
 
     @staticmethod
     def _raise_on_ambiguous_environment_agent_renames(
@@ -1746,7 +1807,9 @@ Set the keys individually, in a config or as overrides, e.g.:
 
             # Bound server startup independently of model-endpoint readiness. Multi-worker
             # supervisors can otherwise replace a deterministically failing worker forever.
-            global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+            global_config_dict.setdefault(
+                SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS
+            )
             global_config_dict.setdefault(SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME, 1)
 
             # How long `gym env start` waits for the model endpoints named in the config to accept
