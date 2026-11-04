@@ -90,6 +90,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             "capture_dir": global_config_dict.get("model_call_capture_dir"),
         },
     }
+    if resource.get("judge_evidence_transport", "quotes") != "quotes":
+        settings["judge"]["judge_evidence_transport"] = resource["judge_evidence_transport"]
     settings = OmegaConf.to_container(OmegaConf.create(settings), resolve=True)
     helper = RolloutCollectionHelper()
     capture_dirs = model_call_capture_dirs_from_config(global_config_dict)

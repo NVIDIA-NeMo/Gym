@@ -743,3 +743,103 @@ def test_different_responses_can_be_judged_concurrently(judge_payload, tmp_path,
     results = asyncio.run(run())
     assert [result["item_verdict"] for result in results] == ["pass", "fail"]
     assert len(calls) == 2
+
+
+def indexed_review(payload):
+    from resources_servers.agentic_if_realworld.benchmark.evidence import build_index
+
+    result = review(payload)
+    for criterion in result["constraints"]:
+        criterion["support_quote"] = "Q0"
+        ev = criterion["response_evidence"]
+        quote = ev.pop("quote")
+        ev["span_id"] = next(
+            sid
+            for sid, span in build_index(payload)["spans"].items()
+            if span["field"] == ev["field"] and quote in span["text"]
+        )
+    return result
+
+
+def test_evidence_ids_preserve_canonical_grade_and_cache(judge_payload, tmp_path, monkeypatch):
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(kwargs)
+        return Response(
+            200,
+            {
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": json.dumps(indexed_review(judge_payload))}}
+                ]
+            },
+        )
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC_JUDGE_KEY", "synthetic")
+    kwargs = dict(
+        directory=tmp_path / "receipts",
+        endpoint="http://synthetic.invalid",
+        policy_prompt=SYNTHETIC_PROMPT,
+        key_env="SYNTHETIC_JUDGE_KEY",
+        evidence_transport="evidence_ids_v1",
+    )
+    result = asyncio.run(score(judge_payload, **kwargs))
+    assert result["item_verdict"] == "pass"
+    assert asyncio.run(score(judge_payload, **kwargs, cached_only=True)) == result
+    assert len(calls) == 1
+    work = next((kwargs["directory"] / "judges").iterdir())
+    receipt = read(work / "attempt0.json")
+    assert (
+        SYNTHETIC_PROMPT + "\nUNTRUSTED_EVALUATION_PAYLOAD:\n" + judge.encode(judge_payload)
+        in receipt["request_body"]["messages"][0]["content"]
+    )
+    assert read(work / "result.json")["raw_review"] == review(judge_payload)
+    assert (work / "response_span_index.json").is_file()
+    with pytest.raises(ValueError, match="missing"):
+        asyncio.run(score(judge_payload, **{**kwargs, "evidence_transport": "quotes"}, cached_only=True))
+
+
+@pytest.mark.parametrize("damage", ["foreign_id", "wrong_field", "wrong_support", "contradiction", "raw_quote"])
+def test_evidence_ids_reject_invalid_evidence(judge_payload, damage):
+    from resources_servers.agentic_if_realworld.benchmark import evidence
+
+    schema = evidence.wire_schema(
+        bounded_schema(provider_schema(read(ROOT / "policy/judge_output.schema.json")), judge_payload), judge_payload
+    )
+    raw = indexed_review(judge_payload)
+    constraint = raw["constraints"][0]
+    if damage == "foreign_id":
+        constraint["response_evidence"]["span_id"] = "R:reasoning:0:3"
+    elif damage == "wrong_field":
+        constraint["response_evidence"]["field"] = "tool_calls"
+    elif damage == "wrong_support":
+        constraint["support_quote"] = "Respond with OK only."
+    elif damage == "contradiction":
+        constraint["violation_established"] = True
+    else:
+        constraint["response_evidence"]["quote"] = "OK."
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(raw, schema)
+
+
+def test_evidence_ids_unicode_and_omission(judge_payload):
+    from resources_servers.agentic_if_realworld.benchmark import evidence
+
+    payload = copy.deepcopy(judge_payload)
+    payload["response"]["message"]["content"] = "你好😀" * 250
+    payload["response_sha256"] = judge.sha(payload["response"])
+    payload["inference_binding"]["response_sha256"] = payload["response_sha256"]
+    index = evidence.build_index(payload)
+    text = payload["response"]["message"]["content"]
+    assert set().union(*(set(range(span["start"], span["end"])) for span in index["spans"].values())) == set(
+        range(len(text))
+    )
+    for span in index["spans"].values():
+        assert span["text"] == text[span["start"] : span["end"]]
+    raw = indexed_review(judge_payload)
+    ev = raw["constraints"][0]["response_evidence"]
+    ev.update(kind="missing_required_element", span_id=None)
+    decoded, _ = evidence.decode_review(raw, judge_payload)
+    assert decoded["constraints"][0]["response_evidence"]["quote"] == ""
+    assert decoded["constraints"][0]["support_quote"] == judge_payload["constraints"][0]["support_quotes"][0]

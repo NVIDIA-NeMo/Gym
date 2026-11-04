@@ -14,6 +14,7 @@ from pathlib import Path
 
 import jsonschema
 
+from . import evidence
 from .core import (
     DEFAULT_JUDGE_MODEL,
     ROOT,
@@ -78,6 +79,7 @@ async def score(
     model: str = DEFAULT_JUDGE_MODEL,
     key_env: str = "AGENTIC_IF_JUDGE_API_KEY",
     reasoning: str = "medium",
+    evidence_transport: str = "quotes",
     cached_only: bool = False,
     validate_only: bool = False,
 ) -> dict:
@@ -87,14 +89,20 @@ async def score(
     validate_judge_config(endpoint, model)
     judge.validate_payload(payload)
     schema = bounded_schema(provider_schema(read(ROOT / "policy/judge_output.schema.json")), payload)
-    wire_schema = provider_schema(schema)
+    if evidence_transport not in ("quotes", "evidence_ids_v1"):
+        raise ValueError("Unknown judge evidence transport")
+    indexed = evidence_transport == "evidence_ids_v1"
+    wire_schema = evidence.wire_schema(schema, payload) if indexed else provider_schema(schema)
     body = {
         "model": model,
         "reasoning_effort": reasoning,
         "messages": [
             {
                 "role": "user",
-                "content": policy_prompt + "\nUNTRUSTED_EVALUATION_PAYLOAD:\n" + judge.encode(payload),
+                "content": policy_prompt
+                + "\nUNTRUSTED_EVALUATION_PAYLOAD:\n"
+                + judge.encode(payload)
+                + (evidence.prompt_note(payload) if indexed else ""),
             }
         ],
         "response_format": {
@@ -112,7 +120,7 @@ async def score(
             "request": body,
             "endpoint": endpoint,
             "validation_schema": schema,
-            "transport_version": TRANSPORT_VERSION,
+            "transport_version": evidence.VERSION if indexed else TRANSPORT_VERSION,
         }
     )
     work = directory / "judges" / identity
@@ -161,7 +169,7 @@ async def score(
                 or receipt["endpoint"] != endpoint
             ):
                 raise ValueError("Cached judge request changed")
-            review, checked = _checked_result(verified_response(receipt), payload, schema, body)
+            review, checked = _checked_result(verified_response(receipt), payload, schema, body, indexed=indexed)
             if cached["raw_review"] != review or cached["result"] != checked:
                 raise ValueError("Cached grade differs from validated review")
             return checked
@@ -174,6 +182,8 @@ async def score(
         write(work / "payload.json", payload)
         write(work / "transport_schema.json", schema)
         write(work / "provider_schema.json", wire_schema)
+        if indexed:
+            write(work / "response_span_index.json", evidence.build_index(payload))
         delivered_reviews = 0
         # At most two 2xx review deliveries; transport-only failures end this invocation.
         for attempt in range(len(receipts) + 2):
@@ -200,7 +210,7 @@ async def score(
             delivered_reviews += 1
             response = verified_response(receipt)
             try:
-                review, result = _checked_result(response, payload, schema, body)
+                review, result = _checked_result(response, payload, schema, body, indexed=indexed)
             except (ValueError, TypeError, KeyError, jsonschema.ValidationError):
                 continue
             write(
@@ -217,12 +227,17 @@ async def score(
         return unscored(payload["item_id"], "judge_delivery_or_validation_error")
 
 
-def _checked_result(response: dict, payload: dict, schema: dict, body: dict) -> tuple[dict, dict]:
+def _checked_result(
+    response: dict, payload: dict, schema: dict, body: dict, *, indexed: bool = False
+) -> tuple[dict, dict]:
     """Derive the full grade from the authoritative judge response."""
     choices = response["choices"]
     if len(choices) != 1 or choices[0]["finish_reason"] != "stop":
         raise ValueError("Incomplete judge delivery")
     review = json.loads(choices[0]["message"]["content"])
+    if indexed:
+        jsonschema.validate(review, body["response_format"]["json_schema"]["schema"])
+        review, proof = evidence.decode_review(review, payload)
     jsonschema.validate(review, schema)
     result = judge.validate_review(review, payload)
     result.update(
@@ -234,4 +249,6 @@ def _checked_result(response: dict, payload: dict, schema: dict, body: dict) -> 
         judge_response_id=response.get("id"),
         judge_usage=response.get("usage"),
     )
+    if indexed:
+        result.update(evidence_transport=evidence.VERSION, evidence_resolution=proof)
     return review, result

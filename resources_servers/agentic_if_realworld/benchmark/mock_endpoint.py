@@ -6,6 +6,7 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .evidence import build_index
 from .synthetic import EXAMPLE_LITERALS, review
 
 
@@ -16,8 +17,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if body["model"] == "synthetic-judge":
-            payload = json.loads(body["messages"][0]["content"].split("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1])
+            text = body["messages"][0]["content"].split("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1]
+            payload = json.JSONDecoder().raw_decode(text)[0]
             answer = review(payload)
+            if "EVIDENCE ID TRANSPORT:" in text:
+                for criterion in answer["constraints"]:
+                    criterion["support_quote"] = "Q0"
+                    ev = criterion["response_evidence"]
+                    quote = ev.pop("quote")
+                    ev["span_id"] = (
+                        next(
+                            (
+                                sid
+                                for sid, span in build_index(payload)["spans"].items()
+                                if span["field"] == ev["field"] and quote in span["text"]
+                            ),
+                            None,
+                        )
+                        if quote
+                        else None
+                    )
             value = {
                 "id": "synthetic-judge-response",
                 "created": 0,

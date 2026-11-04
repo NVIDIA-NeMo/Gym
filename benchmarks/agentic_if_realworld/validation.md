@@ -242,3 +242,23 @@ configuration should pin the approved merged Gym revision.
 
 Public synthetic checks do not establish cluster readiness, a complete paid
 benchmark result, training authorization or certification.
+
+## November 4 evidence-ID transport
+
+New-run configuration uses `evidence_ids_v1`: instruction quote IDs and exact
+response span IDs are resolved before unchanged strict-v2.2 validation. The
+full rubric and evaluation payload remain present. Historical quote transport
+and its cached grades remain available under `quotes`; transport variants use
+different request identities and must retain their provenance.
+
+- 258 synthetic component/model tests pass, including canonical round-trip,
+  cached replay, wrong-field/foreign-ID rejection, contradictory verdict rejection,
+  Unicode span coverage and null omission evidence.
+- A live GPT-6.1 Sol/medium judge scored an independent literal-answer mismatch
+  correctly as fail. Cached replay returned the identical grade without dispatch.
+- All-files pre-commit passes; the private guardword catalog was unavailable.
+- The separate full CLI GLM policy-generation smoke hit HTTP 429. This does not
+  establish end-to-end live generation coverage for the new transport.
+- Frozen policy, source manifest, private inputs and prior grades are unchanged.
+  No real benchmark examples were sent by these checks. Synthetic plumbing
+  evidence does not establish agreement with Astra or a benchmark accuracy gain.

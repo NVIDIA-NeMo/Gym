@@ -52,6 +52,7 @@ class ResourcesConfig(BaseResourcesServerConfig):
     judge_model: str = DEFAULT_JUDGE_MODEL
     judge_api_key_env: str = "AGENTIC_IF_JUDGE_API_KEY"
     judge_reasoning: str = "medium"
+    judge_evidence_transport: Literal["quotes", "evidence_ids_v1"] = "quotes"
     synthetic: bool = False
     split_registry_path: str = ""
     ground_truth_path: str = ""
@@ -78,6 +79,7 @@ class ResourcesServer(SimpleResourcesServer):
             model=self.config.judge_model,
             key_env=self.config.judge_api_key_env,
             reasoning=self.config.judge_reasoning,
+            evidence_transport=self.config.judge_evidence_transport,
             response_source=self.config.response_source,
         )
         return await verifier.verify(body)

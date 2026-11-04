@@ -66,3 +66,21 @@ credentials. From an installed Gym checkout, run:
 gym env test +entrypoint=resources_servers/agentic_if_realworld +should_validate_data=true
 gym env test +entrypoint=responses_api_models/agentic_if_text +should_validate_data=true
 ```
+
+### Evidence-ID judge transport
+
+The shipped profile selects `judge_evidence_transport: evidence_ids_v1`.
+Judges select instruction IDs and exact response-span IDs instead of copying
+quotes. The adapter restores the original text and runs the unchanged strict-v2.2
+validator. IDs establish location, not correctness: the judge must still justify
+compliance or violation against the full input and response. Reasoning and history
+are never response evidence; omission and absence use a null span ID.
+
+Raw requests/reviews, the response-span index, resolved canonical reviews and
+resolution hashes are retained in private receipts. The rubric, dataset, policy
+hashes, model reasoning settings and unscored semantics are unchanged.
+
+This is a versioned transport with a distinct cache identity. Resume historical
+quote-based runs with `judge_evidence_transport: quotes` and their original config;
+valid old grades remain valid and must not be regenerated. Use a new run directory
+for the new transport. Results from different transports must retain that provenance.

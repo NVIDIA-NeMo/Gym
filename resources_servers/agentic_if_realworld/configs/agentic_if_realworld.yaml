@@ -18,6 +18,7 @@ agentic_if_realworld_resources:
       judge_model: ${oc.env:AGENTIC_IF_JUDGE_MODEL,""}
       judge_api_key_env: AGENTIC_IF_JUDGE_API_KEY
       judge_reasoning: medium
+      judge_evidence_transport: evidence_ids_v1
       datasets:
         - name: agentic_if_realworld
           type: benchmark

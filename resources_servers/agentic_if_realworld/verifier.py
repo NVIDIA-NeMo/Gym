@@ -78,9 +78,11 @@ class Verifier:
         key_env: str = "AGENTIC_IF_JUDGE_API_KEY",
         reasoning: str = "medium",
         response_source: Literal["raw_receipt", "gym_response"] = "raw_receipt",
+        evidence_transport: str = "quotes",
     ):
         self.dataset, self.receipt_dir = dataset, receipt_dir
         self.response_source = response_source
+        self.evidence_transport = evidence_transport
         self.endpoint, self.model, self.key_env, self.reasoning = (
             endpoint,
             model,
@@ -97,6 +99,7 @@ class Verifier:
             model=self.model,
             key_env=self.key_env,
             reasoning=self.reasoning,
+            evidence_transport=self.evidence_transport,
             cached_only=cached_only,
             validate_only=validate_only,
         )
