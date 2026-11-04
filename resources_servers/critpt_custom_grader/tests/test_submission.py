@@ -10,7 +10,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.core import AGENT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR, PROVIDER_UNAVAILABLE
 from resources_servers.critpt_custom_grader.submission import (
     FinishRequest,

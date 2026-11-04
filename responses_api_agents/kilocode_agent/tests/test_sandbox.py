@@ -17,18 +17,19 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    SandboxSession,
 )
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.observability.model_calls import ModelCallRecord
-from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
+from nemo_gym.rollouts import run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
-from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, join_agent_model_calls
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ModelCallRecord, join_agent_model_calls
 from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest, _runtime_failure
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession, _sandbox_prepare_command
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent

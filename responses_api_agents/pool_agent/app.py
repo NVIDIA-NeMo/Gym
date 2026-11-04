@@ -16,9 +16,8 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, JsonValue, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -26,7 +25,9 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -313,6 +314,7 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 LOG.exception("Could not preserve Pool failure artifacts")
 
     async def _activate(self, state: PoolSession, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        """Run Pool and classify timeouts from confirmed cleanup and model-call evidence."""
         timeout = resolve_agent_timeout(
             body.metadata, ceiling=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout)
         )
@@ -331,19 +333,21 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
-            if artifacts.trajectory_error:
-                raise RuntimeError("Pool did not produce a readable root trajectory")
-            parsed = parse_trajectory(artifacts.trajectory)
             cleanup = state.session.cleanup
             if cleanup is None or not cleanup["cleanup_confirmed"]:
                 raise RuntimeError("Pool ended without confirmed supervisor cleanup")
             if cleanup["error"]:
                 raise RuntimeError(f"Pool supervision failed: {cleanup['error']}")
+            timed_out = cleanup["timed_out"]
+            if artifacts.trajectory_error:
+                if timed_out and not artifacts.completed_model_calls:
+                    raise RuntimeError("Pool timed out before any model response completed")
+                raise RuntimeError("Pool did not produce a readable root trajectory")
+            parsed = parse_trajectory(artifacts.trajectory)
             if parsed.errors:
                 raise RuntimeError("Pool session failed: " + "; ".join(parsed.errors))
             if parsed.exit_reason == "model_next_tool_call_http_error":
                 raise RuntimeError("Pool model request failed: " + parsed.exit_reason)
-            timed_out = cleanup["timed_out"]
             if parsed.exit_reason not in (None, "exit_tool_called"):
                 raise RuntimeError(f"Pool failed: reason={parsed.exit_reason}")
             if timed_out and not parsed.output and not artifacts.completed_model_calls:

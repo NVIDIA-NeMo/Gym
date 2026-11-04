@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import SandboxSession
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.pool_agent.configuration import pool_config
 from responses_api_agents.pool_agent.sandbox import PoolSession
@@ -221,7 +221,9 @@ async def test_bad_termination_evidence_never_collects_before_confirmation(tmp_p
 
     sandbox.download = read
     try:
-        with pytest.raises(RuntimeError):
+        # A receipt that denies cleanup is the typed harness-termination failure of the shared sandbox session; a
+        # malformed one is refused as before.
+        with pytest.raises(NgFailureEvent if confirmed is False else RuntimeError):
             await asyncio.wait_for(execute(state), timeout=30)
         assert state.session.artifacts is None
         assert "read stdout.jsonl" not in sandbox.events

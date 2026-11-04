@@ -9,9 +9,8 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from pytest import mark, raises
 
-from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI, ServerClient
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.models import NeMoGymAsyncOpenAI
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.tests.test_app import _engine_bad_request_error
 
@@ -224,6 +223,24 @@ async def test_fit_propagates_provider_rejection_once_even_when_legacy_propagati
     failed_call.assert_awaited_once()
     if stage == "tokenize":
         client.create_chat_completion.assert_not_awaited()
+
+
+async def test_fit_propagates_a_conflicting_backend_window_without_reactively_lowering_the_measured_budget():
+    model, client = _model(count=100, window=1000, propagate_context_overflow_errors=False)
+    assert model.config.refit_output_budget_to_window is True
+    error = _engine_bad_request_error(
+        "This model's maximum context length is 800 tokens. However, you requested 1000 tokens "
+        "(100 in the messages, 900 in the completion). Please reduce the length of the messages or completion."
+    )
+    client.create_chat_completion.side_effect = error
+
+    with raises(type(error)) as caught:
+        await model.chat_completions(_request(), _body())
+
+    assert caught.value is error
+    client.create_tokenize.assert_awaited_once()
+    client.create_chat_completion.assert_awaited_once()
+    assert client.create_chat_completion.await_args.kwargs["max_completion_tokens"] == 900
 
 
 def test_fit_preserves_provider_context_error_through_the_public_route():

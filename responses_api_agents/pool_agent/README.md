@@ -176,7 +176,7 @@ POOL_TEST_BINARY=/absolute/path/to/pool-v1.0.16 \
 Run the shared lifecycle tests on Linux to exercise process supervision and cleanup:
 
 ```bash
-python -m pytest tests/unit_tests/test_sandbox_session.py \
-  tests/unit_tests/test_sandbox_supervisor_client.py \
-  tests/unit_tests/test_process_supervisor.py -q -o addopts=''
+python -m pytest tests/unit_tests/agents/test_sandbox_session.py \
+  tests/unit_tests/agents/test_sandbox_supervisor_client.py \
+  tests/unit_tests/agents/test_process_supervisor.py -q -o addopts=''
 ```

@@ -9,12 +9,16 @@ import pytest
 from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.config import BenchmarkDatasetConfig, GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.task_data import normalize_task_fields
-from nemo_gym.train_data_utils import TrainDataProcessor
+from nemo_gym.data import (
+    TrainDataProcessor,
+    apply_prompt_to_row,
+    load_prompt_config,
+    normalize_task_fields,
+    validate_prompt_compatibility,
+)
+from nemo_gym.environment import BenchmarkConfig
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader.task_data import TaskData
 

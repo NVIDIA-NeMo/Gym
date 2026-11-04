@@ -49,10 +49,21 @@ class TestNamingConvention:
             "session_",
             "cohort_",
             "persistence_",
+            "environment_",
+            "harness_",
+            "collection_",
+            # Gym's server supervisor, which starts every server of a run.
+            "server_",
+            # The driver step of an orchestrated job, before collection runs anything.
+            "driver_",
+            # A rollout's own lifecycle across allocations.
+            "rollout_",
         )
         lifecycle = {"cancelled", "kill_shaped", "shutdown"}
+        # Registered for saved rows of shipped producers; the rule binds every name added after them.
+        producer_labels = {"harbor_failed", "infrastructure_error"}
 
-        undomained = {n for n in FAILURE_KINDS if not n.startswith(domains)} - lifecycle
+        undomained = {n for n in FAILURE_KINDS if not n.startswith(domains)} - lifecycle - producer_labels
 
         assert undomained == set()
 
@@ -146,7 +157,7 @@ class TestNamesTheRepoAlreadyProduces:
     """Labels main emits today must be in the vocabulary, or it describes nothing."""
 
     def test_rollout_collection_row_routing_classes(self) -> None:
-        from nemo_gym.rollout_collection import (
+        from nemo_gym.rollouts.rollout_collection import (
             AGENT_REQUEST_FAILED_FAILURE_CLASS,
             AGENT_RUN_ERROR_FAILURE_CLASS,
             ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -157,7 +168,7 @@ class TestNamesTheRepoAlreadyProduces:
         assert is_registered(ENVIRONMENT_SERVER_FAILURE_CLASS)
 
     def test_the_judge_failsafe_class(self) -> None:
-        from nemo_gym.rollout_reverification import JUDGE_FAILED_FAILURE_CLASS
+        from nemo_gym.eval.rollout_reverification import JUDGE_FAILED_FAILURE_CLASS
 
         assert is_registered(JUDGE_FAILED_FAILURE_CLASS)
 
@@ -169,3 +180,9 @@ class TestDependencyWeight:
 
         assert "import fastapi" not in source
         assert "from nemo_gym" not in source
+
+
+def test_the_shipped_producer_labels_are_registered() -> None:
+    from nemo_gym.core.failure_kinds import is_registered
+
+    assert is_registered("harbor_failed") and is_registered("infrastructure_error")

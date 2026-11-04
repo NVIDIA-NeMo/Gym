@@ -37,7 +37,9 @@ fails with HTTP 400. An incompatible `min_tokens` also fails with HTTP 400 rathe
 than being silently reduced. There is no character-estimate fallback or extra
 generation attempt. Context rejections propagate even when
 `propagate_context_overflow_errors` is false, so a refused request cannot become
-an empty, apparently successful completion.
+an empty, apparently successful completion. This mode takes precedence over
+`refit_output_budget_to_window`: a refusal after measurement is propagated
+without lowering the measured budget and sending the request again.
 
 This option defaults to false and requires the chat-completions backend
 (`use_completions_api: false`, `is_responses_native: false`). Requests with prompt
@@ -180,3 +182,17 @@ Once you see that server instances are up, call the server. If you see a model r
 ```bash
 python responses_api_agents/simple_agent/client.py
 ```
+
+
+## HTTP attempt limits
+
+The existing client controls are available as model configuration:
+`max_http_attempts` bounds retryable HTTP-status attempts (default: the shared
+client limit). Set `max_num_tries: 1` when the caller owns retries to disable
+both HTTP-status and inner transport retries. For an explicit single attempt,
+set both to `1`. The existing zero rate-limit wait budget is unchanged, so 429
+and 503 responses do not extend the configured HTTP attempt count.
+
+These settings also apply after endpoint-file rebinding.
+`request_timeout_seconds` bounds each HTTP attempt; it is not an overall
+agent retry budget. Agent-level retries remain separately configured.

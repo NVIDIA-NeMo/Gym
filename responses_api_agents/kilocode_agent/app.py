@@ -32,15 +32,17 @@ from fastapi import HTTPException, Request
 from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_COMMAND_NOT_STARTED, HARNESS_RUNNER_FAILED, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    CleanupReceipt,
+    SandboxSession,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -67,7 +69,13 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
-from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+)
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
@@ -552,6 +560,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         else:
             observations = artifacts.observations.model_copy(deep=True)
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if outcome == "failed" or record.status == "failed":
                     record.status = "failed"
@@ -966,6 +976,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 gaps=[ObservationGap(code="agent_artifact_unavailable")],
             )
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if problem is not None:
                     record.status = "failed"

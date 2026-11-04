@@ -102,7 +102,7 @@ def _resolve_under_cwd_or_install(
     ``benchmarks/<name>/config.yaml`` or ``resources_servers/<env>/data/example.jsonl`` resolves by name
     from any cwd or plugin root. ``validator`` overrides the default ``Path.exists`` check — pass it when a
     candidate is valid only if specific markers are present (e.g. a server dir must ship
-    ``requirements.txt`` or ``pyproject.toml``). If nothing matches, the path under the highest-priority
+    ``pyproject.toml`` and ``uv.lock``). If nothing matches, the path under the highest-priority
     root is returned so error messages point at the user's own location.
 
     Use this for read paths only — never for write targets (e.g. metrics written next to a dataset), which
@@ -197,10 +197,10 @@ _LAZY_EXPORTS: dict[str, str] = {
     "BaseSeedSessionResponse": "server_runtime.base_resources_server",
     "ReverifyMode": "server_runtime.base_resources_server",
     # Agent and model extension points
-    "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
-    "SimpleResponsesAPIAgent": "base_responses_api_agent",
-    "BaseResponsesAPIModelConfig": "base_responses_api_model",
-    "SimpleResponsesAPIModel": "base_responses_api_model",
+    "BaseResponsesAPIAgentConfig": "agents.base_responses_api_agent",
+    "SimpleResponsesAPIAgent": "agents.base_responses_api_agent",
+    "BaseResponsesAPIModelConfig": "models.base_responses_api_model",
+    "SimpleResponsesAPIModel": "models.base_responses_api_model",
     # Common server-client utilities
     "ServerClient": "client.server_client",
     "raise_for_status": "client.http_client",
@@ -214,7 +214,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "AggregateMetricsRequest": "config.config_types",
     "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
-    "NeMoGymAsyncOpenAI": "models.openai_utils",
+    "NeMoGymAsyncOpenAI": "client.openai_client",
     "NeMoGymResponse": "core.responses_api_types",
     "NeMoGymResponseCreateParamsNonStreaming": "core.responses_api_types",
     "NeMoGymChatCompletion": "core.responses_api_types",

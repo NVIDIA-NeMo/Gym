@@ -11,8 +11,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest, AgentSessionSetupError
+from nemo_gym.agents import AgentSeedSessionRequest, AgentSessionSetupError, SandboxSession
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
@@ -648,7 +647,7 @@ async def test_lifespan_closes_sessions_using_their_ownership(owned):
 
 @pytest.mark.asyncio
 async def test_shutdown_continues_after_failed_close_and_retains_retry_state():
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+    from nemo_gym.agents import AgentCloseSessionRequest
 
     server = agent()
     failed, healthy = state(), state()
@@ -672,8 +671,7 @@ async def test_shutdown_continues_after_failed_close_and_retains_retry_state():
 
 
 def test_harbor_materialized_request_passes_validation(tmp_path):
-    from nemo_gym.tasks.harbor.materialize import materialize_task
-    from nemo_gym.tasks.harbor.task import load_task
+    from nemo_gym.data.tasks.harbor import load_task, materialize_task
 
     (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 12.0\n")
     (tmp_path / "instruction.md").write_text("Inspect the repository.")
@@ -766,7 +764,7 @@ async def test_shutdown_during_installation_joins_before_stopping_sandbox():
 
 @pytest.mark.asyncio
 async def test_shutdown_setup_deadline_retains_installation_for_later_close():
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+    from nemo_gym.agents import AgentCloseSessionRequest
 
     server = agent(
         setup_timeout=0.01,
@@ -869,10 +867,16 @@ async def test_close_preserves_artifacts_collected_after_activation_failure(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completed_calls", [0, 1])
-async def test_timeout_without_trajectory_requires_completed_model_response(completed_calls):
+@pytest.mark.parametrize("trajectory_error", [False, True])
+async def test_timeout_without_trajectory_requires_completed_model_response(
+    completed_calls: int, trajectory_error: bool
+) -> None:
+    """Classify model-free timeouts while preserving failed trajectory reads."""
     server, session = agent(), state()
     session.session.cleanup = receipt(timed_out=True, return_code=-15)
-    artifacts = PoolArtifacts("", "", "", None, completed_model_calls=completed_calls)
+    artifacts = PoolArtifacts(
+        "", "", "", None, trajectory_error=trajectory_error, completed_model_calls=completed_calls
+    )
     with (
         patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
         patch.object(SandboxSession, "execute", return_value=artifacts),
@@ -881,6 +885,9 @@ async def test_timeout_without_trajectory_requires_completed_model_response(comp
             with pytest.raises(RuntimeError, match="before any model response"):
                 await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
             assert session.failure == "RuntimeError"
+        elif trajectory_error:
+            with pytest.raises(RuntimeError, match="readable root trajectory"):
+                await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
         else:
             response = await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
             assert response.status == "incomplete" and response.output == []
