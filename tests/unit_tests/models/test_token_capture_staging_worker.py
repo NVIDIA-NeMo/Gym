@@ -91,7 +91,7 @@ class _IncompleteSink:
     async def put(self, entry: Any) -> None:
         raise AssertionError("normal TokenEntry capture must not run")
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str) -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
         self.incomplete.append((rollout_id, model_call_id))
 
 

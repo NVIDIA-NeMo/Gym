@@ -569,7 +569,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "nemo_gym.models.model_call_capture",
             "0.8.0",
             """
-            CaptureStore ModelExecutionOutcome _CLIENT_SESSION_HEADER _CaptureMiddleware _OBSERVED_PATHS
+            CaptureStore ModelExecutionOutcome _CaptureMiddleware _OBSERVED_PATHS
             _PENDING_SUFFIX _TERMINAL_SSE_LINES _classify_exception _classify_status
             _consume_terminal_sse_event _exception_http_details _fail_uncommitted_external_call
             _headers_content_type _parse_sse_events _pending_token _preserve_capture_prefix_on_redirect

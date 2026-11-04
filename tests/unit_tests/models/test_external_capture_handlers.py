@@ -438,7 +438,7 @@ class _FaultyLedger(InMemoryLineageStore):
             raise RuntimeError("ledger write failed")
         await super().record(commit)
 
-    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str, *, identity=None) -> None:
         self.record_failure_calls.append((rollout_id, model_call_id, reason))
         if self._record_failure_fails:
             raise RuntimeError("ledger poison write failed")

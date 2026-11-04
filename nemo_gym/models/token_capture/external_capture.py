@@ -233,6 +233,7 @@ class _BaseExternalCaptureHandler(ABC):
                     context.capture_key,
                     context.model_call_id,
                     self._INVALID_CAPTURE_REASON,
+                    identity=context.identity,
                 )
             except Exception:
                 LOGGER.exception(
@@ -268,6 +269,7 @@ class _BaseExternalCaptureHandler(ABC):
                 context.capture_key,
                 context.model_call_id,
                 WORKER_MISSING_COMMIT_COORDS_REASON,
+                identity=context.identity,
             )
             return
         coords = CommitCoords.model_validate(coords_payload)
@@ -281,6 +283,7 @@ class _BaseExternalCaptureHandler(ABC):
                 context.capture_key,
                 context.model_call_id,
                 WORKER_CAPTURE_FAILED_REASON,
+                identity=context.identity,
             )
             return
         worker_root = admission.mode == "candidate" and coords.parent_call_id is None and coords.prev_len == 0
@@ -356,6 +359,9 @@ class _BaseExternalCaptureHandler(ABC):
                 if context.parent_resolution_mode == "source_history" and admission.request_replay is not None
                 else None
             ),
+            agent_instance=context.agent_instance,
+            agent_kind=context.agent_kind,
+            model_ref=context.model_ref,
         )
         commit = CaptureLedgerCommit(
             capture_key=context.capture_key,
@@ -390,7 +396,9 @@ async def publish_deferred_commit(context: CaptureContext) -> None:
             "Could not publish the ledger row of rollout %s call %s", context.capture_key, context.model_call_id
         )
         try:
-            await ledger.record_failure(context.capture_key, context.model_call_id, INVALID_COMMIT_COORDS_REASON)
+            await ledger.record_failure(
+                context.capture_key, context.model_call_id, INVALID_COMMIT_COORDS_REASON, identity=context.identity
+            )
         except Exception:
             LOGGER.exception(
                 "Could not poison rollout %s call %s after its ledger row failed",
