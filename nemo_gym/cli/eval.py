@@ -21,6 +21,7 @@ import logging
 import os
 import signal
 import site
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -895,6 +896,14 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
             json.dump(value, stream, indent=2)
             stream.write("\n")
         try:
+            # NamedTemporaryFile creates the file 0600; keep the replaced file's mode, or the default for a new one.
+            try:
+                mode = stat.S_IMODE(path.stat().st_mode)
+            except FileNotFoundError:
+                umask = os.umask(0)
+                os.umask(umask)
+                mode = 0o666 & ~umask
+            os.chmod(temporary, mode)
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
