@@ -2443,7 +2443,7 @@ async def test_exec_and_pty_require_explicit_oom_evidence(reason, message, expec
     failure = await provider._pty_failure(handle, ConnectionError("socket lost"))
     assert failure.failure_kind == expected
     assert failure.details.provider_status_reason == reason
-    assert failure.details.container == ("agent" if expected == "oom" else None)
+    assert failure.details.container == ("agent" if expected == PROVIDER_OOM_KILLED else None)
     assert "lifecycle status" in failure.failure_reason
 
 
