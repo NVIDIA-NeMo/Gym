@@ -48,7 +48,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -483,6 +483,9 @@ class RecoveryDecision(BaseModel):
     evidence: list[IdentityEvidence]
     duplicate_results: list[Identity] = Field(default_factory=list)
     scheduler_live: bool = False
+    # Which chain accounting is unknown when this STOP is the unknown-budget or unknown-walltime stop: "budget" or
+    # "walltime". The reason is display text that later notes extend; an operator continuation keys on this field.
+    accounting_unknown: Literal["budget", "walltime"] | None = Field(default=None, exclude=True)
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None
@@ -1412,7 +1415,7 @@ def decide_recovery(
     # servers are up, and then runs the missing and retryable identities.
     reverify_first = sorted(by_state.get(IdentityState.JUDGE_RECOVERABLE.value, []))
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
-        return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON)
+        return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON, accounting_unknown="budget")
     segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         # A chain stops once less than a minute of its walltime remains, so name that budget too when it is spent.
@@ -1434,7 +1437,7 @@ def decide_recovery(
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
-            return decision(RecoveryAction.STOP, UNKNOWN_WALLTIME_REASON)
+            return decision(RecoveryAction.STOP, UNKNOWN_WALLTIME_REASON, accounting_unknown="walltime")
         if budget.walltime_used_s >= budget.max_walltime_s:
             return decision(
                 RecoveryAction.STOP,
@@ -2135,10 +2138,7 @@ def _decide_from_collected(
                 "reason": "the results file is absent; collection cannot safely resume its saved history",
             }
         )
-    unknown = decision.action == RecoveryAction.STOP and decision.reason in (
-        UNKNOWN_BUDGET_REASON,
-        UNKNOWN_WALLTIME_REASON,
-    )
+    unknown = decision.action == RecoveryAction.STOP and decision.accounting_unknown is not None
     if operator_budget is not None:
         # An operator continuation needs the scheduler's answer that no job of the run waits or runs.
         accounting_unknown = (
