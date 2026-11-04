@@ -104,6 +104,16 @@ _JOURNAL_JUDGE_JOB = (
 )
 
 
+def _stopped(decision: RecoveryDecision, reason: str) -> RecoveryOutcome:
+    """The outcome of a judge-only job that was not queued: ``decision`` stopped with ``reason``."""
+    return RecoveryOutcome(
+        decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
+        ok=False,
+        dispatched=None,
+        unsupported=reason,
+    )
+
+
 class JudgeJobs:
     """The judge-only jobs of ``SlurmExecutor``: grade a run's saved answers again, never its policy.
 
@@ -140,19 +150,11 @@ class JudgeJobs:
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
-        def stopped(reason: str) -> RecoveryOutcome:
-            return RecoveryOutcome(
-                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
-                ok=False,
-                dispatched=None,
-                unsupported=reason,
-            )
-
         current, evidence = self.recovery_evidence(
             record, benchmark, **({"reader_ref": repin} if repin is not None else {})
         )
         if current.action != RecoveryAction.REVERIFY or evidence is None:
-            return stopped("saved-answer rejudge admission changed; collect the current evidence")
+            return _stopped(decision, "saved-answer rejudge admission changed; collect the current evidence")
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
         with get_connection(record.hostname) as conn:
@@ -161,7 +163,7 @@ class JudgeJobs:
             resume = original.resume_config
             compute = config.compute[record.cluster]
             if not isinstance(compute, SlurmComputeConfig):
-                return stopped("saved rejudge compute is not Slurm")
+                return _stopped(decision, "saved rejudge compute is not Slurm")
             if not is_cpu_only_submission(config):
                 # A run that served its policy on GPUs: a judge-only job on a derived CPU-only profile instead.
                 return self._queue_judge_job(
@@ -184,9 +186,11 @@ class JudgeJobs:
                 or install.ref != installed_gym_commit()
                 or not re.fullmatch(r"[0-9a-f]{40}", install.ref)
             ):
-                return stopped("saved judge driver and installed recovery source must be the same immutable revision")
+                return _stopped(
+                    decision, "saved judge driver and installed recovery source must be the same immutable revision"
+                )
             if resume is None or resume.max_walltime is None or evidence.accounting_snapshot is None:
-                return stopped("saved rejudge walltime or accounting owner is unknown")
+                return _stopped(decision, "saved rejudge walltime or accounting owner is unknown")
             used = evidence.accounted_walltime_s
             retries = evidence.infra_retries_used
             if (
@@ -197,17 +201,17 @@ class JudgeJobs:
                 or not math.isfinite(retries)
                 or retries < 0
             ):
-                return stopped("actual chain walltime or retry accounting is unknown")
+                return _stopped(decision, "actual chain walltime or retry accounting is unknown")
             if retries > resume.max_retries or not evidence.job_chain or evidence.chain_incomplete:
-                return stopped("recorded chain is incomplete or exceeds its original retry allowance")
+                return _stopped(decision, "recorded chain is incomplete or exceeds its original retry allowance")
             cap = _walltime_to_seconds(resume.max_walltime)
             remaining = math.floor(cap - used)
             if compute.walltime is not None:
                 remaining = min(remaining, _walltime_to_seconds(compute.walltime))
             if remaining < 1:
-                return stopped("original walltime allowance is exhausted")
+                return _stopped(decision, "original walltime allowance is exhausted")
             if evidence.accounting_snapshot.get("resume_config") != resume.model_dump_json():
-                return stopped("saved resume configuration changed since accounting")
+                return _stopped(decision, "saved resume configuration changed since accounting")
             # Use the original runtime/configuration. Only operational output/cache controls change.
             run = dict(original.run)
             for name in (
@@ -220,7 +224,7 @@ class JudgeJobs:
             ):
                 run.pop(name, None)
             if evidence.source_digests is None:
-                return stopped("saved source snapshot is unavailable")
+                return _stopped(decision, "saved source snapshot is unavailable")
             queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
             nonce = new_gym_job_id(utc_now())
             output = job_dir / "reverification" / nonce / "rollouts.jsonl"
@@ -259,7 +263,7 @@ class JudgeJobs:
             config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
             config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
             if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
-                return stopped("saved submission configuration digest is unknown")
+                return _stopped(decision, "saved submission configuration digest is unknown")
             check = (
                 "import hashlib,json,os,sys; from pathlib import Path\n"
                 "expected=json.loads(sys.argv[1])\n"
@@ -303,7 +307,7 @@ class JudgeJobs:
             results = _parse_sbatch_results(conn.run(commands))
             job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
             if job_id is None:
-                return stopped(f"saved-answer rejudge was not admitted: {error}")
+                return _stopped(decision, f"saved-answer rejudge was not admitted: {error}")
             updated = job.model_copy(update={"job_id": job_id, "error": None})
             self.persist_record(record.with_benchmark(updated), conn.write_text)
         return RecoveryOutcome(decision=current, ok=True, dispatched="reverify", job_id=job_id)
@@ -343,14 +347,6 @@ class JudgeJobs:
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
-        def stopped(reason: str) -> RecoveryOutcome:
-            return RecoveryOutcome(
-                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
-                ok=False,
-                dispatched=None,
-                unsupported=reason,
-            )
-
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
         original = config.driver.benchmarks[benchmark]
@@ -358,7 +354,7 @@ class JudgeJobs:
         acknowledgement = None
         if blocked is not None:
             if not acknowledge_failed_judge_jobs or None in blocked:
-                return stopped(failed_judge_jobs_stop(blocked, str(job_dir / "reverification")))
+                return _stopped(decision, failed_judge_jobs_stop(blocked, str(job_dir / "reverification")))
             if not (acknowledge_reason or "").strip():
                 raise ValueError("--acknowledge-failed-judge-jobs needs a nonempty --acknowledge-reason")
             acknowledgement = {
@@ -377,17 +373,18 @@ class JudgeJobs:
                     config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
                 )
         except JudgeProfileUnsupported as error:
-            return stopped(str(error))
+            return _stopped(decision, str(error))
         install = config.driver.gym_install
         ref = repin if repin is not None else (install.ref if install is not None else None)
         if install is None or ref is None or ref != installed_gym_commit() or not re.fullmatch(r"[0-9a-f]{40}", ref):
-            return stopped(
+            return _stopped(
+                decision,
                 "saved judge driver and installed recovery source must be the same immutable revision"
                 + (
                     ""
                     if repin is not None
                     else "; --repin <this launcher's full commit> --repin-reason TEXT runs the judge-only job at it"
-                )
+                ),
             )
         if repin is not None and not (repin_reason or "").strip():
             raise ValueError("--repin needs a nonempty --repin-reason")
@@ -409,7 +406,7 @@ class JudgeJobs:
                 reader_srun=os.environ.get(READER_SRUN_ENV),
             )
         if evidence.source_digests is None or evidence.accounting_snapshot is None:
-            return stopped("saved source or accounting snapshot is unavailable; collect the evidence again")
+            return _stopped(decision, "saved source or accounting snapshot is unavailable; collect the evidence again")
         queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
         run = {k: v for k, v in original.run.items() if k not in _COLLECTION_ONLY_RUN_KEYS}
         nonce = new_gym_job_id(utc_now())
@@ -457,7 +454,7 @@ class JudgeJobs:
         config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
         config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
         if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
-            return stopped("saved submission configuration digest is unknown")
+            return _stopped(decision, "saved submission configuration digest is unknown")
         expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
         check = (
             "import hashlib,json,os,sys; from pathlib import Path\n"
@@ -529,10 +526,12 @@ class JudgeJobs:
             results = _parse_sbatch_results(conn.run(commands))
         except (RuntimeError, OSError) as error:
             text = str(error).strip()
-            return stopped(f"judge-only job was not queued: {text.splitlines()[-1] if text else type(error).__name__}")
+            return _stopped(
+                decision, f"judge-only job was not queued: {text.splitlines()[-1] if text else type(error).__name__}"
+            )
         job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
         if job_id is None:
-            return stopped(f"judge-only job was not admitted: {error}")
+            return _stopped(decision, f"judge-only job was not admitted: {error}")
         updated = job.model_copy(update={"job_id": job_id, "error": None})
         self.persist_record(record.with_benchmark(updated), conn.write_text)
         return RecoveryOutcome(
