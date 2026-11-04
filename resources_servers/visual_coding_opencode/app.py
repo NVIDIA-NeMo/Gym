@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Correctness of a multi-turn visual-coding answer, decided by a GPT judge over the final answer.
 
-The grading of Python_call_gen's opencode harness (`format_judge --mode correctness`):
+Grading:
 - the response text is every assistant text part joined, and the judge sees its last
   `judge_max_text_chars` characters;
 - `extracted` is string_match's final_answer extraction (last "answer:", else last \\boxed{});
@@ -13,24 +13,29 @@ string_match's grade of `extracted` is kept as a diagnostic, not the reward.
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymChatCompletion
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import NeMoGymChatCompletion
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.string_match.app import (
     _extract_answer,
     _extract_last_assistant_text,
     _grade_string_match,
+)
+from resources_servers.visual_coding_opencode.verifier_fixture import (
+    create_visual_coding_opencode_server,
+    invoke_visual_coding_opencode,
 )
 
 
@@ -156,6 +161,14 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
         if not result.reward:
             result.failure_reason = "incorrect_answer"
         return result
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_visual_coding_opencode_server,
+    request_model=VisualCodingOpenCodeVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+    invoke=invoke_visual_coding_opencode,
+)
 
 
 if __name__ == "__main__":

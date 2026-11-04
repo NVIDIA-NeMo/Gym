@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """BabyVision (388 rows) with the bare question: the user message is the image, the question and
-the boxed-answer suffix, without Python_call_gen's opencode prompt. For models trained on
-OpenCode's own system prompt (Python_call_gen `question_only: true`). Same TSV as
-benchmarks/babyvision_opencode.
+the boxed-answer suffix, without benchmarks/babyvision_opencode's visual-reasoning instruction.
+For models trained on OpenCode's own system prompt. Same TSV as benchmarks/babyvision_opencode.
 """
 
 from pathlib import Path

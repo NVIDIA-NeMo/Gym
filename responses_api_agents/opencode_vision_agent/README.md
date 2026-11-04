@@ -4,6 +4,10 @@
 numpy, scipy and opencv. OpenCode's `bash` tool inherits the server's environment, so the
 model's `python3` is this venv and can crop, measure and plot the task images.
 
+Gym's shared dependency policy drops `opencv-python-headless` from component venvs (codec
+licensing); `scripts/component-lock-policy.json` re-enables it for this agent at the version
+`docker/install_codec_deps.sh` pins.
+
 Turn on the multimodal options of `opencode_agent`:
 
 - `attach_images: true` writes the data-URL images of the last user message into the run

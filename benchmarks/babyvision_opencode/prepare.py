@@ -3,11 +3,10 @@
 """Convert the BabyVision TSV (VLMEvalKit format, 388 rows) into Gym benchmark JSONL.
 
 Reads $BABYVISION_TSV, else $LMUData/BabyVision.tsv. Each row is one user message: the
-image as a data URL, then Python_call_gen's opencode prompt (prompts/input_prompt.txt),
-"---", the question and the boxed-answer suffix, the exact text that harness gives OpenCode.
+image as a data URL, then a visual-reasoning instruction (INSTRUCTION), "---", the question
+and the boxed-answer suffix.
 With question_only (benchmarks/babyvision_opencode_question_only) the message is only the
-question and the suffix, as Python_call_gen's `question_only: true` gives it to models trained
-on OpenCode's own system prompt.
+question and the suffix, for models trained on OpenCode's own system prompt.
 The gold answer stays out of the prompt (expected_answer).
 """
 
@@ -22,7 +21,7 @@ from pathlib import Path
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "babyvision_opencode_benchmark.jsonl"
 NUM_ROWS = 388
-# Two copies of the same 388 rows: EFB's LMUData and the lmu_cache copy Python_call_gen read.
+# Two known copies of the same 388 rows (in one, 175 PNG images are re-encoded as JPEG).
 KNOWN_MD5 = {"b3a93182cce0e658e4f81601275e1f04", "4216333e6620668edb267b032250f635"}
 
 INSTRUCTION = """You are a meticulous visual-reasoning agent and you are provided with a question and a set of images.
