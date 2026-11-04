@@ -1,5 +1,5 @@
 # Run instructions
-1. Update your env.yaml file with the necessary keys and configs. You can leave `exclude_domains_file_path` as a path to an empty json.
+1. Update your env.yaml file with the necessary keys and configs. Set `exclude_domains_file_path` to a JSON file containing `{"notices": []}` when no additional domain exclusions are needed; an empty list or `{}` does not match the parser schema.
 ```yaml
 browsecomp_benchmark_resources_server:
   resources_servers:
