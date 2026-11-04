@@ -670,6 +670,18 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "after the timeout, and the run as a whole stays bounded by `timeout`."
         ),
     )
+    sandbox_mcp_discovery_timeout_seconds: float = Field(
+        default=30,
+        ge=0.001,
+        # Node timers overflow above 2**31 - 1 ms.
+        le=2_147_483,
+        allow_inf_nan=False,
+        description=(
+            "Timeout of each request that sets up a sandbox session's MCP tools (initialize, tools/list), at most "
+            "`sandbox_mcp_timeout_seconds`. A required grant whose server does not answer in time stops Pi before its "
+            "first model call; raise it for a server that may be busy for longer with other sessions."
+        ),
+    )
     finish_tool_names: list[str] = Field(
         default_factory=list,
         description=(
@@ -892,6 +904,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "url": str(access.connection.url),
                 "headers": access.connection.headers,
                 "timeout": round(self.config.sandbox_mcp_timeout_seconds * 1000),
+                "discovery_timeout": round(self.config.sandbox_mcp_discovery_timeout_seconds * 1000),
                 "required": access.required,
                 "terminal_tools": list(self.config.finish_tool_names),
             }

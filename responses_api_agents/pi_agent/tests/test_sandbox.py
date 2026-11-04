@@ -586,6 +586,7 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools
     agent, sandbox = setup
     agent.config.enable_tools = enable_tools
     agent.config.sandbox_mcp_timeout_seconds = 120
+    agent.config.sandbox_mcp_discovery_timeout_seconds = 90
     agent.config.finish_tool_names = ["finish"]
     body = seed_with_tools(
         mcp_grant("resources"),
@@ -608,6 +609,7 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools
             "url": "http://resources.example:7000/mcp",
             "headers": {"x-tool-session": "token-resources"},
             "timeout": 120000,
+            "discovery_timeout": 90000,
             "required": True,
             "terminal_tools": ["finish"],
         },
@@ -615,6 +617,7 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools
             "url": "http://resources.example:7000/mcp",
             "headers": {"x-tool-session": "token-web-extra"},
             "timeout": 120000,
+            "discovery_timeout": 90000,
             "required": False,
             "terminal_tools": ["finish"],
         },
@@ -929,10 +932,16 @@ async def test_interrupted_run_keeps_the_skipped_mcp_server_gaps(setup):
     assert ("mcp_server_skipped", f"extra.mcp: {_UNUSABLE_NAME}") in gaps
 
 
+@pytest.mark.parametrize("field", ["sandbox_mcp_timeout_seconds", "sandbox_mcp_discovery_timeout_seconds"])
 @pytest.mark.parametrize("value", [0, 0.0004, 2_147_484])
-def test_mcp_timeout_stays_within_node_timer_range(value):
+def test_mcp_timeout_stays_within_node_timer_range(field, value):
     with pytest.raises(ValidationError):
-        PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", sandbox_mcp_timeout_seconds=value)
+        PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", **{field: value})
+
+
+def test_mcp_discovery_keeps_its_30_second_deadline_by_default():
+    config = PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py")
+    assert config.sandbox_mcp_discovery_timeout_seconds == 30
 
 
 async def test_close_cancels_active_pi_before_detaching(setup):
