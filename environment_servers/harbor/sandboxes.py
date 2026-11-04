@@ -134,6 +134,9 @@ def _is_image_pull_failure(error: BaseException) -> bool:
     Walks the cause/context chain and the members of exception groups: a Compose group whose cleanup
     after a failed pull failed too surfaces as an ``ExceptionGroup`` of the cleanup errors, raised while
     the pull failure was being handled.
+
+    No image-pull failure kind is registered yet. This text heuristic preserves bounded retries of
+    fresh sandbox creation; it must not be used to replay a submitted command.
     """
     seen: set[int] = set()
     pending: list[BaseException] = [error]

@@ -61,23 +61,26 @@ class MySandboxProvider:
         return None
 ```
 
-New provider implementations should follow this lifecycle and failure contract:
+New provider implementations must follow this lifecycle and failure contract:
 
 - Return a `SandboxHandle` from `create()` only after the sandbox is ready enough to run commands and transfer files.
 - Return command status through `SandboxExecResult` for process exits, including nonzero exits.
 - For allocation, readiness and runtime failures, raise `NgFailureEvent` with `boundary="sandbox"`, the operation
   and a kind registered in [failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py).
-  Classify SDK errors inside the provider, then pass the explicit `failure_kind` and any observed `http_status`
-  to `nemo_gym.sandbox.failures.sandbox_failure`. Use `raise ... from error` to retain the original cause.
+  Each provider classifies its own SDK errors. The shared `nemo_gym.sandbox.failures.sandbox_failure` factory
+  builds the event from an explicit `failure_kind`, observed `http_status` and sandbox details; it does not
+  interpret SDK exceptions or choose policy actions. Use `raise ... from error` to retain the original cause.
 - A provider-request timeout leaves remote completion unknown. Report `provider_io_timeout`; do not invent a command timeout.
 - Report `provider_oom_killed` only from authoritative current-sandbox evidence, retaining its source.
 - Choose runtime actions through configurable `OutcomePolicyConfig` rules. Bound retries by the operation's
   existing budget and never replay a command whose delivery is uncertain. Record failed attempts with
-  `observe_failure` before retrying, so successful recovery still carries evidence upstream.
+  `observe_failure` before retrying. It records the attempt in the current request's failure report without
+  changing the result; see [Failure observations](/observability/rollout-failures#recovered-failures).
 - Make `close()` safe to call from cleanup paths.
 - Use `aclose()` for provider-scoped resources such as SDK clients.
 
-Use OpenSandbox as the reference implementation for failure events and outcome policies.
+OpenSandbox implements this contract. See [Required provider migrations](./index#required-provider-migrations)
+for the built-in providers that must adopt it in follow-up changes.
 
 ## Provider Config
 

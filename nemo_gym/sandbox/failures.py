@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Sandbox runtime failures: facts for caller policies, without grading decisions."""
+"""Shared sandbox failure-event construction from facts classified by each provider."""
 
 from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
@@ -20,9 +20,11 @@ def sandbox_failure(
     exit_code: int | None = None,
     http_status: int | None = None,
 ) -> NgFailureEvent:
-    """Construct an event from provider-selected facts; callers raise it ``from cause``.
+    """Build a sandbox event from explicit facts; callers raise it ``from cause``.
 
-    SDK classification belongs to the provider. HTTP status must describe this
+    This shared factory does not classify SDK exceptions or choose policy actions.
+    Each provider translates its SDK errors into a registered kind before calling
+    it (for example, ``opensandbox_failure``). HTTP status must describe this
     operation, not a child failure; causes retain their own evidence.
     """
     foreign_error = None

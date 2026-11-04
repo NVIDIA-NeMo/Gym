@@ -314,9 +314,10 @@ class SandboxProvider(Protocol):
         """Create a ready sandbox and return a provider-neutral handle.
 
         Providers must return only after the sandbox is healthy enough to run
-        commands and transfer files. If the sandbox cannot become ready before
-        the configured timeout, providers should raise ``SandboxCreateError``
-        or a provider-specific subclass.
+        commands and transfer files. New and migrated providers must report allocation
+        and readiness failures as ``NgFailureEvent`` with ``boundary="sandbox"`` and a registered kind.
+        Providers awaiting migration still expose creation exceptions; see the
+        sandbox documentation's required provider migrations.
         """
         ...
 
@@ -543,8 +544,9 @@ class SandboxPtySession(Protocol):
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         """Return the next output chunk (all terminal output in PTY mode;
         stdout only in pipe mode). ``b""`` means the process exited and the
-        stream is drained. Raises ``TimeoutError`` on timeout and
-        ``SandboxPtyError`` if the session died without exiting.
+        stream is drained. Raises ``TimeoutError`` when this wait expires;
+        that alone does not mean the command failed. Report session death as
+        ``NgFailureEvent``; providers awaiting migration use ``SandboxPtyError``.
         """
         ...
 
@@ -578,7 +580,11 @@ class SandboxPtySession(Protocol):
         ...
 
     async def wait_exit(self, *, timeout_s: float | None = None) -> int:
-        """Block until the process exits and return its exit code."""
+        """Block until the process exits and return its exit code.
+
+        Raises ``TimeoutError`` when this wait expires; that alone does not mean
+        the command failed. Session failures follow the same contract as ``read``.
+        """
         ...
 
     async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:

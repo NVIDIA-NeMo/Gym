@@ -243,8 +243,8 @@ Things to know:
 | `DELETE` → `404` / "Failed to terminate sandbox" | Already gone (TTL or earlier stop). | Nothing; the provider treats it as success. |
 | Status poll → `404 unknown execution` on a live sandbox | Stale sandbox→IP routing during create/delete storms. | Treat as a lost execution and recreate; do not tear down other sandboxes. |
 | `Server disconnected` / `Connection reset by peer` on a long stream | Load-balancer idle timeout or a server worker restart. | `background_exec: true`; keep `keepalive_expiry_s` below the server's idle timeout. |
-| `SandboxPtyError: PTY session already has an attached client` on every retry | The sandbox's backend died while the proxy still records the old attachment. | Report the death. Environments must catch `SandboxPtyError` in `verify()`; one unhandled 500 on `/run` can abort the whole eval. |
-| Whole sandbox dies with `137` after one heavy command | Group OOM kill (fan-out above). | Cap parallelism, bash timeout; more memory alone rarely fixes it. See [detecting OOM from the client](/infrastructure/sandbox/opensandbox-debugging#detecting-oom-from-the-client). |
+| `provider_pty_busy` / `PTY session already has an attached client` | Attachment was refused; this alone does not establish that the backend died. | Forward the sandbox `NgFailureEvent` to the owning task's outcome policy. Check the existing attachment and sandbox status before retrying. |
+| Whole sandbox dies after one heavy command, possibly with exit `137` | OOM is one possible cause; exit 137 alone does not confirm it. | Check [current-sandbox OOM evidence](/infrastructure/sandbox/opensandbox-debugging#detecting-oom-from-the-client) before classifying the failure. |
 
 Sandboxes run with the default capability set — no `SYS_PTRACE`, no `SYS_ADMIN`. `strace`/`gdb`
 attach and mount namespaces fail for that reason, not because of your config.
