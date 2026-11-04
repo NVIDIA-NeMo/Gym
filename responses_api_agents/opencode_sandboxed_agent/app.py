@@ -105,6 +105,7 @@ from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
     apply_observability_patch,
+    command_failure_reason,
 )
 
 
@@ -1102,7 +1103,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     boundary="harness",
                     failure_kind=AGENT_ROUTE_FAILED,
                     operation="opencode.setup",
-                    failure_reason="OpenCode setup failed before agent execution",
+                    failure_reason=command_failure_reason(
+                        "OpenCode setup failed before agent execution", setup_result
+                    ),
                 )
             command = f'echo "Shell: $SHELL" && export PATH=$HOME/.opencode/bin:$PATH && {agent_command}'
         else:
@@ -1266,7 +1269,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 operation="opencode.session_list",
-                failure_reason="Failed to list OpenCode sessions",
+                failure_reason=command_failure_reason("Failed to list OpenCode sessions", session_list_result),
             )
         try:
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
@@ -1300,7 +1303,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 operation="opencode.export",
-                failure_reason=f"Failed to export OpenCode session {session_id}",
+                failure_reason=command_failure_reason(
+                    f"Failed to export OpenCode session {session_id}", export_result
+                ),
             )
         if self.config.debug:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)

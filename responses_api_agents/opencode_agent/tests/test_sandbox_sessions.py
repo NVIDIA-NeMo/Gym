@@ -279,13 +279,14 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
     sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
     with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
         sandbox_class.connect = AsyncMock(return_value=sandbox)
-        with pytest.raises(NgFailureEvent, match=f"error={error_type}") as failed:
+        with pytest.raises(NgFailureEvent, match=f"error_type={error_type}") as failed:
             await agent.seed_agent_session(request, body)
     assert failed.value.boundary == "harness"
     assert failed.value.failure_kind == "agent_route_failed"
     assert failed.value.operation == "opencode.setup"
     assert "bootstrap output" in str(failed.value)
     assert "provider failed" in str(failed.value)
+    assert "return_code=0" in failed.value.failure_reason
     assert not request.session
     sandbox.launch.assert_not_awaited()
     if owned:
@@ -295,6 +296,22 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
         sandbox.disconnect.assert_awaited_once()
         sandbox.stop.assert_not_awaited()
     assert not any(record.state is not None for record in agent._session_records.values())
+
+
+def test_setup_failure_retains_status_and_bounded_output_tails():
+    result = SimpleNamespace(
+        return_code=17,
+        error_type=None,
+        stdout="discard stdout prefix" + "x" * 4000 + "stdout end",
+        stderr="discard stderr prefix" + "y" * 4000 + "stderr end",
+    )
+    with pytest.raises(NgFailureEvent) as failed:
+        OpenCodeAgent._check_sandbox_setup("install runtime", result)
+    reason = failed.value.failure_reason
+    assert "return_code=17; error_type=None" in reason
+    assert "stdout end" in reason and "stderr end" in reason
+    assert "discard stdout prefix" not in reason and "discard stderr prefix" not in reason
+    assert len(reason) < 2000
 
 
 def close_body(session_id):
