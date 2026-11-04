@@ -15,13 +15,8 @@ from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.core.episode_types import (
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
-    EpisodeFailure,
-    MaterializedTask,
-)
+from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServer,

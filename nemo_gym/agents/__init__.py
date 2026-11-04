@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -85,7 +86,6 @@ if TYPE_CHECKING:
         parse_cleanup_receipt,
     )
     from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-    from nemo_gym.agents.utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandbox
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -112,7 +112,6 @@ _PUBLIC_API = {
     "CLEANUP_PHASE_COUNT": "utils.supervisor_client",
     "CleanupReceipt": "utils.supervisor_client",
     "DEFAULT_CLEANUP_TIMEOUT": "utils.supervisor_client",
-    "DEFAULT_UV_CACHE_DIR": "utils.uv_bootstrap",
     "HARNESS_COMMAND_NOT_STARTED": "utils.sandbox_session",
     "HARNESS_RUNNER_FAILED": "utils.sandbox_session",
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
@@ -127,6 +126,7 @@ _PUBLIC_API = {
     "SUPERVISOR_FILE": "utils.supervisor_client",
     "SUPERVISOR_SCRIPT": "utils.supervisor_client",
     "SandboxCommand": "utils.sandbox_session",
+    "SandboxPythonRuntime": "utils.sandbox_python",
     "SandboxSession": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
     "agent_outcome_policy": "agent_outcome",
@@ -147,7 +147,6 @@ _PUBLIC_API = {
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
     "stage_skills": "skills",
-    "uv_for_sandbox": "utils.uv_bootstrap",
     "verify_agent_response": "agent_tools",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
