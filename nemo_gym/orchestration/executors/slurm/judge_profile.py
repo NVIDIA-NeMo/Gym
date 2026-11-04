@@ -52,6 +52,7 @@ from nemo_gym.orchestration.api import (
     VllmPDServiceConfig,
 )
 from nemo_gym.orchestration.executors.resume_script import _walltime_to_seconds
+from nemo_gym.orchestration.executors.slurm.scheduler import _slurm_duration
 
 
 # The profile kinds: one CPU node without any service, or the run's own judge services on their saved node pools.
@@ -187,10 +188,6 @@ def choose_judge_partition(
         "the launcher's NEMO_GYM_REMOTE_READER_SRUN names no partition, and no --judge-partition was given); policy "
         "services are not restarted"
     )
-
-
-def _slurm_duration(seconds: int) -> str:
-    return f"{seconds // 3600:02}:{seconds % 3600 // 60:02}:{seconds % 60:02}"
 
 
 def bound_judge_walltime(segment: str | None, limit: dict[str, Any] | None) -> tuple[str, tuple[str, ...]]:

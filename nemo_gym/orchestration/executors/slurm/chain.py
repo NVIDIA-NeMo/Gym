@@ -113,6 +113,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _parse_sbatch_results,
     _partition_time_limit,
     _sbatch_command,
+    _slurm_duration,
     _submission_exports,
 )
 from nemo_gym.orchestration.executors.slurm_script import (
@@ -273,10 +274,6 @@ def _walltime_config(
 def _raised_cap(cap: str | None, walltime: str) -> str:
     """The chain cap after a raise to ``walltime``: at least the raise, and the raise itself when there was none."""
     return walltime if cap is None else max(cap, walltime, key=_walltime_to_seconds)
-
-
-def _slurm_duration(seconds: int) -> str:
-    return f"{seconds // 3600:02}:{seconds % 3600 // 60:02}:{seconds % 60:02}"
 
 
 def _plan_walltime(

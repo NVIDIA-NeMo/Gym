@@ -53,6 +53,11 @@ def _slurm_time_limit_seconds(text: str) -> int | None:
     return _walltime_to_seconds(value)
 
 
+def _slurm_duration(seconds: int) -> str:
+    """``seconds`` as a Slurm time limit, ``HH:MM:SS``."""
+    return f"{seconds // 3600:02}:{seconds % 3600 // 60:02}:{seconds % 60:02}"
+
+
 def _partition_time_limit(conn: Connection, compute: SlurmComputeConfig) -> dict[str, Any]:
     """The partition a job of ``compute`` queues on and its MaxTime, read with sinfo over ``conn``.
 
