@@ -290,14 +290,16 @@ class SandboxPty:
                     "cwd/env/user apply only when pty.exec opens its own session; "
                     "for an existing session they are fixed at pty.create() time"
                 )
+            started = False
             try:
                 # The timeout covers waiting for the lock too: a caller's
                 # budget must not be consumed invisibly by another exec.
                 async with asyncio.timeout(timeout_s):
                     async with self._session_exec_lock:
+                        started = True
                         return await _run_in_pty_session(session, command)
             except (TimeoutError, asyncio.TimeoutError):
-                if implicit:
+                if implicit and started:
                     # This call did not select the session explicitly, and its
                     # stream now carries the stray command's output; retire it
                     # so a later implicit exec cannot inherit it.
@@ -307,7 +309,7 @@ class SandboxPty:
                         pass
                     if self._default_session is session:
                         self._default_session = None
-                return _pty_timeout_result(command, timeout_s, reusable=False)
+                return _pty_timeout_result(command, timeout_s, reusable=not started)
         session = await self.create(command, cwd=cwd, env=env, rows=rows, cols=cols, user=user, pty=pty)
         try:
 

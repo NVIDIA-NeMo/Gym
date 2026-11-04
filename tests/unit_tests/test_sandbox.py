@@ -1981,6 +1981,44 @@ async def test_pty_exec_serializes_shared_session_use() -> None:
     await sandbox.stop()
 
 
+async def test_pty_exec_waiting_timeout_preserves_active_session() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class WaitingShell(_LiveShellSession):
+        async def read(self, *, timeout_s: float | None = None) -> bytes:
+            started.set()
+            await release.wait()
+            return await super().read(timeout_s=timeout_s)
+
+    class Provider(PlainSandboxProvider):
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> WaitingShell:
+            return WaitingShell()
+
+    sandbox = AsyncSandbox(Provider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    live = await sandbox.pty.create()
+    first = asyncio.create_task(sandbox.pty.exec("first", timeout_s=5))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        second = await sandbox.pty.exec("second", timeout_s=0.01)
+        assert (second.return_code, second.error_type) == (125, "timeout")
+        assert len(live.written) == 1, "the queued command must never reach the shell"
+        assert not live.closed, "a waiting timeout must not retire the active command's session"
+        assert "still running" not in (second.stderr or "")
+        release.set()
+        result = await first
+        assert result.return_code == 0
+        assert result.stdout == "live-output\r\n"
+        assert sandbox.pty._default_session is live
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+        await sandbox.stop()
+
+
 async def test_pty_attach_requires_capability() -> None:
     plain = AsyncSandbox(PlainSandboxProvider())
     await plain.start(SandboxSpec(image="image:tag"))
