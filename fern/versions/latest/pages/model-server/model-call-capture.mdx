@@ -265,11 +265,13 @@ the body only as raw text, and what collection does with it depends on how far t
 
 | Cancelled | Capture holds | Collection | Health |
 | --- | --- | --- | --- |
-| After a complete answer (2xx status; one JSON object, or a streamed body that ended with its terminal event) | Raw text | Parses it, so the call carries its `response_id`, token counts, completion status or finish reason, and parsed response, and the raw text is dropped. `error_category` stays `cancelled`. | A successful call |
-| Before a complete answer | Raw text, if any | Keeps it as is, with null token counts and no `response_id`. | A failed call that [reported no usage](/main/evaluation/rollout-health) |
+| After a complete answer (2xx status; a complete JSON body or terminal SSE event, with completed status or a finish reason) | Raw text | Recovers the parsed response, `response_id`, and available token counts; drops the raw text. `error_category` stays `cancelled`. | A successful call |
+| After a Responses stream ends with `response.incomplete` (2xx status; no finish reason) | Raw text | Recovers the partial response, `response_id`, available token counts, and `response_status="incomplete"`; drops the raw text. `error_category` stays `cancelled`. | Still a failed call; recovering its data does not make the answer complete. |
+| Before a parseable JSON body or terminal SSE event arrives | Raw text, if any | Keeps it as is, with null token counts and no `response_id`. | A failed call that [reported no usage](/main/evaluation/rollout-health) |
 
-A retry after a dropped connection can leave both kinds in one rollout. Only the second kind needs a
-later successful call for the rollout to be healthy.
+Recovery preserves available evidence; it does not by itself make a call successful. A retry after a
+dropped connection can leave successful and failed calls in one rollout. Failed calls still need a
+later successful call to count as recovered in rollout health.
 
 ### Raw `CaptureStore` record
 
