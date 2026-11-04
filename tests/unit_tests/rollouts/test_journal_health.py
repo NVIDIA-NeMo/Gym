@@ -175,7 +175,7 @@ async def test_review_aggregation_health_uses_the_scored_snapshot(tmp_path, monk
 
 def test_run_directory_health_reads_the_stacks_settled_judge_answer(tmp_path):
     from nemo_gym.rollouts.rollout_health import health_check_run_dir
-    from tests.unit_tests.test_rejudge_saved_judge_failures import _run, _settle
+    from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _run, _settle
 
     output, failures = _run(tmp_path, judge_failures=1)
     _settle(output, failures[0], 0.25)
