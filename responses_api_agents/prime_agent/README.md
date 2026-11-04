@@ -56,6 +56,12 @@ single_agent_turn_legacy:
   package's CLI, so the task's Node and `PATH` are untouched. The sandbox needs a glibc image, bash,
   `sha256sum`, `tar` and network access to the npm registry and the release host (for the package's
   own dependencies).
+- **Kernel.** Prime Agent's only built-in tool is an IPython kernel. Setup also installs a private
+  Python (the mini-SWE bootstrap build, uploaded with its uv) under the runtime's `kernel` directory,
+  with the packages Prime Agent's own kernel bootstrap installs, pinned in `install_prime_runtime.sh`,
+  and the package's `prime-agent-runtime`, then points `PRIME_AGENT_KERNEL_PYTHON` at it. uv installs
+  them from the package index, so the sandbox also needs network access to PyPI. The kernel takes about
+  440 MB. IPython and Jupyter may write their state under the task's `HOME`.
 - **Isolation.** Models, tools and state live under `PRIME_AGENT_CODING_AGENT_DIR` in a private
   session directory, so tool shells keep the task's `HOME`. `SandboxAccess.env` is forwarded except
   `PRIME_AGENT_*`, `PI_*` and `OPENAI_*`. Close removes only the session directory.

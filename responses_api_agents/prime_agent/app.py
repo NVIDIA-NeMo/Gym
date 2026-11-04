@@ -638,7 +638,11 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             if not key.startswith(("PRIME_AGENT_", "PI_", "OPENAI_"))
         }
         # Prime Agent's models, tools and state live in the session directory, so tool shells keep the task's HOME.
-        env |= {"PRIME_AGENT_CODING_AGENT_DIR": state.agent_dir, "PI_SKIP_VERSION_CHECK": "1"}
+        env |= {
+            "PRIME_AGENT_CODING_AGENT_DIR": state.agent_dir,
+            "PRIME_AGENT_KERNEL_PYTHON": f"{state.runtime}/kernel/bin/python3",
+            "PI_SKIP_VERSION_CHECK": "1",
+        }
         models = self._build_models_config(state.request.episode_id.capture_key)
         return await state.stage(command=command, env=env, models=json.dumps(models, indent=2))
 

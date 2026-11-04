@@ -70,7 +70,7 @@ class LocalSandbox:
     async def exec(self, command, *, cwd=None, timeout_s=30, env=None):
         argv = shlex.split(command)
         if len(argv) > 1 and argv[1].endswith("/install_prime_runtime.sh"):
-            assert argv[3] == PRIME_AGENT_VERSION
+            assert argv[3] == PRIME_AGENT_VERSION and argv[8].endswith("/python.tar.gz") and len(argv) == 11
             node = Path(argv[2]) / "bin" / "node"
             node.parent.mkdir(parents=True, exist_ok=True)
             node.write_text(f"#!{sys.executable}\n" + FAKE_PRIME)
@@ -197,14 +197,18 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
     prime = agent(timeout=timeout, thinking="high")
     asset = tmp_path / "asset.tgz"
     asset.write_bytes(b"asset")
-    # The agent server downloads Node.js and the release package; the fake installer stands in for both.
+    # The agent server downloads Node.js, the release package and the kernel's Python and uv; the fake installer
+    # stands in for all of them.
     with patch(
         "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=asset)
     ) as download:
         await state.install(timeout=10)
+    arch = os.uname().machine
     assert [call.args[0].rsplit("/", 1)[1] for call in download.await_args_list] == [
-        f"node-v22.23.2-linux-{'arm64' if os.uname().machine == 'aarch64' else 'x64'}.tar.gz",
+        f"node-v22.23.2-linux-{'arm64' if arch == 'aarch64' else 'x64'}.tar.gz",
         "prime-agent-0.7.0.tgz",
+        f"uv-{arch}-unknown-linux-musl.tar.gz",
+        f"cpython-3.13.12%2B20260310-{arch}-unknown-linux-gnu-install_only_stripped.tar.gz",
     ]
     state.activation_request = body()
     with patch.object(
@@ -230,6 +234,7 @@ async def test_real_session_run_maps_output_and_keeps_the_task_environment(tmp_p
     assert args[args.index("--append-system-prompt") + 1] == "Use bash." and args[-1] == "Fix the bug."
     assert seen["models"]["providers"]["nemo"]["baseUrl"] == "http://model.invalid/ng-rollout/rollout-1/v1"
     assert seen["env"]["PRIME_AGENT_CODING_AGENT_DIR"] == state.agent_dir
+    assert seen["env"]["PRIME_AGENT_KERNEL_PYTHON"] == f"{state.runtime}/kernel/bin/python3"
     assert (Path(state.session.workdir) / "proof.txt").read_text().splitlines() == [
         str(tmp_path / "task-home"),
         "task-value",

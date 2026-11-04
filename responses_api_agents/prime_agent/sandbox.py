@@ -74,11 +74,16 @@ class PrimeSession(AgentSessionState):
     async def install(self, *, timeout: float) -> None:
         """Create the session directory and install (or reuse) Node.js and the pinned Prime Agent package.
 
-        The agent server downloads and checks the Node.js build and the release package once, then uploads them, so
-        the sandbox needs no download tools; npm installs the package's dependencies from the registry.
+        The agent server downloads and checks the Node.js build, the release package and the kernel's Python and uv
+        once, then uploads them, so the sandbox needs no download tools; npm and uv install dependencies from their
+        package indexes.
         """
         # Shared host-side download cache for pinned sandbox assets.
-        from responses_api_agents.miniswe_sandboxed_agent.bootstrap import cached_download
+        from responses_api_agents.miniswe_sandboxed_agent.bootstrap import (
+            PYTHON_SHA256,
+            bootstrap_assets,
+            cached_download,
+        )
 
         sandbox, directory = self.session.sandbox, self.session.session_dir
         prepared = await sandbox.exec(
@@ -103,12 +108,18 @@ class PrimeSession(AgentSessionState):
             f"https://nodejs.org/dist/v{NODE_VERSION}/{name}", sha256=NODE_SHA256[arch_name], timeout=timeout
         )
         package = await cached_download(PRIME_AGENT_PACKAGE_URL, sha256=PRIME_AGENT_PACKAGE_SHA256, timeout=timeout)
+        # The installer requires glibc, so the kernel uses the glibc Python build.
+        uv, python = await bootstrap_assets(arch_name, "gnu")
         await sandbox.upload(node, f"{directory}/{name}")
         await sandbox.upload(package, f"{directory}/prime-agent.tgz")
+        await sandbox.upload(python, f"{directory}/python.tar.gz")
+        await sandbox.upload(uv, f"{directory}/uv.tar.gz")
         result = await sandbox.exec(
             f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(PRIME_AGENT_VERSION)} "
             f"{quote(f'{directory}/{name}')} {quote(NODE_SHA256[arch_name])} "
-            f"{quote(f'{directory}/prime-agent.tgz')} {quote(PRIME_AGENT_PACKAGE_SHA256)}",
+            f"{quote(f'{directory}/prime-agent.tgz')} {quote(PRIME_AGENT_PACKAGE_SHA256)} "
+            f"{quote(f'{directory}/python.tar.gz')} {quote(PYTHON_SHA256[arch_name, 'gnu'])} "
+            f"{quote(f'{directory}/uv.tar.gz')}",
             cwd="/",
             timeout_s=timeout,
         )
