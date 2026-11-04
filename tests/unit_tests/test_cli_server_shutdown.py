@@ -13,14 +13,14 @@ import psutil
 import pytest
 from omegaconf import OmegaConf
 
-import nemo_gym.cli.env as env
-from nemo_gym.cli.setup_command import run_command
+import nemo_gym.orchestration.server_supervisor as server_supervisor
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME
+from nemo_gym.orchestration.server_venv import run_command
 
 
 def _runner(processes, grace=0.1):
-    runner = env.RunHelper()
+    runner = server_supervisor.RunHelper()
     runner._processes = processes
     runner._head_server = None
     runner._server_shutdown_timeout_seconds = grace
@@ -135,13 +135,17 @@ def test_shutdown_tolerates_an_already_exited_group(tmp_path):
 @pytest.mark.parametrize("value", [True, False, -1, "-1", "nan", "inf", float("-inf"), "later", []])
 def test_invalid_shutdown_budget_is_rejected(value):
     with pytest.raises(ConfigError, match="finite nonnegative"):
-        env._server_shutdown_timeout_seconds(OmegaConf.create({SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME: value}))
+        server_supervisor._server_shutdown_timeout_seconds(
+            OmegaConf.create({SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME: value})
+        )
 
 
 @pytest.mark.parametrize(("value", "expected"), [(None, 1), (0, 0), ("0.5", 0.5), (2, 2)])
 def test_shutdown_budget_accepts_finite_seconds(value, expected):
     assert (
-        env._server_shutdown_timeout_seconds(OmegaConf.create({SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME: value}))
+        server_supervisor._server_shutdown_timeout_seconds(
+            OmegaConf.create({SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME: value})
+        )
         == expected
     )
 
@@ -158,16 +162,18 @@ def test_shutdown_uses_shared_grace_and_reap_deadlines(monkeypatch):
             raise TimeoutExpired("server", timeout)
 
         process.wait.side_effect = wait
-    monkeypatch.setattr(env, "monotonic", lambda: now[0])
-    monkeypatch.setattr(env, "_server_group_exists", lambda process: True)
-    monkeypatch.setattr(env, "_signal_server_group", lambda process, sig: calls.append(("signal", process, sig)))
+    monkeypatch.setattr(server_supervisor, "monotonic", lambda: now[0])
+    monkeypatch.setattr(server_supervisor, "_server_group_exists", lambda process: True)
+    monkeypatch.setattr(
+        server_supervisor, "_signal_server_group", lambda process, sig: calls.append(("signal", process, sig))
+    )
     _runner(dict(zip(("first", "second"), processes)), grace=0.3).shutdown()
     waits = [call[2] for call in calls if call[0] == "wait"]
-    assert waits == pytest.approx([0.3, 0, env._FORCE_KILL_REAP_TIMEOUT_SEC, 0])
+    assert waits == pytest.approx([0.3, 0, server_supervisor._FORCE_KILL_REAP_TIMEOUT_SEC, 0])
     kill_indexes = [i for i, call in enumerate(calls) if call[0] == "signal" and call[2] == signal.SIGKILL]
     assert len(kill_indexes) == 2
     assert max(kill_indexes) < next(
         i
         for i, call in enumerate(calls)
-        if call[0] == "wait" and call[2] == pytest.approx(env._FORCE_KILL_REAP_TIMEOUT_SEC)
+        if call[0] == "wait" and call[2] == pytest.approx(server_supervisor._FORCE_KILL_REAP_TIMEOUT_SEC)
     )

@@ -18,8 +18,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     TaskId,
 )
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.browsecomp_advanced_harness import app as harness_app
 from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchMetrics,

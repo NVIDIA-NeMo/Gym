@@ -21,11 +21,13 @@ from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
+from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.config.global_config as gc
+import nemo_gym.orchestration.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
@@ -740,6 +742,7 @@ class TestFriendlyValidationError:
                 raise AssertionError("RunHelper must not be built for a malformed head_server")
 
         monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
@@ -2089,3 +2092,52 @@ def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve,
         main()
     assert exc.value.code == 2
     assert "--only-tasks and --exclude-tasks apply to a task TARGET" in capsys.readouterr().err
+
+
+def _resolve_eval_run(monkeypatch: MonkeyPatch, selectors: list[str]) -> DictConfig:
+    """Resolve the config `gym eval run <selectors>` would run: the CLI's config_paths, in its order, then the parser."""
+    _, overrides = _dispatch_for(monkeypatch, ["eval", "run", *selectors])
+    (token,) = [o for o in overrides if o.startswith("+config_paths=[")]
+    config_paths = token[len("+config_paths=[") : -1].split(",")
+    initial = DictConfig(
+        {
+            "config_paths": config_paths,
+            "policy_base_url": "https://example.test/v1",
+            "policy_api_key": "test-key",  # pragma: allowlist secret
+            "policy_model_name": "test-model",
+        }
+    )
+    return gc.GlobalConfigDictParser().parse(
+        gc.GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+        )
+    )
+
+
+class TestModelTypeKeepsBenchmarkPolicySettings:
+    """`--model-type vllm_model` merges after the benchmark config, so it must not reset what the benchmark set."""
+
+    POLICY_SETTINGS = {
+        "extra_body": {"thinking_token_budget": 17408},
+        "chat_template_kwargs": {"enable_thinking": True},
+        "sampling_overrides": {"temperature": 0.6},
+    }
+
+    def test_benchmark_policy_settings_survive_the_model_type_config(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        bench_dir = tmp_path / "benchmarks" / "budget_probe"
+        bench_dir.mkdir(parents=True)
+        (bench_dir / "config.yaml").write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": self.POLICY_SETTINGS}}})
+        )
+        selectors = ["--search-dir", str(tmp_path), "--benchmark", "budget_probe", "--model-type", "vllm_model"]
+
+        resolved = _resolve_eval_run(monkeypatch, selectors)
+
+        # The model-type config is the later sibling, i.e. the one whose values would win.
+        assert resolved["config_paths"][-1].endswith("responses_api_models/vllm_model/configs/vllm_model.yaml")
+        vllm_model = resolved["policy_model"]["responses_api_models"]["vllm_model"]
+        for key, value in self.POLICY_SETTINGS.items():
+            assert vllm_model[key] == value, key
+        assert vllm_model["entrypoint"] == "app.py"  # the model-type config still applied
