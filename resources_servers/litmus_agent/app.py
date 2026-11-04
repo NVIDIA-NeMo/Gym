@@ -96,23 +96,14 @@ from fastapi.responses import PlainTextResponse
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
-    ResourcesSessionConflictError,
-    ResourcesSessionFence,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
@@ -612,17 +603,6 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
     _sessions: Dict[str, _SandboxSession] = PrivateAttr(default_factory=dict)
     _session_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _registry_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
-    # The episode and task each Environment Server seed bound to its resources_session_id.
-    _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    _fence: ResourcesSessionFence = PrivateAttr()
-    # Verify unbinds checkpoint ownership; keep only expiring identity for retries and the eventual close.
-    _verified_sessions: ClosedResourcesSessionRecords[tuple[EpisodeId, TaskId]] = PrivateAttr()
-
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
-        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
-
     # -- tool serving -------------------------------------------------------
 
     def setup_webserver(self) -> FastAPI:
@@ -781,64 +761,16 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
     # -- sessions -----------------------------------------------------------
 
-    async def seed_session(
-        self,
-        request: Request,
-        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
-    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Bind an Environment Server's resources session to the request's cookie.
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._sessions
 
-        The sandbox itself starts lazily on the first tool call. An Agent's ``/run`` seeds with its legacy body,
-        which keeps no state here; verify stops that rollout's sandbox.
-        """
-        if not isinstance(body, ResourcesSeedSessionRequest):
-            return BaseSeedSessionResponse()
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Release a prior cookie run; the sandbox still starts on the first tool call."""
+        await self.release_session_state(session_id)
 
-        resources_session_id = body.resources_session_id
-        async with self._fence.locked(resources_session_id):
-            self._fence.raise_if_closed(resources_session_id)
-            if resources_session_id in self._verified_sessions:
-                raise ResourcesSessionConflictError("resources session has already been verified")
-            if resources_session_id not in self._session_episodes and resources_session_id in self._sessions:
-                raise ResourcesSessionConflictError("resources_session_id already belongs to a cookie session")
-            identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
-            if identity != (body.episode_id, body.task_id):
-                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
-        # The tool and verify find the sandbox by the cookie, so it must name this resources session.
-        request.session[SESSION_ID_KEY] = resources_session_id
-        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
-
-    async def retire_session_state(self, session_id: str) -> None:
-        """Stop the sandbox before checkpoint retirement forgets its owning attempt."""
-        async with self._fence.locked(session_id):
-            await self._cleanup_session(session_id)
-            identity = self._session_episodes.pop(session_id, None)
-            if identity is not None:
-                self._fence.mark_closed(session_id, identity[0])
-
-    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Stop the session's sandbox, even when verify never ran.
-
-        Releases by ``resources_session_id``, since a close whose seed reply was lost carries no cookie. A failed
-        stop propagates, so the session is not recorded as closed and the caller can retry.
-        """
-        resources_session_id = body.resources_session_id
-        async with self._fence.locked(resources_session_id):
-            closed_episode = self._fence.closed_episode(resources_session_id)
-            if closed_episode is not None:
-                if closed_episode != body.episode_id:
-                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-                return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
-            identity = self._session_episodes.get(resources_session_id) or self._verified_sessions.get(
-                resources_session_id
-            )
-            if identity is not None and identity[0] != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
-            # Verify has already stopped a verified episode's sandbox, so this finds none.
-            await self._cleanup_session(resources_session_id)
-            self._session_episodes.pop(resources_session_id, None)
-            self._fence.mark_closed(resources_session_id, body.episode_id)
-        return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
+    async def release_session_state(self, session_id: str) -> None:
+        """Release the sandbox, retaining its reference if cleanup fails."""
+        await self._cleanup_session(session_id)
 
     # -- verification -------------------------------------------------------
 
@@ -865,10 +797,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             # A successful verify reply ends checkpoint ownership. Keep failures retriable, and serialize
             # cleanup with a tool's first allocation so no worker can be published after we release it.
             async with self._fence.locked(session_id):
-                await self._cleanup_session(session_id)
-                identity = self._session_episodes.pop(session_id, None)
-                if identity is not None:
-                    self._verified_sessions.remember(session_id, identity)
+                await self.release_session_state(session_id)
+                if session_id not in self._verified_sessions:
+                    self._verified_sessions.remember(session_id, (self._session_episodes.pop(session_id, None), None))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
         answer_type = resolve_answer_type(body.answer_type)
