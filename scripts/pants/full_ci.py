@@ -65,6 +65,10 @@ ENVIRONMENT = (
     "CPATH",
     "CPLUS_INCLUDE_PATH",
     "C_INCLUDE_PATH",
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
     "CC",
     "CXX",
     "CUDA_HOME",
@@ -175,7 +179,7 @@ def server_scope(job: str, *, shard: int, shards: int, changed_files: str) -> li
             str(path.parent)
             for server_type in server_types()
             for path in Path(server_type).glob("*/README.md")
-            if "pycache" not in path.parent.name
+            if "pycache" not in path.parent.name and not path.parent.name.endswith((".egg-info", ".dist-info"))
         )[shard::shards]
     return []
 

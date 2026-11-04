@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Expose declared checkout metadata inside each native pytest sandbox."""
 
-import ast
+import fcntl
 import importlib.metadata
 import json
 import os
@@ -118,22 +118,15 @@ def restore_tracked_modes(root: Path) -> None:
 
 def expose_editable_to_children(root: Path, distribution: Path, installed: Path, *, wheel_site: Path) -> None:
     """Relocate the actual editable finder into a sandbox-local child Python site."""
+    from scripts.pants.native_core.editable import relocate_finder
+
     manifest = json.loads((distribution / "editable.json").read_text())
-    original = manifest["source_root"]
-    tree = ast.parse((distribution / manifest["finder"]).read_text())
-
-    class Relocate(ast.NodeTransformer):
-        def visit_Constant(self, node):
-            if isinstance(node.value, str) and (node.value == original or node.value.startswith(original + "/")):
-                node.value = str(root) + node.value[len(original) :]
-            return node
-
-    relocated = ast.unparse(Relocate().visit(tree))
-    if original != str(root) and original in relocated:
-        raise RuntimeError("Editable finder retained a path outside the native sandbox")
+    relocated = relocate_finder(
+        (distribution / manifest["finder"]).read_text(), original=manifest["source_root"], replacement=str(root)
+    )
     child_site = root / ".native-child-site"
     child_site.mkdir()
-    (child_site / manifest["finder"]).write_text(relocated + "\n")
+    (child_site / manifest["finder"]).write_text(relocated)
     shutil.copy2(distribution / manifest["hook"], child_site / manifest["hook"])
     shutil.copytree(installed, child_site / installed.name)
     (child_site / "sitecustomize.py").write_text(
@@ -164,14 +157,20 @@ def expose_editable_to_children(root: Path, distribution: Path, installed: Path,
         "index = next((i for i, finder in enumerate(sys.meta_path) if finder is PathFinder), len(sys.meta_path))\n"
         "sys.meta_path.insert(index, SampledWheelOverlay)\n"
     )
-    previous = os.environ.get("PYTHONPATH")
-    os.environ["PYTHONPATH"] = str(child_site) + (os.pathsep + previous if previous else "")
+    child_pythonpath(child_site)
 
 
-def pytest_load_initial_conftests(early_config, parser, args):
+def child_pythonpath(child_site: Path) -> None:
+    """Expose child editable imports once per process, including xdist workers."""
+    previous = os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    paths = [str(child_site), *(path for path in previous if path and path != str(child_site))]
+    os.environ["PYTHONPATH"] = os.pathsep.join(paths)
+
+
+def _initialize_sandbox(root: Path) -> str:
     from scripts.pants.native_core.distribution import validate_distribution
+    from scripts.pants.native_core.editable import restore_records
 
-    root = Path(__file__).resolve().parents[3]
     restore_build_directories(root)
     metadata = root / "scripts/pants/native_core/git-state"
     restore_symlinks(root, json.loads((metadata.parent / "symlinks.json").read_text()))
@@ -195,3 +194,37 @@ def pytest_load_initial_conftests(early_config, parser, args):
     (installed / "direct_url.json").write_text(json.dumps({"dir_info": {"editable": True}, "url": root.as_uri()}))
     expose_editable_to_children(root, metadata.parent / "distribution", installed, wheel_site=wheel_site)
     exclude_instrumentation(root, (installed.name + "/",))
+    restore_records(
+        metadata.parent / "distribution",
+        root=root,
+        installed=installed,
+        child_site=root / ".native-child-site",
+        wheel_site=wheel_site,
+    )
+    return installed.name
+
+
+def initialize_sandbox(root: Path) -> None:
+    """Initialize shared sandbox files exactly once across the xdist master/workers."""
+    native = root / "scripts/pants/native_core"
+    completed = native / ".runtime.json"
+    with (native / ".runtime.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if completed.exists():
+            state = json.loads(completed.read_text())
+            if (
+                state.get("root") != str(root)
+                or not (root / ".git").is_symlink()
+                or (root / ".git").resolve() != (native / "git-state").resolve()
+                or not (root / state["distribution"]).is_dir()
+                or not (root / ".native-child-site").is_dir()
+            ):
+                raise RuntimeError("Native worker found an inconsistent initialized sandbox")
+        else:
+            distribution = _initialize_sandbox(root)
+            completed.write_text(json.dumps({"root": str(root), "distribution": distribution}) + "\n")
+    child_pythonpath(root / ".native-child-site")
+
+
+def pytest_load_initial_conftests(early_config, parser, args):
+    initialize_sandbox(Path(__file__).resolve().parents[3])

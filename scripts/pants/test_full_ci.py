@@ -76,11 +76,11 @@ def test_server_discovery_matches_sampled_constants_and_partitions_every_module(
             path.mkdir(parents=True)
             (path / "README.md").write_text("testable module")
             expected.append(str(path))
-        # Native test_all excludes names containing pycache and modules without README.
-        for name in ("__pycache__", "no-readme"):
+        # Match test_all's exclusions for caches, packaging metadata and missing README.
+        for name in ("__pycache__", "no-readme", "example.egg-info", "example.dist-info"):
             path = Path(server_type) / name
             path.mkdir()
-            if "pycache" in name:
+            if name != "no-readme":
                 (path / "README.md").write_text("excluded")
     shards = [full_ci.server_scope("servers", shard=i, shards=12, changed_files="") for i in range(12)]
     assert sorted(server for shard in shards for server in shard) == sorted(expected)

@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +20,54 @@ from xml.etree import ElementTree
 
 from collect import targets
 from prepare import BATCH_SIZE, requirement_pins, snapshot_distribution, validate_lock, write_build_configuration
+
+
+def core_worker_count(source: Path) -> int | None:
+    """Read sampled CI's explicit worker count, retaining historical serial runs."""
+    script = (source / "scripts/ci/core_unit_tests.sh").read_text()
+    assignment = re.search(r"^pytest_addopts=(.+)$", script, re.MULTILINE)
+    if assignment is None:
+        raise ValueError("Cannot read sampled core pytest options; inspect its worker policy")
+    values = shlex.split(assignment[1])
+    if len(values) != 1:
+        raise ValueError("Unsupported sampled core pytest option assignment")
+    options = shlex.split(values[0])
+    if "-n" not in options:
+        if any(option.startswith(("-n", "--numprocesses")) for option in options):
+            raise ValueError("Unsupported sampled core worker option")
+        return None
+    index = options.index("-n") + 1
+    if index == len(options):
+        raise ValueError("Sampled core worker count is missing")
+    count = options[index]
+    if not count.isdecimal() or int(count) < 1 or "--dist=loadfile" not in options:
+        raise ValueError("Sampled core workers require an explicit positive count and loadfile distribution")
+    return int(count)
+
+
+def core_worker_environment(source: Path, environment: dict[str, str]) -> dict[str, str]:
+    """Apply sampled CI's thread limits before collection, setup and execution."""
+    script = (source / "scripts/ci/core_unit_tests.sh").read_text()
+    if 'source "${ci_dir}/test_worker_env.sh"' not in script:
+        return dict(environment)
+    names = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+    command = [
+        "bash",
+        "-e",
+        "-u",
+        "-o",
+        "pipefail",
+        "-c",
+        'source "$1"; shift; exec "$@"',
+        "pants-core-workers",
+        str(source / "scripts/ci/test_worker_env.sh"),
+        sys.executable,
+        "-c",
+        "import json, os, sys; print(json.dumps({name: os.environ[name] for name in sys.argv[1:]}))",
+        *names,
+    ]
+    values = json.loads(subprocess.check_output(command, env=environment, text=True))
+    return dict(environment, **values)
 
 
 def verify_inputs(repo: Path, assets: Path) -> None:
@@ -74,6 +124,10 @@ def run(args: argparse.Namespace) -> int:
         raise FileExistsError(f"Refusing to overwrite a previous native run: {output}")
     source = args.source.resolve()
     assets = Path(__file__).resolve().parent
+    workers = core_worker_count(source) if args.group == "core" else None
+    environment = dict(os.environ)
+    if args.group == "core":
+        environment = core_worker_environment(source, environment)
     metadata = {
         "engine": "pants-native",
         "job": args.group,
@@ -90,6 +144,8 @@ def run(args: argparse.Namespace) -> int:
             "target_files": BATCH_SIZE,
             "partition": "stable-hash",
             "local_parallelism": 1,
+            "pytest_workers": workers or 1,
+            "pytest_distribution": "loadfile" if workers is not None else "serial",
         },
     }
     try:
@@ -114,6 +170,7 @@ def run(args: argparse.Namespace) -> int:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     check=True,
+                    env=environment,
                 )
             native = checkout / "scripts/pants/native_core"
             for resolve in ("core", "sandbox"):
@@ -143,6 +200,7 @@ def run(args: argparse.Namespace) -> int:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     check=True,
+                    env=environment,
                 )
             manifest = json.loads(manifest_path.read_text())
             snapshot_distribution(checkout)
@@ -162,6 +220,8 @@ def run(args: argparse.Namespace) -> int:
             pytest_args = ["-m", marker, "--cov-fail-under=0", "-p", "scripts.pants.native_core.runtime"]
             if args.group == "core":
                 pytest_args.append("--junit-prefix=nemo_gym.core")
+            if workers is not None:
+                pytest_args.extend(["-n", str(workers), "--dist=loadfile"])
             command = [
                 str(Path(args.pants).resolve()),
                 "--no-pantsd",
@@ -178,7 +238,6 @@ def run(args: argparse.Namespace) -> int:
                 "--",
                 *pytest_args,
             ]
-            environment = dict(os.environ)
             interpreter = subprocess.check_output(
                 [args.uv, "python", "find", (checkout / ".python-version").read_text().strip()], text=True
             ).strip()

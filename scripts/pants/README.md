@@ -9,9 +9,10 @@ instrumentation lives in a separate controller checkout. The branch is
 
 The baseline uses the source revision's CI commands. Both arms preserve its test scope, routing and gates:
 
-- Four duration-balanced core shards on independent runners.
+- Four duration-balanced core shards on independent runners, each with the sampled main's pytest worker count.
 - A separate sandbox job and the combined coverage gate.
-- Eight server shards for a full run, or the native changed-server selection.
+- Eight server shards for a full run, including main's four component workers per shard and their logs,
+  or the native changed-server selection.
 - Session-routing end-to-end tests when selected, and lint.
 - Existing runner types, system dependencies, test data, Python, uv and extras.
 
@@ -70,8 +71,11 @@ controller assets before dispatch; stale locks fail the comparison explicitly.
 Core and sandbox suites use native Pants Python targets, one per test file. Compatible
 targets within each resolve share pytest processes with `[test].batch_size = 128`.
 Pants uses stable hash boundaries, so this targets approximately 128 files per batch;
-a target does not imply a separate process. Batches run serially, and test result
-reuse remains disabled. The four core jobs retain Gym's duration-balanced file
+a target does not imply a separate process. Batches run serially; within each core
+batch, pytest matches the sampled main's worker count and file-based distribution
+(currently four workers with `--dist=loadfile`). The sampled core worker environment
+also caps numerical-library threads. Sandbox keeps its serial pytest execution,
+and test result reuse remains disabled. The four core jobs retain Gym's duration-balanced file
 assignments; the sandbox job
 runs the complete sandbox selection. The adapter checks dependency parity against
 `uv.lock` and preserves each job's JUnit and raw coverage inputs.
@@ -86,6 +90,15 @@ test results are not reused. Workspace jobs use session-only result caching,
 because server dependencies and external resources are not fully pinned. Engine
 and dependency caches persist between runs. Do not claim selective test pruning
 or cross-run test-result savings from these measurements.
+
+Editable-install snapshots canonicalize temporary checkout paths and installer
+timestamps before hashing, then restore real sandbox paths and valid RECORD
+hashes at runtime. This removes incidental input changes without replacing the
+genuine project wheel or its console scripts. `native_core/reuse.py` records a
+five-module source audit and a fail-closed runtime contract, but is not connected
+to execution. A verified runtime/environment fingerprint, reduced native target
+graph, and full cold/hit outcome and invalidation checks are still required before
+enabling result reuse.
 
 The uv cache mirrors main's policy: one immutable OS/`uv.lock` key shared across
 jobs, with an OS-level restore prefix. Baseline and Pants use separate namespaces

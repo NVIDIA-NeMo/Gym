@@ -1,7 +1,7 @@
 {
   "inputs": {
     ".python-version": "f8faecf2505680716c6279bf2cdec3d5a5ba2ba852f0d7df45d51ac1ce8d9ade",
-    "pyproject.toml": "6b12ab9dd86c00e0da82b4aee9452d3d5061f812c6e65c052689405bcf14f182",
+    "pyproject.toml": "dc0aba760209eb07a4dc87365bd2de530d0aeca2cbe13161e576073e190032d6",
     "uv.lock": "8f91890c293cbaadb9fb616277841a0ed85fdf41a6a5677ae3257a99a184ac37"
   },
   "pants_version": "2.30.2",

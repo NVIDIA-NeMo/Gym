@@ -239,6 +239,15 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Upload server worker logs
+        if: always() && matrix.job == 'servers'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-ci-worker-logs-${{ inputs.engine }}-${{ matrix.shard }}
+          path: sample/results/server-workers
+          if-no-files-found: warn
+          retention-days: 14
+
   coverage:
     name: combined coverage
     needs: core

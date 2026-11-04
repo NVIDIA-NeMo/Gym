@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 
 from distribution import distribution_targets
+from editable import snapshot_editable
 from runtime import exclude_instrumentation
 
 
@@ -68,27 +69,10 @@ def snapshot_distribution(repo: Path) -> None:
     candidates = list((repo / ".venv").glob("lib/python*/site-packages/nemo_gym-*.dist-info"))
     if len(candidates) != 1:
         raise ValueError(f"Expected one installed Gym distribution after collection, found {len(candidates)}")
-    metadata = candidates[0]
-    direct = json.loads((metadata / "direct_url.json").read_text())
-    if direct != {"dir_info": {"editable": True}, "url": repo.resolve().as_uri()}:
-        raise ValueError("Collected Gym distribution is not the sampled editable checkout")
-    destination = repo / "scripts/pants/native_core/distribution" / metadata.name
-    shutil.copytree(metadata, destination, dirs_exist_ok=True)
-    hooks = list(metadata.parent.glob("__editable__*nemo_gym*.pth"))
-    if len(hooks) != 1:
-        raise ValueError("Expected the sampled Gym setuptools editable finder hook")
-    hook = hooks[0]
-    match = re.fullmatch(r"import ([A-Za-z0-9_]+); \1\.install\(\)\s*", hook.read_text())
-    if not match:
-        raise ValueError("Unsupported sampled Gym editable installation hook")
-    finder = metadata.parent / (match[1] + ".py")
-    if not finder.is_file():
-        raise ValueError("Sampled Gym editable finder is missing")
-    shutil.copy2(hook, destination.parent / hook.name)
-    shutil.copy2(finder, destination.parent / finder.name)
-    (destination.parent / "editable.json").write_text(
-        json.dumps({"source_root": str(repo.resolve()), "hook": hook.name, "finder": finder.name}) + "\n"
-    )
+    destination = repo / "scripts/pants/native_core/distribution"
+    if destination.exists():
+        shutil.rmtree(destination)
+    snapshot_editable(candidates[0], source=repo, destination=destination)
 
 
 def require_uv_version(uv: str) -> None:
@@ -204,6 +188,7 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
         str(path.relative_to(repo)) for path in (native / "distribution").rglob("*") if path.is_file()
     )
     runtime_assets.append("scripts/pants/native_core/runtime.py")
+    runtime_assets.append("scripts/pants/native_core/editable.py")
     runtime_assets.append("scripts/pants/native_core/distribution.py")
     runtime_assets.append("scripts/pants/native_core/symlinks.json")
     lines.append(f"files(name='assets', sources={sorted(set(assets + sources + tests + runtime_assets))!r})\n")
