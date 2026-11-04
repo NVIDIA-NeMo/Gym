@@ -101,6 +101,43 @@ Check `resources_servers/<name>/README.md` for required fields specific to each 
 | `developer` | System instructions (preferred) |
 | `system` | System instructions (legacy) |
 
+### SWE Curriculum Start States
+
+Six SWE resources servers accept two optional row fields for curriculum training: `swe_rebench`,
+`scale_swe`, `swe_next`, `swemer_v1`, `swemer_v2`, and `swemer_oml`. A start-state task begins
+with part of the reference fix already applied, and the agent must finish it. Both fields are off
+by default, so rows without them seed and grade exactly as before.
+
+| Field | Type | Default | Effect |
+|-------|------|---------|--------|
+| `setup_patch` | string | `""` | A unified diff holding part of the reference fix. Seeding applies and commits it before the agent starts. Grading applies it exactly (`git apply`) before the agent's patch. |
+| `squash_history` | bool | `false` | Seeding rebuilds the repository history as one root commit with the base commit's author, dates, and message. |
+
+Add the fields next to the server's own fields. This fragment omits those:
+
+```json
+{
+  "responses_create_params": {"input": [{"role": "user", "content": "..."}]},
+  "instance_id": "owner__repo-1234",
+  "setup_patch": "diff --git a/src/util.py b/src/util.py\n--- a/src/util.py\n+++ b/src/util.py\n@@ -10,3 +10,4 @@\n ...",
+  "squash_history": true
+}
+```
+
+- Set `squash_history: true` on every row with a `setup_patch`. Without it, the start-state
+  commit keeps the base commit's parents, and `git show HEAD` exposes the applied hunks.
+- Also set `squash_history: true`, without a `setup_patch`, on the parent tasks that train next to
+  start states. Then both kinds of task have the same one-commit history.
+- With either field set, seeding always runs the anti-cheat scrub, even when
+  `apply_anti_cheating` is off. The session fails if the original commit is still reachable.
+- If `setup_patch` does not apply in the task's image, grading stops before the agent's patch and
+  the tests. The evaluation is reported as incomplete with the error
+  `start-state setup patch did not apply`. It is not a completed result with zero reward, because
+  the run says nothing about the agent.
+
+The servers' `task_data.py` schemas declare both fields, so `gym dataset collate` validates them
+like any other field.
+
 ---
 
 ## Preprocess Raw Datasets

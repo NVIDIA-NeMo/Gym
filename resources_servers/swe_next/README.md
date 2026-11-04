@@ -54,4 +54,9 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
+## Curriculum start states
+
+Rows may set `setup_patch` and `squash_history` so the agent starts from part of the reference
+fix. See [SWE curriculum start states](https://docs.nvidia.com/nemo/gym/main/data/prepare-validate#swe-curriculum-start-states).
+
 The SWE-Next dataset is MIT licensed. This adapter is Apache-2.0.

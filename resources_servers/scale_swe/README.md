@@ -92,3 +92,8 @@ gym env start \
   --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
+
+## Curriculum start states
+
+Rows may set `setup_patch` and `squash_history` so the agent starts from part of the reference
+fix. See [SWE curriculum start states](https://docs.nvidia.com/nemo/gym/main/data/prepare-validate#swe-curriculum-start-states).
