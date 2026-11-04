@@ -16,6 +16,8 @@ config_paths:
 hermes_agent:
   responses_api_agents:
     hermes_agent:
+      # An unseeded request runs the harness on the Gym host, so keep the agent off the address sandboxes reach.
+      host: 127.0.0.1
       resources_server:
         type: resources_servers
         name: ???

@@ -74,10 +74,11 @@ A new pairing does not need another combined preset.
 `configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
 such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
 agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
-model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server, whose config
-endpoint is unauthenticated, on `127.0.0.1`. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox
-otherwise ends after 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under
-the profile's own instance name, `codex_agent.responses_api_agents.codex_agent.sandbox_config`.
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `codex_agent.responses_api_agents.codex_agent.sandbox_config`.
 
 HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
