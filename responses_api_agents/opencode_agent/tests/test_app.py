@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -1502,6 +1503,11 @@ class TestProcessGroupCleanup:
         _kill_process_group(os.getpgrp())
 
 
+# session_nodes runs sessions as Ray tasks; Ray is the optional `ray` extra, absent from this agent's venv.
+needs_ray = pytest.mark.skipif(importlib.util.find_spec("ray") is None, reason="needs the ray extra")
+
+
+@needs_ray
 class TestRemoteSessionTask:
     def test_runs_session_and_returns_database(self, tmp_path: Path) -> None:
         from responses_api_agents.opencode_agent.app import _remote_session_task
@@ -1538,6 +1544,7 @@ class TestRemoteSessionTask:
         assert timed_out and outputs == {}
 
 
+@needs_ray
 class TestSessionNodes:
     NODES = [
         {"NodeID": "own", "Alive": True, "NodeManagerAddress": "10.0.0.5"},
