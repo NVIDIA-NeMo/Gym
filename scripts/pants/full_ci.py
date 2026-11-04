@@ -298,7 +298,7 @@ def run_native(*, job: str, shard: int, shards: int, output: Path, env: dict[str
 
 
 def run_pants(*, script: Path, output: Path, env: dict[str, str], sources: list[str]) -> int:
-    """Execute the identical command in Pants's workspace and restore its status."""
+    """Execute the identical command under the shared CI job deadline and restore its status."""
     build_path = Path("BUILD.pants-full-ci")
     if build_path.exists():
         raise FileExistsError(f"Refusing to overwrite {build_path}; another job may be running")

@@ -14,7 +14,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from prepare import EXTRAS, prepare, require_uv_version, validate_lock
+from prepare import EXTRAS, UV_VERSION, prepare, require_uv_version, validate_lock
 
 
 HERE = Path(__file__).resolve().parent
@@ -104,7 +104,7 @@ def refresh(*, source: Path, pants: str, uv: str, destination: Path) -> dict[str
             manifest = {
                 "inputs": initial,
                 "resolves": resolves,
-                "uv_version": "0.11.29",
+                "uv_version": UV_VERSION,
                 "pants_version": config["GLOBAL"]["pants_version"],
                 "pex_version": pex_version,
                 "pex_release": f"https://github.com/pex-tool/pex/releases/tag/v{pex_version}",

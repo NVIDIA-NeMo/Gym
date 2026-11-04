@@ -57,7 +57,7 @@ When the sampled main commit changes `uv.lock`, `pyproject.toml` or
 python3 scripts/pants/native_core/refresh_locks.py \
   --source /absolute/clean-sampled-main-checkout \
   --pants /absolute/pants-launcher \
-  --uv /absolute/uv-0.11.29
+  --uv /absolute/uv-0.13.4
 ```
 
 The command exports both CI extras sets from uv, generates both Pants resolves,

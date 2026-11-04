@@ -19,6 +19,7 @@ EXTRAS = {
     "sandbox": ["dev", "ray", "sandbox", "openshell", "mlflow", "wandb"],
 }
 BATCH_SIZE = 128
+UV_VERSION = "0.13.4"
 HEADER = "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n"
 
 
@@ -88,8 +89,8 @@ def snapshot_distribution(repo: Path) -> None:
 
 def require_uv_version(uv: str) -> None:
     actual = subprocess.check_output([uv, "--version"], text=True).split()[1]
-    if actual != "0.11.29":
-        raise ValueError(f"The baseline pins uv 0.11.29; pass --uv with that executable (got {actual})")
+    if actual != UV_VERSION:
+        raise ValueError(f"The baseline pins uv {UV_VERSION}; pass --uv with that executable (got {actual})")
 
 
 def normalize(name: str) -> str:

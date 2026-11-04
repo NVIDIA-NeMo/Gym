@@ -6,6 +6,19 @@ from pathlib import Path
 
 import pytest
 import refresh_locks
+from prepare import UV_VERSION, require_uv_version
+
+
+@pytest.mark.parametrize("actual", ["0.11.29", "0.13.5"])
+def test_uv_requires_exact_baseline_toolchain(actual, monkeypatch):
+    monkeypatch.setattr(refresh_locks.subprocess, "check_output", lambda *args, **kwargs: f"uv {actual}\n")
+    with pytest.raises(ValueError, match=f"baseline pins uv {UV_VERSION}"):
+        require_uv_version("uv")
+
+
+def test_uv_accepts_current_baseline_toolchain(monkeypatch):
+    monkeypatch.setattr(refresh_locks.subprocess, "check_output", lambda *args, **kwargs: f"uv {UV_VERSION}\n")
+    require_uv_version("uv")
 
 
 def test_publication_restores_every_previous_file_after_failure(tmp_path, monkeypatch):
@@ -85,6 +98,7 @@ def test_success_publishes_both_resolves_and_exact_inputs(tmp_path, monkeypatch)
     monkeypatch.setattr(refresh_locks, "validate_lock", lambda *args: {"distributions": 1})
     manifest = refresh_locks.refresh(source=source, pants="pants", uv="uv", destination=destination)
     assert manifest["inputs"] == refresh_locks.fingerprint(source)
+    assert manifest["uv_version"] == UV_VERSION
     assert set(manifest["resolves"]) == {"core", "sandbox"}
     assert (destination / "core.lock").read_text() == "generated lock"
     assert (destination / "sandbox.lock").read_text() == "generated lock"

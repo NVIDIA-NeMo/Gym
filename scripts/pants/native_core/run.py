@@ -114,7 +114,6 @@ def run(args: argparse.Namespace) -> int:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     check=True,
-                    timeout=300,
                 )
             native = checkout / "scripts/pants/native_core"
             for resolve in ("core", "sandbox"):
@@ -144,7 +143,6 @@ def run(args: argparse.Namespace) -> int:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     check=True,
-                    timeout=900,
                 )
             manifest = json.loads(manifest_path.read_text())
             snapshot_distribution(checkout)
@@ -187,9 +185,7 @@ def run(args: argparse.Namespace) -> int:
             environment["PATH"] = str(Path(interpreter).parent) + os.pathsep + environment.get("PATH", "")
             (output / "command.json").write_text(json.dumps(command, indent=2) + "\n")
             with (output / "pants.log").open("w") as log:
-                result = subprocess.run(
-                    command, cwd=checkout, env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=2700
-                )
+                result = subprocess.run(command, cwd=checkout, env=environment, stdout=log, stderr=subprocess.STDOUT)
             metadata["command_exit_code"] = result.returncode
             reports = checkout / "results/native-junit"
             if reports.exists():

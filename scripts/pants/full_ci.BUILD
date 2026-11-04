@@ -18,5 +18,7 @@ package_shell_command(
     output_path="full-ci",
     outputs_match_mode="all",
     log_output=True,
-    timeout=2400,
+    # The matching GitHub job deadline governs both engines, including setup.
+    # Pants defaults to 30 seconds, so keep its ceiling above every job budget.
+    timeout=21600,
 )
