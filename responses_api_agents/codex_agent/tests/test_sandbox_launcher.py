@@ -6,6 +6,7 @@ import json
 import shutil
 import socket
 import subprocess
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -276,6 +277,41 @@ def test_body_failure_retains_http_status_and_transport_error(tmp_path, fault):
         assert "transport_error" not in records[0]
     else:
         assert records[0]["transport_error"]
+
+
+def test_codex_hanging_up_before_the_response_cancels_the_upstream_stream(tmp_path):
+    received, hung_up, upstream_closed = Event(), Event(), Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            received.set()
+            hung_up.wait(5)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            # A model stream that would last the rest of the turn unless the forwarder closes it.
+            try:
+                for _ in range(100):
+                    self.wfile.write(b"data: x\n\n")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                upstream_closed.set()
+
+    attempts_path = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
+        with socket.create_connection(("127.0.0.1", int(proxy.rsplit(":", 1)[1]))) as codex:
+            codex.sendall(b"POST /responses HTTP/1.1\r\nHost: proxy\r\nContent-Length: 2\r\n\r\n{}")
+            assert received.wait(5)
+        # Let the forwarder see the hang-up before the upstream response starts.
+        time.sleep(0.3)
+        hung_up.set()
+        assert upstream_closed.wait(3)
+    assert [json.loads(line) for line in attempts_path.read_text().splitlines()] == [{"status": 200}]
 
 
 def test_snapshot_joins_native_sessions_in_path_order(tmp_path):

@@ -724,6 +724,19 @@ def test_unicode_line_separators_inside_events_keep_the_message(setup, separator
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
+def test_event_record_nested_too_deeply_to_parse_is_skipped(setup):
+    agent, sandbox = setup
+    # The runner copies any stdout line that starts with "{"; only the host parses it.
+    nested = '[1.0, {"a": ' + '{"a": ' * 100_000 + "1" + "}" * 100_001 + "]\n"
+    sandbox.events = nested + events()
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
 @pytest.mark.parametrize("reason,expected", [("error", "failed"), ("aborted", "failed")])
 def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
     agent, sandbox = setup

@@ -1043,7 +1043,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 observed_at, event = json.loads(line)
                 if isinstance(event, dict):
                     events.append((float(observed_at), event))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):
                 LOG.warning("Skipping malformed Codex event record")
         cleanup = state.session.cleanup
         runtime = state.runtime_info

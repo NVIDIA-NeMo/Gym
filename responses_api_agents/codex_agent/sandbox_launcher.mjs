@@ -76,12 +76,15 @@ function relay(upstream, outgoing) {
             resolve(cancelled ? null : error ?? (upstream.complete ? null : "upstream response ended early"));
         });
         // Codex closing its side can be cancellation, not a model failure.
-        outgoing.on("close", () => {
+        const cancel = () => {
             if (!outgoing.writableFinished) {
                 cancelled = true;
                 upstream.destroy();
             }
-        });
+        };
+        outgoing.on("close", cancel);
+        // Codex may have hung up while the forwarder waited for the upstream response.
+        if (outgoing.destroyed) cancel();
     });
 }
 
