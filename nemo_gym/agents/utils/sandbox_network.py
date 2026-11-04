@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Literal
 
 from nemo_gym.agents.agent_tools import restricted_network_policy
+from nemo_gym.agents.base_responses_api_agent import AgentSeedRejectedError
 from nemo_gym.sandbox.providers.base import SandboxSpec
 
 
@@ -26,11 +27,18 @@ def restrict_sandbox_network(
     ``inherit`` leaves the provider's default network. Each allowed host is opened on every port and path, so
     co-hosted services stay reachable. The policy is fixed when the sandbox is created: it applies only to a
     sandbox the agent creates, never to a task sandbox borrowed from Resources.
+
+    A configuration that cannot be enforced (an explicit provider policy as well, a provider without network
+    policies, or an endpoint the sandbox cannot reach) raises ``AgentSeedRejectedError``, so the seed fails once
+    with HTTP 422 instead of being retried; it is still a ``ValueError``.
     """
     if network_access == "inherit":
         return spec
     if "network_policy" in spec.provider_options:
-        raise ValueError("Set network_access or sandbox_config.provider_options.network_policy, not both")
+        raise AgentSeedRejectedError("Set network_access or sandbox_config.provider_options.network_policy, not both")
     urls = [model_base_url, *(tool_urls if network_access == "model_and_tools" else ())]
-    policy = restricted_network_policy(provider_name, urls)
+    try:
+        policy = restricted_network_policy(provider_name, urls)
+    except ValueError as error:
+        raise AgentSeedRejectedError(str(error)) from error
     return replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
