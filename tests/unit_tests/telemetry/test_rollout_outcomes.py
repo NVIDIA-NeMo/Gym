@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym import rollout_collection
+from nemo_gym.rollouts import rollout_collection
 from nemo_gym.telemetry import gym_metrics
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
+from tests.unit_tests.rollouts.test_rollout_recovery import runner_config  # noqa: F401 - fixture
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
-from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
-from tests.unit_tests.test_rollout_recovery import runner_config  # noqa: F401 - fixture
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")
@@ -133,12 +133,16 @@ def test_original_routing_labels_are_not_replaced_by_saved_record(collected_metr
     assert _by_attrs(collected_metrics) == {_key(**attrs): 1}
 
 
+@pytest.mark.parametrize(
+    "retryable_infrastructure", [False, True], ids=["unknown-kill-stops", "known-infrastructure-retries"]
+)
 async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
+    retryable_infrastructure,
     runner_config,
     collected_metrics,
     monkeypatch,  # noqa: F811
 ):
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     _rollout_group_only(monkeypatch)
     runner_config.route_failures_to_sidecar = True
@@ -146,6 +150,10 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     async def post(**kwargs):
         row = kwargs["json"]
         if row["_ng_task_index"] == 1 and row["_ng_attempt_index"] == 0:
+            if retryable_infrastructure:
+                return FakeResponse(
+                    200, {"_ng_failure_class": "infrastructure_error", "failure_kind": "transport_timeout"}
+                )
             return FakeResponse(200, {"_ng_failure_class": "kill_shaped", "_ng_no_persist": True})
         if row["_ng_task_index"] == 2:
             return FakeResponse(200, {"_ng_failure_class": "skipped", "_ng_failure_terminal": True})
@@ -154,9 +162,12 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     post_mock = AsyncMock(side_effect=post)
     install_fake_server_client(monkeypatch, post_mock)
     await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
+    failure_attrs = {OUTCOME: "failed", DISPATCH: "my_agent", CLASS: "kill_shaped"}
+    if retryable_infrastructure:
+        failure_attrs.update({CLASS: "infrastructure_error", KIND: "transport_timeout"})
     expected = {
         _key(**{OUTCOME: "scored", DISPATCH: "my_agent"}): 1,
-        _key(**{OUTCOME: "failed", DISPATCH: "my_agent", CLASS: "kill_shaped"}): 1,
+        _key(**failure_attrs): 1,
         _key(**{OUTCOME: "omitted", DISPATCH: "my_agent", CLASS: "skipped"}): 1,
     }
     assert _by_attrs(collected_metrics) == expected
@@ -165,16 +176,18 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
     assert (coverage["successful"], coverage["failed"], coverage["intentionally_omitted"]) == (1, 1, 1)
     runner_config.resume_from_cache = True
     await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
-    expected[_key(**{OUTCOME: "scored", DISPATCH: "my_agent"})] = 2
+    # An unknown interruption grants no automatic retry. A known infrastructure failure can resume,
+    # and only its newly persisted successful attempt contributes another scored counter.
+    expected[_key(**{OUTCOME: "scored", DISPATCH: "my_agent"})] = 1 + int(retryable_infrastructure)
     assert _by_attrs(collected_metrics) == expected
-    assert post_mock.await_count == 4
+    assert post_mock.await_count == 3 + int(retryable_infrastructure)
     await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
     assert _by_attrs(collected_metrics) == expected
-    assert post_mock.await_count == 4
+    assert post_mock.await_count == 3 + int(retryable_infrastructure)
 
 
 async def test_outcome_rejected_by_storage_is_not_counted(runner_config, collected_metrics, monkeypatch):  # noqa: F811
-    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     _rollout_group_only(monkeypatch)
     install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
@@ -244,7 +257,7 @@ async def test_legacy_counter_keeps_routing_class_and_only_explicit_kind(
 async def test_transport_counter_does_not_invent_a_kind(
     runner_config, collected_metrics, monkeypatch, status, failure_class
 ):  # noqa: F811
-    from tests.unit_tests.test_rollout_collection import http_error
+    from tests.unit_tests.rollouts.test_rollout_collection import http_error
 
     _rollout_group_only(monkeypatch)
 
@@ -373,11 +386,11 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
 ):  # noqa: F811
     import asyncio
 
-    from nemo_gym.core.episode import EpisodeId
-    from nemo_gym.rollout_outcomes import RolloutFailureRecord
-    from nemo_gym.rollout_records import logical_rollout_id
-    from nemo_gym.rollout_store import RolloutStore
-    from nemo_gym.server_runtime.episode_types import EpisodeFailure
+    from nemo_gym.core.episode_types import EpisodeId
+    from nemo_gym.core.failure_records import EpisodeFailure
+    from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+    from nemo_gym.rollouts.rollout_records import logical_rollout_id
+    from nemo_gym.rollouts.rollout_store import RolloutStore
 
     _rollout_group_only(monkeypatch)
     install_fake_server_client(monkeypatch, AsyncMock())
