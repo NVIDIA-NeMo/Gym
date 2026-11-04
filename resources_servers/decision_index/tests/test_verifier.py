@@ -20,6 +20,8 @@ from ..app import (
 )
 from ..verifier import (
     _last_json_object,
+    calibration_items,
+    calibration_metrics,
     engine_answers,
     flatten_scores,
     llm_answers,
@@ -242,12 +244,69 @@ class TestRunScore:
         assert "decision_index" in result.key_metrics and any(
             k.startswith("decision_index_area/") for k in result.key_metrics
         )
+        # Gold answers with all probability on them: perfectly calibrated. The failed BFCL call is excluded.
+        assert metrics["decision_index_calibration_rows"] == 4
+        assert metrics["decision_index_calibration_excluded_rows"] == 1
+        assert metrics["decision_index_brier"] == pytest.approx(0.0) and metrics["decision_index_ece"] == 0.0
+        assert result.key_metrics["decision_index_log_loss"] == pytest.approx(0.0)
 
     def test_score_index_keeps_one_answer_per_request(self) -> None:
         records = self._records("llm", lambda row: "{}")
         scores = score_index(records + records)
         assert scores["requests_in_run"] == 5 and scores["counts"] == {"error": 5}
         assert score_index([{"reward": 0.0}]) == {} and flatten_scores({}) == {}
+
+
+class TestCalibration:
+    # One choice question (gold A) and one noul question (gold false), by hand:
+    #   choice {A: .7, B: .2, 1: .1}: Brier .3^2 + .2^2 + .1^2 = 0.14, log loss -ln .7, confidence .7, right.
+    #   noul p = .8 -> {true: .8, false: .2}: Brier .8^2 + .8^2 = 1.28, log loss -ln .2, confidence .8, wrong.
+    ROW = {
+        "_evaluation": {"run_id": "r1", "catalog_id": 57},
+        "questions": {"c": CHOICE, "n": NOUL, "skip": NOUL},
+        "expected": {"c": "A", "n": False, "skip": None},
+    }
+    RESPONSE = {
+        "answers": {
+            "c": {"type": "choice", "choice": "A", "probabilities": {"A": 0.7, "B": 0.2, "1": 0.1}},
+            "n": {"type": "noul", "noul": 0.8},
+            "skip": {"type": "noul", "noul": 0.5},
+        }
+    }
+
+    def _record(self, mode: str, status: str, response: dict | None) -> dict:
+        result = {"status": status, **({"response": response} if response else {})}
+        return {"di_mode": mode, "di_status": status, "di_score_row": self.ROW, "di_result": result}
+
+    def test_items_by_hand(self) -> None:
+        choice, noul = calibration_items(self.ROW, self.RESPONSE)
+        assert choice == pytest.approx({"brier": 0.14, "log_loss": 0.356675, "confidence": 0.7, "correct": 1.0}, 1e-5)
+        assert noul == pytest.approx({"brier": 1.28, "log_loss": 1.609438, "confidence": 0.8, "correct": 0.0}, 1e-5)
+
+    def test_accepted_answer_benchmarks_have_no_single_gold(self) -> None:
+        chess = {**self.ROW, "_evaluation": {"run_id": "r2", "catalog_id": 31}, "scoring": {"accepted": ["A"]}}
+        assert calibration_items(chess, self.RESPONSE) == []
+
+    def test_run_metrics_overall_and_per_area(self) -> None:
+        records = [
+            self._record("decision", "ok", self.RESPONSE),
+            self._record("decision", "error", None),
+            self._record("decision", "unsupported", None),
+            self._record("llm", "ok", self.RESPONSE),
+        ]
+        metrics = calibration_metrics(records)
+        assert metrics["decision_index_calibration_rows"] == 1
+        assert metrics["decision_index_calibration_excluded_rows"] == 2
+        assert metrics["decision_index_calibration_questions"] == 2
+        assert metrics["decision_index_brier"] == pytest.approx(0.71)
+        assert metrics["decision_index_log_loss"] == pytest.approx(0.983056, abs=1e-6)
+        # Bins 7 and 8, half the answers each: .5 * |.7 - 1| + .5 * |.8 - 0| = 0.55.
+        assert metrics["decision_index_ece"] == pytest.approx(0.55)
+        assert metrics["decision_index_brier_area/Knowledge & Reasoning"] == pytest.approx(0.71)
+        assert metrics["decision_index_ece_area/Knowledge & Reasoning"] == pytest.approx(0.55)
+
+    def test_llm_runs_report_no_calibration(self) -> None:
+        assert calibration_metrics([self._record("llm", "ok", self.RESPONSE)]) == {}
 
 
 def test_load_kit_rebinds_a_shadowed_package(monkeypatch) -> None:

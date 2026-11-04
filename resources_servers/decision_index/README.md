@@ -18,6 +18,14 @@ Verifier for the [Decision Index benchmark](../../benchmarks/decision_index/READ
 - `aggregate_metrics()` adds the kit's public 0.3 index over every rollout (`decision_index`, areas, per-benchmark
   skill). It overrides `aggregate_metrics` instead of `compute_metrics` because that hook sees only unmasked rows.
 
+## Calibration
+
+In decision mode `aggregate_metrics()` also reports mean Brier score, mean log loss and top-label ECE (10 bins) of
+the engine's option probabilities, per scored question, overall (`decision_index_brier`, `decision_index_log_loss`,
+`decision_index_ece`) and per area (`decision_index_brier_area/<area>`, ...), using `nemo_gym.metrics.calibration`.
+Decision-mode rows without probabilities are excluded and counted (`decision_index_calibration_excluded_rows`);
+LLM-mode rows are ignored. Logic: `verifier.calibration_items` / `verifier.calibration_metrics`.
+
 The kit is installed from `requirements.txt` (`apolinario/decision-index@9eb2dbe2`, MIT). Its import name is also
 `decision_index`, so `verifier.load_kit()` binds it from the installed distribution.
 

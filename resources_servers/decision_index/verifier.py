@@ -25,6 +25,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from nemo_gym.metrics import brier_score, expected_calibration_error, log_loss
+
 
 EDITION = "0.3"
 # Scoreable requests of the full public 0.3 suite (the kit's 109,759 + 30,419).
@@ -207,6 +209,98 @@ def row_reward(di_row: Dict[str, Any], response: Optional[Dict[str, Any]]) -> Tu
         else:
             hits.append(pred == gold)
     return float(all(hits)), len(hits)
+
+
+def calibration_items(di_row: Dict[str, Any], response: Dict[str, Any]) -> List[Dict[str, float]]:
+    """Per-question calibration scores of one decision-mode answer: Brier score, log loss, and the confidence and
+    correctness of the chosen answer (for top-label ECE).
+
+    Only the questions ``row_reward`` scores against a single gold answer count; benchmarks scored on a set of
+    accepted answers have no single gold and are skipped. A ``noul`` answer is the two-option distribution
+    ``{true: p, false: 1 - p}``.
+    """
+    n = di_row["_evaluation"]["catalog_id"]
+    scoring = di_row.get("scoring") or {}
+    if n in ACCEPTED_BENCHMARKS and "accepted" in scoring:
+        return []
+    unscored = set(scoring.get("unscored_fields") or [])
+    only = PRIMARY_FIELDS.get(n)
+    items = []
+    for key, q in di_row["questions"].items():
+        gold = di_row["expected"].get(key)
+        if gold is None or key in unscored or (only and key not in only):
+            continue
+        answer = response["answers"][key]
+        if q["type"] == "choice":
+            probabilities = {o: float(p) for o, p in answer["probabilities"].items()}
+            chosen, gold_key = answer["choice"], gold
+        else:
+            p = float(answer["noul"])
+            probabilities = {"true": p, "false": 1.0 - p}
+            chosen, gold_key = ("true" if p >= 0.5 else "false"), ("true" if gold else "false")
+        if gold_key not in probabilities:
+            continue
+        items.append(
+            {
+                "brier": brier_score(probabilities, gold_key),
+                "log_loss": log_loss(probabilities[gold_key]),
+                "confidence": probabilities[chosen],
+                "correct": float(chosen == gold_key),
+            }
+        )
+    return items
+
+
+def _calibration_summary(items: List[Dict[str, float]], prefix: str, suffix: str = "") -> Dict[str, float]:
+    return {
+        f"{prefix}brier{suffix}": sum(i["brier"] for i in items) / len(items),
+        f"{prefix}log_loss{suffix}": sum(i["log_loss"] for i in items) / len(items),
+        f"{prefix}ece{suffix}": expected_calibration_error(
+            [i["confidence"] for i in items], [i["correct"] for i in items], num_bins=10
+        ),
+    }
+
+
+def calibration_metrics(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """Mean Brier score, mean log loss and top-label ECE (10 bins) over every decision-mode rollout, overall and per
+    area, averaged per scored question. LLM-mode rollouts carry no distribution and are ignored; decision-mode
+    rollouts without probabilities (failed, unsupported or invalid answers) are excluded and counted.
+    """
+    load_kit()
+    from decision_index.scoring import index02
+
+    area_of = {n: a["label"] for a in index02.spec(EDITION)["areas"] for n in a["benchmarks"]}
+    overall: List[Dict[str, float]] = []
+    by_area: Dict[str, List[Dict[str, float]]] = {}
+    rows, excluded = 0, 0
+    for record in records:
+        if record.get("di_mode") != "decision" or not record.get("di_score_row"):
+            continue
+        response = (record.get("di_result") or {}).get("response")
+        if record.get("di_status") != OK or not response:
+            excluded += 1
+            continue
+        rows += 1
+        row = record["di_score_row"]
+        items = calibration_items(row, response)
+        overall.extend(items)
+        area = area_of.get(row["_evaluation"]["catalog_id"])
+        if area is not None:
+            by_area.setdefault(area, []).extend(items)
+    if not rows and not excluded:
+        return {}
+    out: Dict[str, Any] = {
+        "decision_index_calibration_rows": rows,
+        "decision_index_calibration_excluded_rows": excluded,
+        "decision_index_calibration_questions": len(overall),
+    }
+    if overall:
+        out.update(_calibration_summary(overall, "decision_index_"))
+    for area, items in by_area.items():
+        if items:
+            for name, value in _calibration_summary(items, "decision_index_").items():
+                out[f"{name}_area/{area}"] = value
+    return out
 
 
 class RowsSuite:

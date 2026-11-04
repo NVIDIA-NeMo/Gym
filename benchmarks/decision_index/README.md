@@ -51,6 +51,18 @@ thresholds) see one-hot probabilities in LLM mode, so LLM scores on ToolRet and 
   raise `num_repeats` until the index varies by less than 1 point; the index scores the first repeat of each
   request, Gym's reward statistics cover all repeats). LLM sampling and token limits come from the model server.
 
+## Calibration (decision-model mode)
+
+A decision engine states a probability for every option, so the decision-model config also reports how well those
+probabilities are calibrated, from `nemo_gym.metrics.calibration`: mean Brier score
+(`decision_index_brier`, 0 to 2), mean log loss (`decision_index_log_loss`, gold probability floored at 1e-6) and
+top-label expected calibration error over 10 equal-width bins (`decision_index_ece`), lower is better for all three.
+Each is averaged over the scored questions (the same questions and gold as the row reward; a `noul` answer is the
+pair `{true: p, false: 1 - p}`; ChessBench and Habermas, which accept several answers, are left out), overall and per
+area (`decision_index_brier_area/<area>`, ...). Rows without probabilities (failed, unsupported or invalid
+answers) are left out and counted in `decision_index_calibration_excluded_rows`. LLM mode has no distribution
+(chosen options get probability 1), so it reports none.
+
 Reference: Nemotron Decide 8B, served locally (FP8, packed reads, 8 GPUs, one Gym shard per server): this benchmark gives public DI 0.3 = 67.21 (raw 75.34), 140,178/140,178 answered and healthy, the same as the kit on the same serving to the last digit (every benchmark identical; same top choice on 312,320/312,320 questions).
 
 ## Data
