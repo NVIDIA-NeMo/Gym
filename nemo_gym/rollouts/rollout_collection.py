@@ -93,7 +93,7 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     CANCELLED,
@@ -5591,6 +5591,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 sources: Dict[str, Tuple[int, str]] = {}
                 for index, (row, copy) in enumerate(zip(examples, dispatched)):
                     scoped = copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
+                    check_rollout_id_length(scoped)  # the run-id prefix makes a long id longer
                     if scoped in sources:
                         first, source = sources[scoped]
                         raise ValueError(

@@ -15147,6 +15147,32 @@ class TestRunRecordWriter:
             run_id = dispatched[0][RUN_ID_KEY]
             assert [row[ROLLOUT_ID_KEY_NAME] for row in dispatched] == [f"{run_id}.0", f"{run_id}.1"]
 
+    def test_a_rollout_id_too_long_for_its_capture_files_is_refused_before_dispatch(self, tmp_path: Path) -> None:
+        from nemo_gym.core.episode_context import MAX_ROLLOUT_ID_LENGTH
+
+        # With the 33-character run-id prefix, the longest id that fits and the next one up.
+        fits = TestEnrichRunResult._row("x" * (MAX_ROLLOUT_ID_LENGTH - 33))
+        too_long = TestEnrichRunResult._row("x" * (MAX_ROLLOUT_ID_LENGTH - 32))
+        dispatched: list[dict] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched.extend(examples)
+                return iter([])
+
+        with pytest.raises(
+            ValueError, match=rf"is {MAX_ROLLOUT_ID_LENGTH + 1} bytes, more than the {MAX_ROLLOUT_ID_LENGTH}"
+        ):
+            Helper().run_examples([too_long], record_output_dir=tmp_path, record_shard="s")
+        assert dispatched == [] and not (tmp_path / "rollouts-s.jsonl").exists()
+        Helper().run_examples([fits], record_output_dir=tmp_path, record_shard="s")
+        [row] = dispatched
+        # The capture files of its highest allowed attempt still fit a file name.
+        assert len(f"{row[ROLLOUT_ID_KEY_NAME]}-a9999.capture.incomplete") == 255
+
     def test_a_superseded_writer_leaves_the_newer_shard_status_alone(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
 
