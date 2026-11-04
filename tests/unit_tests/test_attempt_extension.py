@@ -302,3 +302,25 @@ def test_the_journal_names_the_user_who_extended_the_attempts(tmp_path, slurm_bi
     assert out.dispatched == "resubmit", out.decision.reason
     [entry] = [json.loads(line) for line in (job / RETRY_EXTENSION_JOURNAL_NAME).read_text().splitlines()]
     assert entry["user"] == "operator-a" and entry["kind"] == "attempts"
+
+
+def test_a_fresh_run_at_the_same_path_does_not_inherit_an_earlier_runs_extension(tmp_path):
+    # An earlier run at this path was extended by 5 attempts. A fresh run there, configured for 3, keeps cap 3 when it
+    # starts and when it resumes: the extension belonged to the run it replaced.
+    output = tmp_path / "artifacts" / "rollouts.jsonl"
+    output.parent.mkdir(parents=True)
+    (output.parent / EXTENSION).write_text("5\n")
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(2)]
+    source = tmp_path / "source.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def prepare():
+        inputs = json.loads(json.dumps(rows))
+        return inputs, RunManifest.create(source, inputs, {}, {}).model_copy(update={"max_rollout_attempts": 3})
+
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as fresh:
+        assert fresh.started_fresh and fresh.attempt_cap == 3
+    assert not (output.parent / EXTENSION).exists()
+
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
+        assert resumed.attempt_cap == 3
