@@ -94,6 +94,12 @@ fi
 """
 
 
+# A headless run ends when the CLI exits, and the CLI first waits for every background task. A Bash command the model
+# moves to the background (`run_in_background`) can therefore hold the run open long after the final answer, up to
+# the agent timeout. Keep commands in the foreground, where the Bash tool's own timeout bounds them.
+_HEADLESS_RUN_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+
+
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
@@ -327,6 +333,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
+                **_HEADLESS_RUN_ENV,
             }
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
@@ -713,6 +720,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            **_HEADLESS_RUN_ENV,
         }
         if base_url:
             env.update(
