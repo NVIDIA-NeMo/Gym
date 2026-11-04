@@ -1357,6 +1357,41 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_trajectory_keeps_each_captured_calls_total_duration(self) -> None:
+        # A saved row keeps every captured call's start, end and total duration, a failed call's too, so a reader can
+        # tell how long the model server took inside the agent's window.
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        result = {
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "ok",
+                        "started_at": 100.0,
+                        "completed_at": 101.5,
+                        "status_code": 200,
+                        "latency_ttft_ms": 40.0,
+                        "latency_total_ms": 1500.0,
+                    },
+                    {
+                        "model_call_id": "failed",
+                        "started_at": 102.0,
+                        "completed_at": 132.0,
+                        "status_code": 503,
+                        "error_category": "upstream_error",
+                        "latency_total_ms": 30000.0,
+                    },
+                ]
+            }
+        }
+
+        calls = _build_trajectory_record(row, result).model_calls
+
+        assert [(call.started_at, call.completed_at, call.duration_ms) for call in calls] == [
+            (100.0, 101.5, 1500.0),
+            (102.0, 132.0, 30000.0),
+        ]
+        assert calls[0].response_metadata.latency_ttft_ms == 40.0
+
     def test_trajectory_projection_failure_preserves_rollout(self) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {
@@ -1392,10 +1427,53 @@ class TestRolloutCollection:
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
 
-    def test_rollout_for_export_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
+    def test_rollout_for_export_keeps_canonical_facts_without_trajectory_or_capture_payloads(self) -> None:
         result = {
             "response": {"output": "existing rollout content"},
-            "ng_trajectory": {"invocations": [{"conversation": ["trajectory secret"]}]},
+            "ng_trajectory": {
+                "task_id": "task",
+                "rollout_id": "task-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "status": "completed",
+                        "conversation": [{"role": "user", "content": "trajectory secret"}],
+                    }
+                ],
+                "verifier_invocations": [{"invocation_id": "verify-1", "status": "completed"}],
+                "model_calls": [
+                    {
+                        "model_call_id": "model-1",
+                        "request": {"input": "request secret"},
+                        "response": {"output": "response secret"},
+                        "response_metadata": {"status_code": 200},
+                    }
+                ],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "task",
+                        "rollout_id": "task-0",
+                        "turn_no": 1,
+                        "timestamp": 1.0,
+                        "step_count": 1,
+                        "question": "question secret",
+                        "answer": "answer secret",
+                        "reasoning_content": "reasoning secret",
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "invocation_id": "root",
+                        "tool_call_id": "tool-1",
+                        "status": "failed",
+                        "error_type": "TimeoutError",
+                        "duration_ms": 12.0,
+                        "output": "tool secret",
+                    }
+                ],
+                "gaps": [{"code": "resolution_unavailable"}],
+            },
             "ng_model_call_capture": {
                 "calls": [
                     {
@@ -1411,7 +1489,31 @@ class TestRolloutCollection:
 
         sanitized = _rollout_for_export(result)
 
-        assert "ng_trajectory" not in sanitized
+        trajectory = sanitized["ng_trajectory"]
+        assert trajectory["verifier_invocations"] == result["ng_trajectory"]["verifier_invocations"]
+        assert trajectory["invocations"] == [{"invocation_id": "root", "status": "completed"}]
+        assert trajectory["model_calls"] == [{"model_call_id": "model-1", "response_metadata": {"status_code": 200}}]
+        assert trajectory["tool_calls"] == [
+            {
+                "invocation_id": "root",
+                "tool_call_id": "tool-1",
+                "status": "failed",
+                "error_type": "TimeoutError",
+                "duration_ms": 12.0,
+            }
+        ]
+        assert trajectory["gaps"] == result["ng_trajectory"]["gaps"]
+        assert trajectory["turns"] == [
+            {
+                "invocation_id": "root",
+                "task_id": "task",
+                "rollout_id": "task-0",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "step_count": 1,
+            }
+        ]
+        assert b"secret" not in orjson.dumps(sanitized)
         assert sanitized["ng_model_call_capture"]["calls"] == [{"model_call_id": "model-1"}]
         assert sanitized["response"] == result["response"]
         assert result["ng_model_call_capture"]["calls"][0]["request"] == {"input": "request secret"}
@@ -4378,6 +4480,26 @@ class TestRolloutCollection:
             (1, 1),
         ]
         assert {row["responses_create_params"]["input"] for row in result} == {"question a", "question b"}
+
+    def test_preprocess_rows_limit_logs_tasks_and_resulting_rows(self, tmp_path: Path, capsys) -> None:
+        """The --limit line names the tasks kept and the rows they become, since operators read --limit as rows."""
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            "".join(json.dumps({"responses_create_params": {"input": f"question {name}"}}) + "\n" for name in "aabbcc")
+        )
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            limit=2,
+            num_repeats=3,
+        )
+
+        result = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        # Two tasks, each saved twice and repeated three times.
+        assert len(result) == 12
+        assert "Limiting to 2 tasks (12 rows with their repeats); --limit=2 counts tasks" in capsys.readouterr().out
 
     def test_preprocess_rows_prompt_config_preserves_rcp_fields(self, tmp_path: Path) -> None:
         """prompt_config preserves other responses_create_params fields like tools."""

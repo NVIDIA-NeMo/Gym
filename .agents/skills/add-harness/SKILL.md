@@ -161,7 +161,12 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Pairing declared | Where a paired benchmark's Resources Server declares `allowed_agents`, the harness is in it, reviewed by the benchmark's owner. | Resources Server config diff |
 | Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) table lists the harness; so do the [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) table for a sandboxed harness and each paired benchmark's README harness table, where one exists. Each entry matches the adapter: its limits, the request fields it rejects, and whether it captures token IDs. | Docs diff |
 
+To run an evaluation with the harness as a submitted job on a cluster (submit, resume, recover, acceptance gates),
+follow the [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md) skill.
+
 The [conformance results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#results) are published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
+
+An agent that grades its own rollouts (no resources server) also follows [add-benchmark](../add-benchmark/SKILL.md), Step 7b, "Failure-handling conformance": its grading path, typed failures, time contract and the three fault fixtures.
 
 ## Step 8: Pre-commit and PR
 

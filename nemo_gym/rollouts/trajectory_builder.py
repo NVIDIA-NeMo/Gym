@@ -315,6 +315,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "model_operations",
                 "error_category",
                 "latency_ttft_ms",
+                "requested_max_tokens",
+                "applied_max_tokens",
+                "output_budget_refit",
             )
             if raw_call.get(key) is not None
         }
@@ -376,6 +379,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         # Contradictory returned facts cannot establish authoritative verifier coverage.
                         gaps.append(ObservationGap(code=f"verifier_{field}_conflict"))
                         setattr(existing, field, [])
+                if invocation.grading_record is not None:
+                    existing.grading_record = invocation.grading_record
                 if invocation.status != "unknown":
                     existing.status = invocation.status
                     existing.failure_kind = invocation.failure_kind
