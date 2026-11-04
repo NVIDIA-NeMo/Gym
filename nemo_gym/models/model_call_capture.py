@@ -40,22 +40,15 @@ from fastapi import Request, Response
 from pydantic import BaseModel, model_validator
 
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
 )
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
-)
-from nemo_gym.models.token_capture import (
-    CaptureContext,
-    installed_lineage_store,
-    installed_token_sink,
-    reset_token_sink,
-    set_token_sink,
 )
 from nemo_gym.models.token_capture.config import token_capture_config
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
@@ -64,8 +57,11 @@ from nemo_gym.models.token_capture.protocols import (
     CaptureLedger,
     LineageResolver,
     ParentResolutionMode,
+    installed_lineage_store,
+    installed_token_sink,
 )
 from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
 

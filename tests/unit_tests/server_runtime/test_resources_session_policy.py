@@ -20,7 +20,7 @@ from uuid import UUID
 import pytest
 from pydantic import BeforeValidator, TypeAdapter, ValidationError
 
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.server_runtime.base_resources_server import (
     BaseSeedSessionRequest,
     ResourcesCloseSessionRequest,

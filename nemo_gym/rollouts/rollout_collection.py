@@ -89,7 +89,8 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     CANCELLED,
     COLLECTION_DISPATCH_FAILED,
@@ -100,8 +101,10 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
+from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollouts.batch_status import BatchStatusTracker
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
@@ -145,12 +148,6 @@ from nemo_gym.rollouts.rollout_recovery import (
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_runtime.episode_types import (
-    EpisodeFailure,
-    FailureBoundary,
-    FailureReport,
-    is_materialized_task_row,
-)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -172,7 +169,6 @@ from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     failure_observations,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -199,21 +195,20 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.models.token_capture import (
-    TokenCaptureConfig,
-    TokenCaptureStore,
+from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
-    installed_token_source,
     mask_incomplete_when_attributed_from_config,
     token_capture_dirs_from_config,
 )
-from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
+from nemo_gym.models.token_capture.protocols import installed_token_source
+from nemo_gym.models.token_capture.store import TokenCaptureStore
 from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 
 

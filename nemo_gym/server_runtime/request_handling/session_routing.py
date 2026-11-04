@@ -727,17 +727,42 @@ class SessionRoutingMiddleware:
     ) -> None:
         """Serve a request for a session this worker claims, or may claim, and record it for the claim's lifetime."""
         status: list[int] = []
+        rotated = False
+        refused = False
 
         async def send_and_record(message: Message) -> None:
+            nonlocal rotated, refused
+            if refused:
+                return
             if message["type"] == "http.response.start":
                 status.append(message["status"])
+                if (
+                    200 <= message["status"] < 300
+                    and self.kind.cookie_session
+                    and isinstance(self.lifetimes, ResourcesSessionLifetimes)
+                    and self.lifetimes.starts(scope["path"])
+                ):
+                    seeded_id = (scope.get("session") or {}).get(self.kind.cookie_key)
+                    if isinstance(seeded_id, str) and seeded_id != session_id:
+                        # A seed can rotate a completed cookie. Claim the replacement before the client can use
+                        # its cookie or MCP token, and retain the old claim only for verification retries.
+                        if claims.claim(seeded_id) != self.routing_id:
+                            refused = True
+                            status[-1] = 409
+                            await _conflict(
+                                "The seeded session's ID is already claimed. Retry it.", scope, receive, send
+                            )
+                            return
+                        self.lifetimes.served(seeded_id, scope, message["status"])
+                        self.lifetimes.ended(session_id)
+                        rotated = True
             await send(message)
 
         with claims.serving(session_id):
             try:
                 await self.app(scope, receive, send_and_record)
             finally:
-                if self.lifetimes is not None and claims.mine(session_id):
+                if not rotated and self.lifetimes is not None and claims.mine(session_id):
                     self.lifetimes.served(session_id, scope, status[0] if status else None)
 
     def _session_id_from_headers(self, connection: HTTPConnection) -> Optional[str]:

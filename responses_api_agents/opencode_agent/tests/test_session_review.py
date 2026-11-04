@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+from nemo_gym.agents import raises_agent_failure
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import format_error_message

@@ -95,7 +95,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
-from nemo_gym.core.episode import current_episode_id
+from nemo_gym.core.episode_context import current_episode_id
 from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
 from nemo_gym.server_runtime.base_resources_server import (
     MCP_TOKEN_EPISODE_CLAIM,
@@ -594,7 +594,7 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     idx, route = _take_route(app, "/seed_session", "its response carries the MCP session token to the agent")
     method = route.endpoint
     signature = inspect.signature(method)
-    hints = get_type_hints(method)
+    hints = get_type_hints(method, include_extras=True)
     # Does the original handler already declare a Request param? If so, reuse it; the wrapper reads
     # the Request out of that same name instead of injecting a second one.
     request_param_name = next(

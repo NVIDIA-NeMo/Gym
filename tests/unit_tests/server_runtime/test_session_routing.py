@@ -191,6 +191,32 @@ class StateServer(SimpleResourcesServer):
         return {"worker": self.label, "value": self.store.get(request.session[SESSION_ID_KEY])}
 
 
+class SharedLifecycleStateServer(StateServer):
+    """Exercise the shared lifecycle and its verifier retry records through real routing."""
+
+    seed_session = SimpleResourcesServer.seed_session
+    close_resources_session = SimpleResourcesServer.close_resources_session
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.store
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        self.store[session_id] = 42
+
+    async def release_session_state(self, session_id: str) -> None:
+        self.store.pop(session_id, None)
+
+    async def verify(self, request: Request) -> dict:
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id in self.store:
+            value = self.store.pop(session_id)
+            self._verified_sessions.remember(session_id, (None, value))
+        else:
+            verified = self._verified_sessions.get(session_id)
+            value = verified[1] if verified is not None else None
+        return {"worker": self.label, "value": value}
+
+
 class SessionIgnoringSeedServer(StateServer):
     """Seeds with the default ``seed_session``, which never reads the session, as an agent's own ``/run`` seeds."""
 
@@ -1505,3 +1531,35 @@ class TestPrivateSocketBacklog:
         asyncio.run(serve())
 
         assert backlogs == [16384]
+
+
+@pytest.mark.parametrize("mcp", [False, True])
+def test_rotated_cookie_keeps_worker_ownership_and_retires_only_old_claim(socket_dir: str, mcp: bool) -> None:
+    a = Worker("a", socket_dir, mcp=mcp, close_window_seconds=0.5, server_class=SharedLifecycleStateServer)
+    b = Worker("b", socket_dir, mcp=mcp, close_window_seconds=0.5, server_class=SharedLifecycleStateServer)
+    with a.client, b.client:
+        seeded = a.post("/seed_session", json={})
+        assert seeded.status_code == 200, seeded.text
+        old_cookie = seeded.cookies[a.cookie_name]
+        old_id = a.session(seeded)[SESSION_ID_KEY]
+        assert b.post("/verify", cookie=old_cookie).json() == {"worker": "a", "value": 42}
+
+        rotated = b.post("/seed_session", cookie=old_cookie, json={})
+        assert rotated.status_code == 200, rotated.text
+        new_cookie = rotated.cookies[a.cookie_name]
+        new_id = a.session(rotated)[SESSION_ID_KEY]
+        assert new_id != old_id
+        if mcp:
+            token = rotated.json()["mcp"]["headers"][TOKEN_HEADER]
+            taken = _mcp_payload(_mcp_call(b.client, "take", {}, token))
+        else:
+            taken = b.post("/take", cookie=new_cookie).json()
+        assert taken == {"worker": "a", "value": 42}
+        assert _claimant(socket_dir, new_id) == a.routing_id
+        # The old verifier receipt remains reachable for its bounded retry window.
+        assert b.post("/verify", cookie=old_cookie).json() == {"worker": "a", "value": 42}
+        _wait_until(lambda: _claimant(socket_dir, old_id) is None)
+        # The new session's successful seed must mark its claim open until an end.
+        assert _claimant(socket_dir, new_id) == a.routing_id
+        assert b.post("/verify", cookie=new_cookie).status_code == 200
+        _wait_until(lambda: _claimant(socket_dir, new_id) is None)

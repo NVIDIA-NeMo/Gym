@@ -63,6 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    NgFailureEvent,
 )
 from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
@@ -88,7 +89,6 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.opencode_agent.observability import (
     append_opencode_turns,

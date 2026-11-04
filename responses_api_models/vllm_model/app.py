@@ -32,12 +32,12 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
-from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI
+from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
-from nemo_gym.client.openai_client import MAX_NUM_TRIES
 from nemo_gym.core import (
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
+    FailureHeader,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -46,38 +46,39 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
+    failure_report_for,
 )
-from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.models import (
-    CAPTURE_REFUSAL_HEADER,
-    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
-    CaptureAdmissionError,
-    CaptureContext,
-    CaptureInputError,
     ExternalCaptureHandler,
     SimpleResponsesAPIModel,
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
-    capture_engine_refusal,
     context_overflow_error_fields,
-    current_capture_context,
     is_propagated_refusal,
     make_external_capture_handler,
     note_generation_backend,
     note_generation_request,
-    reset_token_sink,
-    resolve_parent,
-    set_token_sink,
     split_responses_input_output_items,  # noqa: F401
     start_model_execution,
-    token_capture_config,
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
-from nemo_gym.typed_exceptions import failure_report_for
+from nemo_gym.models.token_capture import (
+    CAPTURE_REFUSAL_HEADER,
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    CaptureAdmissionError,
+    CaptureContext,
+    CaptureInputError,
+    capture_engine_refusal,
+    current_capture_context,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
+    token_capture_config,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 

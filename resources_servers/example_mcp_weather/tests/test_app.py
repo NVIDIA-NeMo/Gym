@@ -395,10 +395,11 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
         assert server.session_id_to_state == before
 
 
-def test_malformed_typed_seed_does_not_fall_back_to_legacy() -> None:
+@pytest.mark.parametrize("mcp", [False, True])
+def test_malformed_typed_seed_does_not_fall_back_to_legacy(mcp: bool) -> None:
     server = _server()
     malformed = dict({"verifier_metadata": {"expected_city": "Paris"}}) | {"resources_session_id": "incomplete-typed"}
-    with TestClient(server.setup_webserver()) as client:
+    with _mcp_client(server) if mcp else TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=malformed).status_code == 422
     assert server.session_id_to_state == {}
     assert server._session_episodes == {}

@@ -139,7 +139,7 @@ MOVED_MODULES: dict[str, MovedPath] = {
     ),
     "nemo_gym.mcp_auto_exposure": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure", since="0.8.0"),
     "nemo_gym.server_status": MovedPath(new="nemo_gym.server_runtime.server_status", since="0.8.0"),
-    "nemo_gym.episode_types": MovedPath(new="nemo_gym.server_runtime.episode_types", since="0.8.0"),
+    "nemo_gym.episode_types": MovedPath(new="nemo_gym.core.episode_types", since="0.8.0"),
     "nemo_gym.single_agent_turn_types": MovedPath(
         new="nemo_gym.server_runtime.single_agent_turn_types", since="0.8.0"
     ),
@@ -227,7 +227,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names(
-            "nemo_gym.core.episode",
+            "nemo_gym.core.episode_context",
             "0.8.0",
             """
             current_rollout_id current_verifier_invocation_id maybe_rollout_id_from_run_body rollout_context
@@ -476,7 +476,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     },
     "nemo_gym.rollout_correlation": {
         **_names(
-            "nemo_gym.core.episode",
+            "nemo_gym.core.episode_context",
             "0.8.0",
             """
             VERIFIER_INVOCATION_HEADER _ROLLOUT_ID _VERIFIER_INVOCATION_ID current_episode_id
@@ -493,16 +493,18 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         # rollout_correlation imported these and they stay importable through it.
-        **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId"),
+        **_names("nemo_gym.core.episode_types", "0.8.0", "EpisodeId"),
         # rollout_correlation imported these and they stay importable through it.
         **_names("pydantic", "0.8.0", "BaseModel"),
         # Moved, and still imported by rollout_correlation for its own use.
-        **_names("nemo_gym.core.episode", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
+        **_names("nemo_gym.core.episode_context", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
     },
     "nemo_gym.episode_types": {
-        **_names("nemo_gym.core.episode", "0.8.0", "_CAPTURE_KEY_ATTEMPT"),
+        **_names("nemo_gym.core.failure_records", "0.8.0", "FailureBoundary FailureEvent SdkErrorDetails"),
         # Moved, and still imported by episode_types for its own use.
-        **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId TaskId"),
+        **_names("nemo_gym.core.failure_records", "0.8.0", "EpisodeFailure FailureReport"),
+        # episode_types imported these and they stay importable through it.
+        **_names("nemo_gym.core.failure_kinds", "0.8.0", "FailureStage validate_failure_kind"),
     },
     "nemo_gym.rollout_collection": {
         **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS _strip_capture_payloads"),
@@ -587,7 +589,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         ),
         # base_responses_api_model imported these for code that moved out of it.
         **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX TOKEN_CAPTURE_PATH_SEGMENT"),
-        **_names("nemo_gym.core.episode", "0.8.0", "VERIFIER_INVOCATION_HEADER rollout_context"),
+        **_names("nemo_gym.core.episode_context", "0.8.0", "VERIFIER_INVOCATION_HEADER rollout_context"),
         **_names("nemo_gym.models._checkpoint", "0.8.0", "attach_capture_context ledger_removal_refusal"),
         **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
         **_names("pydantic", "0.8.0", "model_validator"),
@@ -730,6 +732,16 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names("nemo_gym.telemetry.startup", "0.8.0", "STARTUP_SETUP_DONE_NS_ENV SupervisorStartup"),
+    },
+    # The token_id_capture package imported this name without exporting it.
+    # Token capture's public API serves only the names it lists.
+    "nemo_gym.token_id_capture": {
+        **_names("nemo_gym.models.token_capture.fingerprint", "0.8.0", "canonicalize_tool_arguments"),
+    },
+    # The token_id_capture staging package re-exported the terminal resolver from token capture.
+    # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
+    "nemo_gym.token_id_capture.staging": {
+        **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
 }
 

@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, validate_failure_kind
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,

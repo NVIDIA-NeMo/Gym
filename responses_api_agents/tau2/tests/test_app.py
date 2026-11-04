@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.agents.base_responses_api_agent import AggregateMetricsRequest
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest

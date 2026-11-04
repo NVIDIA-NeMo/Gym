@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from pydantic import Field, JsonValue, PrivateAttr
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
