@@ -608,7 +608,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         spec,
                         network_access=self.config.network_access,
                         provider_name=provider.name,
-                        model_base_url=self._resolve_base_url(),
+                        # With neither a Gym model server nor anthropic_base_url, the CLI calls Anthropic's own API.
+                        # Only the allowlist needs that host; activation still leaves ANTHROPIC_BASE_URL unset.
+                        model_base_url=self._resolve_base_url() or "https://api.anthropic.com",
                     )
                 except BaseException:
                     await provider.aclose()
