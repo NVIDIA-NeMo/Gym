@@ -70,6 +70,14 @@ TRANSPORT_LOCAL_RESOURCE = "transport_local_resource"
 # Both are produced today by rollout collection: the agent answered and broke, versus
 # something in front of it answered and the rollout never ran.
 AGENT_RUN_ERROR = "agent_run_error"
+# An agent server route failed; its reply is its cause's reply.
+AGENT_ROUTE_FAILED = "agent_route_failed"
+# A harness supervisor reported that termination was not confirmed (a negative cleanup receipt).
+HARNESS_TERMINATION_UNCONFIRMED = "harness_termination_unconfirmed"
+# An environment server handled an episode failure that names no more specific kind.
+EPISODE_FAILED = "environment_episode_failed"
+# Collection could not dispatch an episode; routing metadata remains separate.
+COLLECTION_DISPATCH_FAILED = "collection_dispatch_failed"
 AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
@@ -80,6 +88,8 @@ AGENT_INVALID_OUTPUT = "agent_invalid_output"
 # Preserve the upstream HTTP status separately; it is not a retry policy.
 MODEL_REQUEST_ERROR = "model_request_error"
 MODEL_TRANSPORT_ERROR = "model_transport_error"
+# A policy-model operation whose observed attempts all timed out after a confirmed upload.
+MODEL_POLICY_RESPONSE_TIMEOUT = "model_policy_response_timeout"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
 
@@ -97,6 +107,8 @@ VERIFIER_ERROR = "verifier_error"
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
 PROVIDER_OOM_KILLED = "provider_oom_killed"
+# The provider answered HTTP 401 or 403: the sandbox credentials were refused.
+PROVIDER_CREDENTIALS_REJECTED = "provider_credentials_rejected"
 
 # --- resources session ------------------------------------------------------------------ #
 SESSION_LOST = "session_lost"
@@ -109,10 +121,18 @@ SESSION_RELEASE_FAILED = "session_release_failed"
 CANCELLED = "cancelled"
 KILL_SHAPED = "kill_shaped"
 SHUTDOWN = "shutdown"
+# A Gym server process exited before it was ready, for example because its port was already in use.
+SERVER_START_FAILED = "server_start_failed"
 
 # --- persistence and cohorts --------------------------------------------------------------- #
 PERSISTENCE_FAILED = "persistence_failed"
 COHORT_INCOMPLETE = "cohort_incomplete"
+
+# --- producer labels older than the layer-prefix rule ------------------------------------------ #
+# Shipped producers write these today: the Harbor agent's failed trial, and the terminal-bench sidecar class of an
+# agent or sandbox failure. They are registered so saved rows have an owner; new producers use a prefixed name.
+HARBOR_FAILED = "harbor_failed"
+INFRASTRUCTURE_ERROR = "infrastructure_error"
 
 
 FAILURE_KINDS: frozenset[str] = frozenset(
@@ -131,6 +151,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_INVALID_OUTPUT,
         MODEL_REQUEST_ERROR,
         MODEL_TRANSPORT_ERROR,
+        MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
@@ -138,14 +159,22 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         PROVIDER_UNAVAILABLE,
         PROVIDER_QUOTA_EXHAUSTED,
         PROVIDER_OOM_KILLED,
+        PROVIDER_CREDENTIALS_REJECTED,
         SESSION_LOST,
         SESSION_EXPIRED,
         SESSION_RELEASE_FAILED,
         CANCELLED,
         KILL_SHAPED,
         SHUTDOWN,
+        SERVER_START_FAILED,
         PERSISTENCE_FAILED,
         COHORT_INCOMPLETE,
+        AGENT_ROUTE_FAILED,
+        HARNESS_TERMINATION_UNCONFIRMED,
+        EPISODE_FAILED,
+        COLLECTION_DISPATCH_FAILED,
+        HARBOR_FAILED,
+        INFRASTRUCTURE_ERROR,
     }
 )
 
@@ -153,6 +182,11 @@ FAILURE_KINDS: frozenset[str] = frozenset(
 def is_registered(name: str) -> bool:
     """Whether ``name`` is part of the shared vocabulary."""
     return name in FAILURE_KINDS
+
+
+JUDGE_FAILURE_KINDS = ("judge_failed", "judge_invalid", JUDGE_UNPARSEABLE)
+"""The judge failures whose saved answer is judged again, never regenerated: a failed judge call, a verdict that did not
+parse (``judge_unparseable``), and collection's own legacy class for an invalid judge response (``judge_invalid``)."""
 
 
 def is_namespaced(name: str) -> bool:
@@ -182,4 +216,11 @@ def validate_failure_kind(name: str | None) -> str | None:
             "'<server>:<kind>'. Reported once per name.",
             name,
         )
+    return name
+
+
+def require_failure_kind(name: str | None) -> str:
+    """Validate a canonical event kind; legacy outcome envelopes keep their migration validator."""
+    if name is None or not (is_registered(name) or is_namespaced(name)):
+        raise ValueError(f"failure_kind {name!r} is not registered in nemo_gym/core/failure_kinds.py or namespaced")
     return name

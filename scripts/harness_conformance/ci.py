@@ -39,7 +39,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
                 "scripts/harness_conformance/",
-                "tests/unit_tests/harness_capabilities/",
+                "tests/unit_tests/rollouts/harness_capabilities/",
                 "tests/unit_tests/test_harness_conformance",
             )
         ):
@@ -139,7 +139,7 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
         warning_title = "Harness conformance"
     else:
         status = "passed"
-        message = f"{harness}: all selected conformance requirements are fulfilled."
+        message = f"{harness}: P0 conformance requirements are fulfilled; additional checks are reported below."
     output.mkdir(parents=True, exist_ok=True)
     (output / "ci-result.json").write_text(
         json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"

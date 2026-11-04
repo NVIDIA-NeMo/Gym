@@ -34,8 +34,12 @@ class TestJudgeRecovery:
 
     @mark.parametrize("error_type", [ClientConnectionError, TimeoutError])
     async def test_a_judge_outage_is_a_judge_failure_that_keeps_the_answer(
-        self, server: ArenaResourcesServer, error_type
+        self, server: ArenaResourcesServer, error_type, monkeypatch
     ):
+        from nemo_gym.verification import judge as judge_module
+
+        monkeypatch.setattr(judge_module, "_judge_retry_wait_s", lambda attempt: 0)
+        attempts = judge_module.JUDGE_CALL_MAX_ATTEMPTS
         request = self._make_verify_request("Paris is the capital.")
         request.category = "lmarena_v3"
         server.server_client.post = AsyncMock(side_effect=error_type("judge unreachable"))
@@ -45,7 +49,9 @@ class TestJudgeRecovery:
         assert row["_ng_failure_class"] == "judge_failed" and row["mask_sample"] is True
         assert "judge unreachable" in row["_ng_failure_judge_error"]
         assert row["response"] == request.response.model_dump(mode="json")
-        assert server.server_client.post.await_count == 2
+        # Each ordering retries an outage up to the bounded attempts of one call; the first ordering
+        # to exhaust them cancels its sibling, so the total stays within twice that bound.
+        assert attempts <= server.server_client.post.await_count <= 2 * attempts
         assert all(
             call.kwargs["server_name"] == server.config.judge_model_server.name
             for call in server.server_client.post.await_args_list

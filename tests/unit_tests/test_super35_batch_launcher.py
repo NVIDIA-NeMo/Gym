@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.lmarena_v2 import prepare as lmarena_prepare
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 ROOT = Path(__file__).resolve().parents[2]

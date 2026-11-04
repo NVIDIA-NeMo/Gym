@@ -22,7 +22,7 @@ import yaml
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, SimpleResponsesAPIAgent
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.harness_capabilities.cli import digest_file
+from nemo_gym.rollouts.harness_capabilities import digest_file
 
 from .provider import OpenClawProbe, Probe
 from .registry import HARNESSES
@@ -196,6 +196,20 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             timeout,
             use_agent_sessions=use_agent_sessions,
         )
+        if scenario.compaction is not None:
+            agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
+            if harness in ("opencode", "pi"):
+                agent_config.update(context_window=32768 if scenario.compaction else 65536, max_output_tokens=8192)
+            elif harness == "codex":
+                agent_config.update(model_context_window=32768, model_auto_compact_token_limit=24000)
+            elif harness == "stirrup":
+                agent_config.update(context_window_tokens=32768)
+            elif harness == "hermes":
+                agent_config.update(
+                    compression_enabled=True, compression_threshold=0.1, max_turns=scenario.tool_steps + 4
+                )
+            elif harness == "simple":
+                agent_config.update(max_steps=scenario.tool_steps + 4)
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         if use_agent_sessions:
@@ -232,7 +246,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             environment_cls = LegacyAgentEnvironmentServer
             environment_config_cls = LegacyAgentEnvironmentServerConfig
         from nemo_gym.client import get_global_aiohttp_client, setup_server_client
-        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
         client = setup_server_client()
         agent = agent_cls(
