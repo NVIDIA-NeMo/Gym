@@ -15,6 +15,7 @@
 """tavily_search serves the typed resources sessions API through its real routes, next to unseeded tool callers."""
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
+    maybe_auto_expose,
 )
 from resources_servers.tavily_search.app import (
     TavilySearchRequest,
@@ -68,6 +70,13 @@ def make_server(*, checkpoint: bool = False, **config: Any) -> TavilySearchResou
     backend.search = AsyncMock(return_value=SEARCH_RESULTS)
     server._async_tavily_clients = [backend]
     return server
+
+
+def make_client(server: TavilySearchResourcesServer) -> TestClient:
+    app = server.setup_webserver()
+    if server.config.expose_tools_over_mcp:
+        maybe_auto_expose(server, app)
+    return TestClient(app)
 
 
 def seed_json(resources_session_id: str = "resources-session", **update: Any) -> dict[str, Any]:
@@ -122,7 +131,7 @@ def test_follows_the_session_contract() -> None:
 
 def test_a_typed_verify_releases_live_metrics_and_preserves_its_retry() -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
 
     seeded = client.post("/seed_session", json=seed_json())
     assert seeded.status_code == 200, seeded.text
@@ -135,11 +144,11 @@ def test_a_typed_verify_releases_live_metrics_and_preserves_its_retry() -> None:
     assert verified["reward"] == 1.0
     assert [call["function"] for call in verified["metrics"]["async_tavily_calls"]] == ["search"]
     assert "resources-session" not in server._session_id_to_metrics
-    assert "resources-session" not in server._typed_sessions
+    assert "resources-session" not in server._session_episodes
     resent = client.post("/verify", json=verify_json()).json()
     assert resent["metrics"] == verified["metrics"]
     assert (resent["reward"], resent["mask_sample"]) == (1.0, False)
-    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert client.post("/seed_session", json=seed_json()).status_code == 409
     assert "resources-session" not in server._session_id_to_metrics
     assert client.post("/web_search", json={"query": "capital of France"}).status_code == 404
 
@@ -147,12 +156,12 @@ def test_a_typed_verify_releases_live_metrics_and_preserves_its_retry() -> None:
     client.cookies.clear()
     assert client.post("/close_session", json=close_json()).status_code == 200
     assert "resources-session" not in server._session_id_to_metrics
-    assert server._verified_sessions.get("resources-session").metrics is None
+    assert server._verified_sessions.get("resources-session")[1].metrics is None
 
 
 def test_a_late_tool_call_does_not_recreate_a_closed_session() -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     client.post("/seed_session", json=seed_json())
     client.post("/close_session", json=close_json())
 
@@ -193,7 +202,7 @@ async def test_a_search_in_flight_across_close_does_not_recreate_the_session() -
 
 def test_a_seed_for_the_same_episode_and_another_task_is_refused() -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     assert client.post("/seed_session", json=seed_json()).status_code == 200
 
     other_task = client.post("/seed_session", json=seed_json(task_id=TaskId(taskset="tavily_search", task_id="1")))
@@ -203,12 +212,12 @@ def test_a_seed_for_the_same_episode_and_another_task_is_refused() -> None:
 
 def test_a_seed_whose_task_data_is_not_a_task_is_refused_and_records_nothing() -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
 
     response = client.post("/seed_session", json=seed_json(task_data={"question": TASK_DATA["question"]}))
 
     assert response.status_code == 422
-    assert "task_data is not a tavily_search task" in response.json()["detail"]
+    assert "task_data is not a valid TavilyTypedSeedSessionRequest" in response.json()["detail"]
     assert server._session_id_to_metrics == {}
     # The refusal records nothing, so a corrected seed for the same ID succeeds.
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -217,7 +226,7 @@ def test_a_seed_whose_task_data_is_not_a_task_is_refused_and_records_nothing() -
 def test_an_unseeded_callers_metrics_are_released_by_verify() -> None:
     """A caller that never sends a typed seed, such as an Agent's /run or an MCP client, is scored as before."""
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
 
     # An Agent's /run seeds with its run body, which records nothing; the tools work either way.
     assert client.post("/seed_session", json=TASK_DATA | {"responses_create_params": {"input": "hi"}}).json() == {}
@@ -233,21 +242,27 @@ def test_an_unseeded_callers_metrics_are_released_by_verify() -> None:
     assert resent["metrics"] == verified["metrics"]
 
 
-def test_the_exit_dump_keeps_released_metrics() -> None:
+@pytest.mark.parametrize("verify_first", [False, True])
+def test_the_exit_dump_keeps_released_metrics(tmp_path: Path, verify_first: bool) -> None:
     server = make_server(dump_session_id_to_metrics_on_exit=True)
-    client = TestClient(server.setup_webserver())
-    client.post("/seed_session", json=seed_json())
-    client.post("/web_search", json={"query": "capital of France"})
-
-    assert client.post("/close_session", json=close_json()).status_code == 200
-
-    assert len(server._session_id_to_metrics["resources-session"].async_tavily_calls) == 1
+    with (
+        patch("resources_servers.tavily_search.app.__file__", str(tmp_path / "app.py")),
+        make_client(server) as client,
+    ):
+        assert client.post("/seed_session", json=seed_json()).status_code == 200
+        assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
+        if verify_first:
+            assert client.post("/verify", json=verify_json()).json()["reward"] == 1.0
+        assert client.post("/close_session", json=close_json()).status_code == 200
+        assert len(server._session_id_to_metrics["resources-session"].async_tavily_calls) == 1
+    dumped = json.loads((tmp_path / "session_id_metrics.json").read_text())
+    assert [call["function"] for call in dumped["resources-session"]["async_tavily_calls"]] == ["search"]
 
 
 @pytest.mark.parametrize("state", ["active", "verified", "closed"])
 def test_a_run_seed_cannot_reuse_a_typed_session(state: str) -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     assert client.post("/seed_session", json=seed_json()).status_code == 200
     if state == "verified":
         assert client.post("/verify", json=verify_json()).status_code == 200
@@ -260,7 +275,7 @@ def test_a_run_seed_cannot_reuse_a_typed_session(state: str) -> None:
 
 def test_a_typed_seed_cannot_claim_an_unseeded_callers_metrics() -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
     [session_id] = server._session_id_to_metrics
     original = server._session_id_to_metrics[session_id]
@@ -273,7 +288,7 @@ def test_failed_metrics_initialization_leaves_no_binding_and_can_be_retried() ->
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     with patch("resources_servers.tavily_search.app.TavilySearchMetrics", side_effect=MemoryError):
         assert client.post("/seed_session", json=seed_json()).status_code == 500
-    assert server._typed_sessions == {}
+    assert server._session_episodes == {}
     assert server._session_id_to_metrics == {}
     assert client.post("/seed_session", json=seed_json()).status_code == 200
     assert "resources-session" in server._session_id_to_metrics
@@ -281,7 +296,7 @@ def test_failed_metrics_initialization_leaves_no_binding_and_can_be_retried() ->
 
 def test_checkpoint_wait_verify_leaves_only_expiring_metrics() -> None:
     server = make_server(checkpoint=True)
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     assert client.post("/ng-rollout/rollout/seed_session", json=seed_json()).status_code == 200
     assert client.post("/ng-rollout/rollout/web_search", json={"query": "capital of France"}).status_code == 200
     assert server._checkpoint.readiness().counts["sessions"] == 1
@@ -291,7 +306,7 @@ def test_checkpoint_wait_verify_leaves_only_expiring_metrics() -> None:
     assert verified.status_code == 200
     assert server._checkpoint.readiness().counts["sessions"] == 0
     assert server._session_id_to_metrics == {}
-    assert server._typed_sessions == {}
+    assert server._session_episodes == {}
     resent = client.post("/ng-rollout/rollout/verify", json=verify_json()).json()
     assert resent["metrics"] == verified.json()["metrics"]
 
@@ -299,7 +314,7 @@ def test_checkpoint_wait_verify_leaves_only_expiring_metrics() -> None:
 @pytest.mark.parametrize("typed", [False, True])
 def test_checkpoint_retirement_releases_unverified_metrics(typed: bool) -> None:
     server = make_server(checkpoint=True)
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     assert client.post("/ng-rollout/rollout/seed_session", json=seed_json() if typed else TASK_DATA).status_code == 200
     assert client.post("/ng-rollout/rollout/web_search", json={"query": "capital of France"}).status_code == 200
     assert len(server._session_id_to_metrics) == 1
@@ -310,12 +325,12 @@ def test_checkpoint_retirement_releases_unverified_metrics(typed: bool) -> None:
     )
     assert retired.status_code == 200, retired.text
     assert server._session_id_to_metrics == {}
-    assert server._typed_sessions == {}
+    assert server._session_episodes == {}
 
 
 def test_verified_metrics_expire_and_close_still_checks_the_episode() -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     with patch("nemo_gym.server_runtime.base_resources_server.monotonic", return_value=0):
         assert client.post("/seed_session", json=seed_json()).status_code == 200
         assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
@@ -329,30 +344,36 @@ def test_verified_metrics_expire_and_close_still_checks_the_episode() -> None:
 
 
 @pytest.mark.parametrize("field", ["resources_session_id", "episode_id", "task_id", "task_data"])
-def test_a_malformed_typed_seed_cannot_fall_back_to_a_run_seed(field: str) -> None:
-    server = make_server()
-    client = TestClient(server.setup_webserver())
+@pytest.mark.parametrize("mcp", [False, True])
+def test_a_malformed_typed_seed_cannot_fall_back_to_a_run_seed(field: str, mcp: bool) -> None:
+    server = make_server(expose_tools_over_mcp=mcp)
+    client = make_client(server)
     body = seed_json()
     body.pop(field)
     # An extra top-level environment also must not let a malformed typed seed use the /run arm.
     body["environment"] = {}
     assert client.post("/seed_session", json=body).status_code == 422
-    assert server._typed_sessions == {}
+    assert server._session_episodes == {}
 
 
-def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
-    # A dataset row's scalar task_id is a row field, not a typed seed's TaskId.
-    server = make_server()
-    client = TestClient(server.setup_webserver())
-    body = TASK_DATA | {"responses_create_params": {"input": "hi"}, "task_id": "row-0"}
+@pytest.mark.parametrize("mcp", [False, True])
+def test_a_run_seed_keeps_a_row_with_its_own_task_id(mcp: bool) -> None:
+    # Dataset task_id/task_data fields do not make a row a typed seed.
+    server = make_server(expose_tools_over_mcp=mcp)
+    client = make_client(server)
+    body = TASK_DATA | {
+        "responses_create_params": {"input": "hi"},
+        "task_id": "row-0",
+        "task_data": {"custom": "legacy"},
+    }
     assert client.post("/seed_session", json=body).status_code == 200
     assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
-    assert server._typed_sessions == {}
+    assert server._session_episodes == {}
 
 
 def test_next_run_keeps_its_cookie_and_starts_fresh_metrics() -> None:
     server = make_server()
-    client = TestClient(server.setup_webserver())
+    client = make_client(server)
     body = TASK_DATA | {"responses_create_params": {"input": "hi"}}
     assert client.post("/seed_session", json=body).status_code == 200
     assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
@@ -389,8 +410,110 @@ async def test_a_failed_judge_retry_preserves_metrics_without_caching_the_failur
         with pytest.raises(JudgeError, match="unavailable"):
             await server.verify(request, body)
     assert server._session_id_to_metrics == {}
-    assert server._typed_sessions == {}
+    assert server._session_episodes == {}
     server.config.use_judge = False
     retried = await server.verify(request, body)
     assert retried.reward == 1.0 and retried.mask_sample is False
     assert [call.function for call in retried.metrics.async_tavily_calls] == ["search"]
+
+
+@pytest.mark.parametrize("mcp", [False, True])
+def test_minimal_legacy_seed_remains_valid_but_typed_seed_requires_the_task(mcp: bool) -> None:
+    server = make_server(expose_tools_over_mcp=mcp)
+    client = make_client(server)
+    assert client.post("/seed_session", json={}).status_code == 200
+    [session_id] = server._session_id_to_metrics
+    assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
+    rejected = client.post("/seed_session", json=seed_json(task_data={}))
+    assert rejected.status_code == 422
+    assert "question" in rejected.json()["detail"] and "ground_truth" in rejected.json()["detail"]
+    assert list(server._session_id_to_metrics) == [session_id]
+    assert server._session_episodes == {}
+
+
+def test_failed_legacy_reseed_keeps_retry_metrics_until_initialization_succeeds() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json={}).status_code == 200
+    assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
+    [session_id] = server._session_id_to_metrics
+    cookies = dict(client.cookies)
+    first = client.post("/verify", json=verify_json()).json()
+    with patch("resources_servers.tavily_search.app.TavilySearchMetrics", side_effect=MemoryError):
+        assert client.post("/seed_session", json={}).status_code == 500
+    assert dict(client.cookies) == cookies
+    assert session_id in server._verified_sessions and not server._session_id_to_metrics
+    assert client.post("/verify", json=verify_json()).json()["metrics"] == first["metrics"]
+    assert client.post("/seed_session", json={}).status_code == 200
+    assert list(server._session_id_to_metrics) == [session_id]
+    assert session_id not in server._verified_sessions
+    assert server._session_id_to_metrics[session_id].async_tavily_calls == []
+
+
+@pytest.mark.parametrize("dump_metrics", [False, True])
+def test_verify_retry_metrics_are_a_snapshot_of_the_finished_run(dump_metrics: bool) -> None:
+    server = make_server(dump_session_id_to_metrics_on_exit=dump_metrics)
+    client = make_client(server)
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
+    live_metrics = server._session_id_to_metrics["resources-session"]
+    first = client.post("/verify", json=verify_json()).json()
+    # A tool already awaiting Tavily can finish after verify has snapshotted its metrics.
+    live_metrics.async_tavily_calls.append(live_metrics.async_tavily_calls[0].model_copy())
+    retry = client.post("/verify", json=verify_json()).json()
+    assert len(retry["metrics"]["async_tavily_calls"]) == 1
+    assert retry["metrics"] == first["metrics"]
+
+
+@pytest.mark.parametrize("operation", ["legacy_reseed", "typed_close"])
+async def test_verification_serializes_with_reseed_and_close(operation: str) -> None:
+    from nemo_gym.server_runtime import BaseSeedSessionRequest
+    from resources_servers.tavily_search.app import JudgeEvaluation, TavilySearchVerifyRequest
+
+    server = make_server()
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "resources-session"}
+    seed = (
+        ResourcesSeedSessionRequest.model_validate(seed_json())
+        if operation == "typed_close"
+        else BaseSeedSessionRequest()
+    )
+    await server.seed_session(request, seed)
+    await server.web_search(request, TavilySearchRequest(query="capital of France"))
+    old_metrics = server._session_id_to_metrics["resources-session"]
+    server.config.use_judge = True
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def judge(*_args):
+        entered.set()
+        await finish.wait()
+        return JudgeEvaluation(reasoning="correct", extracted_final_answer="Paris", reward=1), None
+
+    with patch.object(type(server), "_verify_answer_with_judge", side_effect=judge):
+        verifying = asyncio.create_task(
+            server.verify(request, TavilySearchVerifyRequest.model_validate(verify_json()))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        if operation == "legacy_reseed":
+            changing = asyncio.create_task(server.seed_session(request, BaseSeedSessionRequest()))
+        else:
+            changing = asyncio.create_task(
+                server.close_resources_session(ResourcesCloseSessionRequest.model_validate(close_json()))
+            )
+        try:
+            await asyncio.sleep(0)
+            assert not changing.done()
+            assert server._session_id_to_metrics["resources-session"] is old_metrics
+        finally:
+            finish.set()
+            verified, _ = await asyncio.wait_for(asyncio.gather(verifying, changing), timeout=5)
+    assert verified.reward == 1.0 and len(verified.metrics.async_tavily_calls) == 1
+    if operation == "legacy_reseed":
+        assert request.session[SESSION_ID_KEY] == "resources-session"
+        assert server._session_id_to_metrics["resources-session"] is not old_metrics
+        assert server._session_id_to_metrics["resources-session"].async_tavily_calls == []
+        assert "resources-session" not in server._verified_sessions
+    else:
+        assert not server._session_id_to_metrics and not server._session_episodes
+        assert server._verified_sessions.get("resources-session")[1].metrics is None
+        assert server._fence.closed_episode("resources-session") == EPISODE
