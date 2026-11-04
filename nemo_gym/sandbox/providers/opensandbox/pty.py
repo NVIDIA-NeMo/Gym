@@ -45,10 +45,10 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_PTY_UNAVAILABLE,
     PROVIDER_REQUEST_FAILED,
 )
-from nemo_gym.failure_transport import observe_failure
+from nemo_gym.core.failure_transport import observe_failure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxPtySpec
 from nemo_gym.sandbox.providers.opensandbox.failures import opensandbox_failure
-from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 LOGGER = logging.getLogger(__name__)

@@ -25,6 +25,7 @@ import pytest
 
 import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtySpec
 from nemo_gym.sandbox.providers.opensandbox.pty import (
@@ -32,7 +33,6 @@ from nemo_gym.sandbox.providers.opensandbox.pty import (
     _effective_command,
     open_pty_session,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 pytestmark = pytest.mark.sandbox
@@ -1716,7 +1716,7 @@ async def test_pty_create_http_failure_is_a_serializable_sandbox_event(status, k
 
 
 async def test_recovered_pty_create_is_retained_in_success_report(monkeypatch):
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core.failure_transport import RequestFailureLog
 
     monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
     client = FakeHttpClient(ws=FakeWs([CONNECTED]), post_status=[503, 201])

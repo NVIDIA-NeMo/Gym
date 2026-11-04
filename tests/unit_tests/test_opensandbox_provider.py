@@ -44,10 +44,10 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
 )
-from nemo_gym.failure_transport import RequestFailureLog
+from nemo_gym.core.failure_transport import RequestFailureLog
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
-from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 @contextmanager
@@ -2287,7 +2287,7 @@ async def test_file_transfer_request_timeout_is_ungraded_provider_loss(tmp_path:
         write_file=AsyncMock(side_effect=TimeoutError("write request timed out")),
         read_bytes_stream=AsyncMock(side_effect=TimeoutError("read request timed out")),
     )
-    provider = opensandbox_provider.OpenSandboxProvider()
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retry_delay_s": 0})
     handle = opensandbox_provider.SandboxHandle(
         sandbox_id="transfer-timeout", provider_name="opensandbox", raw=SimpleNamespace(files=files)
     )
@@ -2303,7 +2303,7 @@ async def test_file_transfer_request_timeout_is_ungraded_provider_loss(tmp_path:
 
     assert not isinstance(caught.value, TimeoutError)
     assert isinstance(caught.value.__cause__, TimeoutError)
-    assert files.write_file.await_count + files.read_bytes_stream.await_count == 1
+    assert files.write_file.await_count + files.read_bytes_stream.await_count == (1 if operation == "upload" else 4)
     if operation == "download":
         assert path.read_bytes() == b""
 

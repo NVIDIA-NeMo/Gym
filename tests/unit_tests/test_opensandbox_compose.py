@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
-from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 pytestmark = pytest.mark.sandbox

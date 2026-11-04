@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_REQUEST_ERROR,
         MODEL_TRANSPORT_ERROR,
+        PROVIDER_OOM_KILLED,
         PROVIDER_UNAVAILABLE,
         SESSION_EXPIRED,
         SESSION_LOST,
@@ -65,6 +66,7 @@ if TYPE_CHECKING:
         FailureEvent,
         FailureReport,
         ModelFailureDetails,
+        SandboxFailureDetails,
         SdkErrorDetails,
     )
     from nemo_gym.core.failure_transport import (
@@ -162,6 +164,7 @@ _PUBLIC_API = {
     "MODEL_TRANSPORT_ERROR": "failure_kinds",
     "MaterializedTask": "episode_types",
     "ModelFailureDetails": "failure_records",
+    "SandboxFailureDetails": "failure_records",
     "NeMoGymChatCompletion": "responses_api_types",
     "NeMoGymChatCompletionAssistantMessageForTrainingParam": "responses_api_types",
     "NeMoGymChatCompletionAssistantMessageParam": "responses_api_types",
@@ -202,6 +205,7 @@ _PUBLIC_API = {
     "NeMoGymResponseUsage": "responses_api_types",
     "NeMoGymSummary": "responses_api_types",
     "NgFailureEvent": "typed_exceptions",
+    "PROVIDER_OOM_KILLED": "failure_kinds",
     "PROVIDER_UNAVAILABLE": "failure_kinds",
     "REQUIRED_TOKEN_METADATA_FIELDS": "responses_api_types",
     "RESPONSES_TO_TRAIN": "responses_api_types",
