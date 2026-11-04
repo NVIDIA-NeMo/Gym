@@ -1843,6 +1843,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 else {}
             ),
             "instructions": system if self.config.system_prompt_mode == "append" else "",
+            "literal_replacement_prompt": bool(system) and self.config.system_prompt_mode == "replace",
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
             "command": command,

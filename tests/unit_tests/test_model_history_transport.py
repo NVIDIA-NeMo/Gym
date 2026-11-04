@@ -18,6 +18,7 @@ import requests
 from nemo_gym.agents.utils.model_history_transport import (
     DeltaState,
     HistoryTransport,
+    _serialize_opencode_replacement_config,
     configure_transport,
     stage_cli_transport,
 )
@@ -477,6 +478,54 @@ def test_opencode_configuration_redirects_provider_without_changing_model_or_cre
         assert options["apiKey"] == "unchanged"
         assert updated["model"] == "nemo_gym/unchanged"
         assert params["command"] == ["opencode", "run"]
+
+
+@pytest.mark.parametrize("literal_replacement_prompt", [False, True], ids=["configured-prompt", "replacement-prompt"])
+def test_opencode_url_rewrite_preserves_selective_prompt_escaping(tmp_path, literal_replacement_prompt):
+    prompt = 'λ\n"quoted" \\path\\end\n{env:TEMPLATE_VALUE}\n{file:missing-prompt.txt}\nliteral \\u007b'
+    config = {
+        "model": "nemo_gym/unchanged",
+        "provider": {"nemo_gym": {"options": {"baseURL": "http://127.0.0.1:8000/v1", "apiKey": "unchanged"}}},
+        "agent": {
+            "build": {"prompt": prompt, "description": "{env:TEMPLATE_VALUE}"},
+            "plan": {"prompt": "{file:existing-prompt.txt}"},
+        },
+        "username": "{env:TEMPLATE_VALUE}",
+    }
+    original = deepcopy(config)
+    params = {
+        "directory": str(tmp_path),
+        "history_transport": {"base_url": "http://127.0.0.1:8000/v1", "timeout": 5},
+        "literal_replacement_prompt": literal_replacement_prompt,
+        "env": {
+            "OPENCODE_CONFIG_CONTENT": (
+                _serialize_opencode_replacement_config(config) if literal_replacement_prompt else json.dumps(config)
+            )
+        },
+        "command": ["opencode", "run"],
+    }
+
+    with ExitStack() as stack:
+        configure_transport(stack, params, harness="opencode")
+        serialized = params["env"]["OPENCODE_CONFIG_CONTENT"]
+        updated = json.loads(serialized)
+
+    assert config == original
+    assert updated["provider"]["nemo_gym"]["options"]["baseURL"] != params["history_transport"]["base_url"]
+    assert updated["provider"]["nemo_gym"]["options"]["baseURL"].startswith("http://127.0.0.1:")
+    updated["provider"]["nemo_gym"]["options"]["baseURL"] = original["provider"]["nemo_gym"]["options"]["baseURL"]
+    assert updated == original
+    if literal_replacement_prompt:
+        assert r"\u007benv:TEMPLATE_VALUE}" in serialized
+        assert r"\u007bfile:missing-prompt.txt}" in serialized
+    else:
+        assert "{env:TEMPLATE_VALUE}" in serialized
+        assert "{file:missing-prompt.txt}" in serialized
+    # Native expansion remains available outside the generated build prompt.
+    compact_keys = serialized.replace('": ', '":')
+    assert '"description":"{env:TEMPLATE_VALUE}"' in compact_keys
+    assert '"plan":{"prompt":"{file:existing-prompt.txt}"}' in compact_keys
+    assert '"username":"{env:TEMPLATE_VALUE}"' in compact_keys
 
 
 def test_pi_configuration_redirects_provider_without_changing_models(tmp_path, model_server):
