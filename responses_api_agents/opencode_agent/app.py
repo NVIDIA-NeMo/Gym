@@ -229,6 +229,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/opencode_agent/workspaces"
     repo_dir: Optional[str] = None
     thinking: bool = True
+    supports_images: bool = False
     system_prompt: Optional[str] = None
     system_prompt_mode: Literal["append", "replace"] = "append"
     timeout: int = 900
@@ -405,6 +406,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
             model.setdefault("interleaved", {"field": "reasoning_content"})
+            if self.config.supports_images:
+                model.setdefault("modalities", {"input": ["text", "image"], "output": ["text"]})
             self._deep_merge(
                 model,
                 {
@@ -793,10 +796,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "compaction"}
         if unsupported:
             raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422,
+                f"OpenCode sandbox config supports permission/tools/compaction only; unsupported: {sorted(unsupported)}",
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
@@ -1262,6 +1266,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                                 else {}
                             ),
                             "interleaved": {"field": "reasoning_content"},
+                            "modalities": {
+                                "input": ["text", "image"] if self.config.supports_images else ["text"],
+                                "output": ["text"],
+                            },
                             "limit": {
                                 "context": self.config.context_window,
                                 "input": self.config.context_window,

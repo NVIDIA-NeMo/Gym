@@ -203,6 +203,8 @@ async def finalize_rollout_token_capture(
     if projected is not None:
         if isinstance(result.get("response"), dict):
             result["response"]["output"] = projected["output"]
+            if "agent_input" in projected:
+                result["response"]["agent_input"] = projected["agent_input"]
             # The rebuilt output's truncation verdict travels with it, under the one precedence
             # rule ``apply_capture_incomplete_verdict`` states for both capture placements.
             incomplete_details = projected.get("incomplete_details") or {}

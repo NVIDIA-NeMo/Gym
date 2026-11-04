@@ -52,6 +52,7 @@ from nemo_gym.models.token_capture.records import (
     UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
     TokenEntry,
+    capture_input_images,
     extract_token_fields,
     response_finish_reason,
     response_to_output_items,
@@ -626,6 +627,7 @@ async def capture_tokens(
             routed_experts=info.get("routed_experts"),
             # Preserve content for text-based training penalties.
             output_items=content_items,
+            input_images=capture_input_images(request_messages or []),
             token_item_index=token_item_index,
             # Observe the served payload's own id; never mint one.
             # The Anthropic mapping reuses this id on its outer envelope,

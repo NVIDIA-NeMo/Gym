@@ -26,8 +26,9 @@ process_identity() {
 }
 staged=
 ticket=
+probe_home=
 # However the installer exits, remove a partly staged binary and leave the installer queue.
-trap '[ -z "$staged" ] || rm -f "$staged"; [ -z "$ticket" ] || : >"$queue/$ticket.done"' EXIT
+trap '[ -z "$staged" ] || rm -f "$staged"; [ -z "$probe_home" ] || rm -rf "$probe_home"; [ -z "$ticket" ] || : >"$queue/$ticket.done"' EXIT
 # Serialize preparation of the version-scoped cache in a shared task sandbox.
 if command -v flock >/dev/null 2>&1; then
   # The kernel releases the lock when the installer exits, however it exits.
@@ -74,8 +75,12 @@ else
   echo 'OpenCode sandbox execution requires glibc or musl; could not identify the sandbox libc' >&2
   exit 1
 fi
-mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
-export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
+# Images can provide a read-only cached executable (for example under Apptainer's
+# host UID). Version probes need writable state, not writes beside that binary.
+mkdir -p "$runtime"
+probe_home=$(mktemp -d "${TMPDIR:-/tmp}/nemo-gym-opencode-install.XXXXXX")
+mkdir -p "$probe_home/home" "$probe_home/cache" "$probe_home/data" "$probe_home/config"
+export HOME="$probe_home/home" XDG_CACHE_HOME="$probe_home/cache" XDG_DATA_HOME="$probe_home/data" XDG_CONFIG_HOME="$probe_home/config"
 if [ -n "$source_binary" ]; then
   [ -n "$source_sha256" ] || { echo 'A preinstalled OpenCode binary requires its SHA-256' >&2; exit 1; }
   # Publish a verified new inode so active sessions can keep executing the old one.

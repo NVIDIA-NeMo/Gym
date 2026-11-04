@@ -310,6 +310,16 @@ class TestExtractGeneratedAnswer:
         reasoning = NeMoGymResponseReasoningItem(id="r", summary=[], type="reasoning")
         assert _extract_generated_answer(_response([reasoning, _assistant_msg("final")])) == "final"
 
+    @pytest.mark.parametrize(
+        ("text", "answer"),
+        [("<think>private reasoning</think>Final answer", "Final answer"), ("<think>unfinished</think>", "")],
+    )
+    def test_excludes_gateway_reasoning_without_changing_trace(self, text: str, answer: str) -> None:
+        response = _model_response(text)
+        original = response.model_dump()
+        assert _extract_generated_answer(response) == answer
+        assert response.model_dump() == original
+
     def test_no_assistant_message_returns_empty(self) -> None:
         reasoning = NeMoGymResponseReasoningItem(id="r", summary=[], type="reasoning")
         assert _extract_generated_answer(_response([reasoning])) == ""

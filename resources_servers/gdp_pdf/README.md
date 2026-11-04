@@ -226,3 +226,58 @@ rollout row records the DPI/compositing actually used and every rejected attempt
 ## Licensing
 
 Upstream dataset: MIT. Evaluation only — see the warning above.
+
+## GDP.pdf with OpenCode
+
+`configs/opencode.yaml` pairs the stock OpenCode agent with a PDF sandbox and
+GDP.pdf's existing rubric grader. The agent receives the original question and
+`/workspace/document.pdf`; rubrics and reference answers stay outside the sandbox.
+It can extract text, inspect page images and calculate with Python. Only the
+final answer is graded, excluding structured and `<think>`-wrapped reasoning.
+
+Build the document-tools image and run from the Gym root:
+
+```bash
+docker build -t gdp-pdf-tools resources_servers/gdp_pdf
+gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  +gdp_pdf_sandbox_image=gdp-pdf-tools \
+  +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
+  +policy_model_name=MODEL \
+  --num-repeats 3 --output results/gdp-pdf-opencode.jsonl
+```
+
+Set judge credentials in your private `env.yaml`. The model endpoint must be
+reachable from the sandbox, support images and tool calling, and use the model's
+vLLM tool-call and reasoning parsers. Replace the Docker provider config for your
+deployment. The shared adapter installs OpenCode 1.17.11; preinstall that version
+for offline workers. Preparation downloads the PDFs without OCR or rendering.
+
+Defaults: eight concurrent episodes, 16,384 output tokens **per model call**,
+and a two-hour run timeout. There is no whole-episode token or turn cap. Gym owns
+sandbox cleanup; infrastructure failures propagate through its retry contract.
+Web tools and subagents are denied through OpenCode permissions. Shell networking
+still follows the provider's network policy; enforce model-only egress when an
+offline evaluation is required.
+
+### Training
+
+Use `configs/opencode_training.yaml`, set `gdp_pdf_train_jsonl` to your training
+JSONL and replace its `TBD` license. The existing GDP.pdf row format applies:
+`responses_create_params.input` contains the question; `verifier_metadata` holds
+`source_pdf`, `prompt` and `criteria`. PDF paths resolve beneath
+`gdp_pdf_sandbox.resources_servers.gdp_pdf.documents_base_dir`.
+Never train on benchmark questions.
+
+The overlay enables shared token capture and disables history compaction/pruning.
+The trainer owns capture storage and policy sampling. For NeMo RL, enable
+`token_capture.enabled` and `token_capture.forest_training`, select
+`returned_history`, and keep `skip_tokenizer_init: false`. See the
+[shared capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml).
+
+A four-update multimodal RL smoke completed with 32 unmasked answers, policy
+refits and a model/optimizer checkpoint save. Captured tool images reached the
+learner. This qualifies the exercised training path, not checkpoint restore or
+large-scale throughput. Capture failures must remain explicit; do not replace
+missing tokens/images with retokenized text or zero rewards.

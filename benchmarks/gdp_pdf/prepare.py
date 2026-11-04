@@ -329,8 +329,10 @@ def _prepare_rows(
     documents_dir: Path,
     limit: Optional[int] = None,
     hf_token: Optional[str] = None,
+    *,
+    render_documents: bool = True,
 ) -> list[dict]:
-    """Download the GDP.pdf table + PDFs, render+cache each document, and write Gym JSONL."""
+    """Download the GDP.pdf table + PDFs, optionally render documents, and write Gym JSONL."""
     from datasets import load_dataset
     from huggingface_hub import hf_hub_download
 
@@ -367,11 +369,12 @@ def _prepare_rows(
         )
 
         task_dir = _safe_task_dir(str(record["task_id"]))
-        prepare_document(media_dir / pdf_path, documents_dir / task_dir)
+        if render_documents:
+            prepare_document(media_dir / pdf_path, documents_dir / task_dir)
         rows.append(
             build_gym_row(
                 record,
-                f"{DOCUMENTS_DIR_NAME}/{task_dir}/manifest.json",
+                f"{DOCUMENTS_DIR_NAME}/{task_dir}/manifest.json" if render_documents else "",
                 f"{MEDIA_DIR_NAME}/{pdf_path}",
                 criteria=criteria,
             )
