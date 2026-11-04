@@ -66,6 +66,11 @@ from nemo_gym.config.config_types import (
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from nemo_gym.config.renamed_keys import (
+    RENAMED_SERVER_INSTANCE_KEYS,
+    RENAMED_TOP_LEVEL_KEYS,
+    rename_deprecated_keys,
+)
 from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.orchestration.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.sandbox.providers.registry import plugin_distributions
@@ -1296,6 +1301,23 @@ For example, on the command line:
 {override_examples}"""
         )
 
+    def _rename_deprecated_keys(self, global_config_dict: DictConfig) -> None:
+        """Move config keys set under their names from before a rename to their current names, with a warning."""
+        with open_dict(global_config_dict):
+            rename_deprecated_keys(global_config_dict, RENAMED_TOP_LEVEL_KEYS)
+            for server_name, server_type_config_dict in global_config_dict.items():
+                if not isinstance(server_type_config_dict, DictConfig):
+                    continue
+                for server_type, renamed in RENAMED_SERVER_INSTANCE_KEYS.items():
+                    instances = server_type_config_dict.get(server_type)
+                    if not isinstance(instances, DictConfig):
+                        continue
+                    for instance_name, instance_config in instances.items():
+                        if isinstance(instance_config, DictConfig):
+                            rename_deprecated_keys(
+                                instance_config, renamed, where=f"{server_name}.{server_type}.{instance_name}"
+                            )
+
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
         original_agents = {agent.name for agent in self._agent_instances(frozen_dict_config)}
@@ -1616,6 +1638,8 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+        # After every merge and composition, so an old key from any source, held overrides included, is moved.
+        self._rename_deprecated_keys(global_config_dict)
         # NOTE(martas): this is for catching agents not attached to an environment server
         self._front_agents_without_environment_server(global_config_dict)
 
