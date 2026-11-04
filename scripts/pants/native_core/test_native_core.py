@@ -17,10 +17,30 @@ from xml.etree import ElementTree
 from collect import targets
 from prepare import requirement_pins, snapshot_git, validate_lock, write_build_configuration
 from run import combine_junit
-from runtime import expose_editable_to_children, restore_symlinks
+from runtime import (
+    exclude_instrumentation,
+    expose_editable_to_children,
+    restore_build_directories,
+    restore_symlinks,
+    restore_tracked_modes,
+)
 
 
 class NativeCoreTest(unittest.TestCase):
+    def test_editable_build_directory_follows_sampled_project_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "pyproject.toml"
+            project.write_text('[tool.distutils.egg_info]\negg_base = "cache/editable"\n')
+            restore_build_directories(root)
+            self.assertTrue((root / "cache/editable").is_dir())
+            (root / "cache/editable/existing").write_text("preserved")
+            restore_build_directories(root)
+            self.assertEqual((root / "cache/editable/existing").read_text(), "preserved")
+            project.write_text('[tool.distutils.egg_info]\negg_base = "../outside"\n')
+            with self.assertRaisesRegex(ValueError, "inside"):
+                restore_build_directories(root)
+
     def test_child_python_outside_checkout_uses_relocated_editable_and_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary).resolve()
@@ -54,6 +74,13 @@ class NativeCoreTest(unittest.TestCase):
             extra = base / "existing-pythonpath"
             extra.mkdir()
             (extra / "preserved_module.py").write_text("value = 42\n")
+            # Pants installs the genuine distribution to supply its console
+            # scripts. The sampled editable package must still win over it.
+            wheel_package = extra / "native_fixture/cli"
+            wheel_package.mkdir(parents=True)
+            (extra / "native_fixture/__init__.py").touch()
+            (wheel_package / "__init__.py").touch()
+            (wheel_package / "main.py").write_text("def main():\n    return 'wrong wheel copy'\n")
             with patch.dict(os.environ, {"PYTHONPATH": str(extra)}):
                 expose_editable_to_children(root, distribution, installed)
                 self.assertEqual(
@@ -100,7 +127,9 @@ class NativeCoreTest(unittest.TestCase):
             (root / "dangling").symlink_to("missing-target")
             files.extend(["alias", "dangling"])
             (root / ".python-version").write_text("3.13.14")
-            (root / "pyproject.toml").write_text('[tool.uv]\n[tool.coverage.run]\ndata_file = "results/.coverage"\n')
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "fixture"\n[tool.uv]\n[tool.coverage.run]\ndata_file = "results/.coverage"\n'
+            )
 
             def git_output(command, **kwargs):
                 return "a" * 40 if kwargs.get("text") else "\0".join(files).encode()
@@ -118,6 +147,9 @@ class NativeCoreTest(unittest.TestCase):
                     "python_tests": lambda **values: tests.append(values),
                     "python_sources": lambda **values: None,
                     "files": lambda **values: None,
+                    "relocated_files": lambda **values: None,
+                    "python_distribution": lambda **values: None,
+                    "python_artifact": lambda **values: values,
                 },
             )
             self.assertEqual(len(tests), 2)
@@ -125,6 +157,7 @@ class NativeCoreTest(unittest.TestCase):
             self.assertEqual(len({item["batch_compatibility_tag"] for item in tests}), 2)
             for item in tests:
                 self.assertEqual(item["sources"], files[:2])
+                self.assertIn(":native-project", item["dependencies"])
             self.assertEqual(tomllib.loads((root / "pants.native.toml").read_text())["test"]["batch_size"], 128)
             self.assertEqual(
                 json.loads((root / "scripts/pants/native_core/symlinks.json").read_text()),
@@ -224,15 +257,47 @@ class NativeCoreTest(unittest.TestCase):
             commit = git("commit-tree", tree.decode(), input=b"fixture\n").strip()
             git("update-ref", "HEAD", commit.decode())
             git("read-tree", "HEAD")
+            (source / "source.py").write_bytes(b"sample\n")
             snapshot_git(source)
+            exclude_instrumentation(source)
+            (source / "BUILD.native").touch()
+            self.assertEqual(git("status", "--porcelain"), b"")
             isolated = root / "isolated"
             isolated.mkdir()
             shutil.copytree(source / "scripts/pants/native_core/git-state", isolated / ".git")
+            (isolated / "source.py").write_bytes(b"sample\n")
             shutil.rmtree(source)
             self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=isolated).strip(), commit)
             self.assertEqual(subprocess.check_output(["git", "ls-files"], cwd=isolated), b"source.py\n")
             self.assertEqual(subprocess.check_output(["git", "show", "HEAD:source.py"], cwd=isolated), b"sample\n")
             self.assertFalse((isolated / ".git/objects/info/alternates").exists())
+            (isolated / "pytest_runner.pex").touch()
+            (isolated / "nemo_gym-1.dist-info").mkdir()
+            (isolated / "nemo_gym-1.dist-info/METADATA").write_text("sample metadata")
+            exclude_instrumentation(isolated, ("nemo_gym-1.dist-info/",))
+            self.assertEqual(subprocess.check_output(["git", "status", "--porcelain"], cwd=isolated), b"")
+            content_store = root / "shared-content"
+            content_store.write_bytes(b"sample\n")
+            content_store.chmod(0o755)
+            (isolated / "source.py").unlink()
+            os.link(content_store, isolated / "source.py")
+            restore_tracked_modes(isolated)
+            self.assertEqual(content_store.stat().st_mode & 0o777, 0o755)
+            self.assertNotEqual(content_store.stat().st_ino, (isolated / "source.py").stat().st_ino)
+            self.assertEqual(subprocess.check_output(["git", "status", "--porcelain"], cwd=isolated), b"")
+            (isolated / "source.py").chmod(0o755)
+            self.assertIn(
+                " M source.py", subprocess.check_output(["git", "status", "--porcelain"], cwd=isolated, text=True)
+            )
+            (isolated / "source.py").write_bytes(b"changed\n")
+            (isolated / "unexpected.py").write_text("untracked source\n")
+            status = subprocess.check_output(["git", "status", "--porcelain"], cwd=isolated, text=True)
+            self.assertIn(" M source.py", status)
+            self.assertIn("?? unexpected.py", status)
+            (isolated / "source.py").unlink()
+            self.assertIn(
+                " D source.py", subprocess.check_output(["git", "status", "--porcelain"], cwd=isolated, text=True)
+            )
 
     def test_four_shards_cover_each_globally_collected_file_once(self):
         files = {f"tests/unit_tests/test_{index}.py": [f"test_{index}"] for index in range(354)}

@@ -13,6 +13,9 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+from distribution import distribution_targets
+from runtime import exclude_instrumentation
+
 
 EXTRAS = {
     "core": ["dev", "ray", "telemetry", "mlflow", "wandb"],
@@ -57,6 +60,7 @@ def snapshot_git(repo: Path) -> None:
     subprocess.run(["git", "--git-dir=" + str(snapshot), "read-tree", "HEAD"], check=True)
     (snapshot / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = true\n")
     shutil.rmtree(snapshot / "hooks")
+    exclude_instrumentation(repo, git_dir=snapshot)
 
 
 def snapshot_distribution(repo: Path) -> None:
@@ -189,7 +193,7 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
         lines.append(f"python_sources(name={resolve + '-sources'!r}, sources={sources!r}, resolve={resolve!r})\n")
         lines.append(
             f"python_tests(name={resolve + '-tests'!r}, sources={tests!r}, resolve={resolve!r}, "
-            f"dependencies=[':assets'], tags=['native-core-{resolve}'], "
+            f"dependencies=[':assets', ':native-project'], tags=['native-core-{resolve}'], "
             f"batch_compatibility_tag={'native-' + resolve!r})\n"
         )
     # Several core tests inspect source files as fixtures (for example every agent
@@ -200,8 +204,10 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
         str(path.relative_to(repo)) for path in (native / "distribution").rglob("*") if path.is_file()
     )
     runtime_assets.append("scripts/pants/native_core/runtime.py")
+    runtime_assets.append("scripts/pants/native_core/distribution.py")
     runtime_assets.append("scripts/pants/native_core/symlinks.json")
     lines.append(f"files(name='assets', sources={sorted(set(assets + sources + tests + runtime_assets))!r})\n")
+    lines.append(distribution_targets(repo))
     (repo / "BUILD.native").write_text("".join(lines))
     (native / "BUILD.native").write_text(
         HEADER
@@ -224,7 +230,7 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
 pants_version = "2.30.2"
 backend_packages = ["pants.backend.python", "pants.backend.project_info"]
 build_patterns = ["BUILD.native"]
-pants_ignore = ["/.git", "/.venv", "/results", "/cache", "/.pants-bin", "__pycache__"]
+pants_ignore = ["/.git", "/.venv", "/.pants-bin", "__pycache__"]
 pants_ignore_use_gitignore = false
 unmatched_build_file_globs = "error"
 [source]
@@ -273,6 +279,7 @@ known_versions = [
         "extras": EXTRAS,
     }
     (native / "scope.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    exclude_instrumentation(repo)
     return manifest
 
 
