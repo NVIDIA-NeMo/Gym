@@ -61,8 +61,16 @@ For a full BIRD dev run, see `benchmarks/birdbench/README.md`.
 2. Execute the predicted SQL against the per-`db_id` SQLite database.
 3. Execute the ground-truth SQL against the same database.
 4. Compare result sets via unordered set equality.
-5. Return reward `1.0` on match, `0.0` otherwise (or on any extraction /
-   execution error).
+5. Return reward `1.0` on match, `0.0` otherwise (no SQL block, a result
+   mismatch, or a predicted query that fails or times out).
+
+When the verifier itself cannot measure the answer (the database file is missing
+or corrupt, the ground-truth query fails or times out, the executor crashes), the
+row keeps the model's answer and is masked instead of scored: `mask_sample=true`,
+`failure_kind=verifier_error`, with `failure_reason` naming the cause
+(`database_missing`, `gold_execution_error`, `gold_execution_timeout`,
+`unknown_error`). These are `failure_reason` values, not failure kinds in the
+registry.
 
 ## Input JSONL format
 

@@ -180,15 +180,16 @@ to run `hermes_agent` through an Environment Server. For Hermes specifically:
   tracking upstream. Changing the revision means editing `requirements.txt` and rebuilding the
   agent server environment; the removed `HERMES_VERSION` and `HERMES_REPO_URL` variables are
   no longer read.
-- The runtime is installed at seed time, or reused from
-  `/tmp/nemo-gym-hermes-runtime-<key>/venv`, where `<key>` is the first twelve characters of
-  the pinned commit rather than the full hash. Network-restricted deployments must preinstall
-  exactly that path, and the virtual environment must satisfy
-  `python -c 'import run_agent; from mcp.client.streamable_http import streamablehttp_client'`.
-  The old portable glibc/musl bundles are not a drop-in
-  replacement; validate each task image's architecture and libc before migrating a batch,
-  and note that the removed runtime also bundled a static `ripgrep` for images whose BusyBox
-  `grep` lacks the GNU options Hermes falls back on.
+- The Agent Server now builds the runtime for each sandbox's architecture and C library and
+  uploads it at seed time, reusing `/tmp/nemo-gym-hermes-runtime-<key>/python` when an
+  earlier session in the same sandbox installed it. The sandbox no longer installs packages
+  from the network, so network-restricted task images need no preinstalled runtime; building
+  needs `uv` on the Agent Server and access from there to GitHub and the Python package index
+  (see [Runtime and model requirements](#runtime-and-model-requirements)). The old portable
+  glibc/musl bundles are not a drop-in replacement: the runtime supports x86_64 or aarch64
+  Linux with glibc 2.17 or newer or musl, so validate each task image's architecture and libc
+  before migrating a batch. The removed runtime also bundled a static `ripgrep` for images
+  whose BusyBox `grep` lacks the GNU options Hermes falls back on.
 - Remove request `max_output_tokens`: this agent rejects it with HTTP 422. Config
   `max_tokens` limits each model call, not the whole response, and it is configuration only:
   unlike the removed adapter, which mapped the request field onto Hermes' per-call limit, the
@@ -214,7 +215,7 @@ used by your configuration.
 
 Sandbox sessions live in the memory of the worker that seeded them. With several agent workers, session routing sends each session's requests to the worker that seeded it. Calling the agent's `/run` directly keeps no session.
 
-Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Its image must also match the host CPU architecture and C library because the host's `uv` executable is copied into the sandbox.
+Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<key>/python`, for example because an earlier session in the same sandbox installed it. The key covers the Python build, the Hermes requirement and this server's package versions. The Agent Server builds the runtime for the sandbox's architecture and C library: a pinned standalone CPython plus Hermes and its dependencies at this server's versions, cached under `sandbox_python` in Gym's `cache_dir`. Building needs `uv` and outbound access to GitHub and the Python package index on the Agent Server; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python build can be given the file in that cache directory. The sandbox needs only x86_64 or aarch64 Linux, `bash`, `tar` with gzip and glibc 2.17 or musl, with no network or Python of its own. Hermes calls the Model Server directly from the sandbox, so the sandbox must reach the Model Server at its configured host and port.
 
 Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes names MCP tools `mcp_<server>_<tool>`; the response reports them as `mcp__<server>__<tool>`, the form Gym strips before verification, while captured model calls keep Hermes' names. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
 

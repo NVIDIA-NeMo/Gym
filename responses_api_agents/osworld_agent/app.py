@@ -43,10 +43,13 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
+    failure_report_for,
 )
 from nemo_gym.models import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
@@ -1179,6 +1182,8 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
         "agent_contract": result.agent_contract,
+        # Set only by the built-in rollout; a runner's own result type need not have it.
+        "sandbox_start_failure": getattr(result, "sandbox_start_failure", None),
         # Only Gym's model callers see usage. m3_agent and pointer_agent call models through their own clients, so
         # their usage stays unknown (None).
         "usage": usage.model_dump(mode="json") if (usage := policy_usage.reported()) is not None else None,
@@ -1850,7 +1855,48 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    sandbox_start_failure = result.get("sandbox_start_failure")
+    if isinstance(sandbox_start_failure, Mapping):
+        response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, Any]) -> Dict[str, Any]:
+    """Report a sandbox guest that never became ready as a retryable ``infrastructure_error``.
+
+    The row goes to the failures sidecar, so recovery runs the task again within the run's retry budget. Its reward
+    stays 0.0 and it stays masked, so no score changes. The event carries the guest's last HTTP status and the
+    sandbox id (its operation id), and the reason names the sandbox provider.
+    """
+    provider = str(failure.get("provider") or "unknown")
+    status = failure.get("http_status")
+    http_status = status if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599 else None
+    message = failure.get("message")
+    lines = (error or "").strip().splitlines()
+    if isinstance(message, str) and message.strip():
+        cause = f"TimeoutError: {message.strip()}"
+    else:
+        cause = lines[0] if lines else "the guest did not become ready"
+    reason = f"OSWorld sandbox start failed on provider={provider}: {cause}"[:2000]
+    sandbox_id = failure.get("sandbox_id") if isinstance(failure.get("sandbox_id"), str) else None
+    event = NgFailureEvent(
+        boundary="agent",
+        failure_kind="infrastructure_error",
+        failure_reason=reason,
+        http_status=http_status,
+        operation="osworld.sandbox_start",
+        operation_id=sandbox_id[:128] if sandbox_id else None,
+        stage="agent",
+    )
+    return {
+        "failure_kind": "infrastructure_error",
+        "failure_reason": reason,
+        "sandbox_provider": provider,
+        "sandbox_http_status": http_status,
+        "sandbox_id": sandbox_id,
+        "_ng_failure_class": "infrastructure_error",
+        **FailureReportRow.fields(failure_report_for(event)),
+    }
 
 
 def _empty_response(
@@ -1909,7 +1955,29 @@ def _empty_response(
 
 
 if __name__ == "__main__":
-    from responses_api_agents.osworld_agent.runtime_dependencies import require_optional_runtime_dependencies
+    import subprocess
+
+    from responses_api_agents.osworld_agent.runtime_dependencies import (
+        require_optional_runtime_dependencies,
+        validate_optional_runtime_dependencies,
+    )
+
+    # Opt-in: with OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS=1 the agent runs its own
+    # explicit installer once when the optional runtime dependencies are missing, then
+    # re-executes itself so the fresh packages are imported. Without the opt-in the
+    # behaviour is unchanged: a missing dependency fails startup with the remediation
+    # command. The marker env var prevents a loop if the installer leaves a gap.
+    _install_flag = "OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS"
+    _attempt_marker = "_OSWORLD_AGENT_OPTIONAL_RUNTIME_DEPS_ATTEMPTED"
+    if os.environ.get(_install_flag) == "1" and os.environ.get(_attempt_marker) != "1":
+        if validate_optional_runtime_dependencies():
+            installer = Path(__file__).resolve().with_name("install_optional_runtime_deps.sh")
+            print(
+                f"[osworld_agent] optional runtime dependencies missing; running {installer} on {sys.prefix}",
+                flush=True,
+            )
+            subprocess.run(["bash", str(installer), sys.prefix], check=True)
+            os.execve(sys.executable, [sys.executable, *sys.argv], {**os.environ, _attempt_marker: "1"})
 
     require_optional_runtime_dependencies()
     OSWorldAgent.run_webserver()
