@@ -3,7 +3,7 @@
 
 import pytest
 
-from tests.judge_adapter_cause_links import (
+from tests.helpers.judge_adapter_cause_links import (
     assert_browsecomp_received_unparseable_verdict_keeps_zero_and_transport_observations,
     assert_real_verifier_reply_preserves_the_original_judge_model_cause,
 )

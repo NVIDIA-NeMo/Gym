@@ -35,7 +35,7 @@ from nemo_gym.cli.eval import _finalize_live_exporters
 from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.test_export_receipt import _collected_mlflow
+from tests.unit_tests.artifacts.test_export_receipt import _collected_mlflow
 
 
 class Client:
@@ -928,8 +928,8 @@ def test_health_export_projects_validated_collector_facts_without_changing_score
     """Explicit collector projection boundary; real classifier, persisted metadata and SDK delivery."""
     import nemo_gym.orchestration.recovery as recovery
     from nemo_gym.cli.eval import _prepare_run_health_metrics
-    from tests.unit_tests.test_llm_judge_trial_coverage import _recovered_fixture
-    from tests.unit_tests.test_tool_trial_coverage import fixture
+    from tests.unit_tests.orchestration.test_llm_judge_trial_coverage import _recovered_fixture
+    from tests.unit_tests.orchestration.test_tool_trial_coverage import fixture
 
     artifacts, exporter, client = live
     if case in {"recovered", "invalid"}:
@@ -1131,7 +1131,7 @@ def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omission
     import nemo_gym.orchestration.recovery as recovery
     from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
     from nemo_gym.cli.eval import _prepare_run_health_metrics
-    from tests.unit_tests.test_evaluation_health import _run
+    from tests.unit_tests.orchestration.test_evaluation_health import _run
 
     artifacts, _, _ = live
     collected = _run(49, settled={"model_transport_error": 1} if case == "settled_zero" else None)
