@@ -106,6 +106,6 @@ normalization uses the verifier's pinned dependencies.
 ## Test
 
 ```bash
-python -m pytest tests/unit_tests/test_indic_frontier_math.py
+python -m pytest tests/unit_tests/benchmarks/test_indic_frontier_math.py
 gym env test +entrypoint=resources_servers/frontiermath +should_validate_data=true
 ```
