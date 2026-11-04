@@ -207,6 +207,9 @@ For MCP environments, tool endpoints are discovered at startup via `ListToolsAct
 
 ### Sessions under an Environment Server
 
+`StatefulResourcesServer` supplies seed, close, and checkpoint retirement. OpenEnv implements only live-state
+lookup, environment initialization, and environment release; the base owns identity and retry bookkeeping.
+
 An Environment Server such as `single_agent_turn` seeds with a typed `ResourcesSeedSessionRequest` instead of the legacy
 body. The environment instance is keyed by its `resources_session_id`, and the session cookie is bound to that ID so
 the agent's tool calls reach it. Seeding the same ID again for the same episode keeps the instance it already has; a
