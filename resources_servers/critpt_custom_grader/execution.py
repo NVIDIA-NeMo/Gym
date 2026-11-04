@@ -726,17 +726,17 @@ class Grader:
             ):
                 failure_class, terminal = UNSCORABLE_CATEGORIES["comparator_uncertain"]
                 return GradeResult(
-                    "unscorable",
-                    None,
-                    "comparator_uncertain",
-                    failure_class,
-                    terminal,
-                    job_id,
-                    cases,
-                    cases,
-                    counts["equal"],
-                    None,
-                    {},
+                    outcome="unscorable",
+                    reward=None,
+                    category="comparator_uncertain",
+                    failure_class=failure_class,
+                    terminal=terminal,
+                    job_id=job_id,
+                    case_count=cases,
+                    cases_attempted=cases,
+                    cases_equal=counts["equal"],
+                    first_failed_case=None,
+                    cleanup={},
                     candidate_uncertainty_reasons=tuple(sorted({verdict["code"] for verdict in uncertain})),
                 )
             raise Unscorable("comparator_uncertain", cases)
