@@ -136,9 +136,14 @@ VLLM_DECODE_ARGS=(
     }'
     --compilation-config '{
         "cudagraph_mode": "FULL_DECODE_ONLY",
-        "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 192, 256]
+        "cudagraph_capture_sizes": [
+            6, 12, 18, 24, 30, 36, 42, 48,
+            72, 96, 144, 192, 240, 288, 336, 384,
+            480, 576, 672, 768,
+            864, 960, 1056, 1152, 1248, 1344, 1440, 1536
+        ]
     }'
-    --max-cudagraph-capture-size 256
+    --max-cudagraph-capture-size 1536
     --max-num-batched-tokens 1536
     --max-num-seqs 256
 )
