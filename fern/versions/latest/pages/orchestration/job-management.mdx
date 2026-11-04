@@ -1,6 +1,6 @@
 ---
 title: "Job Management"
-description: "List submitted runs, see what is happening to them, and find where their parts are."
+description: "List submitted runs, see what is happening to them, find where their parts are, stop them, and read their logs."
 position: 6
 ---
 
@@ -11,6 +11,8 @@ position: 6
 | `gym job list` | No | Lists the submissions in this machine's job index, newest first. |
 | `gym job status [ID ...]` | Yes | Shows what is happening to each benchmark of one or more submissions. |
 | `gym job info ID [BENCHMARK]` | Yes, for job ids | Describes one submission and where its parts are. |
+| `gym job cancel ID BENCHMARK` | Yes | Stops a benchmark of a submission, or every benchmark with `--all`. |
+| `gym job logs ID BENCHMARK` | Yes, for the current job id | Prints one of a benchmark's logs. |
 
 `gym job status` is the only command that reports live state. `gym job list` never touches the network, so it is instant and works offline.
 
@@ -105,3 +107,31 @@ Config      not shown; use --config to print the resolved config
 - **Jobs** lists every job id seen for the benchmark, oldest first: the whole chain of a resumed run.
 - **Logs** lists the logs the job was set up to write, planned when the run was submitted (see `log_sources` in [Job Records](./job-records)), with the newest job's id filled in. A planned log is not proof that the file exists. A submission made before log sources were recorded shows none.
 - **Config** is the resolved config the run was submitted with, read from the run directory. It is shown only with `--config`, because it can hold literal values a user typed. When the run directory cannot be read, the reason is shown instead.
+
+## Stop a run
+
+```bash
+gym job cancel ID BENCHMARK
+gym job cancel ID --all [--confirm ID] [--json]
+```
+
+`cancel` asks the scheduler what is running, leaves a benchmark that has already finished alone, and stops everything else of that benchmark. On Slurm that includes a queued follow-up of an auto-resume chain: cancelling only the running job would let the follow-up start, so the pending jobs are cancelled first and then the running one. It then asks again and prints what it sees. The scheduler can take a moment to report a stopped job, so the state printed may still read `RUNNING`. Nothing is written to the record.
+
+```text
+ruler: cancel requested; still RUNNING (the scheduler can take a moment to report CANCELLED)
+```
+
+`--all` stops every live benchmark of the submission. Cancelling a whole submission by accident costs more than typing its id, so it lists the live jobs and asks you to type the submission's id. `--confirm ID` supplies it for scripts; there is no `--yes`. Without a terminal and without `--confirm` it fails and cancels nothing, and a wrong id cancels nothing. A benchmark the scheduler refuses to stop (another user's job, say) is reported on its own, the others still proceed, and the exit code is 1.
+
+## Read a log
+
+```bash
+gym job logs ID BENCHMARK [--source NAME] [--instance ID] [--tail N]
+```
+
+`logs` prints the driver's log by default. `--source` names a service instead; `gym job info` lists what a benchmark has. For a resumed run it reads the log of the job that is running now, not the first one. `--tail N` prints only the last N lines, which is worth using on a large log: the whole file is read in one call.
+
+- A source that does not exist, or an instance given for a source that is not split by instance, fails and lists what does exist.
+- A planned log that has no file means the job has not reached the step that writes it.
+- A submission made before log sources were recorded says so and points at the job's `logs/` directory on the cluster.
+- Bytes in a log that are not UTF-8 are replaced, not an error. There is no `--follow` yet.
