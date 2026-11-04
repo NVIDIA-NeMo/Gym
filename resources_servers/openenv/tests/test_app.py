@@ -26,6 +26,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
+    maybe_auto_expose,
 )
 from resources_servers.openenv.app import (
     OpenEnvResourcesServer,
@@ -1065,10 +1066,14 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
         assert server._sessions == before
 
 
-def test_malformed_typed_seed_does_not_fall_back_to_legacy() -> None:
+@pytest.mark.parametrize("expose_tools_over_mcp", [False, True])
+def test_malformed_typed_seed_does_not_fall_back_to_legacy(expose_tools_over_mcp: bool) -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
+    server.config.expose_tools_over_mcp = expose_tools_over_mcp
     malformed = dict({}) | {"resources_session_id": "incomplete-typed"}
-    with TestClient(server.setup_webserver()) as client:
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
         assert client.post("/seed_session", json=malformed).status_code == 422
     assert server._sessions == {}
     assert server._session_episodes == {}
@@ -1179,3 +1184,32 @@ def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
         assert server._sessions[sid] is original
         assert server._session_episodes == {}
         original.env.close.assert_not_called()
+
+
+def test_failed_cookie_reseed_keeps_previous_reward_until_initialization_succeeds() -> None:
+    server, envs = _session_server()
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json={}).status_code == 200
+        [session_id] = server._sessions
+        server._sessions[session_id].accumulated_reward = 2.0
+        assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 2.0
+        receipt = server._verified_sessions.get(session_id)
+        failed_env = _make_mock_env()
+        failed_env.reset.side_effect = RuntimeError("reset unavailable")
+        replacement = _make_mock_env()
+        server._env_class = MagicMock(side_effect=[failed_env, replacement])
+
+        with pytest.raises(RuntimeError, match="reset unavailable"):
+            client.post("/seed_session", json={})
+        assert server._verified_sessions.get(session_id) is receipt
+        assert server._sessions == {} and server._pending_envs == {}
+        assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 2.0
+        failed_env.close.assert_called_once()
+
+        assert client.post("/seed_session", json={}).status_code == 200
+        assert list(server._sessions) == [session_id]
+        assert session_id not in server._verified_sessions
+        assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 0.0
+        assert server._sessions == {}
+        replacement.close.assert_called_once()
+        envs[0].close.assert_called_once()
