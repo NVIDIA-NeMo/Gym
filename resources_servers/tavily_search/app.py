@@ -24,7 +24,6 @@ from pathlib import Path
 from time import time
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
-from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
 from fastapi import FastAPI, Request
@@ -441,8 +440,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 verified = self._verified_sessions.get(session_id)
                 if session_id in self._typed_sessions or (verified is not None and verified.identity is not None):
                     raise ResourcesSessionConflictError("The session cookie belongs to a typed resources session")
-                if verified is not None:
-                    request.session[SESSION_ID_KEY] = str(uuid4())
+                # A new /run may reuse its caller's cookie: it keeps the ID and starts with fresh metrics, dropping
+                # the previous run's metrics and verify retry record.
+                self._session_id_to_metrics.pop(session_id, None)
+                self._verified_sessions.forget(session_id)
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id

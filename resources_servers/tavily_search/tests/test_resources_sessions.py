@@ -350,24 +350,22 @@ def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
     assert server._typed_sessions == {}
 
 
-def test_repeated_runs_rotate_the_cookie_and_do_not_mix_metrics() -> None:
+def test_next_run_keeps_its_cookie_and_starts_fresh_metrics() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
     body = TASK_DATA | {"responses_create_params": {"input": "hi"}}
     assert client.post("/seed_session", json=body).status_code == 200
     assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
-    [first_id] = server._session_id_to_metrics
-    first_cookies = dict(client.cookies)
+    [session_id] = server._session_id_to_metrics
+    cookies = dict(client.cookies)
     first = client.post("/verify", json=verify_json()).json()
+    # The next /run on the same cookie keeps the ID and starts fresh metrics, dropping the retry record.
     assert client.post("/seed_session", json=body).status_code == 200
+    assert dict(client.cookies) == cookies and session_id not in server._verified_sessions
     assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
-    [second_id] = server._session_id_to_metrics
-    assert second_id != first_id
+    assert list(server._session_id_to_metrics) == [session_id]
     second = client.post("/verify", json=verify_json()).json()
     assert len(first["metrics"]["async_tavily_calls"]) == len(second["metrics"]["async_tavily_calls"]) == 1
-    client.cookies.clear()
-    client.cookies.update(first_cookies)
-    assert client.post("/verify", json=verify_json()).json()["metrics"] == first["metrics"]
     assert server._session_id_to_metrics == {}
 
 
