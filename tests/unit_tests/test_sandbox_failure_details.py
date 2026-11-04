@@ -212,3 +212,37 @@ def test_a_call_the_sandbox_never_answered_is_a_transport_failure_event(error, k
 @pytest.mark.parametrize("error", [RuntimeError("boom"), ValueError("x"), ConnectionError("reset")])
 def test_any_other_error_is_not_a_transport_failure_event(error) -> None:
     assert sandbox_transport_failure_event(error, stage="agent") is None
+
+
+# What OpenSandbox returned for a command-status read after it OOM-killed an agent's sandbox, in a real run: the
+# container was already gone, so only this report named the OOM.
+_ENDED_OOM_BODY = (
+    "Sandbox box-1 has ended (OOMKilled): 1/1 observed pods failed; primary reason=ContainerFailed; sample "
+    "pod=box-1-0; sample detail=Pod box-1-0 container sandbox exited with code 137 (OOMKilled)"
+)
+
+
+@pytest.mark.parametrize("shape", ["raw_body_in_message", "parsed_error"])
+def test_a_command_status_410_reporting_the_agents_oom_is_a_final_zero(shape):
+    from opensandbox.exceptions import SandboxApiException
+    from opensandbox.exceptions.sandbox import SandboxError
+
+    from nemo_gym.rollouts.rollout_recovery import agent_phase_oom
+
+    if shape == "raw_body_in_message":
+        body = '{"code":"SANDBOX::ENDED","message":"' + _ENDED_OOM_BODY + '"}'
+        error = SandboxApiException(f"Get command status failed: HTTP 410: {body} | request_id=r-1", status_code=410)
+    else:
+        error = SandboxApiException(
+            "Get command status failed: HTTP 410",
+            status_code=410,
+            error=SandboxError(code="SANDBOX::ENDED", message=_ENDED_OOM_BODY),
+        )
+
+    event = sandbox_failure_event(error, stage="agent", provider="opensandbox", operation="agent.sandbox_exec")
+
+    assert event is not None
+    assert (event.failure_kind, event.stage, event.http_status) == ("provider_oom_killed", "agent", 410)
+    assert event.details.provider_status_reason == "OOMKilled"
+    assert event.details.container == "sandbox"
+    assert agent_phase_oom(failure_report_for(event).events) is True
