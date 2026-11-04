@@ -20,10 +20,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from nemo_gym.artifacts.rollout_rows import (
+    NG_FAILURE_CLASS_KEY,
+    NG_FAILURE_COUNTS_AS_ZERO_KEY,
+    NG_FAILURE_MAX_ATTEMPTS_KEY,
+    NG_TERMINAL_KEY,
+)
 from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.eval.recovery.evidence import (
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     Identity,
@@ -31,12 +38,12 @@ from nemo_gym.eval.recovery.evidence import (
 from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
 
 
-FAILURE_CLASS = "_ng_failure_class"
-TERMINAL = "_ng_failure_terminal"
-COUNTS_AS_ZERO = "_ng_failure_counts_as_zero"
-MAX_ATTEMPTS = "_ng_failure_max_attempts"
-FAILURE_EVENTS = "_ng_failure_events"
-FAILURE_ID = "_ng_failure_id"
+FAILURE_CLASS = NG_FAILURE_CLASS_KEY
+TERMINAL = NG_TERMINAL_KEY
+COUNTS_AS_ZERO = NG_FAILURE_COUNTS_AS_ZERO_KEY
+MAX_ATTEMPTS = NG_FAILURE_MAX_ATTEMPTS_KEY
+FAILURE_EVENTS = FailureReportRow.EVENTS
+FAILURE_ID = FailureReportRow.FAILURE_ID
 # Facts of a failure's recorded cause that the collector reads on the run host (see ``_cause_kind``).
 COLLECTED_CAUSE = "_ng_collected_cause"
 
@@ -121,10 +128,6 @@ EXTEND_ATTEMPTS_HINT = (
 MAX_EXTEND_ATTEMPTS = 100
 
 
-# The chain's accounting counters in the job dir (see resume_script); an operator continuation fills unknown ones.
-INFRA_RETRIES_FILE = ".gym_infra_retries"
-ACCUMULATED_WALLTIME_FILE = ".gym_accumulated_walltime"
-INFRA_RETRY_EXTENSION_FILE = ".gym_infra_retry_extension"
 # The planner's stops when the chain accounting is unknown; an operator continuation may lift them (see below).
 UNKNOWN_BUDGET_REASON = "the job chain or scheduler state is unavailable, so the budget is unknown"
 UNKNOWN_WALLTIME_REASON = "the run caps its walltime but the used walltime is unavailable"

@@ -752,6 +752,13 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.orchestration.recovery": {
         # Split by the question each part answers when the module moved to nemo_gym.eval.recovery.planner;
         # served by the planner's __getattr__ with a warning.
+        "INFRA_RETRIES_FILE": MovedPath(new="nemo_gym.eval.recovery.markers:RETRY_FILE_NAME", since="0.8.0"),
+        "ACCUMULATED_WALLTIME_FILE": MovedPath(
+            new="nemo_gym.eval.recovery.markers:ACCUMULATED_WALLTIME_NAME", since="0.8.0"
+        ),
+        "INFRA_RETRY_EXTENSION_FILE": MovedPath(
+            new="nemo_gym.eval.recovery.markers:RETRY_EXTENSION_NAME", since="0.8.0"
+        ),
         **_names(
             "nemo_gym.eval.recovery.evidence",
             "0.8.0",

@@ -49,9 +49,6 @@ from nemo_gym.eval.recovery.continuation import (
     stopped_followup,
 )
 from nemo_gym.eval.recovery.decision import (
-    ACCUMULATED_WALLTIME_FILE,
-    INFRA_RETRIES_FILE,
-    INFRA_RETRY_EXTENSION_FILE,
     LIVE_JOB_STATES,
     MAX_EXTEND_ATTEMPTS,
     NO_INVENTORY,
@@ -73,6 +70,7 @@ from nemo_gym.eval.recovery.evidence import (
     _managed_trial_metadata,
     select_managed_evidence,
 )
+from nemo_gym.eval.recovery.markers import ACCUMULATED_WALLTIME_NAME, RETRY_EXTENSION_NAME, RETRY_FILE_NAME
 from nemo_gym.eval.recovery.planner import (
     RERUN_MASKED_JOURNAL_NAME,
     decide_from_collected,
@@ -131,7 +129,6 @@ from nemo_gym.orchestration.executors.resume_script import (
     RESUBMIT_ENV,
     RESUBMIT_LOCK_NAME,
     RETRY_EXTENSION_MARKER,
-    RETRY_EXTENSION_NAME,
     SCHEDULER_CAUSE_MARKER,
     _walltime_to_seconds,
 )
@@ -2582,7 +2579,7 @@ class SlurmExecutor(BaseExecutor):
         the retry extension an explicit ``--extend-retries`` raises when the spent count is readable.
         """
         writes = continuation.get("writes") or {}
-        if not set(writes) <= {INFRA_RETRIES_FILE, ACCUMULATED_WALLTIME_FILE, INFRA_RETRY_EXTENSION_FILE} or any(
+        if not set(writes) <= {RETRY_FILE_NAME, ACCUMULATED_WALLTIME_NAME, RETRY_EXTENSION_NAME} or any(
             type(write.get("value")) is not int or write["value"] < 0 for write in writes.values()
         ):
             raise ValueError("an operator continuation fills only the chain's counters, each with a whole number")

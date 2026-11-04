@@ -41,6 +41,7 @@ from nemo_gym.core.failure_kinds import (
 from nemo_gym.eval.recovery.markers import (
     ACCOUNTED_WALLTIME_PREFIX,
     ACCOUNTING_UNKNOWN_PREFIX,
+    ACCUMULATED_WALLTIME_NAME,
     CANCELLED_FOLLOWUP_MARKER,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
@@ -48,6 +49,8 @@ from nemo_gym.eval.recovery.markers import (
     PROVISIONAL_MARKER_PREFIX,
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
+    RETRY_EXTENSION_NAME,
+    RETRY_FILE_NAME,
 )
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
@@ -62,12 +65,9 @@ _JOB_SCRIPT_NAME = "job.sh"
 # The first line of the prologue, so a resubmit can tell a resumable job.sh from one without the chain.
 PROLOGUE_MARKER = "# --- Auto-resume chain ---"
 JOB_CHAIN_NAME = ".gym_job_chain"
-RETRY_FILE_NAME = ".gym_infra_retries"
 # Written by a segment that restarted the run fresh after a server failed to start before any rollout was saved,
 # named by that segment's job id: the next segment restarts it no more, so one such restart is the bound.
 FRESH_RESTART_MARKER_NAME = ".gym_fresh_restart"
-# Written only by `gym eval resubmit --recover --extend-retries`: infra retries added to the configured cap.
-RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"
 # Capability of the generated script: it reads the recorded extension.
 RETRY_EXTENSION_MARKER = "# --- Recorded retry extension v1 ---"
 # Written when the chain stops before the run finished (no eligible retries, walltime cap, or cancel), so a reader of the
@@ -161,7 +161,7 @@ _PROLOGUE_TEMPLATE = """\
 OUTPUT_DIR="$PWD"
 _this_script="$OUTPUT_DIR/{job_script_name}"
 _prev_slurm_job_id="${{1:-}}"
-_walltime_file="$OUTPUT_DIR/.gym_accumulated_walltime"
+_walltime_file="$OUTPUT_DIR/{accumulated_walltime_name}"
 _retry_file="$OUTPUT_DIR/{retry_file_name}"
 _incomplete_file="$OUTPUT_DIR/{incomplete_marker_name}"
 
@@ -945,6 +945,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         job_script_name=_JOB_SCRIPT_NAME,
         job_chain_name=JOB_CHAIN_NAME,
         retry_file_name=RETRY_FILE_NAME,
+        accumulated_walltime_name=ACCUMULATED_WALLTIME_NAME,
         incomplete_marker_name=INCOMPLETE_MARKER_NAME,
         resubmit_env=RESUBMIT_ENV,
         keep_budget_env=KEEP_BUDGET_ENV,

@@ -33,10 +33,7 @@ from nemo_gym.eval.recovery.budgets import (
     _with_attempt_extension,
 )
 from nemo_gym.eval.recovery.decision import (
-    ACCUMULATED_WALLTIME_FILE,
     FRESH_RESTART_REASON,
-    INFRA_RETRIES_FILE,
-    INFRA_RETRY_EXTENSION_FILE,
     LIVE_JOB_STATES,
     OPERATOR_CONTINUATION,
     UNKNOWN_BUDGET_HINT,
@@ -57,6 +54,7 @@ from nemo_gym.eval.recovery.evidence import (
     CollectedEvidence,
     _identity,
 )
+from nemo_gym.eval.recovery.markers import ACCUMULATED_WALLTIME_NAME, RETRY_EXTENSION_NAME, RETRY_FILE_NAME
 from nemo_gym.eval.recovery.policy import (
     OutcomePolicySource,
     RecoveryOutcomePolicyConfig,
@@ -119,12 +117,12 @@ def _operator_continuation(
     else:
         extension = 0
         unknown.append("infra_retry_extension")
-        writes[INFRA_RETRY_EXTENSION_FILE] = {"previous": "unknown", "value": 0}
+        writes[RETRY_EXTENSION_NAME] = {"previous": "unknown", "value": 0}
     readable_retries = states.get("infra_retries") in ("absent", "ok")
     extended = extend_retries if readable_retries else 0
     if extended:
         # The spent count is known, so N cannot fill it: it raises the cap, as --extend-retries does elsewhere.
-        writes[INFRA_RETRY_EXTENSION_FILE] = {
+        writes[RETRY_EXTENSION_NAME] = {
             "previous": "unknown" if "infra_retry_extension" in unknown else extension,
             "value": extension + extended,
         }
@@ -135,13 +133,13 @@ def _operator_continuation(
     else:
         used = max(cap - operator.retries, 0)
         unknown.append("infra_retries_used")
-        writes[INFRA_RETRIES_FILE] = {"previous": "unknown", "value": used}
+        writes[RETRY_FILE_NAME] = {"previous": "unknown", "value": used}
     if states.get("walltime") in ("absent", "ok"):
         walltime = float(collected.walltime_used_s or 0)
     else:
         walltime = 0.0
         unknown.append("walltime_used_s")
-        writes[ACCUMULATED_WALLTIME_FILE] = {"previous": "unknown", "value": 0}
+        writes[ACCUMULATED_WALLTIME_NAME] = {"previous": "unknown", "value": 0}
     budget = RecoveryBudget(
         max_infra_retries=cap,
         infra_retries_used=used,

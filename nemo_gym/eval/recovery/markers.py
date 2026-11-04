@@ -41,3 +41,8 @@ CANCELLED_FOLLOWUP_MARKER = "was cancelled before it started"
 # The scheduler answered the follow-up's sbatch with a refusal (a QOS submit limit, an invalid account): nothing was
 # queued, and the accounting is known. The chain stops; `gym eval resubmit --recover` continues it.
 FOLLOW_UP_SUBMISSION_REFUSED = "follow_up_submission_refused"
+# The chain's accounting counters in the job dir; an operator continuation fills unknown ones.
+RETRY_FILE_NAME = ".gym_infra_retries"
+ACCUMULATED_WALLTIME_NAME = ".gym_accumulated_walltime"
+# Written only by `gym eval resubmit --recover --extend-retries`: infra retries added to the configured cap.
+RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"

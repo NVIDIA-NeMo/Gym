@@ -27,6 +27,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.failure_kinds import (
     PROVIDER_CREDENTIALS_REJECTED,
 )
@@ -983,9 +984,8 @@ print(json.dumps(collected))
 )
 
 
-TASK_INDEX = "_ng_task_index"
-ROLLOUT_INDEX = "_ng_rollout_index"
-
+TASK_INDEX = TASK_INDEX_KEY_NAME
+ROLLOUT_INDEX = ROLLOUT_INDEX_KEY_NAME
 
 Identity = tuple[int, int]
 
