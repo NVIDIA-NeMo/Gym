@@ -92,8 +92,7 @@ The diagnostic reason identifies whether evidence came from lifecycle status or 
 the provider, known sandbox/execution IDs and any reported lifecycle reason or command exit code.
 
 ```python
-from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.core import NgFailureEvent, PROVIDER_OOM_KILLED
 
 try:
     result = await sandbox.exec(cmd, timeout_s=120)

@@ -12,7 +12,7 @@ from nemo_gym.core.failure_kinds import FAILURE_KINDS
 
 
 if TYPE_CHECKING:
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 
 class OutcomeAction(StrEnum):

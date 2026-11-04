@@ -317,9 +317,9 @@ async def test_sdk_rate_limit_retains_header_and_obeys_provider_policy(
 ):
     from opensandbox.adapters.factory import AdapterFactory
 
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core.failure_transport import RequestFailureLog
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
     from nemo_gym.sandbox.providers.opensandbox import provider as module
-    from nemo_gym.typed_exceptions import NgFailureEvent
 
     shared_server.replies.extend([(429, {"Retry-After": "27"})] * attempts)
     config = {"retries": 1, "outcome_policy": {"by_status_code": {429: action}}}

@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Sandbox runtime failures: facts for caller policies, without grading decisions."""
 
-from nemo_gym.exception_inspection import bounded_text
-from nemo_gym.server_runtime.episode_types import FailureBoundary, SandboxFailureDetails
-from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.utils.exception_inspection import bounded_text
 
 
 def sandbox_failure(

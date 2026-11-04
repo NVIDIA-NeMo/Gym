@@ -11,9 +11,9 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_REQUEST_FAILED,
     PROVIDER_UNAVAILABLE,
 )
-from nemo_gym.exception_inspection import error_to_http_status
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.failures import sandbox_failure
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.utils.exception_inspection import error_to_http_status
 
 
 def opensandbox_failure(

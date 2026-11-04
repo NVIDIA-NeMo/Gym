@@ -28,6 +28,7 @@ from pydantic import ValidationError
 
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, _AsyncLoopRunner
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.failures import sandbox_failure
@@ -44,7 +45,6 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.registry import create_provider, get_provider_class, list_providers, register_provider
 from nemo_gym.sandbox.utils import rewrite_image
-from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 

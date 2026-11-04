@@ -47,9 +47,10 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
 )
+from nemo_gym.core.failure_transport import observe_failure
 from nemo_gym.core.outcome_policy import OutcomeAction, OutcomePolicyConfig, failure_outcome_policy
-from nemo_gym.exception_inspection import error_to_http_status
-from nemo_gym.failure_transport import observe_failure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
+
 # Re-exported names keep their old import path (see tests/unit_tests/fixtures/import_surface.json).
 from nemo_gym.sandbox.attribution import (  # noqa: F401
     ATTRIBUTION_KEY_PREFIX_RE,
@@ -80,7 +81,7 @@ from nemo_gym.sandbox.utils import rewrite_image
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.utils.exception_inspection import error_to_http_status
 
 
 LOGGER = logging.getLogger(__name__)
@@ -2634,9 +2635,12 @@ class OpenSandboxProvider:
                     task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
+        primary_error: BaseException | None = None
         try:
             done, _ = await asyncio.wait({task}, timeout=timeout_s)
             timed_out = not done
+            if done and not task.cancelled():
+                primary_error = task.exception()
             if timed_out:
                 observe_failure(
                     opensandbox_failure(
@@ -2647,13 +2651,24 @@ class OpenSandboxProvider:
                         reason=f"Gym command session deadline expired after {timeout_s:g}s",
                     )
                 )
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
             cleanup = asyncio.create_task(release_session())
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:
-                await cleanup
+                try:
+                    await cleanup
+                except Exception as error:
+                    observe_failure(error)
                 raise
+            except Exception as error:
+                if primary_error is None:
+                    raise
+                # Cleanup is a separate failed operation, not the cause of the command failure.
+                observe_failure(error)
 
         if task.done() and not task.cancelled():
             task_error = task.exception()
@@ -2856,6 +2871,7 @@ class OpenSandboxProvider:
                 stream,
                 operation="download_file",
                 sandbox_id=handle.sandbox_id,
+                replay_safe=True,
                 # No overall deadline: the transfer time grows with the file, and the SDK client's request timeout
                 # still applies to every read, so a stalled stream fails.
                 timeout_s=None,

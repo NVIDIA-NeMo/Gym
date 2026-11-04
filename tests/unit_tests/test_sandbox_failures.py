@@ -19,13 +19,13 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
 )
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.outcome_policy import OutcomeAction, failure_outcome_policy
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxHandle
 from nemo_gym.sandbox.providers.opensandbox import provider as module
 from nemo_gym.sandbox.providers.opensandbox.failures import opensandbox_failure
-from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 
 
 pytestmark = pytest.mark.sandbox
@@ -471,3 +471,110 @@ def test_shared_constructor_keeps_provider_selected_facts_and_child_evidence():
     assert restored.__cause__.event_id == child.event_id
     assert restored.__cause__.http_status == 503
     assert restored.__cause__.details.sandbox_id == "sb"
+
+
+@pytest.mark.parametrize("primary", ["typed", "foreign", "cancel"])
+async def test_failed_session_cleanup_preserves_the_primary_failure(primary):
+    original = opensandbox_failure(operation="run_in_session", sandbox_id="sb", cause=TimeoutError("read expired"))
+    if primary == "foreign":
+        original = RuntimeError("command stream failed")
+    started = asyncio.Event()
+
+    async def run(*args, **kwargs):
+        started.set()
+        if primary == "cancel":
+            await asyncio.Future()
+        raise original
+
+    cleanup_error = HttpError(503)
+    commands = SimpleNamespace(
+        create_session=AsyncMock(return_value="session-1"),
+        run_in_session=run,
+        delete_session=AsyncMock(side_effect=cleanup_error),
+    )
+    provider = module.OpenSandboxProvider()
+    handle = SandboxHandle("sb", "opensandbox", SimpleNamespace(commands=commands))
+    with RequestFailureLog.capture() as log:
+        request = asyncio.create_task(provider.exec_with_background_services(handle, "command", timeout_s=5))
+        if primary == "cancel":
+            await started.wait()
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            report = log.reply_report(None)
+            assert report.failure_id is None
+        else:
+            with pytest.raises(NgFailureEvent) as caught:
+                await request
+            if primary == "typed":
+                assert caught.value is original
+            else:
+                assert caught.value.__cause__ is original
+            report = log.reply_report(caught.value)
+            assert report.failure_id == caught.value.event_id
+            assert report.events[report.failure_id].operation == "run_in_session"
+        [cleanup] = [event for event in report.events.values() if event.operation == "delete bash session"]
+        assert cleanup.http_status == 503
+        assert cleanup.cause_id is None
+    commands.delete_session.assert_awaited_once()
+
+
+@pytest.mark.parametrize("action,attempts", [("retry", 2), ("fail", 1)])
+async def test_download_timeout_follows_policy_and_preserves_attempts(tmp_path, action, attempts):
+    calls = 0
+
+    async def read(path):
+        nonlocal calls
+        calls += 1
+        attempt = calls
+
+        async def chunks():
+            yield b"partial" if attempt == 1 else b"complete"
+            if attempt == 1:
+                raise TimeoutError("stream read expired")
+
+        return chunks()
+
+    provider = module.OpenSandboxProvider(
+        operations={
+            "retries": 1,
+            "retry_delay_s": 0,
+            "outcome_policy": {"by_failure_kind": {PROVIDER_IO_TIMEOUT: action}},
+        }
+    )
+    handle = SandboxHandle("sb", "opensandbox", SimpleNamespace(files=SimpleNamespace(read_bytes_stream=read)))
+    target = tmp_path / "artifact"
+    with RequestFailureLog.capture() as log:
+        if action == "retry":
+            await provider.download_file(handle, "/artifact", target)
+            assert target.read_bytes() == b"complete"
+            report = log.reply_report(None)
+            assert report.failure_id is None
+        else:
+            with pytest.raises(NgFailureEvent) as caught:
+                await provider.download_file(handle, "/artifact", target)
+            report = log.reply_report(caught.value)
+        assert len(report.events) == 1
+        [event] = report.events.values()
+        assert event.failure_kind == PROVIDER_IO_TIMEOUT
+        assert event.operation == "download_file"
+    assert calls == attempts
+
+
+async def test_download_timeout_retry_budget_is_bounded(tmp_path):
+    read = AsyncMock(side_effect=TimeoutError("stream read expired"))
+    provider = module.OpenSandboxProvider(
+        operations={
+            "retries": 2,
+            "retry_delay_s": 0,
+            "outcome_policy": {"by_failure_kind": {PROVIDER_IO_TIMEOUT: "retry"}},
+        }
+    )
+    handle = SandboxHandle("sb", "opensandbox", SimpleNamespace(files=SimpleNamespace(read_bytes_stream=read)))
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await provider.download_file(handle, "/artifact", tmp_path / "artifact")
+        report = log.reply_report(caught.value)
+    assert read.await_count == 3
+    assert len(report.events) == 3
+    assert all(event.failure_kind == PROVIDER_IO_TIMEOUT for event in report.events.values())
