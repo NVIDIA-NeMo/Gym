@@ -33,7 +33,8 @@ def repo(tmp_path):
     def git(*args):
         return subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True, text=True).stdout
 
-    git("init", "-q", "-b", "main")
+    git("init", "-q")
+    git("symbolic-ref", "HEAD", "refs/heads/main")
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "one")
     git("tag", "v1")
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "two")
