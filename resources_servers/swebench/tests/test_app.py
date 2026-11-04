@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import hashlib
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -33,7 +34,10 @@ from resources_servers.swebench.app import (
     patch_extraction_command,
     strip_binary_diffs,
 )
-from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox
+from resources_servers.swebench.swebench_patches import (
+    patch_swebench_multilingual_golden_patch_pass,
+    patch_swebench_multilingual_sandbox,
+)
 
 
 def make_sandbox(
@@ -294,6 +298,24 @@ class TestMultilingualMavenSettings:
         destinations = [call.args[1] for call in sandbox.upload.await_args_list]
         assert ("/root/.m2/settings.xml" in destinations) is overwrite
         assert "/root/.gradle/init.d/maven_central_mirror.gradle" in destinations
+
+
+class TestPsfRequestsLocalHttpbin:
+    EVAL_SH = (
+        "#!/bin/bash\nset -uxo pipefail\ncd /testbed\ngit apply -v - <<'EOF_1'\nEOF_1\n"
+        ": '>>>>> Start Test Output'\npytest -rA test_requests.py\n: '>>>>> End Test Output'\n"
+    )
+
+    def test_setup_runs_after_patches_and_before_graded_output(self) -> None:
+        eval_sh = patch_swebench_multilingual_golden_patch_pass(self.EVAL_SH, "psf__requests-1766")
+
+        setup = eval_sh.index("bash -e <<'LOCAL_HTTPBIN'")
+        assert eval_sh.index("git apply") < setup < eval_sh.index(": '>>>>> Start Test Output'")
+        assert eval_sh.count("LOCAL_HTTPBIN") == 2
+        assert subprocess.run(["bash", "-n"], input=eval_sh, text=True).returncode == 0
+
+    def test_other_repos_are_unchanged(self) -> None:
+        assert patch_swebench_multilingual_golden_patch_pass(self.EVAL_SH, "django__django-11099") == self.EVAL_SH
 
 
 class TestPatchExtraction:

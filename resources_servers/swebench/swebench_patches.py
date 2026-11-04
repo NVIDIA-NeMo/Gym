@@ -26,6 +26,9 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.sandbox import AsyncSandbox
 
 
+PSF_REQUESTS_LOCAL_HTTPBIN = PARENT_DIR / "resources_servers/swebench/patches/psf_requests_local_httpbin.sh"
+
+
 # @bxyu-nvidia: We modify the run_instance function to:
 # 1. Enable async container operations.
 # 2. Avoid complicated patching logic.
@@ -332,6 +335,13 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
             "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
             "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
         )
+
+    # psf/requests tests call httpbin.org, which now serves a certificate their bundled CA list rejects,
+    # rate-limits (429) and no longer redirects off-host. Serve it locally, after the patches are applied
+    # and outside the graded test output.
+    if instance_id.startswith("psf__requests-"):
+        start = f": '{START_TEST_OUTPUT}'"
+        eval_sh = eval_sh.replace(start, PSF_REQUESTS_LOCAL_HTTPBIN.read_text() + start, 1)
 
     return eval_sh
 
