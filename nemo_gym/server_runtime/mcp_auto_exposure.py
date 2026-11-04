@@ -594,6 +594,8 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     idx, route = _take_route(app, "/seed_session", "its response carries the MCP session token to the agent")
     method = route.endpoint
     signature = inspect.signature(method)
+    # Preserve Annotated metadata, including the BeforeValidator that prevents malformed typed seeds
+    # from falling back to the permissive cookie-seed model instead of returning 422.
     hints = get_type_hints(method, include_extras=True)
     # Does the original handler already declare a Request param? If so, reuse it; the wrapper reads
     # the Request out of that same name instead of injecting a second one.
