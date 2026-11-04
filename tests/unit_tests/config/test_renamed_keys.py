@@ -16,6 +16,8 @@
 
 import asyncio
 import inspect
+import logging
+import warnings
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -25,7 +27,12 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, model_validator
 
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import (
+    ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME,
+    AgentWithoutEnvironmentServerError,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+)
 from nemo_gym.config.renamed_keys import (
     RENAMED_SERVER_INSTANCE_KEYS,
     RENAMED_TOP_LEVEL_KEYS,
@@ -52,7 +59,8 @@ NEW = {"new_block": BLOCK, **_servers("new_flag")}
 def renames(monkeypatch: pytest.MonkeyPatch) -> None:
     # Example renames, one top-level key and one agent instance key, added to the registered ones for each test.
     monkeypatch.setitem(RENAMED_TOP_LEVEL_KEYS, "old_block", "new_block")
-    monkeypatch.setitem(RENAMED_SERVER_INSTANCE_KEYS, "responses_api_agents", {"old_flag": "new_flag"})
+    agent_keys = {**RENAMED_SERVER_INSTANCE_KEYS.get("responses_api_agents", {}), "old_flag": "new_flag"}
+    monkeypatch.setitem(RENAMED_SERVER_INSTANCE_KEYS, "responses_api_agents", agent_keys)
 
 
 def _parse(*, initial: dict | None = None, cli: dict | None = None, config_paths: list[str] | None = None) -> dict:
@@ -188,10 +196,38 @@ def test_an_old_and_a_new_key_set_to_the_same_value_parse_like_the_new_key(expec
     assert parsed == expected
 
 
-def test_an_instance_key_of_another_server_type_is_left_alone() -> None:
+def test_an_instance_key_of_another_server_type_is_left_alone(expected: dict) -> None:
     model = {"policy_model": {"responses_api_models": {"vllm_model": {"entrypoint": "app.py", "old_flag": True}}}}
-    parsed = _parse(initial={**NEW, **model})
-    assert parsed["policy_model"]["responses_api_models"]["vllm_model"]["old_flag"] is True
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(initial={**OLD, **model})
+    model_instance = parsed.pop("policy_model")["responses_api_models"]["vllm_model"]
+    assert model_instance["old_flag"] is True and "new_flag" not in model_instance
+    assert parsed == expected
+
+
+def test_an_old_key_copied_into_a_server_instance_is_renamed() -> None:
+    # The template is not a server instance, so only the pass over the merged config can rename the copied key.
+    template = {"agent_template": {"entrypoint": "app.py", "old_flag": True}}
+    servers = {"my_agent": {"responses_api_agents": {"simple_agent": "${copy:agent_template}"}}}
+    with pytest.warns(DeprecationWarning):
+        parsed = _parse(initial={"new_block": BLOCK, **template, **servers})
+    agent = parsed["my_agent"]["responses_api_agents"]["simple_agent"]
+    assert agent["new_flag"] is True and "old_flag" not in agent
+
+
+def test_a_parser_step_reads_a_renamed_top_level_key_under_its_new_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(RENAMED_TOP_LEVEL_KEYS, "old_error_flag", ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME)
+    with pytest.warns(DeprecationWarning), pytest.raises(AgentWithoutEnvironmentServerError):
+        _parse(initial={**NEW, "old_error_flag": True})
+
+
+def test_each_renamed_key_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    # Python hides DeprecationWarning outside __main__, so the log is what a config author sees.
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.config.renamed_keys"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _parse(initial=OLD)
+    assert "'old_block' was renamed 'new_block'" in caplog.text
+    assert "'my_agent.responses_api_agents.simple_agent.old_flag' was renamed" in caplog.text
 
 
 def test_an_old_key_set_to_an_interpolation_keeps_it_unresolved() -> None:
@@ -262,3 +298,28 @@ def test_an_async_call_with_an_old_argument_name_stays_async() -> None:
 def test_passing_both_argument_names_is_an_error() -> None:
     with pytest.raises(TypeError, match="got both 'old_arg' and 'new_arg'"):
         _call(old_arg=1, new_arg=2)
+
+
+class _Client:
+    @classmethod
+    @renamed_keyword("old_arg", "new_arg")
+    def build(cls, *, new_arg: int = 0) -> int:
+        return new_arg
+
+    @renamed_keyword("old_arg", "new_arg")
+    async def fetch(self, *, new_arg: int = 0) -> int:
+        return new_arg
+
+
+def test_a_classmethod_with_an_old_argument_name_warns_at_the_caller() -> None:
+    with pytest.warns(DeprecationWarning, match=r"_Client\.build\(\) argument 'old_arg'") as record:
+        assert _Client.build(old_arg=4) == 4
+    assert record[0].filename == __file__
+
+
+def test_an_async_method_with_an_old_argument_name_warns_at_the_caller() -> None:
+    assert inspect.iscoroutinefunction(_Client().fetch)
+    with pytest.warns(DeprecationWarning) as record:
+        coroutine = _Client().fetch(old_arg=6)
+    assert record[0].filename == __file__
+    assert asyncio.run(coroutine) == 6
