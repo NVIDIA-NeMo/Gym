@@ -1074,7 +1074,7 @@ def test_output_named_failures_checks_its_own_history(prepared_run):
 async def test_no_progress_resume_uses_bounded_infrastructure_retries(runner_config, monkeypatch, tmp_path):
     from nemo_gym.cli.eval import _check_saved_completion
     from nemo_gym.orchestration.api import ResumeConfig
-    from tests.unit_tests.test_resume_script import _run_prologue
+    from tests.unit_tests.orchestration.test_resume_script import _run_prologue
 
     client = install_fake_server_client(monkeypatch, AsyncMock())
     (tmp_path / "artifacts").mkdir()
