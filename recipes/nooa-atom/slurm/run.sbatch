@@ -56,6 +56,10 @@ set -a; source .env; set +a
 [ -x .venv/bin/gym ] && export PATH="$PWD/.venv/bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"   # uv, for Gym's per-server venvs
 export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS="${NEMO_GYM_MAX_ROLLOUT_ATTEMPTS:-1}"
+# stdout goes through the tee pipe above, so Python block-buffers it: the collector's tqdm.write lines
+# ("Finished N / M", "rollout dropped from the score") sat unseen for hours while the stderr progress bar
+# was live (glm2B SWE 8597437, 2026-11-03). Unbuffered keeps the job log honest while the run is going.
+export PYTHONUNBUFFERED=1
 # Rollout ids repeat across runs, so each attempt keeps its own artifacts.
 export NOOA_ARTIFACTS_DIR="$ATTEMPT/nooa-artifacts"
 
