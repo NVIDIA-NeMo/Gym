@@ -31,9 +31,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.verification.judge import is_judge_failure
+from nemo_gym.verification import is_judge_failure
 
 
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "prompt_templates"

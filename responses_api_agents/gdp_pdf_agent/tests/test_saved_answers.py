@@ -20,8 +20,7 @@ import nemo_gym.rollouts.rollout_collection as collection
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
-from nemo_gym.core import NeMoGymResponse
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core import FailureReportRow, NeMoGymResponse, NgFailureEvent
 from nemo_gym.rollouts import RolloutStore
 from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 from nemo_gym.server_runtime import (
@@ -30,7 +29,6 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.bird_sql.app import BirdSqlResourcesServer, BirdSqlResourcesServerConfig
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,

@@ -74,13 +74,15 @@ current results at build time.
 ## Run diagnostic probes
 
 Run predetermined model replies and failures through real Gym harnesses, collect
-their rollouts, and apply the existing P0 evidence checks:
+their rollouts, and apply the scenario and evidence checks:
 
 ```bash
 python scripts/run_harness_conformance.py \
     --harness codex --harness pi --harness opencode --harness hermes \
     --output results/conformance
 ```
+
+Use `--gate-tier P1` to include P1 requirements in the exit status; the default is P0.
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
 installed. Simple Agent (`--harness simple`) uses Gym's Python implementation and
@@ -138,6 +140,7 @@ python scripts/run_harness_conformance.py --harness codex \
 | `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
 | `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
+| `context_compaction` | Automatic compaction between shell actions; summary reused, helper retained without becoming a turn | Existing P0 checks plus P1 compaction checks (TE-13) |
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat
@@ -194,9 +197,7 @@ tree, including harnesses that start new process groups.
 
 Exit codes: **0** when all selected gates pass, **1** for evidence or scenario
 failures, and **2** for execution, dependency, input, or checker errors. Existing
-harness evidence gaps are expected to remain visible as failures. This suite
-covers P0 checks, including ownership and call-to-step checks. Multimodal content,
-compaction, parallelism and transport disconnects remain outside its qualification scope.
+harness evidence gaps remain visible as failures.
 
 Run regression checks with:
 
@@ -211,13 +212,14 @@ tool's schema consumable by `provider.Probe._finish`. Keep expectations and witn
 of the task input and preserve the normal Gym collection path.
 
 Registration also means adding the harness name to hard-coded tuples. `episode._config`
-passes the probe's `--timeout` as the agent's `timeout` only to the harnesses in its
-`("opencode", "pi")` tuple; add a harness whose adapter has a `timeout` field, so that
-the harness uses the probe timeout instead of the adapter's default. `ci.install_runtime`
-installs the adapter's `requirements.txt` and then returns early only for the harnesses
-in its `("hermes", "stirrup", "simple")` tuple: Hermes comes from those requirements,
-Stirrup installs in the task sandbox during session setup, and Simple Agent is built in.
-For any other harness it installs a
+passes the probe's `--timeout` as the agent's `timeout` to the harnesses whose adapters
+have a `timeout` field (OpenCode, Pi, CrewAI and OpenClaw); add a new harness with that
+field, so that it uses the probe timeout instead of the adapter's default.
+`ci.install_runtime` syncs the adapter's locked project (`pyproject.toml` and `uv.lock`)
+and then returns early only for the harnesses in its
+`("hermes", "stirrup", "simple", "openclaw", "crewai")` tuple: Hermes and CrewAI come from
+that project, Stirrup and OpenClaw install in the task sandbox during session setup, and
+Simple Agent is built in. For any other harness it installs a
 pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
 so add a harness that installs its runtime in the task sandbox to that tuple. A
 data-driven registry entry could carry these per-harness settings and remove the

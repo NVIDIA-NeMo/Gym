@@ -6,7 +6,7 @@ Server, and its tools run where the episode puts them: a shell in the episode's 
 episode's MCP grants. The sandbox is the one the Resources Server lends the session, which the adapter never stops,
 or, when it lends none and `sandbox_provider` is set, one the adapter starts and stops itself.
 
-- Harness: `crewai==1.15.34`, pinned in [`requirements.txt`](requirements.txt).
+- Harness: `crewai==1.15.34`, pinned in [`pyproject.toml`](pyproject.toml) and locked in [`uv.lock`](uv.lock).
 - Execution: in process, under an Environment Server such as `single_agent_turn`. There is no `/run` route and no
   host path: `/v1/responses` without a seeded agent session answers 409.
 - Capability level: Observability, plus Environment tools and task sandboxes. The close bundle carries an invocation

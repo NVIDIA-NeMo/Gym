@@ -82,10 +82,8 @@ BaseServer (Pydantic model with config + server_client)
 `rollouts`, `data`, `agents`, `models`, `server_runtime`, `artifacts`, `metrics`, `verification`, `trajectory`,
 `sandbox`, `client`, `telemetry`, `core`, `utils`, `config`. A package imports only packages below it. The
 import-linter contract in `pyproject.toml` enforces the order; its `ignore_imports` list holds the known exceptions,
-which are removed as the code moves and must not grow. Three modules sit directly in `nemo_gym/`:
-`failure_transport.py` and `typed_exceptions.py` share the `core` layer, and `exception_inspection.py` shares the
-`utils` layer. `nemo_gym/verifiers/` sits outside the layers: it runs inside Harbor verifier sandboxes and uses only
-the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
+which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sits outside the layers: it runs inside
+Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
 (`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
 
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
