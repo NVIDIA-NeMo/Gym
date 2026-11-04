@@ -199,7 +199,7 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
 
 
 def decide_persisted(job, max_infra_retries=3):
-    from nemo_gym.orchestration.recovery import (
+    from nemo_gym.eval.recovery.planner import (
         COLLECT_SCRIPT,
         CollectedEvidence,
         decide_from_collected,

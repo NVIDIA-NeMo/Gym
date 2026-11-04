@@ -171,6 +171,8 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.install_lock": MovedPath(new="nemo_gym.utils.install_lock", since="0.8.0"),
     "nemo_gym.cli._compat": MovedPath(new="nemo_gym.utils.compat", since="0.8.0"),
     "nemo_gym.cli._venv_setup": MovedPath(new="nemo_gym.utils.venv_setup", since="0.8.0"),
+    "nemo_gym.orchestration.recovery": MovedPath(new="nemo_gym.eval.recovery.planner", since="0.8.0"),
+    "nemo_gym.orchestration.collect_evidence": MovedPath(new="nemo_gym.eval.recovery.evidence", since="0.8.0"),
 }
 
 

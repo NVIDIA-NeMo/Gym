@@ -21,12 +21,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from nemo_gym.eval.recovery.planner import CollectedEvidence, RecoveryAction, RecoveryDecision
 from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.recovery import CollectedEvidence, RecoveryAction, RecoveryDecision
 
 
 RECEIPT = {"run_id": "post-run", "current": True, "uploaded_rollouts": True, "rollout_projection_version": 1}

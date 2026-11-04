@@ -18,13 +18,13 @@ import json
 import subprocess
 import sys
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     decide_from_collected,
     failure_facts,
 )
-from tests.unit_tests.test_eval_recovery_gate import inventory, scored
+from tests.unit_tests.eval.recovery.test_eval_recovery_gate import inventory, scored
 
 
 REFIT = {"requested_max_tokens": 131072, "window": 8192, "applied_max_tokens": 8076}

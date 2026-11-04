@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     decide_from_collected,
@@ -563,7 +563,7 @@ def test_recovery_counters_preserve_observed_mcqa_gate(counters, expected):
 
 @pytest.mark.parametrize("reasons", [1, "malformed", {}, True, 0, ""])
 def test_nested_optional_quality_reasons_cannot_abort_saved_outcomes(tmp_path, reasons):
-    from nemo_gym.orchestration.recovery import quality_inputs
+    from nemo_gym.eval.recovery.planner import quality_inputs
 
     a, _ = setup(tmp_path)
     summary_path = a / "quality_summary.json"
@@ -583,7 +583,7 @@ def test_nested_optional_quality_reasons_cannot_abort_saved_outcomes(tmp_path, r
 
 @pytest.mark.parametrize("reasons", [None, [], ["diagnostic"]])
 def test_optional_quality_reason_list_and_null_remain_supported(tmp_path, reasons):
-    from nemo_gym.orchestration.recovery import quality_inputs
+    from nemo_gym.eval.recovery.planner import quality_inputs
 
     a, _ = setup(tmp_path)
     path = a / "quality_summary.json"

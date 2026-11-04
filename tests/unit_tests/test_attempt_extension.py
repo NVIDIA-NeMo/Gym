@@ -19,8 +19,8 @@ import json
 
 import pytest
 
+from nemo_gym.eval.recovery.planner import decide_from_collected, select_managed_evidence
 from nemo_gym.orchestration.executors.slurm import RETRY_EXTENSION_JOURNAL_NAME
-from nemo_gym.orchestration.recovery import decide_from_collected, select_managed_evidence
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_eval_resubmit import _handle, _provider_failures, _resumable_run
@@ -157,7 +157,7 @@ def test_recover_records_the_extension_journals_it_and_a_later_recovery_counts_i
 
 @pytest.mark.parametrize("extension,continues", [(None, False), ("1", True)])
 def test_the_in_job_admission_reads_the_recorded_extension(tmp_path, monkeypatch, capsys, extension, continues):
-    from nemo_gym.orchestration.recovery import continuation_admission
+    from nemo_gym.eval.recovery.planner import continuation_admission
 
     prepare_managed(tmp_path, "exhausted")
     # Segment 200 continues segment 100, which timed out after 60 s.

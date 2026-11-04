@@ -23,7 +23,7 @@ trial's call joins is reported as such and leaves the run unverified; it never f
 
 from pathlib import Path
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     CollectedEvidence,
     decide_from_collected,
     gate_summary_from_collected,

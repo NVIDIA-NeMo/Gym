@@ -64,7 +64,7 @@ def test_failure_payload_preserves_only_valid_typed_slots():
 
 
 def test_trial_boundary_consumes_runtime_observations_without_claiming_completeness():
-    from nemo_gym.orchestration.recovery import trial_boundary
+    from nemo_gym.eval.recovery.planner import trial_boundary
 
     quality = {
         "observed_runtime": {
@@ -101,7 +101,7 @@ def test_trial_coverage_from_actual_cpu_collector_metadata_fails_closed_when_evi
     from copy import deepcopy
     from pathlib import Path
 
-    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
+    from nemo_gym.eval.recovery.planner import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
 
     fixture = json.loads((Path(__file__).parents[1] / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     collected = CollectedEvidence.model_validate(deepcopy(fixture))
@@ -142,7 +142,7 @@ def test_trial_coverage_requires_whole_row_report_and_reports_the_turn():
     import json
     from pathlib import Path
 
-    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
+    from nemo_gym.eval.recovery.planner import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
 
     fixture = json.loads((Path(__file__).parents[1] / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     baseline = CollectedEvidence.model_validate(fixture)
@@ -180,7 +180,7 @@ def test_recovered_observations_remain_unknown_and_keep_both_counters():
     import json
     from pathlib import Path
 
-    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
+    from nemo_gym.eval.recovery.planner import CollectedEvidence, decide_from_collected, trial_health
 
     fixture = json.loads((Path(__file__).parents[1] / "fixtures/cpu-mcqa-trial-operations.json").read_text())
     collected = CollectedEvidence.model_validate(fixture)
@@ -197,7 +197,7 @@ def test_historical_mcqa_without_grading_observation_stays_unknown():
     import json
     from pathlib import Path
 
-    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
+    from nemo_gym.eval.recovery.planner import CollectedEvidence, decide_from_collected, trial_health
 
     fixtures = Path(__file__).parents[1] / "fixtures"
     historical = CollectedEvidence.model_validate_json((fixtures / "cpu-mcqa-trial-operations.json").read_text())

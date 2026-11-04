@@ -25,7 +25,7 @@ import sys
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     IdentityState,
@@ -262,8 +262,8 @@ def _metadata(model_ref: dict, *, failed: bool, status: int = 400, **extra) -> d
 
 
 def test_a_scored_zero_that_ended_on_the_policys_context_limit_is_named_so():
-    from nemo_gym.orchestration.recovery import decide_recovery
-    from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, inventory
+    from nemo_gym.eval.recovery.planner import decide_recovery
+    from tests.unit_tests.eval.recovery.test_eval_recovery_gate import OK_BUDGET, inventory
 
     limit = _metadata(POLICY, failed=True, error_category="context_length_exceeded")
     rows = [

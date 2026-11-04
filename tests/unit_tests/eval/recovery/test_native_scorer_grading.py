@@ -24,7 +24,7 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.recovery import grading_artifact
+from nemo_gym.eval.recovery.planner import grading_artifact
 from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 
 

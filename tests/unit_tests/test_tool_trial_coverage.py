@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     CollectedEvidence,
     _observed_trial_operations,
     decide_from_collected,
@@ -28,7 +28,7 @@ def health(collected):
 
 def trajectory_reported(collected):
     """The trial verdict and its reported trajectory evidence: the grading bound to the answer decides."""
-    from nemo_gym.orchestration.recovery import trial_verdict
+    from nemo_gym.eval.recovery.planner import trial_verdict
 
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     passed, reason, report = trial_verdict(decision, collected)

@@ -5,15 +5,15 @@
 import pytest
 
 from nemo_gym.core.episode_context import rollout_context
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     _observed_trial_operations,
     decide_from_collected,
     trial_counts,
     trial_health,
 )
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
+from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _dep, _judge_call, _own
 from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
-from tests.unit_tests.test_llm_judge_trial_coverage import _dep, _judge_call, _own
 from tests.unit_tests.test_tool_trial_coverage import fixture
 
 

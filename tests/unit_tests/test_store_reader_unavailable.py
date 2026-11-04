@@ -19,11 +19,11 @@ import sys
 
 import pytest
 
-from nemo_gym.orchestration import recovery
+from nemo_gym.eval.recovery import planner as recovery
+from nemo_gym.eval.recovery.planner import select_managed_evidence
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors import slurm
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection
-from nemo_gym.orchestration.recovery import select_managed_evidence
 from tests.unit_tests.test_allocation_cut_recovery import _cut_run
 from tests.unit_tests.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index

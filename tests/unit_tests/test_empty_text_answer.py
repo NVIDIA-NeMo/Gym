@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     CollectedEvidence,
     _empty_answer,
     _model_failure,

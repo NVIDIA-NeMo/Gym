@@ -17,8 +17,8 @@
 import pytest
 
 from nemo_gym.core import failure_kinds
-from nemo_gym.orchestration import recovery
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery import planner as recovery
+from nemo_gym.eval.recovery.planner import (
     GateCriteria,
     fault_class,
     fault_report,
@@ -85,7 +85,7 @@ def test_a_policy_timeout_is_the_models_fault_by_default():
 
 
 def test_a_run_that_owns_its_serving_can_count_a_policy_timeout_as_a_server_fault():
-    from nemo_gym.orchestration.recovery import decide_from_collected
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     collected = _timed_out_run()
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)

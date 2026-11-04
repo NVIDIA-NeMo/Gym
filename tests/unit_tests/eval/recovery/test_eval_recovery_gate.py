@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import IdentityState, RecoveryAction, RecoveryBudget, decide_recovery
+from nemo_gym.eval.recovery.planner import IdentityState, RecoveryAction, RecoveryBudget, decide_recovery
 
 
 OK_BUDGET = RecoveryBudget(
@@ -353,7 +353,7 @@ def test_terminal_and_exhausted_verification_failures_keep_their_state() -> None
 
 def test_an_explicit_fail_policy_still_stops_a_failed_verification_as_settled() -> None:
     from nemo_gym.agents.agent_outcome import OutcomeAction
-    from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+    from nemo_gym.eval.recovery.planner import RecoveryOutcomePolicyConfig
 
     policy = RecoveryOutcomePolicyConfig(by_failure_kind={"collection_dispatch_failed": OutcomeAction.FAIL})
     d = decide_recovery(
@@ -406,7 +406,7 @@ def test_an_infrastructure_failure_before_any_answer_still_retries_within_its_bu
     ],
 )
 def test_unconfirmed_harness_termination_replays_only_without_a_saved_answer(extra, unsupported):
-    from nemo_gym.orchestration.recovery import _policy_replay_is_unsupported
+    from nemo_gym.eval.recovery.planner import _policy_replay_is_unsupported
 
     events = {
         "h": {
@@ -419,7 +419,7 @@ def test_unconfirmed_harness_termination_replays_only_without_a_saved_answer(ext
 
 
 def test_other_harness_failures_and_malformed_causes_keep_their_replay_decision():
-    from nemo_gym.orchestration.recovery import _policy_replay_is_unsupported
+    from nemo_gym.eval.recovery.planner import _policy_replay_is_unsupported
 
     other = {"h": {"boundary": "harness", "operation": "harness.run"}}
     assert not _policy_replay_is_unsupported(

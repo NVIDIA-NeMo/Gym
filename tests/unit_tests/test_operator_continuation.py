@@ -20,15 +20,15 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX, RETRY_EXTENSION_NAME
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.jobs import load_submission_record
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
     UNKNOWN_BUDGET_HINT,
     UNKNOWN_BUDGET_REASON,
 )
+from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX, RETRY_EXTENSION_NAME
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.jobs import load_submission_record
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin

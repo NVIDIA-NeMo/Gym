@@ -446,7 +446,7 @@ class ResumeConfig(_StrictModel):
     def _validate_recovery_outcome_policy(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         if value is not None:
             # Imported here: recovery imports the executors, which import this module.
-            from nemo_gym.orchestration.recovery import configured_outcome_policy
+            from nemo_gym.eval.recovery.planner import configured_outcome_policy
 
             configured_outcome_policy(value)
         return value

@@ -27,7 +27,7 @@ from nemo_gym.core.failure_kinds import (
     SERVER_FAULT_KINDS,
     is_registered,
 )
-from nemo_gym.orchestration.recovery import failure_facts, fault_class
+from nemo_gym.eval.recovery.planner import failure_facts, fault_class
 from nemo_gym.rollouts.rollout_records import read_records
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore

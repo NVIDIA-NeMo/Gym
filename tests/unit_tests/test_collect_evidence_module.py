@@ -14,7 +14,8 @@
 # limitations under the License.
 """The evidence collector lives in its own module; recovery and the Slurm executor run that same script."""
 
-from nemo_gym.orchestration import collect_evidence, recovery
+from nemo_gym.eval.recovery import evidence as collect_evidence
+from nemo_gym.eval.recovery import planner as recovery
 from nemo_gym.orchestration.executors import slurm
 
 

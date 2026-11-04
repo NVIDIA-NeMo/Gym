@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     decide_from_collected,
@@ -309,7 +309,7 @@ def test_managed_selection_never_materializes_a_whole_rollout_file(tmp_path, mon
 def test_snapshot_hash_memory_is_bounded_on_large_sparse_file(tmp_path, reader):
     import tracemalloc
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.planner import _managed_source_digest
 
     path = tmp_path / "large.jsonl"
     size = 256 << 20
@@ -346,7 +346,7 @@ def collector_hash():
 def test_hashing_rejects_mid_read_file_mutation(tmp_path, monkeypatch, reader, mutation):
     import builtins
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.planner import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20))
@@ -492,7 +492,7 @@ def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_pat
     import builtins
     import os
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.planner import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20))
@@ -532,7 +532,7 @@ def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_pat
 
 @pytest.mark.parametrize("reader", ["managed", "collector"])
 def test_an_unchanged_file_gets_the_same_digest_from_both_readers(tmp_path, reader):
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.planner import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20) + b"tail")

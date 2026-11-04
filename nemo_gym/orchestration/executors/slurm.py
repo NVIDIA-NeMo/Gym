@@ -38,6 +38,42 @@ from nemo_gym.config.global_config import (
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
 )
+from nemo_gym.eval.recovery.planner import (
+    ACCUMULATED_WALLTIME_FILE,
+    COLLECT_SCRIPT,
+    FOLLOWUP_ACCOUNTING_FORMAT,
+    INFRA_RETRIES_FILE,
+    INFRA_RETRY_EXTENSION_FILE,
+    JUDGE_JOB_ACK_JOURNAL_NAME,
+    JUDGE_JOB_JOURNAL_NAME,
+    LIVE_JOB_STATES,
+    MAX_EXTEND_ATTEMPTS,
+    NO_INVENTORY,
+    OPERATOR_CONTINUATION_JOURNAL_NAME,
+    OPERATOR_CONTINUATION_NOTE,
+    READER_PLACEMENT_FIELDS,
+    RERUN_MASKED_JOURNAL_NAME,
+    CollectedEvidence,
+    IdentityState,
+    OperatorBudget,
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryOutcome,
+    RecoveryOutcomePolicyConfig,
+    _managed_trial_metadata,
+    accounted_chain_walltime,
+    allocation_cut_from_accounting,
+    chain_accounting,
+    decide_from_collected,
+    effective_outcome_policy,
+    failed_judge_jobs_blocking,
+    failed_judge_jobs_stop,
+    live_chain_job,
+    reconcile_requeued_chain,
+    requeue_note,
+    select_managed_evidence,
+    stopped_followup,
+)
 from nemo_gym.orchestration.api import (
     HOST_ENV_REFS,
     SAVED_CONFIG,
@@ -109,50 +145,18 @@ from nemo_gym.orchestration.jobs import (
     utc_now,
     utc_timestamp,
 )
-from nemo_gym.orchestration.recovery import (
-    ACCUMULATED_WALLTIME_FILE,
-    COLLECT_SCRIPT,
-    FOLLOWUP_ACCOUNTING_FORMAT,
-    INFRA_RETRIES_FILE,
-    INFRA_RETRY_EXTENSION_FILE,
-    JUDGE_JOB_ACK_JOURNAL_NAME,
-    JUDGE_JOB_JOURNAL_NAME,
-    LIVE_JOB_STATES,
-    MAX_EXTEND_ATTEMPTS,
-    NO_INVENTORY,
-    OPERATOR_CONTINUATION_JOURNAL_NAME,
-    OPERATOR_CONTINUATION_NOTE,
-    READER_PLACEMENT_FIELDS,
-    RERUN_MASKED_JOURNAL_NAME,
-    CollectedEvidence,
-    IdentityState,
-    OperatorBudget,
-    RecoveryAction,
-    RecoveryDecision,
-    RecoveryOutcome,
-    RecoveryOutcomePolicyConfig,
-    _managed_trial_metadata,
-    accounted_chain_walltime,
-    allocation_cut_from_accounting,
-    chain_accounting,
-    decide_from_collected,
-    effective_outcome_policy,
-    failed_judge_jobs_blocking,
-    failed_judge_jobs_stop,
-    live_chain_job,
-    reconcile_requeued_chain,
-    requeue_note,
-    select_managed_evidence,
-    stopped_followup,
-)
 from nemo_gym.utils.path_utils import attempt_extension_path_for
 
 
-# Executed only inside the saved pinned install. The projection contains no saved answer text.
+# Executed only inside the saved pinned install. The projection contains no saved answer text. That install may
+# predate the planner's move to nemo_gym.eval.recovery, so the reader falls back to its old path.
 _REMOTE_MANAGED_READER = r"""
 import json, subprocess, sys
 from pathlib import Path
-import nemo_gym.orchestration.recovery as recovery
+try:
+    import nemo_gym.eval.recovery.planner as recovery
+except ImportError:
+    import nemo_gym.orchestration.recovery as recovery
 job, expected_ref = Path(sys.argv[1]), sys.argv[2]
 raw = json.load(sys.stdin)
 root = Path.cwd().resolve()

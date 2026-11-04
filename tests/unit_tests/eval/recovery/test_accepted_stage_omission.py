@@ -26,7 +26,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.artifacts.exporters.base import BaseExporter, ExportState
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, RunArtifacts
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     RecoveryBudget,

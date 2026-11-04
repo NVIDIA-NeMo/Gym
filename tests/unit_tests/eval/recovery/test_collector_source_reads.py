@@ -26,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence
+from nemo_gym.eval.recovery.planner import COLLECT_SCRIPT, CollectedEvidence
 from tests.unit_tests.test_eval_resubmit_decision import complete_job, ident, produce_quality, write_job_dir
 
 

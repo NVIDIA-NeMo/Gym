@@ -25,7 +25,7 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     RERUN_MASKED_JOURNAL_NAME,
     decide_from_collected,
     masked_without_artifact_kind,
@@ -102,7 +102,7 @@ def test_every_other_exclusion_still_applies(row):
 
 
 def test_a_row_that_re_verification_can_grade_is_excluded_by_that_rule_alone():
-    from nemo_gym.orchestration.recovery import reverification_cause
+    from nemo_gym.eval.recovery.planner import reverification_cause
     from nemo_gym.rollouts.rollout_recovery import masked_kept_answer_kind
 
     patch = "diff --git a/x b/x\n"
@@ -398,8 +398,8 @@ def test_the_command_refuses_a_bad_combination_before_doing_anything(monkeypatch
 @pytest.mark.parametrize("inspect_only", [False, True])
 def test_the_command_passes_the_stripped_reason_to_recovery_and_inspect(monkeypatch, capsys, inspect_only):
     from nemo_gym.cli.main import _eval_resubmit, build_parser
+    from nemo_gym.eval.recovery.planner import RecoveryAction, RecoveryDecision, RecoveryOutcome
     from nemo_gym.orchestration import submit
-    from nemo_gym.orchestration.recovery import RecoveryAction, RecoveryDecision, RecoveryOutcome
 
     seen = {}
 

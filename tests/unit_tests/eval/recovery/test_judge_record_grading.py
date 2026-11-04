@@ -20,7 +20,7 @@ reward. A rubric judge's saved verdict and score record the grading when the rew
 
 import pytest
 
-from nemo_gym.orchestration.recovery import grading_artifact
+from nemo_gym.eval.recovery.planner import grading_artifact
 from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 
 
@@ -43,7 +43,7 @@ def test_an_empty_judge_evaluation_list_is_no_judge_record_and_the_incomplete_an
     # Nothing a judge saved: no grading facts are projected at all.
     assert not row.get("_ng_collected_grading_facts", {}).get("judge_evaluations")
     assert grading_artifact(row) is None
-    from nemo_gym.orchestration.recovery import _model_failure
+    from nemo_gym.eval.recovery.planner import _model_failure
 
     assert _model_failure(row) is True
 

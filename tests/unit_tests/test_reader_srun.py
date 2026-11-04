@@ -17,13 +17,13 @@ from pathlib import Path
 import pytest
 
 import nemo_gym.orchestration.executors.slurm as slurm
-from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     READER_PLACEMENT_FIELDS,
     CollectedEvidence,
     decide_from_collected,
     gate_summary_from_collected,
 )
+from nemo_gym.orchestration.executors.connection import LocalConnection
 from tests.unit_tests.test_reader_cleanup import _token_processes, _wait_until, needs_setsid
 from tests.unit_tests.test_remote_managed_recovery import ProjectionConnection, config
 

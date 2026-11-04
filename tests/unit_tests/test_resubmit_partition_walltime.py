@@ -20,11 +20,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from nemo_gym.eval.recovery.planner import RecoveryAction
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.slurm import WALLTIME_JOURNAL_NAME, SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
-from nemo_gym.orchestration.recovery import RecoveryAction
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin

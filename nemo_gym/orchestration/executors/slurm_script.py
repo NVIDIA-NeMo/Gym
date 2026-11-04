@@ -1229,9 +1229,13 @@ def build_sbatch_script(
         # Run only the saved-state reader, with the same pinned install, image and mounted artifacts as the
         # driver. This step precedes every service; plain host Python need not have Gym installed.
         # The run's recovery_outcome_policy, when set, is the seventh argument: a continuation decides with it.
+        # The pinned install may predate the planner's move to nemo_gym.eval.recovery: then it imports the old path.
         policy = resume.recovery_outcome_policy
         admission_python = (
-            "import sys; from nemo_gym.orchestration.recovery import continuation_admission; "
+            "import importlib, importlib.util, sys; "
+            "planner = ('nemo_gym.eval.recovery.planner' if importlib.util.find_spec('nemo_gym.eval') "
+            "and importlib.util.find_spec('nemo_gym.eval.recovery') else 'nemo_gym.orchestration.recovery'); "
+            "continuation_admission = importlib.import_module(planner).continuation_admission; "
             "print('__GYM_CONTINUATION:' + continuation_admission(sys.argv[1], int(sys.argv[2]), "
             "None if sys.argv[3] == 'None' else float(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6]"
             + (", sys.argv[7]" if policy is not None else "")

@@ -12,7 +12,7 @@ from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutco
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_records import FailureEvent, FailureReport
 from nemo_gym.core.failure_transport import FailureReportRow
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     decide_from_collected,

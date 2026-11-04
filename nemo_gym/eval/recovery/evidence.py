@@ -15,12 +15,12 @@
 """The evidence collector of `gym eval resubmit --recover`: one self-contained Python script, run on the run's host
 over the executor's connection (or locally), that reads the job directory and prints one JSON object.
 
-Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the script and the constants it embeds.
+Decisions live in ``nemo_gym.eval.recovery.planner``; this module holds the script and the constants it embeds.
 """
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.eval.recovery.markers import (
     ACCOUNTING_UNKNOWN_PREFIX,
     CANCELLED_FOLLOWUP_MARKER,
     FOLLOW_UP_SUBMISSION_REFUSED,

@@ -20,7 +20,7 @@ Runs are built from the one-trial programmatic-grading fixture, repeated with fr
 import json
 from pathlib import Path
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     CollectedEvidence,
     decide_from_collected,
     gate_summary_from_collected,
@@ -275,7 +275,7 @@ def test_trial_counts_leave_a_grading_bound_to_another_answer_unobserved():
 
 
 def test_trial_counts_leave_an_unbound_grading_artifact_unobserved():
-    from tests.unit_tests.test_grading_artifacts import _ungraded
+    from tests.unit_tests.eval.recovery.test_grading_artifacts import _ungraded
 
     collected = _run(1)
     _ungraded(collected.results[0], sentence_metrics=["sentence_chrf"])

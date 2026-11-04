@@ -757,7 +757,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     from nemo_gym.artifacts.exporters.base import _artifact_version
     from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
     from nemo_gym.artifacts.run_artifacts import RunArtifacts
-    from nemo_gym.orchestration.recovery import (
+    from nemo_gym.eval.recovery.planner import (
         COLLECT_SCRIPT,
         CollectedEvidence,
         IdentityState,

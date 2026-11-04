@@ -25,7 +25,7 @@ import sys
 import pytest
 
 from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE, is_gate_derived
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     IdentityState,
@@ -42,8 +42,8 @@ from nemo_gym.rollouts.rollout_recovery import (
     is_infrastructure_agent_timeout,
     is_server_fault_call,
 )
-from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, ident, inventory
-from tests.unit_tests.test_recovery_saved_generation import persist_producer_result, response
+from tests.unit_tests.eval.recovery.test_eval_recovery_gate import OK_BUDGET, ident, inventory
+from tests.unit_tests.eval.recovery.test_recovery_saved_generation import persist_producer_result, response
 
 
 WINDOW_S = 600.0

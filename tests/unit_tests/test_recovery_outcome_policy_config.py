@@ -24,12 +24,12 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym.agents.agent_outcome import OutcomeAction
+from nemo_gym.eval.recovery.planner import RecoveryAction, RecoveryOutcomePolicyConfig
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
-from nemo_gym.orchestration.recovery import RecoveryAction, RecoveryOutcomePolicyConfig
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
@@ -92,7 +92,7 @@ RATE_LIMITED = INFRA | {"_ng_failure_http_status": 429}
 
 
 def test_the_config_section_is_a_partial_override_of_the_default_policy() -> None:
-    from nemo_gym.orchestration.recovery import configured_outcome_policy
+    from nemo_gym.eval.recovery.planner import configured_outcome_policy
 
     resume = ResumeConfig(
         recovery_outcome_policy={"by_failure_kind": {"agent_timeout": "fail"}, "by_status_code": {429: "fail"}}
@@ -156,7 +156,7 @@ def test_a_bad_section_in_the_saved_config_fails_recovery_loudly(tmp_path, slurm
 
 
 def test_python_wins_over_config_which_wins_over_the_defaults() -> None:
-    from nemo_gym.orchestration.recovery import effective_outcome_policy
+    from nemo_gym.eval.recovery.planner import effective_outcome_policy
 
     configured = {"by_failure_kind": {"agent_timeout": "fail"}}
     explicit = RecoveryOutcomePolicyConfig(by_status_code={429: "fail"})
@@ -277,7 +277,7 @@ def test_the_in_job_continuation_applies_the_saved_policy(tmp_path) -> None:
 
 
 def test_the_continuation_admission_decides_with_the_saved_policy(tmp_path, monkeypatch) -> None:
-    from nemo_gym.orchestration import recovery
+    from nemo_gym.eval.recovery import planner as recovery
     from tests.unit_tests.test_allocation_cut_recovery import _cut_run
 
     job = tmp_path / "job"

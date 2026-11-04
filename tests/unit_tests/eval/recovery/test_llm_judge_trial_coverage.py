@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from nemo_gym.orchestration.recovery import _observed_trial_operations, decide_from_collected
+from nemo_gym.eval.recovery.planner import _observed_trial_operations, decide_from_collected
 from tests.unit_tests.test_tool_trial_coverage import fixture
 
 
@@ -233,7 +233,7 @@ def _recovered_fixture():
 
 
 def test_recovered_judge_counts_are_separate_and_do_not_change_score_or_denominator():
-    from nemo_gym.orchestration.recovery import trial_health
+    from nemo_gym.eval.recovery.planner import trial_health
 
     c, _, _ = _recovered_fixture()
     before = copy.deepcopy(c.model_dump())
@@ -276,7 +276,7 @@ def test_recovered_judge_counts_are_separate_and_do_not_change_score_or_denomina
     ],
 )
 def test_recovered_judge_missing_or_foreign_facts_cannot_accept(change):
-    from nemo_gym.orchestration.recovery import trial_health
+    from nemo_gym.eval.recovery.planner import trial_health
 
     c, meta, grade = _recovered_fixture()
     report = meta["failure_report"]
@@ -358,7 +358,7 @@ def test_recovered_event_id_cannot_be_reused_by_another_judge_dependency():
     ],
 )
 def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish):
-    from nemo_gym.orchestration.recovery import gate_summary_from_collected, trial_counts, trial_health
+    from nemo_gym.eval.recovery.planner import gate_summary_from_collected, trial_counts, trial_health
 
     c, meta, grade = _recovered_fixture()
     grade["outcome"] = "unknown"
@@ -420,7 +420,7 @@ def _transport_retried_judge(*, transport=1, event=True):
 
 
 def test_a_judge_request_retried_after_a_transport_failure_is_recovered():
-    from nemo_gym.orchestration.recovery import trial_health
+    from nemo_gym.eval.recovery.planner import trial_health
 
     c = _transport_retried_judge()
     d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)

@@ -39,6 +39,13 @@ run with a longer walltime.
 An unknown identity that a resume never runs again (the Store or the saved result holds it) does not block the
 missing and retryable ones: the decision reports it apart from what is retried and what is retained. A decision never
 reports a run as complete while an identity is terminal, missing or unknown.
+
+Module layout: this planner, its evidence collector (``nemo_gym.eval.recovery.evidence``) and the chain markers
+(``nemo_gym.eval.recovery.markers``) sit below ``nemo_gym.orchestration`` in the import-linter layers. They never import
+orchestration: the planner reads a run only through the evidence the collector prints (``CollectedEvidence``) and
+the marker strings the chain scripts write, and returns a ``RecoveryDecision``. Executing that decision (queueing a
+follow-up, a judge-only job, a fresh restart) is the caller's part: ``nemo_gym.orchestration.executors`` and the CLI
+import this module, never the reverse.
 """
 
 import hashlib
@@ -93,7 +100,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureReportRow
-from nemo_gym.orchestration.collect_evidence import (
+from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
     EPISODE_DEADLINE_REASON,  # noqa: F401
     JUDGE_JOB_ACK_JOURNAL_NAME,  # noqa: F401
@@ -102,7 +109,7 @@ from nemo_gym.orchestration.collect_evidence import (
     UNOBSERVED_CLAIM_REASON,
     UNREADABLE_CLAIM_REASON,
 )
-from nemo_gym.orchestration.executors.resume_script import (
+from nemo_gym.eval.recovery.markers import (
     ACCOUNTED_WALLTIME_PREFIX,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,

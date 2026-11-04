@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     decide_from_collected,
@@ -419,8 +419,8 @@ async def test_unusable_original_response_does_not_fall_back_to_different_partia
 
 
 def test_persisted_null_original_input_does_not_fall_back_to_partial(tmp_path):
+    from nemo_gym.eval.recovery.planner import _saved_answer
     from nemo_gym.eval.rollout_reverification import _rollout_response
-    from nemo_gym.orchestration.recovery import _saved_answer
     from nemo_gym.rollouts.rollout_recovery import has_saved_generation
     from tests.unit_tests.test_eval_resubmit_decision import _judge_failure, collect, write_job_dir
 

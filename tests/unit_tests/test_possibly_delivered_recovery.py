@@ -24,13 +24,13 @@ import sys
 
 import pytest
 
-from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     decide_from_collected,
     select_managed_evidence,
 )
+from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.rollouts.test_possibly_delivered_replay import _lost_connection_row

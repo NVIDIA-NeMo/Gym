@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 import nemo_gym.orchestration.executors.slurm as slurm
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.recovery import decide_from_collected
 from tests.unit_tests.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin

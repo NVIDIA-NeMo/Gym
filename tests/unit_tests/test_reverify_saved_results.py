@@ -17,8 +17,7 @@ from aiohttp import ClientPayloadError
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for
-from nemo_gym.eval.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     IdentityState,
@@ -28,10 +27,11 @@ from nemo_gym.orchestration.recovery import (
     reverification_cause,
     saved_row_evidence,
 )
+from nemo_gym.eval.rollout_reverification import bind_judge_failures, due_judge_failures, rejudge_saved_judge_failures
 from nemo_gym.rollouts.rollout_records import logical_rollout_id, rejudge_predecessor_id
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, scored
+from tests.unit_tests.eval.recovery.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, scored
 
 
 ANSWER = {
@@ -484,7 +484,7 @@ async def test_a_pairwise_result_with_a_game_lacking_its_verdict_is_replaced_who
 async def test_a_rejudgment_that_again_lacks_a_game_verdict_settles_once_and_the_gate_still_counts_it(
     tmp_path, verifier
 ) -> None:
-    from nemo_gym.orchestration.recovery import _scored_fault, reverification_cause, saved_row_evidence
+    from nemo_gym.eval.recovery.planner import _scored_fault, reverification_cause, saved_row_evidence
 
     output = _run(tmp_path, [pairwise_partial()])
     (identity,) = due_judge_failures(output)

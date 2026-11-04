@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.planner import (
     CollectedEvidence,
     decide_from_collected,
     final_zero_trials,
