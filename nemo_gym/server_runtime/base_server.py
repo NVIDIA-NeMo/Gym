@@ -63,7 +63,8 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.typed_exceptions import NgFailureEvent, route_reply_error
 from nemo_gym.server_runtime.ray_support import (
     _connect_server_to_ray,
     maybe_ray_cluster_exit,
@@ -100,7 +101,6 @@ from nemo_gym.telemetry.profiling import (
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
-from nemo_gym.typed_exceptions import NgFailureEvent, route_reply_error
 from nemo_gym.utils.server_process import (
     is_nemo_gym_fastapi_worker,
     set_is_nemo_gym_fastapi_entrypoint,

@@ -14,10 +14,7 @@ biomysterybench:
           type: benchmark
           jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
           prepare_script: benchmarks/biomysterybench/harbor/adapter.py
-          prepare_dependencies:
-            - huggingface_hub
-            - tqdm
-            - tyro
+          prepare_project: benchmarks/biomysterybench
           num_repeats: 4
 
       harbor_max_retries: 3

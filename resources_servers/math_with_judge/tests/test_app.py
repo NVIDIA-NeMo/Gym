@@ -33,11 +33,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.telemetry import ResourcesOperation
-from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.verification.judge import is_judge_failure
+from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
