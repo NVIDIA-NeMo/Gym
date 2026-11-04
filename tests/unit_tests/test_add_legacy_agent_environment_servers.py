@@ -78,6 +78,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
         "hermes_agent",
         "pi_agent",
         "pool_agent",
+        "kimi_code_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
@@ -116,6 +117,7 @@ def test_migration_respects_agent_session_templates(
         "hermes_agent",
         "pi_agent",
         "pool_agent",
+        "kimi_code_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
@@ -143,7 +145,7 @@ def test_agent_session_capable_overlay_keeps_inherited_resources(tmp_path: Path,
     assert resolved.renamed_agent.responses_api_agents[agent_type].resources_server.name == "my_resources"
 
 
-@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent"])
+@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent", "kimi_code_agent"])
 def test_default_agent_composes_with_exactly_one_session_environment(tmp_path: Path, agent_type: str) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / f"responses_api_agents/{agent_type}/configs/{agent_type}.yaml"

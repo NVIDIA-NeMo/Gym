@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Kimi Code agent sessions: config rendering, output conversion, seed refusals, and real supervised runs of a fake
+Kimi CLI."""
+
+import asyncio
+import json
+import shlex
+import shutil
+import sys
+import tomllib
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi import HTTPException
+
+from nemo_gym.agents import AgentSeedSessionRequest, SandboxSession, check_agent_seed_rejected
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents.base_responses_api_agent import ModelEndpoint
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxExecResult
+from responses_api_agents.kimi_code_agent.app import KimiCodeAgent, KimiCodeAgentConfig
+from responses_api_agents.kimi_code_agent.conversion import max_concurrency, parse_session, to_toml
+from responses_api_agents.kimi_code_agent.sandbox import KIMI_VERSION, KimiSession
+
+
+FAKE_KIMI = r"""
+import json, os, subprocess, sys, time
+from pathlib import Path
+if sys.argv[1:] == ["--version"]:
+    print("__VERSION__")
+    sys.exit(0)
+home = Path(os.environ["KIMI_CODE_HOME"])
+mode = os.environ.get("TEST_MODE", "normal")
+agents_md = home / "AGENTS.md"
+(home / "seen.json").write_text(json.dumps({
+    "argv": sys.argv[1:], "cwd": os.getcwd(), "config": (home / "config.toml").read_text(),
+    "agents_md": agents_md.read_text() if agents_md.exists() else None,
+    "env": {k: v for k, v in os.environ.items() if k.startswith(("KIMI_", "OPENAI_"))},
+}))
+subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
+def usage(tokens):
+    return {"type": "usage.record", "usage": {"inputOther": tokens, "output": 1, "inputCacheRead": 2}}
+wires = {"main": [usage(100), {"type": "subagent.spawned", "subagentId": "agent-0", "parentAgentId": "main",
+                                "parentToolCallId": "call-1", "subagentName": "coder"},
+                  {"type": "subagent.started", "subagentId": "agent-0", "time": 1000},
+                  {"type": "subagent.completed", "subagentId": "agent-0", "time": 3000}, usage(200)],
+         "agent-0": [usage(10)]}
+for agent, events in wires.items():
+    wire = home / "sessions" / "wd_0" / "session_1" / "agents" / agent / "wire.jsonl"
+    wire.parent.mkdir(parents=True, exist_ok=True)
+    wire.write_text("\n".join(json.dumps(e) for e in events))
+# A kimi process the agent started itself has its own session, which must not be counted.
+other = home / "sessions" / "wd_0" / "session_2" / "agents" / "main" / "wire.jsonl"
+other.parent.mkdir(parents=True, exist_ok=True)
+other.write_text(json.dumps(usage(999)))
+messages = [
+    {"role": "meta", "type": "system.version", "version": "__VERSION__"},
+    {"role": "assistant", "tool_calls": [{"type": "function", "id": "call-1",
+     "function": {"name": "Agent", "arguments": "{\"prompt\": \"fix\"}"}}]},
+    {"role": "tool", "tool_call_id": "call-1", "content": "fixed"},
+]
+if mode != "silent":
+    messages.append({"role": "assistant", "content": "<think>check</think>Done."})
+for message in messages:
+    print(json.dumps(message), flush=True)
+if mode == "sleep":
+    time.sleep(60)
+print(json.dumps({"role": "meta", "type": "session.resume_hint", "session_id": "session_1"}))
+sys.exit(1 if mode == "crash" else 0)
+""".replace("__VERSION__", KIMI_VERSION)
+
+
+class LocalSandbox:
+    """Run every sandbox command on this host, except the installer, which writes the fake Kimi."""
+
+    def __init__(self):
+        self.events = []
+        self.disconnected = False
+
+    async def upload(self, source, destination):
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    async def download(self, source, destination):
+        self.events.append(f"read {Path(source).name}")
+        shutil.copyfile(source, destination)
+
+    async def exec(self, command, *, cwd=None, timeout_s=30, env=None):
+        argv = shlex.split(command)
+        if len(argv) > 1 and argv[1].endswith("/install_kimi_runtime.sh"):
+            assert argv[3] == KIMI_VERSION
+            binary = Path(argv[2]) / "kimi"
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_text(f"#!{sys.executable}\n" + FAKE_KIMI)
+            binary.chmod(0o755)
+            return SandboxExecResult("", "", 0)
+        process = await asyncio.create_subprocess_exec(
+            "sh", "-c", command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        return SandboxExecResult(stdout.decode(errors="replace"), stderr.decode(errors="replace"), process.returncode)
+
+    async def disconnect(self):
+        self.events.append("disconnect")
+        self.disconnected = True
+
+    async def stop(self):
+        pytest.fail("A borrowed sandbox must not be stopped")
+
+
+def agent(**kwargs) -> KimiCodeAgent:
+    return KimiCodeAgent(
+        config=KimiCodeAgentConfig(
+            host="localhost",
+            port=8080,
+            name="kimi_code_agent",
+            entrypoint="app.py",
+            model="policy",
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+            **kwargs,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+def seed(*, workdir="/repo", tools=None, user=None, borrowed=True) -> AgentSeedSessionRequest:
+    access = {
+        "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {"id": "task"}},
+        "workdir": workdir,
+    }
+    if user is not None:
+        access["user"] = user
+    return AgentSeedSessionRequest(
+        agent_session_id="session-1",
+        episode_id={"rollout_id": "rollout-1"},
+        task_id={"taskset": "test", "task_id": "task"},
+        tool_accesses=tools or [],
+        sandbox_access=access if borrowed else None,
+    )
+
+
+def body(**fields) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "system", "content": "Use tools."}, {"role": "user", "content": "Fix the bug."}], **fields
+    )
+
+
+def test_to_toml_round_trips_nested_tables_rule_arrays_and_unicode():
+    data = {
+        "default_model": "policy",
+        "models": {"a.b": {"capabilities": ["tool_use"], "max_context_size": 8}},
+        "permission": {"rules": [{"decision": "deny", "pattern": "Bash(echo \U0001f600)"}]},
+        "loop_control": {"max_steps_per_turn": None},
+        "note": 'quote " and \x7f',
+    }
+    assert tomllib.loads(to_toml(data)) == data | {"loop_control": {}}
+    with pytest.raises(ValueError, match="disabled holds None"):
+        to_toml({"tools": {"disabled": ["Shell", None]}})
+
+
+def test_unknown_subagent_events_do_not_end_a_child(tmp_path):
+    wire = tmp_path / "agents" / "main" / "wire.jsonl"
+    wire.parent.mkdir(parents=True)
+    events = [
+        {"type": "subagent.spawned", "subagentId": "agent-0", "parentAgentId": "main"},
+        {"type": "subagent.started", "subagentId": "agent-0", "time": 1000},
+        {"type": "subagent.progress", "subagentId": "agent-0", "time": 1500},
+    ]
+    wire.write_text("\n".join(json.dumps(e) for e in events))
+    _, children = parse_session(tmp_path)
+    assert children[0]["status"] == "incomplete" and "ended" not in children[0]
+    assert (
+        max_concurrency([{"started": 0, "ended": 10}, {"started": 5, "ended": 6}, {"started": 6, "ended": 7}, {}]) == 2
+    )
+
+
+def test_config_routes_every_model_through_the_rollout_and_keeps_its_providers():
+    server = agent(
+        subagent_model_server={"type": "responses_api_models", "name": "lightning"},
+        subagent_model_force=True,
+        subagents=False,
+        kimi_config={"providers": {"policy": {"base_url": "http://elsewhere"}}, "extra": {"x": 1}},
+    )
+    state = MagicMock(request=seed())
+
+    def endpoint(*, model_server, rollout_id):
+        return ModelEndpoint(base_url=f"http://{model_server.name}/ng-rollout/{rollout_id}/v1")
+
+    with patch.object(KimiCodeAgent, "model_endpoint", side_effect=endpoint):
+        config = tomllib.loads(to_toml(server.kimi_config(state)))
+    assert config["providers"]["policy"]["base_url"] == "http://policy_model/ng-rollout/rollout-1/v1"
+    assert config["providers"]["subagent"]["base_url"] == "http://lightning/ng-rollout/rollout-1/v1"
+    assert config["secondary_model"] == {"default_model": "subagent", "force": True}
+    assert {"Agent", "AgentSwarm"} <= set(config["tools"]["disabled"])
+    assert config["extra"] == {"x": 1}
+
+
+@pytest.mark.parametrize(
+    ("request_seed", "reason"),
+    [
+        (
+            seed(
+                tools=[
+                    {
+                        "kind": "mcp",
+                        "name": "task_tools",
+                        "required": True,
+                        "connection": {"transport": "streamable_http", "url": "http://r/mcp"},
+                    }
+                ]
+            ),
+            "Kimi Code sessions use Kimi's own tools; required tool grants are unsupported",
+        ),
+        (seed(user="nobody"), "Kimi Code does not support a SandboxAccess user override"),
+        (seed(workdir="repo"), "Kimi Code task workdir must be absolute and separate from its session storage"),
+        (seed(borrowed=False), "Kimi Code requires sandbox_access or a configured sandbox_provider"),
+    ],
+)
+def test_unsupported_seeds_are_final_refusals(request_seed, reason):
+    server = agent()
+    assert check_agent_seed_rejected(server.setup_webserver(), request_seed) == reason
+    assert not server._session_records
+
+
+def test_request_mapping_and_refusals():
+    prompt, instructions = agent()._conversation(body(instructions="Answer in English."))
+    assert (prompt, instructions) == ("Fix the bug.", "Answer in English.\n\nUse tools.")
+    for fields in ({"temperature": 0.5}, {"max_output_tokens": 10}, {"model": "other"}):
+        with pytest.raises(HTTPException) as error:
+            agent()._conversation(body(**fields))
+        assert error.value.status_code == 422
+    with pytest.raises(HTTPException, match="byte argument limit"):
+        agent()._conversation(NeMoGymResponseCreateParamsNonStreaming(input="x" * (128 * 1024)))
+
+
+async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
+    workdir = tmp_path / "task repo"
+    workdir.mkdir()
+    request = seed(workdir=str(workdir))
+    request.sandbox_access.env = {
+        "TEST_MODE": mode,
+        "TASK_TEST": "task-value",
+        "HOME": str(tmp_path / "task-home"),
+        "KIMI_CODE_HOME": "must-not-inherit",
+    }
+    sandbox = LocalSandbox()
+    state = KimiSession(
+        request=request,
+        provider_name="local",
+        sandbox_id="task",
+        runtime=str(tmp_path / "runtime"),
+        session=SandboxSession(
+            sandbox=sandbox, session_dir=str(tmp_path / "kimi session"), workdir=str(workdir), harness="Kimi Code"
+        ),
+    )
+    server = agent(timeout=timeout, swarm_max_concurrency=4)
+    binary = tmp_path / "release"
+    binary.write_bytes(b"release")
+    # The agent server downloads the release; the fake installer stands in for its contents.
+    with patch(
+        "responses_api_agents.miniswe_sandboxed_agent.bootstrap.cached_download", AsyncMock(return_value=binary)
+    ) as download:
+        await state.install(timeout=10)
+    assert download.await_args.args[0].startswith("https://code.kimi.com/kimi-code/binaries/2.1.1/kimi-code-linux-")
+    state.activation_request = body()
+    endpoint = ModelEndpoint(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
+    with patch.object(KimiCodeAgent, "model_endpoint", return_value=endpoint):
+        try:
+            response = await asyncio.wait_for(server._activate(state, state.activation_request), timeout=60)
+        except Exception as error:
+            response = error
+    seen = json.loads((Path(state.home) / "seen.json").read_text())
+    close = await asyncio.wait_for(server._close_agent_session_state(state), timeout=60)
+    return response, close, seen, state, sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_real_run_maps_output_usage_and_subagents(tmp_path):
+    response, close, seen, state, sandbox = await activate(tmp_path, "normal")
+    assert response.status == "completed"
+    assert [item.type for item in response.output] == ["function_call", "function_call_output", "reasoning", "message"]
+    assert response.output[-1].content[0].text == "Done."
+    # Usage counts this run's session (root and child), not another kimi process's.
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (102 + 202 + 12, 3)
+    assert response.metadata["kimi_num_subagents"] == "1"
+    assert seen["argv"] == ["-p", "Fix the bug.", "--output-format", "stream-json"]
+    assert seen["cwd"] == state.session.workdir
+    assert seen["agents_md"] == "Use tools."
+    assert tomllib.loads(seen["config"])["providers"]["policy"]["base_url"].endswith("/ng-rollout/rollout-1/v1")
+    assert seen["env"]["KIMI_CODE_HOME"] == state.home
+    assert seen["env"]["KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"] == "4"
+    assert (Path(state.session.workdir) / "proof.txt").read_text().splitlines() == [
+        str(tmp_path / "task-home"),
+        "task-value",
+    ]
+    records = close.agent_observations.records
+    assert records[1].parent_invocation_id == "rollout-1" and records[1].status == "completed"
+    assert "usage_unavailable" not in {gap.code for gap in close.agent_observations.gaps}
+    assert close.cleanup_confirmed and sandbox.disconnected and not Path(state.session.session_dir).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+@pytest.mark.parametrize(
+    ("mode", "status", "failure_kind"), [("crash", "failed", "unknown"), ("silent", "failed", "agent_invalid_output")]
+)
+async def test_failed_runs_report_an_outcome(tmp_path, mode, status, failure_kind):
+    response, close, _, _, _ = await activate(tmp_path, mode)
+    assert response.status == status
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == failure_kind
+    assert close.cleanup_confirmed
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+async def test_timeout_keeps_partial_work_as_incomplete(tmp_path):
+    response, close, _, state, _ = await activate(tmp_path, "sleep", timeout=3)
+    assert state.session.cleanup["timed_out"] and response.status == "incomplete"
+    assert response.output[-1].content[0].text == "Done."
+    assert close.agent_observations.records[-1].outcome == "timeout"

@@ -217,6 +217,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "harbor_oracle_agent",
         "hermes_agent",
         "kilocode_agent",
+        "kimi_code_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
         "openclaw_agent",

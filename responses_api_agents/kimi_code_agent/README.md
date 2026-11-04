@@ -1,0 +1,111 @@
+# Kimi Code Agent
+
+Runs Moonshot's [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code) **2.1.1** (`@moonshot-ai/kimi-code`, MIT) as
+one print-mode session (`kimi -p ... --output-format stream-json`) inside a Gym task sandbox. The Environment Server
+seeds the Resources and agent sessions, activates Kimi once, closes the agent, verifies the task, and closes
+Resources. Kimi runs its own tools and calls Gym Model Servers for inference. Kimi's subagent tools, `Agent` and
+`AgentSwarm`, are available unless `subagents: false`.
+
+Capability level: **Evaluation**. The adapter returns the root conversation as Responses items, usage summed over the
+root and every subagent, and an observation bundle with one invocation per subagent. Token IDs are not captured.
+
+## Configure and run
+
+[configs/kimi_code_agent.yaml](configs/kimi_code_agent.yaml) defines the agent defaults. For SWE-bench Pro, save this
+composition as `run.yaml`:
+
+```yaml
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/kimi_code_agent/configs/kimi_code_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: swebench_pro_resources_server
+      agent_server:
+        name: kimi_code_agent
+      resources_tool_transports: []
+```
+
+Supply a `policy_model` Gym Model Server, `policy_model_name`, and the `sandbox` provider configuration in
+`model-provider.yaml`. The task sandbox must be able to reach the Model Server.
+
+```bash
+python benchmarks/swebench/pro/prepare.py
+
+gym env start --config run.yaml --config model-provider.yaml --allow-unsupported-pairing
+
+gym eval run --no-serve \
+  --config run.yaml --config model-provider.yaml \
+  --agent kimi_code_agent \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  -o rollouts.jsonl --limit 3 --concurrency 3
+```
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `kimi_version` | `2.1.1` | Release whose binary checksums are pinned in the adapter. Other values are refused. |
+| `model` | `${policy_model_name}` | Model name Kimi sends for the root. |
+| `subagent_model_server`, `subagent_model` | `null` | A second Model Server (and model name) for `Agent`/`AgentSwarm` children, Kimi's `[secondary_model]` default. `subagent_model_force: true` pins every child to it. |
+| `subagents` | `true` | `false` disables `Agent` and `AgentSwarm`, for a solo control. |
+| `swarm_max_concurrency` | `null` | `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`; `null` keeps Kimi's own ramp. |
+| `max_steps_per_turn`, `print_max_turns` | `null` | Kimi's `loop_control.max_steps_per_turn` and `background.print_max_turns`. |
+| `thinking_effort` | `null` | Kimi's `thinking.effort`. |
+| `max_context_size` | `262144` | The model's context window, for Kimi's compaction. |
+| `disabled_tools`, `permission_rules` | Cron tools, `[]` | Kimi tool and permission settings. |
+| `kimi_config` | `{}` | Merged under the generated `config.toml`; the providers, models and tool settings above win. |
+| `timeout` | `7200` | Seconds per activation, enforced by the sandbox's process supervisor. Task `agent_timeout_sec` metadata can shorten it. |
+| `sandbox_install_timeout_seconds`, `session_close_timeout_seconds` | `900`, `60` | Setup and per-phase close bounds. |
+| `sandbox_provider`, `sandbox_config` | `null`, `{}` | Agent-owned sandbox, only when Resources supplies no `SandboxAccess`. |
+
+## Runtime and sandbox setup
+
+Kimi Code ships one self-contained glibc binary per platform (about 190 MB). Session setup installs the binary for
+the sandbox's architecture under `/tmp/nemo-gym-kimi-runtime-2.1.1`. The agent server downloads it from
+`code.kimi.com` once into its asset cache, checks the SHA-256 pinned in `sandbox.py` from the release manifest, and
+uploads it; the sandbox checks the checksum again, checks the version Kimi reports, and reuses a runtime that already
+reports it. The sandbox needs a glibc image, bash and `sha256sum`, and no internet access; Alpine/musl images are not
+supported by the release binaries.
+
+Kimi runs in `SandboxAccess.workdir` through the shared `harness_runner.sh` under the process supervisor. Its config,
+global `AGENTS.md`, sessions and logs live under `KIMI_CODE_HOME` in a private session directory, so tool shells keep
+the task's `HOME`. `SandboxAccess.env` is forwarded, except `KIMI_*`, `OPENAI_*` and `MOONSHOT_*` variables. Close
+removes only the session directory.
+
+## Requests, results and outcomes
+
+The user message is the task, passed as `-p` (at most 128 KiB). The request's system or developer message and
+`instructions` become Kimi's global `AGENTS.md`. Other request fields, such as `temperature` and `max_output_tokens`,
+are refused with HTTP 422, as are sessionless requests and `/run`.
+
+The response output is the root's chat messages from `--output-format stream-json`, converted to Responses items, with
+`<think>` reasoning split off. Usage sums every `usage.record` in this run's session (picked by the session id Kimi
+prints, so kimi processes the agent starts itself are not counted). Response metadata records `kimi_exit_code`,
+`kimi_num_subagents` and `kimi_max_concurrent_subagents`.
+
+| Kimi Code 2.1.1 ending | Response |
+|---|---|
+| Exit 0 with an assistant message | `completed` |
+| Supervisor deadline, with model output | `incomplete` (verified); without any output, the activation fails |
+| Nonzero exit | `failed`, `unknown` (Kimi reports no structured cause; the episode may be retried) |
+| Exit 0 without an assistant message | `failed`, `agent_invalid_output` |
+| Kimi never started | The activation raises |
+
+## Limitations
+
+- Model-call ownership and tool timing are not reported (`model_call_ownership_unavailable`,
+  `harness_tool_timing_unavailable`): Kimi sends no per-call session header.
+- Required tool grants are refused at seed; optional grants are skipped and reported. A `SandboxAccess` user override
+  is refused.
+- One activation per session; there is no host execution path.
+
+## Tests
+
+```bash
+python -m pytest responses_api_agents/kimi_code_agent/tests -q -o addopts=''
+```
+
+The lifecycle tests run the shared process supervisor and runner on Linux with a fake Kimi CLI.
