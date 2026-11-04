@@ -9,7 +9,10 @@ deepswe_opencode_resources_server:
   _inherit_from: deepswe_resources_server
   resources_servers:
     deepswe:
-      score_agent_sandbox_oom_as_zero: true
+      agent_failure_outcome_policy:
+        default_action: fail
+        by_failure_kind:
+          provider_oom_killed: count_as_zero
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
