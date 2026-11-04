@@ -23,7 +23,6 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Dict, Optional, Union
-from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, ValidationError
@@ -261,13 +260,13 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 verified = self._verified_sessions.get(session_id)
                 if session_id in self._session_episodes or (verified is not None and verified[0] is not None):
                     raise ResourcesSessionConflictError("A legacy seed cannot replace a typed session")
-                if verified is not None:
-                    # A new /run may reuse its caller's cookie; keep the completed cookie valid for verify retries.
-                    session_id = str(uuid4())
+                # A new /run may reuse its caller's cookie: it keeps the ID and replaces the previous run's state,
+                # including that run's verify retry record and expiry label.
                 metadata = self._session_metadata(body)
                 self._close_session(session_id)
                 self.session_metadata[session_id] = metadata
-                request.session[SESSION_ID_KEY] = session_id
+                self._verified_sessions.forget(session_id)
+                self._expired_sessions.forget(session_id)
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id

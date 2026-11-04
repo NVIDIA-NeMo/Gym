@@ -129,7 +129,8 @@ metadata and the Python worker for typed and legacy sessions before checkpoint t
 to that verification payload remains for `session_close_retry_window_seconds`; retries return the same evaluation
 without invoking the judge again, and a changed payload is masked. `/close_session` fences this record and releases
 any still-active session. Checkpoint retirement also releases live workers and metadata. A legacy seed cannot
-replace a typed session; a new legacy `/run` reusing a completed legacy cookie receives a fresh cookie.
+replace a typed session; a new legacy `/run` reusing a completed legacy cookie keeps its session ID and replaces
+the completed run's state, including its retry record.
 The idle sweep (`session_ttl`)
 and `/end_session` also release state; a later seed retry for that session fails with 404 instead of confirming a
 session that no longer exists. A tool call for a session the server no longer holds fails with 404, and `/verify`

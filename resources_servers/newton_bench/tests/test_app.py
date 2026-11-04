@@ -15,6 +15,7 @@
 import asyncio
 import math
 import time
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException, Request
@@ -1520,27 +1521,33 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert len(server._verified_sessions) == 0
 
 
-def test_next_legacy_run_gets_new_cookie_and_old_verify_remains_retryable() -> None:
+def test_next_legacy_run_keeps_its_cookie_and_replaces_the_finished_run() -> None:
     server = _session_server()
-    with TestClient(server.setup_webserver()) as client:
+    body = _final_law_verify_body()
+    evaluator = MagicMock()
+    evaluator.evaluate_law.side_effect = [
+        {"symbolic_equivalent": True, "rmsle": 0.0},
+        {"symbolic_equivalent": False, "rmsle": 10.0},
+    ]
+    with (
+        TestClient(server.setup_webserver()) as client,
+        patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
+    ):
         assert client.post("/seed_session", json=TASK_DATA).status_code == 200
-        old_cookies = dict(client.cookies)
-        old_id = next(iter(server.session_metadata))
-        first = client.post("/verify", json=VERIFY_BODY).json()
+        [session_id] = server.session_metadata
+        cookies = dict(client.cookies)
+        assert client.post("/verify", json=body).json()["reward"] == 1.0
+        # The next /run on the same cookie keeps the ID and replaces the finished run, retry record included.
         assert client.post("/seed_session", json=TASK_DATA).status_code == 200
-        new_id = next(iter(server.session_metadata))
-        assert new_id != old_id
-        assert client.post("/verify", json=VERIFY_BODY).json()["mask_sample"] is False
-        client.cookies.clear()
-        client.cookies.update(old_cookies)
-        retry = client.post("/verify", json=VERIFY_BODY).json()
-        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+        assert list(server.session_metadata) == [session_id] and dict(client.cookies) == cookies
+        assert session_id not in server._verified_sessions
+        # The same answer is evaluated again for the new run, not replayed from the finished one.
+        assert client.post("/verify", json=body).json()["reward"] < 1.0
+        assert evaluator.evaluate_law.call_count == 2
+        assert server.session_metadata == {}
 
 
-def test_verify_retry_reuses_evaluation_and_refuses_a_changed_answer() -> None:
-    from copy import deepcopy
-
-    server = _session_server()
+def _final_law_verify_body() -> dict:
     body = deepcopy(VERIFY_BODY)
     body["response"]["output"] = [
         {
@@ -1553,6 +1560,12 @@ def test_verify_retry_reuses_evaluation_and_refuses_a_changed_answer() -> None:
             ],
         }
     ]
+    return body
+
+
+def test_verify_retry_reuses_evaluation_and_refuses_a_changed_answer() -> None:
+    server = _session_server()
+    body = _final_law_verify_body()
     evaluator = MagicMock()
     evaluator.evaluate_law.side_effect = [
         {"symbolic_equivalent": True, "rmsle": 0.0},
