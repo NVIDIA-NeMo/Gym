@@ -26,7 +26,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel, PositiveFloat, PositiveInt
+from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -72,7 +72,10 @@ class JudgeEvaluation(BaseModel):
     response: NeMoGymResponse
     # The verdict the reply gave, `[[A=B]]` or `[[A!=B]]`, or `judge_parsing_error` when it gave none. A reply without
     # a verdict still scores as unequal, and the saved label lets recovery re-judge it instead of keeping that zero.
-    verdict_label: Optional[str] = None
+    # Servers that parse their own verdict (physics_judge, math_with_autograder, ugphysics_judge) build this model
+    # without a label. Recovery reads a saved null label as a judge that gave no verdict, so an unset label is left
+    # out and their evaluations are saved as before the field existed.
+    verdict_label: Optional[str] = Field(default=None, exclude_if=lambda label: label is None)
 
 
 class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
