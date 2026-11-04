@@ -249,6 +249,10 @@ dependencies = [
 
     # pydot License: MIT https://github.com/pydot/pydot/blob/a2bee1e770698867332516fb2878fac262b4ffc5/LICENSES/MIT.txt
     "pydot",
+    
+    # tiktoken: BPE tokenizer for SPEED-Bench dataset preparation script
+    # License: MIT https://raw.githubusercontent.com/openai/tiktoken/refs/tags/0.9.0/LICENSE
+    "tiktoken>=0.9.0",
 ]
 
 [project.optional-dependencies]
