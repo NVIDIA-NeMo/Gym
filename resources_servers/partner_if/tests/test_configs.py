@@ -46,6 +46,9 @@ SWE_FIELDS = HARBOR_FIELDS | {
     "f2p_script": "pytest tests/test_notes.py",
     "FAIL_TO_PASS": ["tests/test_notes.py::test_log"],
     "PASS_TO_PASS": "[]",
+    # Scale-SWE's curriculum start-state fields, at the only values IF tasks accept.
+    "setup_patch": "",
+    "squash_history": False,
 }
 
 
@@ -69,6 +72,20 @@ def test_gym_task_data_tooling_validates_the_same_contract(dataset, native_field
     for i, line in enumerate((root / "data" / dataset).read_text().splitlines()):
         validator.validate_row(i, json.loads(line) | native_fields)
     assert validator.report.clean, validator.report.summary()
+
+
+@pytest.mark.parametrize(
+    "start_state", [{"setup_patch": "diff --git a/notes.py b/notes.py\n"}, {"squash_history": True}], ids=str
+)
+def test_gym_task_data_tooling_rejects_a_curriculum_start_state(start_state):
+    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+
+    root = PARENT_DIR / "resources_servers/partner_if"
+    validator = TaskDataValidator("partner_if", load_task_data_schema(root), "mock_tools_example.jsonl")
+    row = json.loads((root / "data" / "mock_tools_example.jsonl").read_text().splitlines()[0])
+    validator.validate_row(0, row | SWE_FIELDS | start_state)
+    assert validator.report.error_rows == 1
+    assert next(iter(start_state)) in validator.report.summary()
 
 
 def test_the_swe_row_carries_every_task_field_of_its_wire():
