@@ -270,6 +270,23 @@ gym eval prepare --benchmark chemreason_bench \
 
 Upstream evaluates with deterministic decoding (`temperature = 0`) and one pass per instance.
 
+### Task-type subsets
+
+`prepare()` accepts `task_types` to keep only some of the six task families; it applies
+after the `protocol` selection and before `limit`, and writes to the normal dataset path:
+
+```bash
+gym eval prepare --benchmark chemreason_bench \
+  +prepare_script_args.protocol=gen \
+  +prepare_script_args.task_types=[step_completion,step_validation,condition_validation,rationalization]
+```
+
+That selection, the four families whose answer describes or validates a procedure step,
+is 4,963 `gen` instances; its `mean/reward` is a pooled per-instance score over those
+families, **not** the published Primary-Overall. The filter is also exposed as repeatable
+`--task-type` flags. Unknown families are rejected, and the download count gate still
+checks the complete corpus before any subset is written.
+
 ## Tests
 
 ```bash
