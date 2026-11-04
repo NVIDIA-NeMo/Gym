@@ -15065,6 +15065,15 @@ class TestRunRecordWriter:
         writer.write({**rows[2], "reward": 1.0})
         assert completed() == 3  # the last expected record is always written
 
+        # The last expected row may be an omitted row the shard does not keep: the status still ends current.
+        writer = _RunRecordWriter(tmp_path, "step_2", rows=rows, status_rows=[dict(row) for row in rows])
+        writer.write({**rows[0], "reward": 1.0})
+        writer.write({**rows[1], "reward": 1.0})
+        assert completed() == 1
+        assert writer.write({**rows[2], NG_FAILURE_CLASS_KEY: "cancelled", NG_NO_PERSIST_KEY: True}) is None
+        member = orjson.loads(writer.status_fpath.read_bytes())["members"]["a"]
+        assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (2, 1)
+
     async def test_a_reused_row_is_recorded_under_the_shard_run(self, tmp_path: Path, monkeypatch) -> None:
         """A row that carries an earlier run's id is dispatched and saved under the shard's run, so the Store reads it."""
         from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY, RolloutStore, _failure_diagnostics

@@ -1285,6 +1285,9 @@ class _RunRecordWriter:
         self._status_written += 1
         if result.get(NG_NO_PERSIST_KEY):
             if not self.record_omitted_rollouts:
+                # Nothing is saved for it, but when it is the last expected row the status still ends current.
+                if self._status_expected is not None and self._status_written >= self._status_expected:
+                    self.flush_status()
                 return None
             fpath, line = self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
         elif result.get(NG_FAILURE_CLASS_KEY) is not None:
