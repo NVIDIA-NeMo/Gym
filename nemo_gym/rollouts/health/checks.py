@@ -165,6 +165,22 @@ def _nonempty(value: Any) -> bool:
     return False
 
 
+def _reasoning_nonempty(value: Any) -> bool:
+    """Whether a turn's reasoning holds anything, Anthropic Messages thinking blocks included.
+
+    Kept out of ``_nonempty``, which also decides whether a response is actionable, so that thinking never counts
+    as an answer there.
+    """
+    if isinstance(value, (list, tuple)):
+        return any(_reasoning_nonempty(item) for item in value)
+    if isinstance(value, dict):
+        if value.get("type") == "thinking":
+            return _nonempty(value.get("thinking")) or _nonempty(value.get("signature"))
+        if value.get("type") == "redacted_thinking":
+            return _nonempty(value.get("data"))
+    return _nonempty(value)
+
+
 def _call_ref_key(ref: Any) -> str | None:
     if not isinstance(ref, dict):
         return None
@@ -257,7 +273,7 @@ def _agent_steps(trajectory: dict[str, Any]) -> list[_AgentStep]:
         steps.append(
             _AgentStep(
                 locator={"turn": turn.get("turn_no", position)},
-                has_message=_nonempty(turn.get("answer")) or _nonempty(turn.get("reasoning_content")),
+                has_message=_nonempty(turn.get("answer")) or _reasoning_nonempty(turn.get("reasoning_content")),
                 has_tool_calls=_item_has_tool_call(turn.get("answer")),
                 model_call_refs=refs,
             )
