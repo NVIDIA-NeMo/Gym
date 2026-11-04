@@ -18,7 +18,7 @@
 #
 # Needs an active Gym venv, ./env.yaml (copy env.yaml.example) and .env loaded
 # into your shell (copy .env.example; this recipe uses HF_TOKEN, NVIDIA_API_KEY,
-# JUDGE_API_KEY and TAVILY_API_KEY). Run from the Gym repo root — the benchmark's
+# JUDGE_API_KEY and YDC_API_KEY). Run from the Gym repo root — the benchmark's
 # dataset and prepare script resolve relative to your working directory. Results
 # land in ./results/browsecomp.
 #
@@ -31,7 +31,7 @@ export BROWSECOMP_RUN_FULL=1
 
 # Used judge: GLM-5.1
 BROWSECOMP_JUDGE_MODEL="${BROWSECOMP_JUDGE_MODEL:?}"
-TAVILY_API_KEY="${TAVILY_API_KEY:?export TAVILY_API_KEY (one key, or [k1,k2] for several)}"
+YDC_API_KEY="${YDC_API_KEY:?export YDC_API_KEY (one key, or [k1,k2] for several)}"
 
 # The domain list search skips. Which domains are on it changes search coverage,
 # so results shift if you swap in a different list.
@@ -69,7 +69,7 @@ gym eval run \
   --max-output-tokens 32768 \
   "++$QWEN.model=$BROWSECOMP_JUDGE_MODEL" \
   "++$HARNESS.judge_model_server.name=Qwen3-235B-A22B-Instruct-2507-FP8" \
-  "++$HARNESS.tavily_api_key=$TAVILY_API_KEY" \
+  "++$HARNESS.ydc_api_key=$YDC_API_KEY" \
   "++$HARNESS.exclude_domains_file_path=$EXCLUDE_JSON" \
   "++$AGENT.save_model_call_using_vllm_tokenize_endpoint=false" \
   "++$POLICY.chat_template_kwargs={enable_thinking: true}" \
