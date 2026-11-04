@@ -378,7 +378,9 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 refusal = provider_refusal(error.status, raw_body, self.config.provider_refusal_codes)
                 if refusal is None:
                     raise
-                return NeMoGymResponse.model_validate(refusal_response(self.config.openai_model, refusal, raw_body))
+                return NeMoGymResponse.model_validate(
+                    refusal_response(self.config.openai_model, refusal, raw_body, request=body_dict)
+                )
             response_dict = _normalize_reasoning_content(response_dict)
             reasoning = response_dict.get("reasoning") if isinstance(response_dict, dict) else None
             if (

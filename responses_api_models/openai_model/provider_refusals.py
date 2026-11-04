@@ -8,6 +8,7 @@ from uuid import uuid4
 
 
 def provider_refusal(status: int, body: object, allowed_codes: frozenset[str]) -> dict[str, str] | None:
+    """Recognize structured HTTP 400 policy refusals with an explicitly allowed code."""
     if status != 400 or not allowed_codes:
         return None
     pending = [body.decode(errors="replace") if isinstance(body, bytes) else body]
@@ -47,7 +48,8 @@ def provider_refusal(status: int, body: object, allowed_codes: frozenset[str]) -
     return None
 
 
-def refusal_response(model: str, refusal: dict, raw_body) -> dict:
+def refusal_response(model: str, refusal: dict, raw_body: bytes | str | dict | None, *, request: dict) -> dict:
+    """Build a refusal envelope preserving request tools, error evidence and unknown usage."""
     if isinstance(raw_body, bytes):
         raw_body = raw_body.decode(errors="replace")
     raw = raw_body if isinstance(raw_body, str) else json.dumps(raw_body, sort_keys=True)
@@ -72,9 +74,9 @@ def refusal_response(model: str, refusal: dict, raw_body) -> dict:
                 "content": [{"type": "refusal", "refusal": refusal["message"]}],
             }
         ],
-        "parallel_tool_calls": False,
-        "tool_choice": "auto",
-        "tools": [],
+        "parallel_tool_calls": request.get("parallel_tool_calls", True),
+        "tool_choice": request.get("tool_choice", "auto"),
+        "tools": request.get("tools", []),
         # The provider did not report usage; do not invent zero billable tokens.
         "usage": None,
         "metrics": {"provider_http_refusal": evidence},

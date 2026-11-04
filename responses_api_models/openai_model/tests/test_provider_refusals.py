@@ -58,10 +58,20 @@ def test_nested_litellm_escaped_envelope():
     assert provider_refusal(400, outer, ALLOWED) == BODY["error"]
 
 
-async def test_provider_refusal_is_typed_and_keeps_unknown_usage():
+@pytest.mark.parametrize("parallel_tool_calls", [False, True])
+async def test_provider_refusal_is_typed_and_keeps_unknown_usage(parallel_tool_calls):
     model = server(provider_refusal_codes=ALLOWED)
     model._client = SimpleNamespace(create_response=AsyncMock(side_effect=failure(400, BODY)))
-    response = await model.responses(NeMoGymResponseCreateParamsNonStreaming(input="A benign test"))
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input="A benign test",
+        parallel_tool_calls=parallel_tool_calls,
+        tool_choice="required",
+        tools=[{"type": "function", "name": "search", "parameters": {"type": "object"}, "strict": False}],
+    )
+    response = await model.responses(request)
+    assert response.parallel_tool_calls == request.parallel_tool_calls
+    assert response.tool_choice == request.tool_choice
+    assert response.model_dump(exclude_unset=True)["tools"] == request.tools
     assert response.output[0].content[0].type == "refusal"
     assert response.output[0].content[0].refusal == BODY["error"]["message"]
     assert response.usage is None
