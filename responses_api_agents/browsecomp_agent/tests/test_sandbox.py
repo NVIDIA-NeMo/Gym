@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import socket
 import sys
 import zipfile
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import web
 
+from nemo_gym.core import NeMoGymResponse
 from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession, _write_sources
 from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import (
     EPISODE,
@@ -321,3 +323,97 @@ async def test_start_upload_failure_retains_owned_sandbox_for_cleanup_retry(monk
     await agent._close_agent_session_state(error.value.state)
     assert provider.close.await_count == 3
     provider.aclose.assert_awaited()
+
+
+async def test_an_unreachable_endpoint_fails_the_activation_before_the_loop(tmp_path: Path) -> None:
+    """The runner reports an endpoint it cannot connect to instead of spinning until its deadline."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    archive = tmp_path / "source.zip"
+    _write_sources(archive)
+    with zipfile.ZipFile(archive) as bundle:
+        bundle.extractall(tmp_path / "source")
+    payload = {
+        "config": {
+            "name": "browsecomp",
+            "host": "0.0.0.0",
+            "port": 1,
+            "entrypoint": "app.py",
+            "model_server": {"type": "responses_api_models", "name": "policy"},
+            "rollout_timeout_s": 600,
+        },
+        "seed": _seed(tool_accesses=[]).model_dump(mode="json"),
+        "tool_access": None,
+        "body": QUESTION,
+        "model_url": f"http://127.0.0.1:{closed_port}/ng-rollout/{EPISODE.capture_key}/v1",
+    }
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    input_path.write_text(json.dumps(payload))
+    runner = str(tmp_path / "source/responses_api_agents/browsecomp_agent/sandbox_runner.py")
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-I", runner, str(input_path), str(output_path), cwd=tmp_path
+    )
+    try:
+        assert await asyncio.wait_for(process.wait(), timeout=60) == 0
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    receipt = json.loads(output_path.read_text())
+    assert receipt["error"].startswith(f"ConnectionError: The sandbox cannot connect to 127.0.0.1:{closed_port}")
+    assert "response" not in receipt
+
+
+def test_a_tool_free_session_answers_a_tool_call_without_a_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, harness = _agent([_model_response(_tool_call("ls")), _model_response(_message("42"))], monkeypatch)
+    assert client.post("/v1/agent_sessions", json=_seed(tool_accesses=[]).model_dump(mode="json")).status_code == 200
+    reply = client.post(ROUTE, json=QUESTION)
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["output"][1]["output"] == "Tool 'bash_command' is not available in this session."
+    assert harness.calls == []
+
+
+def test_retries_count_from_the_first_attempts_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
+
+    client, _, _ = _agent([], monkeypatch, max_run_retries=3, rollout_timeout_s=60)
+    starts = []
+
+    async def empty_attempt(self, request, response, body, *, session=None, started_at=None):
+        starts.append(started_at)
+        return NeMoGymResponse.model_validate(_model_response(_message("")))
+
+    monkeypatch.setattr(BrowsecompAgent, "_responses_impl", empty_attempt)
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+    assert client.post(ROUTE, json=QUESTION).status_code == 200
+    assert len(starts) == 3 and starts[0] is not None and len(set(starts)) == 1
+
+
+def test_a_loopback_model_url_refuses_the_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
+
+    client, _, _ = _agent([], monkeypatch)
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.app.resolve_provider_config", lambda *args: {"e2b": {}})
+    monkeypatch.setattr(BrowsecompAgent, "resolve_model_base_url", lambda *args: "http://127.0.0.1:9001/v1")
+    reply = client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
+    assert reply.status_code == 422
+    assert "loopback" in reply.text
+
+
+def test_missing_process_isolation_refuses_the_seed_after_stopping_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nemo_gym.agents import SandboxSession
+    from responses_api_agents.browsecomp_agent.sandbox import SandboxIsolationError
+
+    client, _, _ = _agent([], monkeypatch)
+    monkeypatch.setattr(
+        BrowsecompSandboxSession,
+        "install_runtime",
+        AsyncMock(side_effect=SandboxIsolationError("BrowseComp requires an isolated PID namespace")),
+    )
+    reply = client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
+    assert reply.status_code == 422
+    assert "isolated PID namespace" in reply.text
+    SandboxSession.close.assert_awaited_once()

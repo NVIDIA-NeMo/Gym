@@ -80,7 +80,7 @@ from nemo_gym.server_runtime import (
     MCPToolAccess,
 )
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
-from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession
+from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession, SandboxIsolationError
 
 
 def _qid(text: str) -> str:
@@ -394,18 +394,24 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             workdir = body.sandbox_access.workdir
         if not isinstance(workdir, str) or not workdir.startswith("/"):
             raise AgentSeedRejectedError("BrowseComp requires an absolute sandbox workdir")
-        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        try:
+            provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(f"BrowseComp sandbox provider is not usable: {error}") from error
         provider_name = next(iter(provider_config), None)
         if provider_name == "local":
             raise AgentSeedRejectedError(
                 "BrowseComp sessions require an isolated sandbox provider; local is not isolated"
             )
-        assert_model_url_reachable_from_sandbox(
-            self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-            provider_name=provider_name,
-        )
-        if tool_access is not None:
-            assert_model_url_reachable_from_sandbox(str(tool_access.base_url), provider_name=provider_name)
+        try:
+            assert_model_url_reachable_from_sandbox(
+                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+                provider_name=provider_name,
+            )
+            if tool_access is not None:
+                assert_model_url_reachable_from_sandbox(str(tool_access.base_url), provider_name=provider_name)
+        except ValueError as error:
+            raise AgentSeedRejectedError(str(error)) from error
         provider = create_provider(provider_config)
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -447,6 +453,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 await state.close(timeout=self.config.session_close_timeout_seconds)
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
+            if isinstance(error, SandboxIsolationError):
+                # Every retry would get a sandbox from the same provider.
+                raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
 
@@ -518,6 +527,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             close_timeout=self.config.session_close_timeout_seconds,
         )
         if output.get("error"):
+            if output.get("traceback"):
+                print(
+                    f"[browsecomp][sandbox_error][{state.request.agent_session_id}]\n{output['traceback']}",
+                    flush=True,
+                )
             raise RuntimeError(f"BrowseComp sandbox failed: {output['error']}")
         state.resources_cookies = _cookie_values(output.get("resources_cookies"))
         return NeMoGymResponse.model_validate(output["response"])
@@ -535,6 +549,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         an HTTP error returns a failed response that names its status, for the Environment Server's outcome policy.
         """
         attempts = max(1, self.config.max_run_retries)
+        # rollout_timeout_s bounds the whole activation, so every retry counts from the first attempt's start.
+        started_at = time.monotonic()
         for attempt in range(attempts):
             attempt_body = body
             if self.config.snap_dir:
@@ -543,7 +559,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 metadata.update(task_index=state.request.episode_id.capture_key, attempt=str(attempt))
                 attempt_body = body.model_copy(update={"metadata": metadata})
             try:
-                model_response = await self._responses_impl(request, response, attempt_body, session=state)
+                model_response = await self._responses_impl(
+                    request, response, attempt_body, session=state, started_at=started_at
+                )
             except aiohttp.ClientResponseError as error:
                 return self._model_request_failure(body, error)
             answer = re.sub(r"<think>.*?</think>", "", self._last_message_text(model_response), flags=re.DOTALL)
@@ -592,6 +610,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         session: Optional[BrowsecompAgentSessionState] = None,
+        started_at: Optional[float] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
@@ -609,7 +628,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         resources_server_cookies = request.cookies if session is None else dict(session.resources_cookies)
 
         reset_threshold = self._reset_threshold(self.config)
-        loop_started = time.monotonic()
+        loop_started = time.monotonic() if started_at is None else started_at
         deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
         timed_out = False
         model_response = None
@@ -898,6 +917,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             "Progress board updated (%d chars). It persists in the "
                             "system prompt across context resets." % len(progress_board)
                         )
+                elif session is not None and session.tool_access is None:
+                    # A tool-free pairing has no grant to send the call to; answer as an unknown tool would.
+                    tool_output = f"Tool '{output_function_call.name}' is not available in this session."
                 else:
 
                     async def _tool_call():

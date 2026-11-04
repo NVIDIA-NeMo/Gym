@@ -10,6 +10,7 @@ import socket
 import sys
 import traceback
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 # The source bundle is shipped by the adapter; task PYTHONPATH and user site packages are ignored (-I).
@@ -64,6 +65,27 @@ class SandboxBrowsecompAgent(BrowsecompAgent):
         return int((await get_response_json(reply))["count"])
 
 
+async def check_reachable(urls: list[str | None], *, attempts: int = 3, timeout_s: float = 10.0) -> None:
+    """Fail the activation when the sandbox cannot open a connection to a granted endpoint.
+
+    Gym's client resends a refused internal request without limit, so an endpoint the sandbox cannot reach would
+    otherwise spin until the loop deadline and come back as a scored, timed-out zero.
+    """
+    for url in filter(None, urls):
+        parsed = urlsplit(url)
+        host, port = parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+        for attempt in range(attempts):
+            try:
+                _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout_s)
+            except (OSError, TimeoutError) as error:
+                if attempt == attempts - 1:
+                    raise ConnectionError(f"The sandbox cannot connect to {host}:{port}: {error!r}") from error
+                await asyncio.sleep(1)
+            else:
+                writer.close()
+                break
+
+
 async def run(input_path: Path, output_path: Path) -> None:
     """Persist a receipt on success, error and supervisor interruption."""
     payload = json.loads(input_path.read_text())
@@ -94,6 +116,9 @@ async def run(input_path: Path, output_path: Path) -> None:
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, task.cancel)
     try:
+        await check_reachable(
+            [payload["model_url"], str(grant.base_url) if grant else None, payload.get("token_count_url")]
+        )
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload["body"])
         http_request = Request({"type": "http", "headers": [], "path": "/v1/responses"})
         result = await agent._run_session_loop(http_request, Response(), body, state)

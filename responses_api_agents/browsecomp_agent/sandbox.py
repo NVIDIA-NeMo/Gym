@@ -63,6 +63,10 @@ def _write_sources(destination: Path) -> None:
                     archive.write(path, f"{prefix}/{relative.as_posix()}")
 
 
+class SandboxIsolationError(RuntimeError):
+    """The provider's sandbox does not isolate the harness's processes; no retry can fix it."""
+
+
 @dataclass
 class BrowsecompSandboxSession(AgentSessionState):
     """Sandbox ownership and retained activation; resource state stays behind its HTTP grant."""
@@ -109,14 +113,14 @@ class BrowsecompSandboxSession(AgentSessionState):
             "assert namespace == os.readlink('/proc/1/ns/pid'); print(namespace)"
         )
         result = await sandbox.exec(f"{quote(python)} -I -c {quote(probe)}", cwd="/", timeout_s=30)
-        namespace = result.stdout.strip()
+        namespace = (result.stdout or "").strip()
         if (
             result.return_code != 0
             or result.error_type is not None
             or re.fullmatch(r"pid:\[\d+\]", namespace) is None
             or namespace == host_namespace
         ):
-            raise RuntimeError(
+            raise SandboxIsolationError(
                 "BrowseComp requires an isolated PID namespace and matching /proc mount. "
                 "Install a complete Enroot distribution with PID isolation support (4.2 or newer)."
             )
