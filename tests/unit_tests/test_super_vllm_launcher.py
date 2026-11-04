@@ -796,8 +796,13 @@ sleep() { "$TEST_SLEEP" 0.01; }
                     self.assertEqual(args[args.index("--port") + 1], str(8001 + index))
                     self.assertEqual(args[args.index("--tensor-parallel-size") + 1], "1")
                     self.assertEqual(args[args.index("--data-parallel-size") + 1], "1" if rank == 0 else "4")
-                    self.assertNotIn("--speculative-config", args)
-                    self.assertNotIn("--use-replayssm", args)
+                    speculative = json.loads(args[args.index("--speculative-config") + 1])
+                    expected_speculative = {"method": "mtp", "num_speculative_tokens": 5}
+                    if rank == 0:
+                        expected_speculative["num_speculative_tokens_per_batch_size"] = [[1, 1024, 0]]
+                    self.assertEqual(speculative, expected_speculative)
+                    self.assertIn("--use-replayssm", args)
+                    self.assertEqual(args[args.index("--replayssm-buffer-len") + 1], "16")
                     if rank == 0:
                         self.assertNotIn("--enable-expert-parallel", args)
                         self.assertIn("--enforce-eager", args)

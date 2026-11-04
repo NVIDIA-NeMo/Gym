@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# DWDP currently rejects speculative decoding. NIXL requires matching speculative
-# configurations, so MTP must also stay disabled on decode for this recipe.
+# NIXL requires matching speculative cache configurations on both PD roles.
+# DWDP applies only to target experts; MTP draft weights remain replicated.
+NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
@@ -60,12 +61,15 @@ VLLM_COMMON_ARGS=(
     --api-server-count 1
     --enable-mamba-shared-prefix-checkpoint
     --prefix-match-unit 128
+    --use-replayssm
+    --replayssm-buffer-len 16
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # Four independent TP1/DP1 engines share expert weights on each prefill node.
 # The launcher assigns DWDP rank 0..3; merge_free reads resident shards directly.
 # Start with eager execution; graph-enabled DWDP is still experimental.
 VLLM_PREFILL_ARGS=(
+    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
     --data-parallel-size 1
     --data-parallel-size-local 1
     --moe-backend flashinfer_prims
@@ -100,6 +104,7 @@ VLLM_PREFILL_ARGS=(
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(
+    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS}}"
     --data-parallel-size 4
     --data-parallel-size-local 4
     --enable-expert-parallel
