@@ -19,8 +19,20 @@ ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = ROOT / "scripts/ci/server_test_workers.py"
 WORKER_ENV = ROOT / "scripts/ci/test_worker_env.sh"
 THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+CHILD = """import json, os, signal, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+marker = Path(sys.argv[1])
+pending = marker.with_name('.' + marker.name)
+pending.write_text(json.dumps({'pid': os.getpid(), 'group': os.getpgrp()}))
+pending.replace(marker)
+print('ready', flush=True)
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline and not (marker.parent / 'stop-children').exists():
+    time.sleep(0.02)
+"""
 WORKER = """#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 state = Path(os.environ['WORKER_STATE'])
 index = int(next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('+shard_index=')))
@@ -31,6 +43,12 @@ while len(list(state.glob('started-*'))) != 4:
     if time.monotonic() > deadline:
         raise RuntimeError('Four workers did not overlap')
     time.sleep(0.02)
+if os.environ.get('SPAWN_CHILD'):
+    child = subprocess.Popen([sys.executable, '-c', os.environ['CHILD_CODE'], str(state / f'child-{index}')],
+        stdout=subprocess.PIPE, text=True)
+    assert child.stdout.readline() == 'ready\\n'
+    if os.environ.get('EXIT_ONE_LEADER') and index == 10:
+        sys.exit(0)
 if os.environ.get('HOLD_WORKERS'):
     time.sleep(60)
 (state / f'finished-{index}').touch()
@@ -54,6 +72,7 @@ def worker_environment(tmp_path: Path) -> dict[str, str]:
         PATH=f"{binary}:{os.environ['PATH']}",
         WORKER_STATE=str(state),
         FAIL_STATUS="0",
+        CHILD_CODE=CHILD,
         **dict.fromkeys(THREAD_VARIABLES, "64"),
     )
 
@@ -98,7 +117,9 @@ def test_workers_overlap_preserve_shard_ownership_and_failures(
         selected.extend(_select_shard(paths, index, count))
         assert f"finished worker {index}" in result.stdout
     assert sorted(selected) == _select_shard(paths, 2, 8)
-    assert len(list((tmp_path / "results/server-workers/shard-2").glob("worker-*.log"))) == 4
+    logs = list((tmp_path / "results/server-workers/shard-2").glob("worker-*.log"))
+    assert len(logs) == 4
+    assert all(log.read_bytes().endswith(b"\xff\n") for log in logs)
     assert "\ufffd" in result.stdout
 
 
@@ -122,3 +143,50 @@ def test_cancellation_terminates_every_worker(tmp_path: Path, worker_environment
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=15)
+
+
+def process_is_live(pid: int) -> bool:
+    """Treat orphaned zombies as dead without depending on the container init's reaping policy."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+    except FileNotFoundError:
+        return False
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The CI launcher uses Linux process-group ownership")
+@pytest.mark.parametrize("leader_exits", [False, True])
+def test_cancellation_kills_term_ignoring_children_after_leader_exit(
+    tmp_path: Path, worker_environment: dict[str, str], leader_exits: bool
+) -> None:
+    """A single grace deadline covers every group, including one whose leader has already exited."""
+    worker_environment.update(HOLD_WORKERS="1", SPAWN_CHILD="1")
+    if leader_exits:
+        worker_environment["EXIT_ONE_LEADER"] = "1"
+    process = subprocess.Popen(worker_command(), cwd=tmp_path, env=worker_environment, stdout=subprocess.DEVNULL)
+    state = Path(worker_environment["WORKER_STATE"])
+    try:
+        deadline = monotonic() + 15
+        while len(list(state.glob("child-*"))) != 4 and monotonic() < deadline:
+            sleep(0.02)
+        assert len(list(state.glob("child-*"))) == 4
+        children = [json.loads(path.read_text()) for path in state.glob("child-*")]
+        workers = [json.loads(path.read_text())["pid"] for path in state.glob("started-*")]
+        assert len(workers) == 4
+        assert {child["group"] for child in children} == set(workers)
+        if leader_exits:
+            leader = json.loads((state / "started-10").read_text())["pid"]
+            while process_is_live(leader) and monotonic() < deadline:
+                sleep(0.02)
+            assert not process_is_live(leader)
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=15) == 128 + signal.SIGTERM
+        deadline = monotonic() + 2
+        while any(process_is_live(child["pid"]) for child in children) and monotonic() < deadline:
+            sleep(0.02)
+        assert not any(process_is_live(child["pid"]) for child in children)
+        assert not any(process_is_live(pid) for pid in workers)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=15)
+        (state / "stop-children").touch()

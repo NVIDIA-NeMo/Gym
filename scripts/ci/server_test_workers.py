@@ -8,34 +8,65 @@ import shutil
 import signal
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from types import FrameType
 
 
 WORKERS = 4
 
 
-def stop_workers(processes: list[subprocess.Popen[bytes]]) -> None:
-    """Terminate active worker process groups and reap them within a bounded grace period."""
-    active = [process for process in processes if process.poll() is None]
-    for process in active:
+def signal_groups(groups: set[int], signum: int) -> None:
+    """Signal owned groups whose leader PIDs have not been reaped or released for reuse."""
+    for group in groups:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(group, signum)
         except ProcessLookupError:
             pass
-    deadline = monotonic() + 10
-    for process in active:
+
+
+def live_groups(groups: set[int]) -> set[int]:
+    """Find live members on Linux, excluding the unreaped leaders that reserve group IDs."""
+    live = set()
+    for stat in Path("/proc").glob("[0-9]*/stat"):
         try:
-            process.wait(timeout=max(0, deadline - monotonic()))
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+            fields = stat.read_bytes().rsplit(b")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        group = int(fields[2])
+        if group in groups and fields[0] not in (b"Z", b"X"):
+            live.add(group)
+    return live
+
+
+def stop_workers(processes: list[subprocess.Popen[bytes]]) -> None:
+    """Bound group cleanup before reaping any leader, preserving ownership even after leader exit."""
+    groups = {process.pid for process in processes}
+    try:
+        signal_groups(groups, signal.SIGTERM)
+        deadline = monotonic() + 10
+        while live_groups(groups) and monotonic() < deadline:
+            sleep(0.05)
+    finally:
+        signal_groups(groups, signal.SIGKILL)
+        deadline = monotonic() + 2
+        try:
+            while live_groups(groups):
+                if monotonic() >= deadline:
+                    raise TimeoutError("Server worker groups remained alive after SIGKILL")
+                sleep(0.01)
+        finally:
+            for process in processes:
+                process.wait(timeout=max(0, deadline - monotonic()))
+
+
+def worker_exit_status(process: subprocess.Popen[bytes]) -> int | None:
+    """Observe exit without reaping: the leader PID reserves its group until cleanup finishes."""
+    result = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    if result is None:
+        return None
+    return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
 
 
 def run_workers(*, shard_index: int, num_shards: int, arguments: list[str]) -> int:
@@ -44,7 +75,7 @@ def run_workers(*, shard_index: int, num_shards: int, arguments: list[str]) -> i
     log_dir.mkdir(parents=True, exist_ok=True)
     processes = []
     failed = False
-    with ExitStack() as stack, ThreadPoolExecutor(max_workers=WORKERS) as executor:
+    with ExitStack() as stack:
         try:
             pending = {}
             for worker in range(WORKERS):
@@ -61,15 +92,20 @@ def run_workers(*, shard_index: int, num_shards: int, arguments: list[str]) -> i
                     command, stdout=log_output, stderr=subprocess.STDOUT, start_new_session=True
                 )
                 processes.append(process)
-                pending[executor.submit(process.wait)] = (worker, log_path)
-            for future in as_completed(pending):
-                worker, log_path = pending[future]
-                status = future.result()
-                failed |= status != 0
-                print(f"Server worker {worker} exited {status}; log: {log_path}", flush=True)
-                with log_path.open(errors="replace") as log_contents:
-                    shutil.copyfileobj(log_contents, sys.stdout)
-                sys.stdout.flush()
+                pending[process] = (worker, log_path)
+            while pending:
+                for process in list(pending):
+                    status = worker_exit_status(process)
+                    if status is None:
+                        continue
+                    worker, log_path = pending.pop(process)
+                    failed |= status != 0
+                    print(f"Server worker {worker} exited {status}; log: {log_path}", flush=True)
+                    with log_path.open(errors="replace") as log_contents:
+                        shutil.copyfileobj(log_contents, sys.stdout)
+                    sys.stdout.flush()
+                if pending:
+                    sleep(0.05)
         finally:
             stop_workers(processes)
     return int(failed)
