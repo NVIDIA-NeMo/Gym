@@ -40,7 +40,8 @@ from fastapi import Request, Response
 from pydantic import BaseModel, model_validator
 
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
     attach_capture_context,
@@ -49,13 +50,6 @@ from nemo_gym.models._checkpoint import (
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
-from nemo_gym.models.token_capture import (
-    CaptureContext,
-    installed_lineage_store,
-    installed_token_sink,
-    reset_token_sink,
-    set_token_sink,
-)
 from nemo_gym.models.token_capture.config import token_capture_config
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
@@ -63,8 +57,11 @@ from nemo_gym.models.token_capture.protocols import (
     CaptureLedger,
     LineageResolver,
     ParentResolutionMode,
+    installed_lineage_store,
+    installed_token_sink,
 )
 from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
 
@@ -554,6 +551,41 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     return result
 
 
+def _stream_report(failure_log: Optional[RequestFailureLog], error: BaseException | None) -> Optional[dict]:
+    """The bounded ``FailureHeader.STREAM_FIELD`` value for a stream's request log; ``None`` with nothing to report."""
+    return FailureHeader.stream_value(failure_log.reply_report(error)) if failure_log is not None else None
+
+
+def _with_report_field(payload: dict[str, Any], report: Optional[dict]) -> dict[str, Any]:
+    return payload if report is None else {**payload, FailureHeader.STREAM_FIELD: report}
+
+
+_RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
+
+
+def _is_chat_done(event: str | bytes) -> bool:
+    text = event.decode("utf-8", errors="replace") if isinstance(event, bytes) else event
+    return text.strip() == "data: [DONE]"
+
+
+def _with_stream_report(event: str | bytes, report: Optional[dict]) -> str | bytes:
+    """``event`` with the report added to its data object when it is a terminal Responses event or a Chat chunk."""
+    if report is None:
+        return event
+    text = event.decode("utf-8") if isinstance(event, bytes) else event
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        payload = json.loads(line[len("data: ") :])
+        if payload.get("type", "chat.completion.chunk") not in _RESPONSES_TERMINAL_EVENTS and "choices" not in payload:
+            return event
+        lines[index] = "data: " + json.dumps(_with_report_field(payload, report))
+        joined = "\n".join(lines)
+        return joined.encode("utf-8") if isinstance(event, bytes) else joined
+    return event
+
+
 def _reconstruct_responses_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """Rebuild a Responses API response: the terminal envelope carries the full response object."""
     for event in reversed(events):
@@ -599,6 +631,7 @@ def _record(
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
     execution: Optional[ModelExecutionOutcome] = None,
+    failure: BaseException | None = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -641,6 +674,10 @@ def _record(
             exchange["request_raw"] = request_raw
         if response_raw is not None:
             exchange["response_raw"] = response_raw
+        observations = RequestFailureLog.current()
+        if observations is not None:
+            exchange["failure_report"] = observations.reply_report(failure).model_dump(mode="json")
+            exchange["model_operations"] = [o.model_dump(mode="json") for o in observations.model_operations.values()]
         store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
@@ -999,6 +1036,7 @@ class _CaptureMiddleware:
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                     execution=request_state.get("nemo_gym_model_execution"),
+                    failure=exc,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)

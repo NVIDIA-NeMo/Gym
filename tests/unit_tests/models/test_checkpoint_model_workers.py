@@ -16,7 +16,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models._checkpoint import GenerationCutRecord, ModelRecord, PolicyGate, _Ticket
 from nemo_gym.models._checkpoint_workers import PolicyCoordinator, PolicyWorkerLink
 from nemo_gym.models.token_capture.lineage import FileLineageStore
