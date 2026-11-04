@@ -16,7 +16,6 @@ import copy
 import json
 import logging
 from typing import Annotated, Any, Dict, List, Optional, Tuple
-from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, ValidationError
@@ -161,12 +160,11 @@ class IPIResourcesServer(SimpleResourcesServer):
                 self._fence.raise_if_closed(session_id)
                 if session_id in self._typed_sessions or self._verified_sessions.get(session_id) is not None:
                     raise ResourcesSessionConflictError("The session cookie belongs to a typed resources session")
-                # A new /run may reuse its caller's cookie. Keep the previous verify's retry record independent.
-                if session_id in self._verified_sessions:
-                    session_id = str(uuid4())
+                # A new /run may reuse its caller's cookie: it keeps the ID and replaces the previous run's
+                # environment and verify retry record.
                 environment = copy.deepcopy(body.environment)
                 self.session_id_to_env[session_id] = environment
-                request.session[SESSION_ID_KEY] = session_id
+                self._verified_sessions.forget(session_id)
             logger.debug("seed_session: sid=%s", session_id)
             return BaseSeedSessionResponse()
 

@@ -294,20 +294,19 @@ def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
     assert server._typed_sessions == {}
 
 
-def test_repeated_runs_rotate_the_cookie_and_keep_the_previous_verify_retry() -> None:
+def test_next_run_keeps_its_cookie_and_replaces_the_finished_environment() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=ROW).status_code == 200
-    [first_id] = server.session_id_to_env
-    first_cookies = dict(client.cookies)
-    first = client.post("/verify", json=verify_json()).json()
-    assert client.post("/seed_session", json=ROW).status_code == 200
-    [second_id] = server.session_id_to_env
-    assert second_id != first_id
+    [session_id] = server.session_id_to_env
+    cookies = dict(client.cookies)
     assert client.post("/send_message", json=MESSAGE).status_code == 200
+    first = client.post("/verify", json=verify_json()).json()
+    # The next /run on the same cookie keeps the ID and replaces the finished run, retry record included.
+    assert client.post("/seed_session", json=ROW).status_code == 200
+    assert list(server.session_id_to_env) == [session_id] and dict(client.cookies) == cookies
+    assert session_id not in server._verified_sessions
+    assert server.session_id_to_env[session_id] == ROW["environment"]
     second = client.post("/verify", json=verify_json()).json()
     assert (first["reward"], second["reward"]) == (1.0, 1.0)
-    client.cookies.clear()
-    client.cookies.update(first_cookies)
-    assert client.post("/verify", json=verify_json()).json()["mask_sample"] is False
     assert server.session_id_to_env == {}
