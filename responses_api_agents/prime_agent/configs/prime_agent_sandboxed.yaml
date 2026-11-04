@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Prime Agent borrows SandboxAccess from the Environment Server and runs inside the task sandbox.
+# The run configuration binds the independent benchmark and agent; this config selects only the
+# harness and model. For the host /run path, use prime_agent.yaml.
+prime_agent:
+  responses_api_agents:
+    prime_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      prime_agent_version: 0.7.0
+      concurrency: 8
+      thinking: null
+      system_prompt: null
+      # Seconds per activation, enforced by the sandbox's process supervisor.
+      timeout: 3600
+      # The served model's limits, written to Prime Agent's models.json.
+      context_window: 262144
+      max_output_tokens: 131072
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 60
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}

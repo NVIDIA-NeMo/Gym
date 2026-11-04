@@ -56,11 +56,16 @@ def _config(**kwargs) -> PrimeAgentConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_host_install():
+    # Host-path tests never install the real CLI; the lazy-install test patches it itself.
+    with patch("responses_api_agents.prime_agent.app.ensure_prime_agent"):
+        yield
+
+
 def _make_agent(**kwargs) -> PrimeAgent:
-    with patch("responses_api_agents.prime_agent.app.PrimeAgent.model_post_init"):
-        agent = PrimeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    # Startup installs nothing on the host, so the agent is built as served.
+    return PrimeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _message_end(role, content, **extra) -> str:
@@ -79,14 +84,18 @@ class TestSanity:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
 
-    def test_model_post_init_checks_pinned_version(self) -> None:
+    def test_host_runtime_installs_on_first_host_call_only(self) -> None:
         agent = _make_agent(prime_agent_version="0.7.0")
-        with (
-            patch("responses_api_agents.prime_agent.app.ensure_prime_agent") as ensure,
-            patch("responses_api_agents.prime_agent.app.shutil.which", return_value="/bin/prime-agent"),
-        ):
+        with patch("responses_api_agents.prime_agent.app.ensure_prime_agent") as ensure:
+            # Startup installs nothing on the host: agent sessions install inside the task sandbox.
             agent.model_post_init(None)
+            ensure.assert_not_called()
 
+            async def twice() -> None:
+                await agent._ensure_local_runtime()
+                await agent._ensure_local_runtime()
+
+            asyncio.run(twice())
         ensure.assert_called_once_with("0.7.0")
 
 

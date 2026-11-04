@@ -2,8 +2,9 @@
 
 Runs [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) in headless JSON mode.
 
-Prime Agent must be on `PATH`. The adapter installs `prime_agent_version` with the official
-installer when the default command is missing.
+On the host path, Prime Agent must be on `PATH`. The adapter installs `prime_agent_version` with
+the official installer on the first host request when the default command is missing; agent
+sessions install Prime Agent inside the task sandbox instead (see below).
 
 Set `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
 
@@ -24,3 +25,46 @@ IPython dependencies are reused.
 
 `model` uses `<provider>/<model-id>`. Define the provider in `models_config` or set `model_server`
 to use a Gym model server. See `configs/prime_agent.yaml` for all options.
+
+## Agent sessions in task sandboxes
+
+[configs/prime_agent_sandboxed.yaml](configs/prime_agent_sandboxed.yaml) runs Prime Agent **0.7.0**
+inside the task sandbox of a `single_agent_turn` Environment Server, for benchmarks whose Resources
+Server supplies `SandboxAccess`, such as SWE-bench Pro. Capability level: **Evaluation**.
+
+```yaml
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/prime_agent/configs/prime_agent_sandboxed.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: swebench_pro_resources_server
+      agent_server:
+        name: prime_agent
+      resources_tool_transports: []
+```
+
+- **Runtime.** Session setup installs a private Node.js 22.23.2 and the `prime-agent-0.7.0.tgz`
+  release package with npm (`--ignore-scripts`) under `/tmp/nemo-gym-prime-runtime-0.7.0-node-22.23.2`,
+  checks the version it reports, and reuses a ready runtime. The agent server downloads the official
+  Node.js build and the release package (GitHub release) once into its asset cache, checks the SHA-256 values pinned in
+  `sandbox.py`, and uploads them; the sandbox checks them again. Prime Agent runs as that Node with the
+  package's CLI, so the task's Node and `PATH` are untouched. The sandbox needs a glibc image, bash,
+  `sha256sum`, `tar` and network access to the npm registry and the release host (for the package's
+  own dependencies).
+- **Isolation.** Models, tools and state live under `PRIME_AGENT_CODING_AGENT_DIR` in a private
+  session directory, so tool shells keep the task's `HOME`. `SandboxAccess.env` is forwarded except
+  `PRIME_AGENT_*`, `PI_*` and `OPENAI_*`. Close removes only the session directory.
+- **Requests.** The user message is the task and the system or developer message, `instructions`
+  and `system_prompt` are appended to the system prompt; both are argv values under 128 KiB. Other
+  request fields are refused with HTTP 422. `command`, `extra_args` and `env` overrides, required
+  tool grants and a `SandboxAccess` user override are refused at seed.
+- **Results.** Output and usage come from Prime Agent's `message_end` events. A run that ends with
+  an error stop fails with the model request's status when Prime Agent reports one (for example
+  `model_request_error` 503), a `length` stop is `incomplete`, a supervisor timeout with output is
+  `incomplete`, and a nonzero exit or a run without an answer fails. Model-call ownership, tool
+  timing and child invocations are reported as observation gaps.
