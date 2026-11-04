@@ -33,10 +33,10 @@ STDERR_TAIL_BYTES = 16000
 # They are npm's own `dist.integrity` for each release; add a release here before pinning it in cline_version.
 CLINE_RUNTIME_SHA512: dict[str, dict[str, str]] = {
     "3.0.55": {
-        "x64": "bd5aaa113eb4b42e4a7c87dd1f02d3c9833846e9a62384b8c59bfeb1c68ec177"
-        "f869aec3f4c4c0ac8f7f0745bc57eea586176050b45f3720cca66fe5fec106ba",
-        "arm64": "f89fcd965bdaeff0ac49f93ab9dad263cba419ac5bbfd5af11b08f19662b99f3"
-        "24d4067f4e1b5cdefe6b904944adbcc3c419d0436e2becad253d1a91264e4d5a",
+        "x64": "bd5aaa113eb4b42e4a7c87dd1f02d3c9833846e9a62384b8c59bfeb1c68ec177"  # pragma: allowlist secret
+        "f869aec3f4c4c0ac8f7f0745bc57eea586176050b45f3720cca66fe5fec106ba",  # pragma: allowlist secret
+        "arm64": "f89fcd965bdaeff0ac49f93ab9dad263cba419ac5bbfd5af11b08f19662b99f3"  # pragma: allowlist secret
+        "24d4067f4e1b5cdefe6b904944adbcc3c419d0436e2becad253d1a91264e4d5a",  # pragma: allowlist secret
     },
 }
 
