@@ -37,7 +37,8 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
                 "gym_install": {"ref": "a" * 40},
                 "benchmarks": {
                     "judge": {
-                        "run": {"config_paths": ["fixture.yaml"]},
+                        # A collection limit counts tasks; the queued re-judge must not inherit it.
+                        "run": {"config_paths": ["fixture.yaml"], "limit": 1},
                         "resumable": {"max_retries": 1, "max_walltime": "00:10:00"},
                     }
                 },
@@ -147,6 +148,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
             assert "+observability_enabled=True" in words, words
             [capture] = [word for word in words if word.startswith("+model_call_capture_dir=")]
             assert "/reverification/" in capture and capture.endswith("/model-calls"), capture
+            assert not [word for word in words if word.lstrip("+").startswith("limit=")], words
     assert (tmp_path / "calls").exists() is (case == "ok")
     assert (job / ".gym_infra_retries").read_text() == "0\n"
     if case == "ok":

@@ -9,7 +9,7 @@ import math
 
 import pytest
 
-from nemo_gym.core.episode import rollout_context
+from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.orchestration.recovery import COLLECT_SCRIPT
 from nemo_gym.server_runtime.verifier_observability import observe_programmatic_grading, observe_verifier
 from nemo_gym.trajectory.trajectory_record import grading_result_binding

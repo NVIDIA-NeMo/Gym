@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from aiohttp import ClientResponseError
 
 from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
-from nemo_gym.core.episode_types import FailureBoundary
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureHeader
 from nemo_gym.core.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for, rebuild_failure
 from tests.unit_tests.agents.test_agent_seed_failure_boundary import _served

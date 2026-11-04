@@ -1347,6 +1347,7 @@ def _submission_exports(config: SubmitConfig) -> list[str]:
 
 # Settings of the run's own collection that a judge-only job's `gym eval reverify` replaces with its own.
 _COLLECTION_ONLY_RUN_KEYS = (
+    "limit",
     "output_jsonl_fpath",
     "materialized_inputs_jsonl_fpath",
     "resume_from_cache",
@@ -1749,6 +1750,7 @@ class SlurmExecutor(BaseExecutor):
             # Use the original runtime/configuration. Only operational output/cache controls change.
             run = dict(original.run)
             for name in (
+                "limit",
                 "output_jsonl_fpath",
                 "materialized_inputs_jsonl_fpath",
                 "resume_from_cache",

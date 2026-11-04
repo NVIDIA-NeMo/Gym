@@ -25,8 +25,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from nemo_gym.core.episode_types import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, TRANSPORT_TIMEOUT, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
 from nemo_gym.utils.exception_inspection import bounded_text, error_to_http_status
