@@ -33,8 +33,9 @@ exit code 0 = pass. The HDF5 target-loading and comparison helpers (`process_hdf
 `cmp_tuple_or_list`, …) are ported from nemo-skills' `scicode_utils.eval_prefix`; the only change is
 that the `test_data.h5` path is injected from config rather than hardcoded.
 
-Because the generated code runs in this server's own venv, `requirements.txt` pins `scipy<1.14`
-(keeps `scipy.integrate.simps`, has Python 3.12 wheels) plus `numpy`, `matplotlib`, `h5py`, `sympy`.
+The generated code runs in this server's own venv. `pyproject.toml` declares its
+scientific dependencies (`scipy>=1.14.1`, `numpy`, `matplotlib`, `h5py`, `sympy`,
+and `networkx`); `uv.lock` records the exact versions installed by `uv sync --locked`.
 
 **Scoring notes** (mirroring nemo-skills):
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
