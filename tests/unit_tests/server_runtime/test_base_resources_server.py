@@ -620,6 +620,25 @@ class TestClosedResourcesSessionRecords:
         assert len(records) == 0
         assert records.get("never closed") is None
 
+    def test_a_forgotten_record_is_gone_and_the_others_keep_their_expiry(self, monkeypatch) -> None:
+        clock = [100.0]
+        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+        records = ClosedResourcesSessionRecords[str](window_seconds=10)
+
+        records.remember("a", "first run")
+        records.remember("b", "close")
+        records.forget("a")
+        records.forget("never closed")
+        assert "a" not in records and records.get("b") == "close"
+
+        # Remembered again, the ID gets a new record with its own window.
+        clock[0] = 105.0
+        records.remember("a", "next run")
+        clock[0] = 110.0
+        assert "b" not in records and records.get("a") == "next run"
+        clock[0] = 115.0
+        assert len(records) == 0
+
     def test_a_record_never_outlives_the_routing_claim(self, monkeypatch) -> None:
         clock = [0.0]
         monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])

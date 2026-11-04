@@ -450,6 +450,10 @@ class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
         entry = self._records.get(resources_session_id)
         return None if entry is None else entry[1]
 
+    def forget(self, resources_session_id: str) -> None:
+        """Drop the session's record before its window ends, for a server that starts the same ID again."""
+        self._records.pop(resources_session_id, None)
+
     def __contains__(self, resources_session_id: object) -> bool:
         self._expire()
         return resources_session_id in self._records
@@ -517,7 +521,8 @@ class ResourcesSessionFence:
         Deprecated compatibility path: migrate callers to typed ``ResourcesSeedSessionRequest`` seeds.
         Call while holding ``locked(session_id)``. Pass the active or retained verification identity, if any.
         A closed or typed session cannot be seeded through its cookie. Any other session keeps its ID, so the new
-        state replaces the previous run's, as a cookie seed always did.
+        state replaces the previous run's, as a cookie seed always did, and ``seed_session`` drops that run's
+        verify retry record.
         """
         self.raise_if_closed(session_id)
         if identity is not None:
@@ -915,6 +920,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                     identity=self._session_episodes.get(session_id) or (verified[0] if verified is not None else None),
                 )
                 await self.initialize_session_state(session_id, body)
+                # The new run replaces the finished one, so its verify must not be answered from that run's record.
+                self._verified_sessions.forget(session_id)
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id

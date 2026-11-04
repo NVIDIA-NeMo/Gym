@@ -539,8 +539,10 @@ def test_next_cookie_run_keeps_its_cookie_and_starts_a_fresh_history() -> None:
         assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
         assert server.session_id_to_state == {session_id: {"weather_calls": []}}
         second = client.post("/verify", json=verify_body).json()
+        # A resent verify replays this run's record, not the finished run's weather calls.
+        resent = client.post("/verify", json=verify_body).json()
 
-    assert second["reward"] == 0.0 and second["mask_sample"] is False
+    assert second["reward"] == resent["reward"] == 0.0 and second["mask_sample"] is False
 
 
 @pytest.mark.parametrize("typed", [False, True])
