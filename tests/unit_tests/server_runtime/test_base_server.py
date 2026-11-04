@@ -16,7 +16,9 @@ import asyncio
 import logging
 import os
 import pickle
+import signal
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 import uvicorn
@@ -1233,9 +1235,12 @@ class TestRunWebserverProxyKwargs:
 
         captured: dict = {}
         self.uvicorn_kwargs = captured
-        monkeypatch.setattr(
-            nemo_gym.server_runtime.base_server.uvicorn, "run", lambda **kwargs: captured.update(kwargs)
-        )
+
+        def run(**kwargs) -> None:
+            captured.update(kwargs)
+            self.blocked_signals_at_run = signal.pthread_sigmask(signal.SIG_BLOCK, ())  # reads the mask, adds nothing
+
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
 
         server_config = BaseRunServerInstanceConfig(
             name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
@@ -1313,6 +1318,18 @@ class TestRunWebserverProxyKwargs:
         )
 
         assert "workers" not in kwargs
+
+    def test_uvicorn_starts_with_the_shutdown_signals_unblocked(self, monkeypatch: MonkeyPatch) -> None:
+        # A process starts with the signal mask of the thread that launched it, and Ray blocks SIGINT in every thread
+        # of its workers, NeMo RL's Gym actor among them: the servers it launched never got RunHelper's interrupt.
+        def launch_from_a_ray_worker_thread() -> None:
+            signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT,))
+            self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(launch_from_a_ray_worker_thread).result()
+
+        assert not {signal.SIGINT, signal.SIGTERM} & self.blocked_signals_at_run
 
     def test_server_without_a_reason_runs_several_workers(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=2)

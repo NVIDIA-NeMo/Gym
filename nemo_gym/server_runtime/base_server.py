@@ -17,6 +17,7 @@ import atexit
 import json
 import logging
 import resource
+import signal
 import socket
 import sys
 from abc import abstractmethod
@@ -252,6 +253,14 @@ def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
     reason = server.multiple_workers_unsupported_reason()
     if reason is not None:
         raise ValueError(f"{server.config.name} needs num_workers=1: {reason}")
+
+
+def _unblock_shutdown_signals() -> None:
+    """Let SIGINT and SIGTERM, on which uvicorn shuts a server down, reach this process. A process starts with the
+    signal mask of the thread that launched it, and Ray blocks SIGINT in every thread of its workers: a server that a
+    Ray worker launches, as NeMo RL's Gym actor launches every server through RunHelper, would otherwise leave
+    RunHelper's interrupt pending and never run its shutdown."""
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
 
 
 class SimpleServer(BaseServer):
@@ -555,6 +564,7 @@ repr(e): {repr(e)}"""
 
     @classmethod
     def run_webserver(cls) -> Optional[FastAPI]:  # pragma: no cover
+        _unblock_shutdown_signals()
         startup = ServerStartupTimeline(
             getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, cls.__name__),
             _telemetry_server_type(cls),

@@ -6,6 +6,7 @@ import shlex
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from subprocess import TimeoutExpired
 from unittest.mock import MagicMock
 
@@ -27,8 +28,8 @@ def _runner(processes, grace=0.1):
     return runner
 
 
-def _wait_for(path, process):
-    deadline = time.monotonic() + 5
+def _wait_for(path, process, timeout=5):
+    deadline = time.monotonic() + timeout
     while not path.exists():
         assert process.poll() is None and time.monotonic() < deadline
         time.sleep(0.01)
@@ -86,6 +87,44 @@ print('cleanup finished', flush=True)
         assert process.returncode == 0
         assert interrupts.read_text() == "SIGINT\n"
         assert "cleanup finished" in (tmp_path / "logs/server.log").read_text()
+    finally:
+        _kill_group(process)
+
+
+def test_server_launched_with_the_interrupt_blocked_still_receives_it(tmp_path):
+    # Ray blocks SIGINT in every thread of its workers, and a process starts with the mask of the thread that launched
+    # it: every server that NeMo RL's Gym actor launches starts with the interrupt blocked.
+    started_blocked, ready, stopped = tmp_path / "started_blocked", tmp_path / "ready", tmp_path / "stopped"
+    script = f"""
+import signal, sys, time
+from pathlib import Path
+from nemo_gym.server_runtime.base_server import _unblock_shutdown_signals
+blocked = signal.pthread_sigmask(signal.SIG_BLOCK, ())  # reads the mask, adds nothing
+Path({str(started_blocked)!r}).write_text(str(signal.SIGINT in blocked))
+_unblock_shutdown_signals()  # as run_webserver does first
+def stop(*_):
+    print('server stopping', flush=True)
+    Path({str(stopped)!r}).touch()
+    sys.exit(0)
+signal.signal(signal.SIGINT, stop)
+Path({str(ready)!r}).touch()
+while True:
+    time.sleep(0.01)
+"""
+
+    def launch_from_a_thread_that_blocks_the_interrupt():
+        signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT,))
+        return _launch(tmp_path, script, logged=True)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        process = pool.submit(launch_from_a_thread_that_blocks_the_interrupt).result()
+    try:
+        _wait_for(ready, process, timeout=30)  # the stand-in imports the server runtime first
+        assert started_blocked.read_text() == "True"  # the block reached it through its launch shell and log tee
+        _runner({"server": process}, grace=10).shutdown()
+        assert stopped.exists()  # yet it ran its own shutdown
+        assert process.returncode == 0
+        assert "server stopping" in (tmp_path / "logs/server.log").read_text()
     finally:
         _kill_group(process)
 
