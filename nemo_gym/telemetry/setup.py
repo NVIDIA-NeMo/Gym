@@ -102,6 +102,7 @@ _ENV_FIELD_MAP = {
     "run_id": f"{_OTEL_PREFIX}_RUN_ID",
     # Gym-owned flag, read back by init_telemetry rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
+    "sandbox_resource_sample_interval_seconds": f"{_OTEL_PREFIX}_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS",
 }
 
 #: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
