@@ -6,8 +6,8 @@ on the wrong failure."""
 import pytest
 
 from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
-from nemo_gym.core.episode_types import FailureBoundary
 from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.typed_exceptions import NgFailureEvent, agent_route_failure
 
 

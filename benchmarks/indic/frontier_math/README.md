@@ -10,7 +10,8 @@ questions; report coverage for incomplete runs.
 Run from the Gym repository root:
 
 ```bash
-python -m pip install -r benchmarks/indic/frontier_math/requirements.txt
+uv sync --locked --project benchmarks/indic/frontier_math
+source benchmarks/indic/frontier_math/.venv/bin/activate
 gym eval prepare --benchmark indic/frontier_math
 ```
 

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nemo_gym.rollouts.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
     from nemo_gym.rollouts.harness_capabilities.checks import PriorityTier
     from nemo_gym.rollouts.harness_capabilities.cli import digest_file, inspect_bundle, json_rows, main
+    from nemo_gym.rollouts.harness_capabilities.compaction import inspect_compaction
     from nemo_gym.rollouts.harness_capabilities.health import inspect_health
     from nemo_gym.rollouts.harness_capabilities.results import gate_passes, render_matrices
 
@@ -38,6 +39,7 @@ _PUBLIC_API = {
     "gate_passes": "results",
     "inspect_behavior": "behavior",
     "inspect_bundle": "cli",
+    "inspect_compaction": "compaction",
     "inspect_health": "health",
     "inspect_record": "checker",
     "json_rows": "cli",

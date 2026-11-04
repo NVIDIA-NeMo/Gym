@@ -118,8 +118,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Unset, the bound agent's own resources server, the one its /run used under the legacy_agent relay.
-    resources_server: ResourcesServerRef | None = None
+    resources_server: ResourcesServerRef
     agent_server: AgentServerRef
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
@@ -143,11 +142,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        # Fail at startup, not on the first episode, when there is no resources server to bind or a tool server
-        # cannot serve its tools.
-        resources_server_name = self.resources_server_name
+        # Fail at startup, not on the first episode, when a tool server cannot serve its tools.
         for name in self.tool_server_names:
-            self._check_tool_server(name, resources_server_name)
+            self._check_tool_server(name, self.config.resources_server.name)
 
     def _check_tool_server(self, name: str, resources_server_name: str) -> None:
         server = f"Environment Server {self.config.name!r}"
@@ -182,23 +179,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
         return [server.name for server in servers]
 
-    @property
-    def resources_server_name(self) -> str:
-        """The resources server this server binds: its own setting, or else its agent's."""
-        if self.config.resources_server is not None:
-            return self.config.resources_server.name
-        agent_config = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.agent_server.name,
-        )
-        name = (agent_config.get("resources_server") or {}).get("name")
-        if not name:
-            raise ValueError(
-                f"Environment Server {self.config.name!r} sets no resources_server, "
-                f"and its agent {self.config.agent_server.name!r} names none either."
-            )
-        return name
-
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Forward to the resources server, which owns verification in this protocol.
 
@@ -213,7 +193,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             return AggregateMetrics()
         response = await self.server_client.post(
-            server_name=self.resources_server_name,
+            server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",
             json=body,
         )
@@ -439,7 +419,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         task_input = request.task.task_input
         try:
             seed_http_response = await self.server_client.post(
-                server_name=self.resources_server_name,
+                server_name=self.config.resources_server.name,
                 url_path="/seed_session",
                 json=ResourcesSeedSessionRequest(
                     resources_session_id=handles.resources_session_id,
@@ -529,7 +509,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         seed: ResourcesSeedSessionResponse,
         tool_server_accesses: Sequence[ToolAccess] = (),
     ) -> None:
-        resources_base_url = self.server_client._resolve_base_url(self.resources_server_name).rstrip("/")
+        resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
         if "direct_http" in self.config.resources_tool_transports:
             # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
@@ -542,14 +522,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             tool_accesses.append(
                 DirectHTTPToolAccess(
-                    name=f"{self.resources_server_name}.direct_http",
+                    name=f"{self.config.resources_server.name}.direct_http",
                     required=True,
                     base_url=tools_base_url,
                     cookies=handles.resources_cookies,
                 )
             )
         if "mcp" in self.config.resources_tool_transports:
-            tool_accesses.append(self._mcp_tool_access(self.resources_server_name, seed))
+            tool_accesses.append(self._mcp_tool_access(self.config.resources_server.name, seed))
             # The MCP session token names this attempt, and the Resources Server refuses it once a restore replaces it.
             # An agent continued from a checkpoint would keep that token and see every tool call fail.
             # So the episode restarts from its input after a crash, and its new seed mints a token for the new attempt.
@@ -638,7 +618,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     async def _close_resources(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> None:
         await self._close_session(
-            request, self.resources_server_name, handles.resources_session_id, handles.resources_cookies
+            request, self.config.resources_server.name, handles.resources_session_id, handles.resources_cookies
         )
 
     async def _close_tool_session(self, request: SingleAgentTurnRequest, handles: "SessionHandles", name: str) -> None:
@@ -670,7 +650,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         verifier_invocations = None
         try:
             verify_http_response = await self.server_client.post(
-                server_name=self.resources_server_name,
+                server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
                 json=self._verify_body(request, agent_response),

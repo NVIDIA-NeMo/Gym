@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.core.episode_types import ModelFailureDetails
+from nemo_gym.core.failure_records import ModelFailureDetails
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError

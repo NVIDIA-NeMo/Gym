@@ -327,35 +327,31 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
         )
 
 
-def _unbound_adapter() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
-    # A server that replaced a legacy_agent relay names no resources server and binds its agent's.
+def _adapter_with_different_agent_resources() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
     environment_server, client = _environment_server()
     client.global_config_dict.agent.responses_api_agents.test.update(
         {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
     )
-    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
-        {**environment_server.config.model_dump(), "resources_server": None}
-    )
-    return SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=client), client
+    return SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client), client
 
 
-@pytest.mark.parametrize("task_source", [None, "agents_resources"])
-def test_an_unbound_adapter_takes_its_agents_resources_server_as_the_taskset(task_source: str | None) -> None:
-    adapter, _ = _unbound_adapter()
+@pytest.mark.parametrize("task_source", [None, "resources"])
+def test_adapter_uses_its_own_resources_binding_as_the_taskset(task_source: str | None) -> None:
+    adapter, _ = _adapter_with_different_agent_resources()
     row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "responses_create_params": {"input": "task"}}
 
     request = adapter._episode_request_from_row(row if task_source is None else {**row, "task_source": task_source})
 
-    assert request.task.task_id.taskset == "agents_resources"
+    assert request.task.task_id.taskset == "resources"
 
 
-def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> None:
-    adapter, _ = _unbound_adapter()
+def test_adapter_rejects_a_row_naming_the_agents_other_resources_server() -> None:
+    adapter, _ = _adapter_with_different_agent_resources()
 
     with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
         adapter._episode_request_from_row(
             {
-                "task_source": "resources",
+                "task_source": "agents_resources",
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
                 "responses_create_params": {"input": "task"},
@@ -363,14 +359,14 @@ def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> N
         )
 
 
-def test_an_unbound_adapter_forwards_aggregate_metrics_to_its_agents_resources_server() -> None:
-    adapter, client = _unbound_adapter()
+def test_adapter_forwards_aggregate_metrics_to_its_own_resources_server() -> None:
+    adapter, client = _adapter_with_different_agent_resources()
     client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]
 
     response = TestClient(adapter.setup_webserver()).post("/aggregate_metrics", json={"verify_responses": []})
 
     assert response.status_code == 200
-    assert [(server, path) for server, path, _ in client.calls] == [("agents_resources", "/aggregate_metrics")]
+    assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
 async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:

@@ -60,9 +60,10 @@ from nemo_gym.config.global_config import (
     TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.core.episode_types import FailureBoundary
+from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
