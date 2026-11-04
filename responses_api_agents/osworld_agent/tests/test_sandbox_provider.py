@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import threading
 from types import SimpleNamespace
@@ -523,6 +524,43 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         forwarder.server_close()
         upstream.shutdown()
         upstream.server_close()
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"REQUESTS_CA_BUNDLE": "/certs/requests.pem", "SSL_CERT_FILE": "/certs/ssl.pem"}, "/certs/requests.pem"),
+        ({"SSL_CERT_FILE": "/certs/ssl.pem"}, "/certs/ssl.pem"),
+        ({}, True),
+    ],
+)
+def test_local_forwarder_verifies_with_custom_ca_bundle(monkeypatch, env, expected) -> None:
+    seen: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers: dict[str, str] = {}
+        content = b"ok"
+
+    def fake_request(self: requests.Session, *args: Any, **kwargs: Any) -> FakeResponse:
+        seen["verify"] = self.verify
+        return FakeResponse()
+
+    for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    forwarder, port = start_forwarder("https://gateway.invalid/proxy/5000")
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        connection.request("GET", "/screenshot")
+        assert connection.getresponse().status == 200
+        connection.close()
+        assert seen["verify"] == expected
+    finally:
+        forwarder.shutdown()
+        forwarder.server_close()
 
 
 def test_lifecycle_recreates_from_snapshot_and_close_is_idempotent(tmp_path, monkeypatch) -> None:
