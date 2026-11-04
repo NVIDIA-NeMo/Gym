@@ -2860,6 +2860,24 @@ def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setu
         factory.connect.assert_not_awaited()
 
 
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {
+        "image": "test-image",
+        "workdir": "/workspace",
+        "provider_options": {"network_policy": {}},
+    }
+    agent.config.network_access = "model_only"
+
+    spec, refused = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert "not both" in refused.text
+    assert spec is None
+
+
 @pytest.mark.parametrize("reported", ["codex-cli 0.144.4", "codex-cli 0.143.0"])
 def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported):
     agent, sandbox = setup
