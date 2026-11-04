@@ -16,7 +16,7 @@ from nemo_gym.sandbox import SandboxExecResult
 
 
 VERIFIER = """
-from nemo_gym.verifiers import final_text
+from nemo_gym.verification.python_verifier import final_text
 
 
 def verify(workspace, task_data, response) -> float:
@@ -114,9 +114,11 @@ class TestPythonVerifierShim:
             ".ng/task_data.json",
             ".ng/response.json",
             ".ng/nemo_gym/__init__.py",
+            ".ng/nemo_gym/verification/__init__.py",
+            ".ng/nemo_gym/verification/python_verifier/__init__.py",
+            ".ng/nemo_gym/verification/python_verifier/files.py",
+            ".ng/nemo_gym/verification/python_verifier/runner.py",
             ".ng/nemo_gym/verifiers/__init__.py",
-            ".ng/nemo_gym/verifiers/files.py",
-            ".ng/nemo_gym/verifiers/runner.py",
         }
         script = shim["test.sh"].decode()
         # The verifier module is the one the task's tests/ carries; the workspace is the session's.

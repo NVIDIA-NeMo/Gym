@@ -7,11 +7,11 @@ A task may grade with ``tests/verifier.py`` instead of ``tests/test.sh``; a data
 beside ``dataset.toml`` that grades every task without a ``tests/`` folder. ``tests/test.sh`` always wins when it is
 present: many hub datasets ship a ``tests/verifier.py`` that their ``test.sh`` calls as a helper, and such a task is a
 plain ``test.sh`` task to Gym (the module is uploaded with ``tests/`` like any other file). The module's ``verify``
-function (see :mod:`nemo_gym.verifiers`) never runs on the host. The ``harbor`` environment server uploads a shim folder
-over ``/tests`` after the task's own ``tests/``: a ``test.sh`` that finds a Python (3.8 or newer, :data:`PYTHON_FLOOR`;
-an older one is refused with the version named, exit 127, no reward), the runner, a vendored copy
-of ``nemo_gym.verifiers``, the task's fields and, at run time, the agent's final response, and runs the
-verifier with the workspace path. ``gym dataset publish --harbor`` writes the same shim into each expanded
+function (see :mod:`nemo_gym.verification.python_verifier`) never runs on the host. The ``harbor`` environment
+server uploads a shim folder over ``/tests`` after the task's own ``tests/``: a ``test.sh`` that finds a Python (3.8 or
+newer, :data:`PYTHON_FLOOR`; an older one is refused with the version named, exit 127, no reward), the runner, a
+vendored copy of ``nemo_gym.verification.python_verifier``, the task's fields and, at run time, the agent's final
+response, and runs the verifier with the workspace path. ``gym dataset publish --harbor`` writes the same shim into each expanded
 task's ``tests/`` (without the response, which Harbor cannot provide): the task's own ``tests/verifier.py`` stays
 where it is and the shim runs it there, a dataset-level module travels under ``tests/.ng/verifier.py``, so the
 published folder grades by ``tests/test.sh`` the same way under Harbor in shared verifier mode, and loads back into
@@ -36,7 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-import nemo_gym.verifiers as verifiers_package
+import nemo_gym.verification.python_verifier as verifiers_package
+from nemo_gym._moved_paths import MOVED_MODULES
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 
 
@@ -52,10 +53,27 @@ RESPONSE_FILE = "response.json"
 # The in-sandbox tests folder, Harbor's.
 TESTS_DIR = "/tests"
 REWARD_DIR = "/logs/verifier"
-# The oldest Python the runner and the vendored `nemo_gym.verifiers` run under (they keep to it: no `str.removesuffix`,
-# no 3.9+ syntax). The shim's test.sh refuses an older interpreter with the version named rather than letting
+# The oldest Python the runner and the vendored `nemo_gym.verification.python_verifier` run under (they keep to it: no
+# `str.removesuffix`, no 3.9+ syntax). The shim's test.sh refuses an older interpreter with the version named rather than letting
 # verify() die in a SyntaxError or AttributeError with no reward and no hint at the cause.
 PYTHON_FLOOR = (3, 8)
+# Where the shim vendors the helpers under .ng/, the same dotted path a verifier imports them from.
+VENDORED_PACKAGE = ("nemo_gym", "verification", "python_verifier")
+# The helpers' old path. A verifier written against it still runs while _moved_paths keeps the entry: the shim then
+# vendors an alias package there, which serves the same modules and says on stderr (the verifier log) where they moved.
+OLD_VENDORED_PACKAGE = "nemo_gym.verifiers"
+OLD_PATH_ALIAS = """import sys
+
+from nemo_gym.verification import python_verifier
+from nemo_gym.verification.python_verifier import files
+
+sys.stderr.write(
+    "nemo_gym.verifiers is deprecated; import nemo_gym.verification.python_verifier instead. "
+    "The old path is removed in {removed_in}.\\n"
+)
+sys.modules["nemo_gym.verifiers"] = python_verifier
+sys.modules["nemo_gym.verifiers.files"] = files
+"""
 
 
 class PythonVerifierError(HarborTaskError):
@@ -164,8 +182,9 @@ def test_script(shim: VerifierShim) -> str:
 def write_shim(target: Path, shim: VerifierShim) -> Path:
     """Write the shim folder at ``target`` (created; existing shim files replaced) and return it.
 
-    ``target/test.sh``, ``target/.ng/run_verifier.py``, ``target/.ng/nemo_gym/verifiers/*`` (the installed
-    package's modules, with an empty ``nemo_gym/__init__.py`` so the sandbox never imports the real package),
+    ``target/test.sh``, ``target/.ng/run_verifier.py``, ``target/.ng/nemo_gym/verification/python_verifier/*`` (the
+    installed package's modules, with empty ``nemo_gym/__init__.py`` and ``nemo_gym/verification/__init__.py`` so the
+    sandbox never imports the real package), ``target/.ng/nemo_gym/verifiers/__init__.py`` while the old path is kept,
     ``target/.ng/task_data.json``, ``target/.ng/response.json`` when a response is given, and
     ``target/.ng/verifier.py`` when the module is not in the task's own ``tests/``.
 
@@ -182,13 +201,22 @@ def write_shim(target: Path, shim: VerifierShim) -> Path:
     shim_dir = target / SHIM_DIR
     if shim_dir.exists():
         shutil.rmtree(shim_dir)
-    (shim_dir / "nemo_gym" / "verifiers").mkdir(parents=True)
+    vendored = shim_dir.joinpath(*VENDORED_PACKAGE)
+    vendored.mkdir(parents=True)
     (target / TEST_SCRIPT).write_text(test_script(shim))
     (target / TEST_SCRIPT).chmod(0o755)
     package_dir = Path(verifiers_package.__file__).resolve().parent
     for module in sorted(package_dir.glob("*.py")):
-        shutil.copyfile(module, shim_dir / "nemo_gym" / "verifiers" / module.name)
-    (shim_dir / "nemo_gym" / "__init__.py").write_text("")
+        shutil.copyfile(module, vendored / module.name)
+    for parent in vendored.parents:
+        if parent == shim_dir:
+            break
+        (parent / "__init__.py").write_text("")
+    moved = MOVED_MODULES.get(OLD_VENDORED_PACKAGE)
+    if moved is not None:
+        alias = shim_dir.joinpath(*OLD_VENDORED_PACKAGE.split("."))
+        alias.mkdir()
+        (alias / "__init__.py").write_text(OLD_PATH_ALIAS.format(removed_in=moved.removed_in))
     shutil.copyfile(package_dir / "runner.py", shim_dir / RUNNER_FILE)
     (shim_dir / TASK_DATA_FILE).write_text(json.dumps(dict(shim.task_data), sort_keys=True) + "\n")
     if shim.response is not None:

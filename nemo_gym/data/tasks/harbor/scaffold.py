@@ -131,7 +131,7 @@ VERIFIER_PY = """# The Python verifier: runs inside the task's sandbox through a
 # (solution/answer.md) is written to by `gym dataset validate` and by the published solve.sh alike.
 from pathlib import Path
 
-from nemo_gym.verifiers.files import read_text
+from nemo_gym.verification.python_verifier.files import read_text
 
 
 def verify(workspace: Path, task_data: dict) -> float:

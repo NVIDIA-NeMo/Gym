@@ -3,8 +3,8 @@
 
 """File checks for Python verifiers: the agent's workspace is a directory, these read it.
 
-Standard library only (see :mod:`nemo_gym.verifiers`). Paths are relative to the workspace; a path that
-escapes it (``..`` or an absolute path outside it) reads as absent, so a task cannot be graded on files the
+Standard library only (see :mod:`nemo_gym.verification.python_verifier`). Paths are relative to the workspace; a
+path that escapes it (``..`` or an absolute path outside it) reads as absent, so a task cannot be graded on files the
 agent never owned.
 """
 

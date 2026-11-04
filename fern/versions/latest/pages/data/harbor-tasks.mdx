@@ -227,7 +227,7 @@ it reads and returns the reward:
 ```python
 from pathlib import Path
 
-from nemo_gym.verifiers.files import read_text
+from nemo_gym.verification.python_verifier.files import read_text
 
 
 def verify(workspace: Path, task_data: dict) -> float:
@@ -239,22 +239,23 @@ def verify(workspace: Path, task_data: dict) -> float:
 | --- | --- |
 | `workspace` | The task's working directory inside the sandbox, as a `Path`. |
 | `task_data` | The task's own fields (`task_data.json`, a parameterized row). |
-| `response` | The agent's final Responses API response, as a dict (`nemo_gym.verifiers.final_text` reads its text). Gym-only: a published Harbor task cannot see it. |
+| `response` | The agent's final Responses API response, as a dict (`nemo_gym.verification.python_verifier.final_text` reads its text). Gym-only: a published Harbor task cannot see it. |
 | `state` | `{"workspace": Path}`, the RFC's spelling of the workspace. |
 
 The return value is a number, or a dict with a `reward` key and other numeric keys as metrics; an `async def verify`
 is awaited. A `verify` that requires `response` without a default leaves no reward wherever no response exists, which
 is every published Harbor task. Helpers:
-`nemo_gym.verifiers` (`final_text`, `exact_match`, `numeric_match`) and `nemo_gym.verifiers.files` (`read_text`,
+`nemo_gym.verification.python_verifier` (`final_text`, `exact_match`, `numeric_match`) and `nemo_gym.verification.python_verifier.files` (`read_text`,
 `file_exists`, `text_file_equals`, which stay inside the workspace; `read_text` drops one trailing newline unless told
 not to). They are standard library only, and in the sandbox they always resolve to the vendored copy under
 `/tests/.ng`: the runner ranks that folder ahead of the verifier's own folder, `/tests` and the image's packages, so a
-`nemo_gym` shipped in, or planted into, the task's `tests/` never replaces them.
+`nemo_gym` shipped in, or planted into, the task's `tests/` never replaces them. The helpers' old path,
+`nemo_gym.verifiers`, still works until release 0.10.0, and the verifier log then says where they moved.
 
 No verifier code runs on the host. At verification the environment server uploads a shim over `/tests` after the
 task's own `tests/`: a `test.sh` that finds `python3` (or `python`) in the image and checks it is 3.8 or newer (an
 older one is refused with the version named, exit 127, no reward), the runner, a vendored copy of
-`nemo_gym.verifiers`, the task's fields, the agent's response and, for a dataset-level module, the module itself.
+`nemo_gym.verification.python_verifier`, the task's fields, the agent's response and, for a dataset-level module, the module itself.
 The shim runs under the same `timeout` wrapper, user and mode (shared or separate) as any `test.sh`, with the
 session's working directory as the workspace, and writes `reward.txt` or `reward.json`. In separate mode the
 verifier runs in a fresh container, so a verifier that reads `workspace` (or `state`) needs the task's top-level `artifacts`
