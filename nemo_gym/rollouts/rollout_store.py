@@ -74,6 +74,7 @@ from nemo_gym.utils.path_utils import (
     aggregation_sources_path_for,
     attempt_extension_path_for,
     failures_path_for,
+    rerun_masked_journal_path_for,
     resubmit_offset_path_for,
 )
 
@@ -264,6 +265,8 @@ class RolloutStore:
             resubmit_offset_path_for(output),
             # An attempt extension an explicit recovery recorded for the run this one replaces.
             attempt_extension_path_for(output),
+            # Its approvals to run masked results again name attempts this run numbers from 0 again.
+            rerun_masked_journal_path_for(output),
             journal_path_for(output),
             coverage_path_for(output),
             aggregate_metrics_path_for(output),
