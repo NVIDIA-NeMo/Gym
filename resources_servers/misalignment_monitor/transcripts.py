@@ -117,7 +117,7 @@ def render_items(items: list[dict], max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     half = max_chars // 2
-    return f"{text[:half]}\n\n[... {len(text) - 2 * half} characters omitted ...]\n\n{text[-half:]}"
+    return f"{text[:half]}\n\n[... {len(text) - 2 * half} characters omitted ...]\n\n{text[len(text) - half :]}"
 
 
 def render_transcript(rollout: dict, max_chars: int) -> str:

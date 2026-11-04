@@ -176,12 +176,19 @@ def _read_activation_file(path: str) -> dict[str, Any]:
                 os.remove(leftover)
 
 
-def _parse_json(text: str) -> Optional[dict[str, Any]]:
-    try:
-        value = json.loads(text[text.index("{") : text.rindex("}") + 1])
-    except ValueError:
-        return None
-    return value if isinstance(value, dict) else None
+def _parse_json(text: str, *, key: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """The last JSON object in the text that has ``key``. Prose around it, braces included, does not break it."""
+    decoder, found, start = json.JSONDecoder(), None, text.find("{")
+    while start != -1:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except ValueError:
+            start = text.find("{", start + 1)
+            continue
+        if isinstance(value, dict) and (key is None or key in value):
+            found = value
+        start = text.find("{", end)
+    return found
 
 
 def _answer_text(response: NeMoGymResponse) -> str:
@@ -196,7 +203,7 @@ def _answer_text(response: NeMoGymResponse) -> str:
 
 def parse_verdict(text: str) -> dict[str, Any]:
     """The judge's JSON verdict. A reply without a valid severity is 'unparsed', which escalates."""
-    verdict = _parse_json(text)
+    verdict = _parse_json(text, key="severity")
     if verdict is None or verdict.get("severity") not in SEVERITIES:
         return {"severity": "unparsed", "raw": text[-2000:]}
     return verdict
@@ -307,6 +314,8 @@ class _Case:
     record: dict[str, Any]
     reading: Optional[dict[str, Any]] = None
     started: bool = False
+    # Rejected by a full backlog: it will never run.
+    dropped: bool = False
 
 
 class MisalignmentMonitorServer(SimpleResourcesServer):
@@ -340,6 +349,9 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 "set observability_enabled: true and model_call_capture_dir in the global config."
             )
         Path(self.config.alerts_jsonl_fpath).parent.mkdir(parents=True, exist_ok=True)
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return "open P0 alerts, rollouts in progress and the capture tailer live in one process's memory"
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -397,6 +409,17 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         return True
 
     async def _tail_captures(self) -> None:
+        def skip_earlier_runs() -> None:
+            for path in self._capture_dir.glob("*.capture.jsonl"):
+                try:
+                    with path.open("rb") as f:
+                        self._capture_offsets[path] = (f.read(_CAPTURE_HEAD_BYTES), path.stat().st_size)
+                except FileNotFoundError:
+                    continue
+
+        # Capture files already there belong to an earlier run: only calls captured from now on are reviewed.
+        async with self._capture_lock:
+            await asyncio.to_thread(skip_earlier_runs)
         while True:
             try:
                 await self._read_captures()
@@ -408,13 +431,13 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 print(f"[misalignment_monitor] reading model-call capture failed: {type(e).__name__}: {e}", flush=True)
             await asyncio.sleep(self.config.capture_poll_interval_s)
 
-    async def _read_captures(self, rollout_id: Optional[str] = None) -> None:
+    async def _read_captures(self, rollout_id: Optional[str] = None, *, finished: bool = False) -> None:
         """Take every model call captured since the last read, of one rollout or of all."""
         async with self._capture_lock:
-            for rid, exchange in await asyncio.to_thread(self._new_capture_lines, rollout_id):
+            for rid, exchange in await asyncio.to_thread(self._new_capture_lines, rollout_id, finished):
                 self._take_call(rid, exchange)
 
-    def _new_capture_lines(self, rollout_id: Optional[str]) -> list[tuple[str, dict]]:
+    def _new_capture_lines(self, rollout_id: Optional[str], finished: bool = False) -> list[tuple[str, dict]]:
         suffix = ".capture.jsonl"
         if rollout_id:
             paths = [self._capture_dir / f"{rollout_id}{suffix}"]
@@ -441,10 +464,20 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
             except FileNotFoundError:
                 self._capture_offsets.pop(path, None)
                 continue
-            # A line still being appended waits for the next read.
-            complete = data[: data.rfind(b"\n") + 1]
+            # A line still being appended waits for the next read. For a finished rollout, its last call counts as soon
+            # as its JSON is whole (the newline can land after the rollout ends), so the final review sees the last turn.
+            end = data.rfind(b"\n") + 1
+            if finished and end < len(data):
+                try:
+                    json.loads(data[end:])
+                    end = len(data)
+                except ValueError:
+                    pass
+            complete = data[:end]
             self._capture_offsets[path] = (head, start + len(complete))
             for line in complete.splitlines():
+                if not line.strip():
+                    continue
                 try:
                     lines.append((path.name.removesuffix(suffix), json.loads(line)))
                 except ValueError:
@@ -494,7 +527,7 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
             state.reviewed_latest = cases[-1] is this_call
             state.last_review = time.time()
         if per_turn and state.reviewed_latest:
-            if state.waiting is not None and not state.waiting.started:
+            if state.waiting is not None and not state.waiting.started and not state.waiting.dropped:
                 # The queued review takes this window, which holds the earlier one. Agents whose every call ends a
                 # turn would otherwise queue a review per call.
                 state.waiting.window, state.waiting.windows = this_call.window, this_call.windows
@@ -527,15 +560,20 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 state.reviewed_latest = state.reviewed_latest or state.window is this_call.window
                 state.last_review = time.time()
             this_call.reading = reading
-        for case in cases:
+        for i, case in enumerate(cases):
             if not self._spawn(self._review_and_record(case)):
+                # The backlog is full. These reviews will not run, so the latest window is not reviewed: a later
+                # turn queues a new review and the finished rollout gets its final one.
+                for dropped in cases[i:]:
+                    dropped.dropped = True
+                state.reviewed_latest = False
                 return
 
     async def _finish(self, rollout: dict[str, Any]) -> None:
         """Review a finished rollout, unless per-turn reviews already covered its last context window."""
         rollout_id = rollout.get("rollout_id")
         if rollout_id and self._capture_dir is not None:
-            await self._read_captures(rollout_id)
+            await self._read_captures(rollout_id, finished=True)
         state = self._rollouts.pop(rollout_id, None) if rollout_id else None
         if state is not None:
             await asyncio.gather(*state.pending, return_exceptions=True)
@@ -552,6 +590,10 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         if readings:
             flagged = [r for r in readings if r.get("flagged")]
             reading = {"flagged": bool(flagged), "calls_read": len(readings), "flagged_calls": flagged[:5]}
+            errors = [r["error"] for r in readings if r.get("error")]
+            if errors:
+                # A call that was not screened leaves the rollout unscreened.
+                reading["error"] = f"{len(errors)} of {len(readings)} calls not screened: {errors[0]}"
         windows = [*(state.windows if state else []), window]
         await self._review_and_record(_Case(rollout_id, "final", window, windows, record, reading))
 
@@ -576,8 +618,8 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 case.reading = await asyncio.to_thread(self._reader.read, case.window)
         report["l0"] = case.reading
         if self.config.activation_source != "disabled":
-            if case.reading is None:
-                # No screen ran on this window (for example, it was not served by vLLM), so it is not cleared.
+            if case.reading is None or case.reading.get("error"):
+                # No screen ran on this window (it was not served by vLLM, or its reading failed), so it is not cleared.
                 self._counts["l0_unscreened"] += 1
             elif not case.reading.get("flagged") and not self._audit("l0", report):
                 return report
@@ -813,11 +855,11 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         self._counts[f"alerts_{severity}"] += 1
         summary = {key: alert[key] for key in ("alert_id", "severity", "categories", "summary", "found_by")}
         self._recent_alerts.append(summary)
-        self._append(alert)
         print(
             f"[misalignment_monitor] {severity} alert {alert['alert_id']} ({case.reason}): {alert['summary']}",
             flush=True,
         )
+        # A P0 is held and paged before it is written, so a failed write cannot lose it.
         if severity == "P0":
             self._open_p0[alert["alert_id"]] = {"since": time.time(), "summary": alert["summary"]}
             if self.config.alert_webhook_url:
@@ -826,6 +868,7 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                 except Exception as e:
                     self._counts["webhook_errors"] += 1
                     print(f"[misalignment_monitor] P0 webhook failed for {alert['alert_id']}: {e!r}", flush=True)
+        self._append(alert)
         if "alignment" in found_by:
             self._alignment_alerts.append(summary)
             every = self.config.pattern_review_every
@@ -878,8 +921,13 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         return {"resolved": resolved}
 
     def _append(self, record: dict[str, Any]) -> None:
-        with open(self.config.alerts_jsonl_fpath, "a") as f:
-            f.write(json.dumps(record, default=str) + "\n")
+        try:
+            with open(self.config.alerts_jsonl_fpath, "a") as f:
+                f.write(json.dumps(record, default=str) + "\n")
+        except OSError as e:
+            self._counts["alerts_file_errors"] += 1
+            ids = {k: record.get(k) for k in ("status", "severity", "alert_id", "rollout_id") if k in record}
+            print(f"[misalignment_monitor] writing {self.config.alerts_jsonl_fpath} failed: {e!r}: {ids}", flush=True)
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         """Recall and false-positive rate at each severity threshold, on rows labeled ``expected_severity``."""

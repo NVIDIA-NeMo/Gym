@@ -213,7 +213,8 @@ class MisalignmentActivationConnector(ExampleHiddenStatesConnector):
         if self._mode == "probe":
             position = getattr(pending, "num_prompt_tokens", pending.token_ids.shape[0]) - 1
             if position < first:
-                return {"mode": "probe", "flagged": False, "position": position}
+                # The probe's position was not read, so the call is not screened rather than clean.
+                return {"mode": "probe", "flagged": False, "position": position, "error": "probe position not read"}
             score = probe_score(residual[position - first], readout["probe"], readout["temperature"])
             threshold = float(self._kv_transfer_config.get_from_extra_config("probe_threshold", 0.5))
             return {"mode": "probe", "score": score, "flagged": score > threshold, "position": position}

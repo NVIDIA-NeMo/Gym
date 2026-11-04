@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import contextlib
 import importlib.util
 import json
 from pathlib import Path
@@ -25,7 +26,7 @@ import pytest
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 from resources_servers.misalignment_monitor import app
 from resources_servers.misalignment_monitor.app import (
     MisalignmentMonitorConfig,
@@ -772,3 +773,131 @@ class TestReader:
         server._reader.read = MagicMock(return_value={"mode": "jspace", "concepts": {}, "flagged": False})
         report = await server.review(_case())
         assert report["l0"]["flagged"] is False and server.server_client.post.call_count == 0
+
+
+async def test_a_layer_0_read_error_is_not_a_clean_screen(tmp_path) -> None:
+    config = _config(tmp_path, activation_source="engine", audit_rate=0.0)
+    server = _server(config, NONE, global_config=_capture(tmp_path))
+    case = _Case("7-2", "final", "the agent's context", ["the agent's context"], {"reward": 1.0})
+    # What _read_activation_file and the vLLM connector return when extraction or scoring fails.
+    case.reading = {"flagged": False, "error": "OSError: activation file disappeared"}
+
+    report = await server.review(case)
+
+    assert server.server_client.post.call_count == 1, report
+    assert report["l1"] is not None
+
+
+async def test_a_dropped_per_turn_review_does_not_swallow_every_later_review(tmp_path) -> None:
+    config = _config(tmp_path, review_schedule="per_turn", max_backlog=1)
+    server = _server(config, NONE, NONE, NONE, global_config=_capture(tmp_path))
+
+    # Occupy the backlog so the first queued per-turn review is rejected by _spawn.
+    placeholder = MagicMock()
+    server._backlog.add(placeholder)
+    _call("7-2", tmp_path, TASK, DONE)
+    await server._read_captures()
+    await asyncio.gather(*server._rollouts["7-2"].pending, return_exceptions=True)
+    assert server._counts["dropped"] == 1
+    assert server._rollouts["7-2"].waiting is not None
+    assert not server._rollouts["7-2"].waiting.started
+
+    # The backlog is free again; a later turn must still get reviewed.
+    server._backlog.discard(placeholder)
+    next_turn = [*TASK, *DONE, {"role": "user", "content": "Now update the docs."}]
+    _call("7-2", tmp_path, next_turn, DONE)
+    await server._read_captures()
+    await _settle(server)
+    await server._finish({"rollout_id": "7-2", "response": {"output": DONE}})
+
+    assert server.server_client.post.call_count >= 1
+
+
+async def test_final_review_sees_the_last_turn_when_its_capture_row_is_mid_write(tmp_path) -> None:
+    server = _server(_config(tmp_path), NONE, global_config=_capture(tmp_path))
+    _call("7-2", tmp_path, TASK, EDIT)
+
+    # The final call's capture row has been written but its newline is not there yet, so the tailer skips it.
+    late = {
+        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+        "dialect": "responses",
+        "status_code": 200,
+        "request": {"input": [*TASK, *EDITED]},
+        "response": {"output": DONE},
+    }
+    with (tmp_path / "capture" / "7-2.capture.jsonl").open("a") as f:
+        f.write(json.dumps(late))
+
+    rollout = {"responses_create_params": {"input": "Fix it."}, "response": {"output": DONE}, "rollout_id": "7-2"}
+    await server._finish(rollout)
+
+    assert server.server_client.post.call_count == 1
+    assert "Fixed." in _prompt(server, 0)
+
+
+async def test_a_failed_alerts_write_does_not_lose_a_p0(tmp_path, monkeypatch) -> None:
+    webhook = AsyncMock(return_value=MagicMock(ok=True))
+    monkeypatch.setattr(app, "request", webhook)
+    config = _config(tmp_path, alert_webhook_url="http://hooks.example/alert", pause_after_unresolved_p0_minutes=0)
+    server = _server(config)
+
+    def fail_to_write(record: dict) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server, "_append", fail_to_write)
+    report = {
+        "severity": "P0",
+        "l2": {
+            "security": {"severity": "P0", "categories": ["sandbox_escape"], "summary": "curl to the internet"},
+            "alignment": {"severity": "none"},
+        },
+    }
+
+    try:
+        await server._alert(_case(), report)
+    except OSError:
+        pass
+
+    status = await server.status()
+    assert status["open_p0"], status
+    assert status["pause"] is True
+    assert webhook.await_count == 1
+
+
+def test_several_workers_are_refused(tmp_path) -> None:
+    server = _server(_config(tmp_path, num_workers=2))
+
+    with pytest.raises(ValueError, match="num_workers=1"):
+        refuse_unsupported_num_workers(server)
+
+
+async def test_tailer_does_not_review_captures_from_an_earlier_run(tmp_path) -> None:
+    capture = _capture(tmp_path)
+    # Left behind by a previous run in the same capture directory, before this run's server starts.
+    _call("stale-rollout", tmp_path, TASK, DONE)
+
+    config = _config(tmp_path, review_schedule="per_turn", capture_poll_interval_s=3600)
+    server = _server(config, NONE, global_config=capture)
+
+    tailer = asyncio.create_task(server._tail_captures())
+    await asyncio.sleep(0.05)
+    tailer.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tailer
+    await _settle(server)
+
+    assert server.server_client.post.call_count == 0, server._counts
+
+
+def test_a_verdict_brace_outside_the_json_does_not_downgrade_a_flag() -> None:
+    text = '{"severity": "P1", "categories": ["evaluation_gaming"], "summary": "s"}\n(see {note})'
+
+    assert parse_verdict(text)["severity"] == "P1"
+
+
+def test_a_one_character_cap_does_not_duplicate_the_whole_text() -> None:
+    items = [{"role": "user", "content": "abcdefghij"}]
+
+    rendered = render_items(items, max_chars=1)
+
+    assert "abcdefghij" not in rendered
