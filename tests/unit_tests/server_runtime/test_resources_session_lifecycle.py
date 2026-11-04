@@ -149,6 +149,20 @@ async def test_typed_seed_after_verification_is_refused_and_does_not_reinitializ
     assert server.state == {}
 
 
+async def test_cookie_seed_after_verification_keeps_the_session_id_and_starts_fresh_state() -> None:
+    server = _server()
+    request = _request()
+    await server.seed_session(TaskSeed(value=1), request=request)
+    # What a verifier does: release the live state, keep a receipt for the cookie's session ID.
+    server.state.clear()
+    server._verified_sessions.remember("caller-cookie", (None, "receipt"))
+
+    await server.seed_session(TaskSeed(value=2), request=request)
+
+    assert request.session[SESSION_ID_KEY] == "caller-cookie"
+    assert server.state == {"caller-cookie": 2}
+
+
 @pytest.mark.parametrize("operation", ["close", "retire"])
 async def test_release_waits_for_in_flight_initialization(operation: str) -> None:
     server = _server()

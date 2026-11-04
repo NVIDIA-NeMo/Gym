@@ -15,7 +15,6 @@
 
 import logging
 from typing import Annotated
-from uuid import UUID
 
 import pytest
 from pydantic import BeforeValidator, TypeAdapter, ValidationError
@@ -87,33 +86,22 @@ def test_typed_seed_refuses_conflicting_or_verified_sessions(
     assert error.value.status_code == 409
 
 
-def test_legacy_seed_rotates_only_after_verification() -> None:
-    fence = ResourcesSessionFence(window_seconds=10)
-    assert fence.legacy_seed_session_id("session", identity=None, verified=False) == "session"
-    new_id = fence.legacy_seed_session_id("session", identity=None, verified=True)
-    assert new_id != "session"
-    assert str(UUID(new_id)) == new_id
-    # Rotation leaves the previous cookie available for the environment's verify-retry evidence.
-    assert fence.closed_episode("session") is None
-
-
-def test_legacy_seed_deprecation_is_logged_once_and_names_the_migration(caplog) -> None:
+def test_cookie_seed_deprecation_is_logged_once_and_names_the_migration(caplog) -> None:
     fence = ResourcesSessionFence(window_seconds=10)
     with caplog.at_level(logging.WARNING):
         fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
         assert not caplog.records
-        fence.legacy_seed_session_id("first", identity=None, verified=False)
-        fence.legacy_seed_session_id("second", identity=None, verified=True)
+        fence.check_cookie_seed("first", identity=None)
+        fence.check_cookie_seed("second", identity=None)
     assert len(caplog.records) == 1
     assert "deprecated" in caplog.records[0].message
     assert "ResourcesSeedSessionRequest" in caplog.records[0].message
 
 
-@pytest.mark.parametrize("verified", [False, True])
-def test_legacy_seed_cannot_replace_a_typed_session(verified: bool) -> None:
+def test_cookie_seed_cannot_replace_a_typed_session() -> None:
     fence = ResourcesSessionFence(window_seconds=10)
     with pytest.raises(ResourcesSessionConflictError):
-        fence.legacy_seed_session_id("session", identity=IDENTITY, verified=verified)
+        fence.check_cookie_seed("session", identity=IDENTITY)
 
 
 def test_close_checks_ownership_without_marking_a_failed_cleanup_closed() -> None:
@@ -147,7 +135,7 @@ def test_close_of_unknown_session_fences_both_seed_protocols_until_expiry(monkey
     with pytest.raises(ResourcesSessionConflictError):
         fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
     with pytest.raises(ResourcesSessionConflictError):
-        fence.legacy_seed_session_id("session", identity=None, verified=False)
+        fence.check_cookie_seed("session", identity=None)
     clock[0] += 10
     assert fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
-    assert fence.legacy_seed_session_id("session", identity=None, verified=False) == "session"
+    fence.check_cookie_seed("session", identity=None)

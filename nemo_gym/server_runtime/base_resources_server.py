@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from time import monotonic
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
-from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import (
@@ -475,9 +474,9 @@ class ResourcesSessionFence:
     while a request holds or waits for it.
 
     It also decides what a seed or close may do: ``check_typed_seed`` says whether a typed seed reuses, creates or is
-    refused, ``check_close`` checks which episode owns the session, and ``legacy_seed_session_id`` says whether a cookie
-    seed keeps its session ID or takes a new one. They take the caller's identity and verification facts as arguments
-    and keep none, so the owning server stays the single place that stores them.
+    refused, ``check_close`` checks which episode owns the session, and ``check_cookie_seed`` refuses a cookie seed of a
+    closed or typed session. They take the caller's identity and verification facts as arguments and keep none, so the
+    owning server stays the single place that stores them.
 
     TODO: also expire sessions that are never closed, as when the Environment Server dies before its close. Planned
     rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next request
@@ -488,7 +487,7 @@ class ResourcesSessionFence:
         self._window_seconds = window_seconds
         self._locks: dict[str, _FenceLock] = {}
         self._closed: ClosedResourcesSessionRecords[EpisodeId] = ClosedResourcesSessionRecords(window_seconds)
-        self._legacy_seed_warning_emitted = False
+        self._cookie_seed_warning_emitted = False
 
     @asynccontextmanager
     async def locked(self, resources_session_id: str) -> AsyncIterator[None]:
@@ -512,29 +511,23 @@ class ResourcesSessionFence:
         if self.closed_episode(resources_session_id) is not None:
             raise ResourcesSessionConflictError(f"Resources session is already closed: {resources_session_id}")
 
-    def legacy_seed_session_id(
-        self,
-        session_id: str,
-        *,
-        identity: tuple[EpisodeId, TaskId] | None,
-        verified: bool,
-    ) -> str:
-        """Check a legacy seed and rotate a completed cookie without invalidating its verification retries.
+    def check_cookie_seed(self, session_id: str, *, identity: tuple[EpisodeId, TaskId] | None) -> None:
+        """Check a cookie-based seed and warn once that the path is deprecated.
 
         Deprecated compatibility path: migrate callers to typed ``ResourcesSeedSessionRequest`` seeds.
         Call while holding ``locked(session_id)``. Pass the active or retained verification identity, if any.
-        Bind the returned ID to the request cookie only after creating the new state successfully.
+        A closed or typed session cannot be seeded through its cookie. Any other session keeps its ID, so the new
+        state replaces the previous run's, as a cookie seed always did.
         """
         self.raise_if_closed(session_id)
         if identity is not None:
-            raise ResourcesSessionConflictError("A legacy seed cannot replace a typed session")
-        if not self._legacy_seed_warning_emitted:
+            raise ResourcesSessionConflictError("A cookie seed cannot replace a typed session")
+        if not self._cookie_seed_warning_emitted:
             logger.warning(
-                "Legacy cookie-based /seed_session is deprecated. Migrate to an Environment Server that sends "
+                "Cookie-based /seed_session is deprecated. Migrate to an Environment Server that sends "
                 "ResourcesSeedSessionRequest with resources_session_id, episode_id, task_id, and task_data."
             )
-            self._legacy_seed_warning_emitted = True
-        return str(uuid4()) if verified else session_id
+            self._cookie_seed_warning_emitted = True
 
     def check_typed_seed(
         self,
@@ -704,12 +697,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Register the episode routes ``/seed_session``, ``/close_session`` and ``/verify``."""
         if type(self).seed_session is SimpleResourcesServer.seed_session:
             # Inject Request at the HTTP boundary while keeping seed_session(body) valid for direct callers.
-            legacy_body = (
+            cookie_body = (
                 Annotated[self.seed_request_model, BeforeValidator(reject_partial_typed_seed)]
                 if self._manages_session_state()
                 else BaseSeedSessionRequest
             )
-            seed_body = ResourcesSeedSessionRequest | legacy_body
+            seed_body = ResourcesSeedSessionRequest | cookie_body
 
             async def seed_endpoint(
                 request: Request, body: seed_body
@@ -917,13 +910,11 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             session_id = request.session[SESSION_ID_KEY]
             async with self._fence.locked(session_id):
                 verified = self._verified_sessions.get(session_id)
-                session_id = self._fence.legacy_seed_session_id(
+                self._fence.check_cookie_seed(
                     session_id,
                     identity=self._session_episodes.get(session_id) or (verified[0] if verified is not None else None),
-                    verified=verified is not None,
                 )
                 await self.initialize_session_state(session_id, body)
-                request.session[SESSION_ID_KEY] = session_id
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id

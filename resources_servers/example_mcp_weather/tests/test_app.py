@@ -525,31 +525,22 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert len(server._verified_sessions) == 0
 
 
-def test_next_legacy_run_gets_new_cookie_and_old_verify_remains_retryable() -> None:
+def test_next_cookie_run_keeps_its_cookie_and_starts_a_fresh_history() -> None:
     server = _server()
+    verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
-        old_cookies = dict(client.cookies)
-        old_id = next(iter(server.session_id_to_state))
-        first = client.post(
-            "/verify", json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
-        ).json()
+        session_id = next(iter(server.session_id_to_state))
+        assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
+        assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
+        assert server.session_id_to_state == {}
+
+        # The next /run on the same cookie replaces the finished run's state under the same ID.
         assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
-        new_id = next(iter(server.session_id_to_state))
-        assert new_id != old_id
-        assert (
-            client.post(
-                "/verify",
-                json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
-            ).json()["mask_sample"]
-            is False
-        )
-        client.cookies.clear()
-        client.cookies.update(old_cookies)
-        retry = client.post(
-            "/verify", json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
-        ).json()
-        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+        assert server.session_id_to_state == {session_id: {"weather_calls": []}}
+        second = client.post("/verify", json=verify_body).json()
+
+    assert second["reward"] == 0.0 and second["mask_sample"] is False
 
 
 @pytest.mark.parametrize("typed", [False, True])
