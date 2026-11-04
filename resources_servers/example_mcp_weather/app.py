@@ -16,25 +16,19 @@
 from typing import Annotated, Any, Optional
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-    ResourcesSessionFence,
     ResourcesSessionLostError,
-    SimpleResourcesServer,
+    StatefulResourcesServer,
     lost_session_verification,
     reject_typed_resources_seed,
 )
@@ -101,22 +95,12 @@ class ExampleMCPWeatherVerifyResponse(BaseVerifyResponse):
     final_response_mentions_weather: bool
 
 
-class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
+class ExampleMCPWeatherResourcesServer(StatefulResourcesServer[frozenset[str]]):
     config: ExampleMCPWeatherResourcesServerConfig
     # The weather calls of each live session, keyed by the session cookie's SESSION_ID_KEY. Every tool call reaches
     # the same key: over HTTP the cookie carries it, and over MCP the signed session token minted at seed time does.
     session_id_to_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    # The episode and task each Environment Server session was seeded for, keyed by resources_session_id.
-    _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    _verified_sessions: ClosedResourcesSessionRecords[tuple[Optional[tuple[EpisodeId, TaskId]], frozenset[str]]] = (
-        PrivateAttr()
-    )
-    _fence: ResourcesSessionFence = PrivateAttr()
-
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+    seed_request_model = ExampleMCPWeatherSeedSessionRequest
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -129,67 +113,21 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[ExampleMCPWeatherSeedSessionRequest, BeforeValidator(reject_typed_resources_seed)],
     ) -> ResourcesSeedSessionResponse | ExampleMCPWeatherSeedSessionResponse:
-        if not isinstance(body, ResourcesSeedSessionRequest):
-            # An Agent's /run seeds with the row's own fields, under the session its cookie names.
-            session_id = request.session[SESSION_ID_KEY]
-            async with self._fence.locked(session_id):
-                verified = self._verified_sessions.get(session_id)
-                session_id = self._fence.legacy_seed_session_id(
-                    session_id,
-                    identity=self._session_episodes.get(session_id) or (verified[0] if verified is not None else None),
-                    verified=verified is not None,
-                )
-                self.session_id_to_state[session_id] = {"weather_calls": []}
-                request.session[SESSION_ID_KEY] = session_id
-            return ExampleMCPWeatherSeedSessionResponse()
+        response = await super().seed_session(request, body)
+        return (
+            response if isinstance(response, ResourcesSeedSessionResponse) else ExampleMCPWeatherSeedSessionResponse()
+        )
 
-        # An Environment Server names the session itself. Seeding the same ID again for the same episode must
-        # return the open session unchanged, so a retried seed keeps the weather calls already recorded.
-        session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            if self._fence.check_typed_seed(
-                body,
-                identity=self._session_episodes.get(session_id),
-                has_state=session_id in self.session_id_to_state,
-                verified=session_id in self._verified_sessions,
-            ):
-                # task_data holds the row's own fields, the body an Agent's /run seed sends. Input that fails
-                # validation gets a final 422: retrying the episode would send the same input again.
-                try:
-                    ExampleMCPWeatherSeedSessionRequest.model_validate(body.task_data)
-                except ValidationError as error:
-                    raise ResourcesSeedRejectedError(
-                        f"task_data is not an example_mcp_weather task: {error}"
-                    ) from error
-                self.session_id_to_state[session_id] = {"weather_calls": []}
-                self._session_episodes[session_id] = (body.episode_id, body.task_id)
-            # Bind the cookie to the session. MCP auto-exposure signs this same ID into the session token it adds to
-            # the reply as resources_tools, so tool calls over HTTP and over MCP both find the state stored here.
-            request.session[SESSION_ID_KEY] = session_id
-        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.session_id_to_state
 
-    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        # The body names the session, so a close that carries no cookie (the seed's reply was lost) still releases it.
-        session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            verified = self._verified_sessions.get(session_id)
-            identity = self._session_episodes.get(session_id) or (verified[0] if verified is not None else None)
-            self._fence.check_close(body, identity=identity)
-            # Releasing in-memory state cannot fail. A server that holds an external resource releases it here and
-            # lets a failure raise before mark_closed, so the caller can retry the close.
-            self.session_id_to_state.pop(session_id, None)
-            self._session_episodes.pop(session_id, None)
-            # Closing an unknown or already-closed session also succeeds, and the fence refuses a later seed of it.
-            self._fence.mark_closed(session_id, body.episode_id)
-        return ResourcesCloseSessionResponse(resources_session_id=session_id)
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Start an empty weather-call history for this task."""
+        self.session_id_to_state[session_id] = {"weather_calls": []}
 
-    async def retire_session_state(self, session_id: str) -> None:
-        """Release the weather history of an attempt the checkpoint controller retired."""
-        async with self._fence.locked(session_id):
-            self.session_id_to_state.pop(session_id, None)
-            identity = self._session_episodes.pop(session_id, None)
-            if identity is not None:
-                self._fence.mark_closed(session_id, identity[0])
+    async def release_session_state(self, session_id: str) -> None:
+        """Drop the live weather-call history."""
+        self.session_id_to_state.pop(session_id, None)
 
     async def get_weather(
         self,

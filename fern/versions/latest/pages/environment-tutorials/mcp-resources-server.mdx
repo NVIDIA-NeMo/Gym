@@ -56,7 +56,7 @@ At startup, Gym mounts a Streamable-HTTP `/mcp` endpoint on the same app. Each e
 
 ## How MCP reaches the tool
 
-The Resources Server remains an ordinary `SimpleResourcesServer`. These are excerpts from [the weather server's `app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/app.py); use that file for the complete class, request models, and session implementation.
+The weather server extends `StatefulResourcesServer`, which supplies session handling on top of `SimpleResourcesServer`. The example implements its state hooks, tool, and verifier. These are excerpts from [the weather server's `app.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_mcp_weather/app.py); use that file for the complete class and request models.
 
 ```python
 # Methods of ExampleMCPWeatherResourcesServer.
@@ -105,7 +105,7 @@ To inspect the protocol without an LLM, see the [weather README's MCP round-trip
 
 ## Sessions under an Environment Server
 
-An Environment Server such as `single_agent_turn` can own seed, verification, and close directly. This requires an agent that serves agent sessions and accepts MCP tool grants. **`claude_code_agent` does not serve agent sessions yet**, so the runnable configuration above uses its `/run` path.
+An Environment Server such as `single_agent_turn` can own seed, verification, and close directly. This requires an agent that accepts per-session MCP tool grants. The Claude Code agent's session path does not consume those grants yet, so the runnable configuration above uses its `/run` path.
 
 On the typed-session path:
 
@@ -115,10 +115,12 @@ On the typed-session path:
 
 The [weather README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather#sessions-under-an-environment-server) has more on this path.
 
-The example uses the shared [`ResourcesSessionFence`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/base_resources_server.py) for seed conflicts, completed-cookie rotation, and close ownership checks. `reject_typed_resources_seed` prevents malformed typed requests from falling through to the permissive legacy request model. The weather server owns task validation, weather history, cleanup, and the evidence needed to retry verification. Keep cleanup before `mark_closed` so a failed release can be retried.
+[`StatefulResourcesServer`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/stateful_resources_server.py) owns the seed, close, and checkpoint-retirement flow, including request validation, identity checks, cookie rotation, and retry bookkeeping. An environment supplies three hooks: `has_session_state`, `initialize_session_state`, and `release_session_state`. Cleanup must succeed before the base class drops the identity or marks the session closed. The weather example also keeps a thin seed wrapper to preserve its original HTTP request and response schemas.
+
+The cookie-based seed path is deprecated and logs a migration warning once per server instance. The runnable Claude Code example still uses this compatibility path; migrating it requires per-session MCP tool-grant support in the agent.
 
 <Accordion title="Why the implementation uses both Field and PrivateAttr">
-`session_id_to_state` retains the original example's public Pydantic `Field`. The added `_session_episodes`, `_verified_sessions`, and `_fence` hold internal runtime bookkeeping and use `PrivateAttr`. Pydantic treats these underscore-prefixed attributes as private state, excluding them from model-field validation and serialization.
+`session_id_to_state` retains the original example's public Pydantic `Field`. `StatefulResourcesServer` keeps `_session_episodes`, `_verified_sessions`, and `_fence` as internal `PrivateAttr` state. Pydantic excludes those attributes from model-field validation and serialization. The `frozenset[str]` type parameter describes the called-city evidence this verifier retains for retries.
 </Accordion>
 
 ## Which handler shapes are supported

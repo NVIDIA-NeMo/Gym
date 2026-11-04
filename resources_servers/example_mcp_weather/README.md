@@ -1,8 +1,9 @@
 # Example MCP Weather
 
 A minimal example of serving a Resources Server's tools over the **Model Context Protocol (MCP)**.
-The server is a plain `SimpleResourcesServer` with one typed HTTP tool route (`POST /get_weather`) —
-no MCP imports, no decorators. Setting `expose_tools_over_mcp: true` in its YAML config serves that
+The server extends `StatefulResourcesServer` with one typed HTTP tool route (`POST /get_weather`) —
+no MCP imports, no decorators. The base class handles seed, close, and checkpoint retirement; the example
+provides its weather state and scoring. Setting `expose_tools_over_mcp: true` in its YAML config serves that
 same route over a Streamable-HTTP MCP endpoint at `/mcp` on the same FastAPI app as `/seed_session`
 and `/verify`. Tool calls record against the per-rollout Gym session (resolved from a signed
 `X-NeMo-Gym-Session-Token`), and `/verify` rewards a rollout only if the tool was used **in that same
@@ -68,8 +69,8 @@ calls `/close_session`, which fences verification retries. From then on:
 - `/verify` returns a masked sample (`mask_sample: true`, `failure_kind: session_lost`) instead of a reward of 0;
 - a seed that reuses the closed `resources_session_id` is refused with 409.
 
-Running the example under `single_agent_turn` with the `mcp` tool transport needs an agent that serves agent sessions
-and accepts MCP tool grants; `claude_code_agent` does not serve agent sessions yet.
+Running the example under `single_agent_turn` with the `mcp` tool transport needs an agent that accepts per-session
+MCP tool grants. The Claude Code agent's session path does not consume those grants yet, so this example uses `/run`.
 
 ## Inspect the MCP round-trip without an LLM
 

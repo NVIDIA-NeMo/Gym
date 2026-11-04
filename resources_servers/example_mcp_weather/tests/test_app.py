@@ -298,7 +298,8 @@ def test_typed_seed_rejects_malformed_task_data() -> None:
         response = client.post("/seed_session", json=_typed_seed(task_data={"verifier_metadata": "Paris"}))
 
     assert response.status_code == 422
-    assert "task_data is not an example_mcp_weather task" in response.text
+    assert "task_data" in response.json()["detail"]
+    assert "verifier_metadata" in response.json()["detail"]
     assert server.session_id_to_state == {}
 
 
