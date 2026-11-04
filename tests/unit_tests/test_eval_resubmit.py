@@ -759,12 +759,57 @@ def test_a_saved_policy_key_that_differs_from_the_policy_model_is_still_refused(
         SubmitConfig.model_validate(raw, context={SAVED_CONFIG: True})
 
 
-def test_policy_keys_written_by_hand_still_conflict_with_the_policy_model(tmp_path: Path) -> None:
-    raw = _policy_config(tmp_path, {})
-    raw["driver"]["benchmarks"]["gsm8k"] = {"run": {"policy_model_name": "org/model"}}
+def test_a_config_that_went_through_submit_validates_again_unchanged(tmp_path: Path) -> None:
+    """A config SubmitConfig already validated carries the derived policy keys; validating it again, without the
+    saved-config context, accepts them as they are."""
+    config = SubmitConfig.model_validate(_policy_config(tmp_path, {}))
 
-    with pytest.raises(ValueError, match="driver.policy_model is also set"):
+    again = SubmitConfig.model_validate(config.model_dump(mode="json"))
+
+    assert again.driver.benchmarks == config.driver.benchmarks
+    assert again.driver.benchmarks["gsm8k"].run == {
+        "policy_base_url": "http://localhost:8000/v1",
+        "policy_model_name": "org/model",
+        "policy_api_key": "dummy",  # pragma: allowlist secret
+    }
+
+
+def test_a_policy_key_written_by_hand_with_the_derived_value_is_accepted(tmp_path: Path) -> None:
+    raw = _policy_config(tmp_path, {})
+    raw["driver"]["benchmarks"]["gsm8k"] = {"run": {"policy_model_name": "org/model", "split": "test"}}
+
+    config = SubmitConfig.model_validate(raw)
+
+    assert config.driver.benchmarks["gsm8k"].run["policy_model_name"] == "org/model"
+    assert config.driver.benchmarks["gsm8k"].run["split"] == "test"
+
+
+@pytest.mark.parametrize(
+    ("run", "named"),
+    [
+        (
+            {"policy_model_name": "another/model"},
+            "policy_model_name='another/model' in the run, 'org/model' from driver.policy_model",
+        ),
+        (
+            {"policy_api_key": "my-key"},  # pragma: allowlist secret
+            "policy_api_key=<redacted> in the run, <redacted> from driver.policy_model",
+        ),
+    ],
+    ids=["model_name", "api_key"],
+)
+def test_a_policy_key_that_differs_from_the_policy_model_is_refused_with_both_values(
+    tmp_path: Path, run: dict, named: str
+) -> None:
+    raw = _policy_config(tmp_path, {})
+    raw["driver"]["benchmarks"]["gsm8k"] = {"run": run}
+
+    with pytest.raises(ValueError, match="driver.policy_model is also set") as refused:
         SubmitConfig.model_validate(raw)
+
+    assert f"already sets {list(run)}" in str(refused.value)
+    assert named in str(refused.value)
+    assert "my-key" not in str(refused.value)
 
 
 # --- A command benchmark reads the policy from its run keys, as NEMO_GYM_POLICY_* -----------------------------
