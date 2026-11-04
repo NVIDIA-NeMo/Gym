@@ -68,9 +68,9 @@ The mirrored Gym CICD and Fern workflows run automatically for verified commits 
 
 ### Reapprove After Conflict Resolution
 
-After conflict resolution dismisses a human approval, contributors with repository write permission can comment `/review-reapprove` for a PR or `/review-reapprove scope=stack` for its entire stack.
-The bot checks that changes are limited to conflict resolutions and asks a model whether they preserve the approved behavior, declining uncertain cases; required checks and human or CODEOWNER requirements still apply.
-Maintainers must configure `REAPPROVE_API_KEY` and `REAPPROVE_MODEL`, enable GitHub Actions approvals, and merge the [workflow](https://github.com/NVIDIA-NeMo/Gym/blob/main/.github/workflows/reapprove.yml) into the default branch before using these commands.
+After conflict resolution dismisses a human approval, eligible maintainers with repository write permission can comment `/review-reapprove` for a PR or `/review-reapprove scope=stack` for its entire linear stack.
+The review bot checks that changes are limited to conflict resolutions that preserve approved behavior and declines uncertain cases, using Codex by default or Claude with `model=claude`.
+Each PR receives its own review outcome; required checks and human or CODEOWNER requirements still apply.
 
 ### Build Docs CI Failures
 
