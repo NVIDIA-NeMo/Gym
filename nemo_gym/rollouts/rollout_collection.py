@@ -109,7 +109,6 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.progress_utils import tqdm
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
@@ -192,6 +191,7 @@ from nemo_gym.utils.path_utils import (
     materialized_path_for,
     resubmit_offset_path_for,
 )
+from nemo_gym.utils.tqdm import tqdm
 
 
 if TYPE_CHECKING:

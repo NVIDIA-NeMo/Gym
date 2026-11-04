@@ -8,7 +8,7 @@ import io
 import pytest
 from tqdm import tqdm as upstream_tqdm
 
-from nemo_gym.progress_utils import tqdm
+from nemo_gym.utils.tqdm import tqdm
 
 
 class _CollectingStream(io.StringIO):
