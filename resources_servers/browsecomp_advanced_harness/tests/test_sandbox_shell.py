@@ -55,6 +55,105 @@ def sandboxed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return server, containers
 
 
+@pytest.fixture
+def shell_install(monkeypatch: pytest.MonkeyPatch):
+    sandbox = AsyncMock(spec=harness.AsyncSandbox)
+    sandbox.provider_name = "enroot"
+    runtime = SimpleNamespace(
+        python="/private/runtime/python/bin/python3",
+        directory="/private/runtime",
+        is_installed=AsyncMock(return_value=False),
+        install=AsyncMock(),
+    )
+    monkeypatch.setattr(shell_module, "_RUNTIME", runtime)
+    readlink = MagicMock(return_value="pid:[100]")
+    monkeypatch.setattr(shell_module, "os", SimpleNamespace(readlink=readlink))
+    session = SimpleNamespace(sandbox=sandbox, session_dir="/private/session", workdir="/workspace")
+    return shell_module.BrowsecompShellSandbox(session=session), sandbox, runtime, readlink
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdout", "return_code", "error_type"),
+    [
+        ("pid:[100]\npid:[100]\n", 0, None),
+        ("pid:[200]\npid:[100]\n", 0, None),
+        ("pid:[200]\npid:[200]\n", 1, None),
+        ("pid:[200]\npid:[200]\n", 0, "timeout"),
+        (None, 0, None),
+        ("unavailable\nunavailable\n", 0, None),
+    ],
+)
+async def test_enroot_install_refuses_unproven_pid_isolation(shell_install, stdout, return_code, error_type) -> None:
+    state, sandbox, runtime, readlink = shell_install
+    sandbox.exec.return_value = SimpleNamespace(stdout=stdout, return_code=return_code, error_type=error_type)
+    with pytest.raises(RuntimeError, match="older Enroot builds can ignore ENROOT_UNSHARE_PID"):
+        await state.install(timeout=20)
+    runtime.install.assert_awaited_once_with(sandbox, timeout_s=20)
+    readlink.assert_called_once_with("/proc/self/ns/pid")
+    assert not state.ready
+    sandbox.exec.assert_awaited_once()  # Failed isolation prevents workspace activation.
+    command = sandbox.exec.await_args.args[0]
+    assert f"{runtime.python} -I -c " in command
+    assert "/proc/self/ns/pid" in command and "/proc/1/ns/pid" in command
+
+
+@pytest.mark.asyncio
+async def test_enroot_install_requires_readable_host_pid_namespace(shell_install) -> None:
+    state, sandbox, _, readlink = shell_install
+    readlink.side_effect = OSError("no proc mount")
+    with pytest.raises(RuntimeError, match="Cannot read the host PID namespace"):
+        await state.install(timeout=20)
+    assert not state.ready
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enroot_install_accepts_distinct_namespace_with_matching_proc_mount(shell_install) -> None:
+    state, sandbox, _, _ = shell_install
+    sandbox.exec.side_effect = [
+        SimpleNamespace(stdout="pid:[200]\npid:[200]\n", return_code=0, error_type=None),
+        SimpleNamespace(return_code=0, error_type=None),
+    ]
+    await state.install(timeout=20)
+    assert state.ready
+    assert sandbox.exec.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_other_providers_do_not_probe_host_pid_namespace(shell_install) -> None:
+    state, sandbox, _, readlink = shell_install
+    sandbox.provider_name = "docker"
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None)
+    await state.install(timeout=20)
+    assert state.ready
+    readlink.assert_not_called()
+    sandbox.exec.assert_awaited_once()
+    assert "ns/pid" not in sandbox.exec.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_pid_guard_failure_keeps_failed_stop_retryable(
+    shell_install, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, sandbox, _, _ = shell_install
+    server = _server(tmp_path, workspace="per_session", sandbox_provider="sandbox", allow_host_execution=False)
+    monkeypatch.setattr(harness, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(harness, "resolve_provider_config", lambda *_: {"enroot": {}})
+    monkeypatch.setattr(harness, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(harness, "create_provider", lambda *_: object())
+    monkeypatch.setattr(harness, "AsyncSandbox", lambda *_: sandbox)
+    sandbox.exec.return_value = SimpleNamespace(stdout="pid:[100]\npid:[100]\n", return_code=0, error_type=None)
+    sandbox.stop.side_effect = [RuntimeError("stop unavailable"), None]
+    with pytest.raises(RuntimeError, match="namespace probe did not confirm isolation"):
+        await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
+    assert "resources-session" in server._shell_sessions
+    assert not server._shell_sessions["resources-session"].ready
+    await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
+    assert sandbox.stop.await_count == 2
+    assert not server._shell_sessions and not server._session_workspaces
+
+
 def test_missing_provider_refuses_seed_without_creating_workspace(tmp_path: Path) -> None:
     server = _server(tmp_path, workspace="per_session", allow_host_execution=False)
     with TestClient(server.setup_webserver()) as client:

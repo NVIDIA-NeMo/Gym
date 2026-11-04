@@ -3,6 +3,8 @@
 """Resources-owned, supervised execution of the existing read-only shell."""
 
 import json
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
@@ -14,6 +16,10 @@ from nemo_gym.sandbox import read_text, upload_text
 
 _RUNTIME = SandboxPythonRuntime(harness="browsecomp-shell", requirements=("regex",), import_check="import regex")
 _RUNNER = f"{_RUNTIME.directory}/shell_runner.py"
+_ENROOT_PID_ERROR = (
+    "BrowseComp requires an Enroot PID namespace separate from the host and a matching /proc mount. "
+    "Upgrade or configure Enroot with PID isolation; older Enroot builds can ignore ENROOT_UNSHARE_PID."
+)
 
 
 def shell_source_files() -> dict[str, str]:
@@ -41,15 +47,39 @@ class BrowsecompShellSandbox:
         sandbox = self.session.sandbox
         if not await _RUNTIME.is_installed(sandbox):
             await _RUNTIME.install(sandbox, timeout_s=timeout)
+        await self._require_enroot_pid_namespace()
         prepared = await sandbox.exec(
             f"mkdir -p {quote(_RUNTIME.directory + '/pocketshell')} "
             f"{quote(self.session.session_dir)} {quote(self.session.workdir + '/pages')}",
             cwd="/",
             timeout_s=30,
         )
-        if prepared.return_code or prepared.error_type:
+        if prepared.return_code != 0 or prepared.error_type is not None:
             raise RuntimeError(f"Could not prepare BrowseComp shell paths: {prepared.stderr or prepared.error_type}")
         self.ready = True
+
+    async def _require_enroot_pid_namespace(self) -> None:
+        """Check actual process isolation before any model-directed command can run."""
+        sandbox = self.session.sandbox
+        if sandbox.provider_name != "enroot":
+            return
+        try:
+            host_namespace = os.readlink("/proc/self/ns/pid")
+        except OSError as error:
+            raise RuntimeError(f"{_ENROOT_PID_ERROR} Cannot read the host PID namespace.") from error
+        probe = "import os; print(os.readlink('/proc/self/ns/pid')); print(os.readlink('/proc/1/ns/pid'))"
+        result = await sandbox.exec(f"{quote(_RUNTIME.python)} -I -c {quote(probe)}", cwd="/", timeout_s=30)
+        if result.return_code != 0 or result.error_type is not None:
+            raise RuntimeError(f"{_ENROOT_PID_ERROR} The namespace probe did not complete successfully.")
+        namespaces = (result.stdout or "").splitlines()
+        if (
+            not re.fullmatch(r"pid:\[[0-9]+\]", host_namespace)
+            or len(namespaces) != 2
+            or any(not re.fullmatch(r"pid:\[[0-9]+\]", value) for value in namespaces)
+            or namespaces[0] != namespaces[1]
+            or namespaces[0] == host_namespace
+        ):
+            raise RuntimeError(f"{_ENROOT_PID_ERROR} The namespace probe did not confirm isolation.")
 
     async def execute(self, *, command: str, duration: float, workspace: Path, close_timeout: float) -> str:
         """Copy new retrieved pages, then interpret the command only inside the sandbox."""
@@ -60,7 +90,7 @@ class BrowsecompShellSandbox:
 
         async def stage() -> SandboxCommand:
             prepared = await self.session.sandbox.exec(f"mkdir -p {quote(directory)}", cwd="/", timeout_s=30)
-            if prepared.return_code or prepared.error_type:
+            if prepared.return_code != 0 or prepared.error_type is not None:
                 raise RuntimeError("Could not prepare BrowseComp shell activation")
             # Pages are immutable after _PageWriter publishes them; only the manifest changes.
             # Never copy arbitrary files, symlinks, credentials, or verifier inputs from the host.
