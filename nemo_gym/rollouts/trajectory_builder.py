@@ -76,10 +76,9 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
     if is_materialized_task_row(row):
         task_id = TaskId.model_validate(row["task_id"]).task_id
     else:
-        task_id = next(
-            (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
-            str(row[TASK_INDEX_KEY_NAME]),
-        )
+        task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+        if task_id is None:
+            task_id = str(row[TASK_INDEX_KEY_NAME])
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 

@@ -91,3 +91,24 @@ def test_materialized_identity_does_not_validate_task_input(task_input: object) 
 def test_invalid_materialized_task_identity_fails_validation(task_id: dict) -> None:
     with pytest.raises(ValidationError):
         _trajectory_identity(_materialized_row() | {"task_id": task_id})
+
+
+@pytest.mark.parametrize("field", ["task_id", "problem_id", "instance_id"])
+def test_legacy_identity_with_capture_id_does_not_require_indices(field: str) -> None:
+    row = {field: "task-without-index", ROLLOUT_ID_KEY_NAME: "capture-without-index", ATTEMPT_INDEX_KEY_NAME: 2}
+    assert _trajectory_identity(row) == ("task-without-index", "capture-without-index-a2")
+
+
+def test_materialized_identity_with_capture_id_does_not_require_indices() -> None:
+    row = materialize_task({"problem_id": "task-7"}, taskset="test:tasks") | {ROLLOUT_ID_KEY_NAME: "capture-id"}
+    assert _trajectory_identity(row) == ("task-7", "capture-id")
+
+
+def test_explicit_semantic_identity_does_not_require_indices() -> None:
+    row = {"trajectory_identity": {"task_id": "semantic-task", "rollout_id": "semantic-rollout"}}
+    assert _trajectory_identity(row) == ("semantic-task", "semantic-rollout")
+
+
+def test_capture_id_without_task_identity_still_requires_task_index() -> None:
+    with pytest.raises(KeyError, match=TASK_INDEX_KEY_NAME):
+        _trajectory_identity({ROLLOUT_ID_KEY_NAME: "capture-id"})
