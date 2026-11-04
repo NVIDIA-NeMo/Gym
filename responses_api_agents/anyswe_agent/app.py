@@ -832,6 +832,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 if exists.return_code == 0:
                     await sandbox.download(remote, local)
         except Exception as exc:
+            if isinstance(exc, NgFailureEvent):
+                observe_failure(exc)
             sandbox_failed = True
             update_metrics(
                 params.metrics_fpath,

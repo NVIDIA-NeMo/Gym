@@ -532,10 +532,18 @@ class TestRunReportsMaskSample:
 
 class TestSandboxGradingFailures:
     @pytest.mark.parametrize(
-        "failure_kind", ["provider_unavailable", "provider_command_outcome_unknown", "model_transport_error", None]
+        "failure_kind,phase",
+        [
+            ("provider_unavailable", "grading"),
+            ("provider_command_outcome_unknown", "grading"),
+            ("model_transport_error", "grading"),
+            (None, "grading"),
+            ("provider_unavailable", "agent"),
+            ("provider_command_outcome_unknown", "agent"),
+        ],
     )
     async def test_grading_failure_is_excluded_and_preserves_evidence(
-        self, tmp_path, monkeypatch, failure_kind
+        self, tmp_path, monkeypatch, failure_kind, phase
     ) -> None:
         with patch.object(AnySweAgent, "model_post_init", lambda self, context: None):
             agent = AnySweAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
@@ -557,6 +565,8 @@ class TestSandboxGradingFailures:
                 pass
 
             async def exec(self, command, **kwargs):
+                if phase == "agent" and "agent_runner.py" in command:
+                    raise error
                 return SimpleNamespace(
                     return_code=1 if command == "test -f /trajectories_mount/response.json" else 0,
                     error_type=None,
@@ -578,7 +588,7 @@ class TestSandboxGradingFailures:
                 failure_reason="Grading failed",
             )
             error.__cause__ = cause
-        grade = AsyncMock(side_effect=error, return_value=(False, None))
+        grade = AsyncMock(side_effect=error if phase == "grading" else None, return_value=(False, None))
         monkeypatch.setattr(AnySweAgent, "_grade_sandbox_patch", grade)
         body = AnySweRunRequest(
             responses_create_params={
@@ -593,7 +603,10 @@ class TestSandboxGradingFailures:
             return
         with RequestFailureLog.capture() as log:
             response = await agent.run(body)
-        grade.assert_awaited_once()
+        if phase == "agent":
+            grade.assert_not_awaited()
+        else:
+            grade.assert_awaited_once()
         assert response.reward == 0.0
         assert response.mask_sample is (error is not None)
         assert response.error_kind == ("sandbox" if error is not None else None)

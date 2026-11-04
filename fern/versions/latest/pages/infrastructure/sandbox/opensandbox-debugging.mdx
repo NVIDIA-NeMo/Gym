@@ -47,7 +47,8 @@ cat /sys/fs/cgroup/memory.events
 ```
 
 `memory.peak == memory.max` with a large `max` count means you are living at the ceiling even if
-nothing has died yet. `oom_kill > 0` with the sandbox still alive means a child process was killed.
+nothing has died yet. An `oom_kill` count that increased during the command means a process in the
+cgroup was OOM-killed; a nonzero count alone may describe an earlier command.
 If the whole sandbox died you will not get to read this file — see
 [detecting OOM from the client](#detecting-oom-from-the-client).
 
@@ -73,9 +74,9 @@ From the client this is an ordinary command failure:
 
 - `exec()` returns normally with `return_code == 137` (or `-9`), usually `Killed` in stderr and
   truncated output.
-- Confirm from inside: `memory.events` shows `oom_kill > 0`, and `memory.peak` is at or near
-  `memory.max`.
-- The sandbox is fine to keep using; the agent can retry a smaller step.
+- Check whether `memory.events`'s `oom_kill` counter increased during the command. A nonzero historical
+  count or high `memory.peak` alone does not establish this command's cause.
+- The sandbox can remain usable. Check partial command effects before rerunning a smaller step.
 
 ### The whole sandbox died
 
@@ -85,28 +86,16 @@ also occur for other reasons, such as node loss or sandbox expiry.
 
 On command execution failure or PTY loss, Gym checks the sandbox's lifecycle status within the remaining
 diagnostic budget. An explicit terminal `OOMKilled` reason, or the opt-in inspect fallback's current
-user-container state, confirms OOM. Gym then raises
-`NgFailureEvent(boundary="sandbox", failure_kind="provider_oom_killed")` with the evidence source.
-Without that evidence, the event describes the observed request or command-outcome failure; it does not claim OOM.
-The diagnostic reason identifies whether evidence came from lifecycle status or inspect. Typed `details` retain
-the provider, known sandbox/execution IDs and any reported lifecycle reason or command exit code.
+user-container state, confirms OOM and produces a `provider_oom_killed` failure event.
+The diagnostic reason identifies the evidence source. Without that evidence, a disconnect or exit code 137
+does not establish OOM. See [Failure reporting and recovery](./opensandbox#failure-reporting-and-recovery)
+for OpenSandbox timeouts and retry settings, and [Error Handling](./index#error-handling) for the shared contract.
 
-```python
-from nemo_gym.core import NgFailureEvent, PROVIDER_OOM_KILLED
-
-try:
-    result = await sandbox.exec(cmd, timeout_s=120)
-except NgFailureEvent as error:
-    if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
-        print(error.details.sandbox_id, error.failure_reason)
-    raise  # Preserve the event and cause for the caller's policy.
-```
-
-`provider_io_timeout` means a request expired; `provider_status_unavailable` means bounded status recovery
-ended without an outcome. Neither establishes that the command stopped. The session execution path can report
-its own expired deadline as a `provider_command_timeout` observation and, after cleanup,
-`SandboxExecResult(error_type="timeout")`; elapsed time and a signal exit alone
-are not used to infer a command timeout.
+If lifecycle status does not confirm OOM and inspect is disabled or cannot finish within the diagnostic budget,
+Gym retains the observed request or command-outcome failure. A confirmed stopped or failed sandbox without
+OOM evidence is `provider_unavailable`, retaining the original request failure as its cause.
+An unconfirmed OOM does not qualify for an OOM-specific `count_as_zero` rule: retries and terminal handling
+follow the owning caller's outcome policy and budgets, so repeated failures can remain ungraded instead of scoring zero.
 
 ### Inspect fallback
 
@@ -121,11 +110,9 @@ lookup cannot replace the original failure. Confirm support with the deployment 
 
 ### Counting OOMs across a run
 
-Count distinct saved failure-event IDs whose kind is `provider_oom_killed` to measure confirmed sandbox OOMs.
-Group them by task ID to find tasks with repeated OOMs. Exit code 137 alone does not confirm OOM.
-
-Failed read attempts may also accompany a successful command: they remain observations and do not change
-its result or automatically make it unhealthy.
+Use the saved reports described in [Failure observations](/observability/rollout-failures).
+Count each event ID with kind `provider_oom_killed` once, grouping by task ID to locate repeated OOMs.
+Exit code 137 alone does not confirm OOM; counting a failure does not choose its score or health outcome.
 
 ## Cluster-side checks
 
@@ -149,6 +136,6 @@ for requests and limits.
 | --- | --- | --- |
 | `throttled_usec` ≫ 0, memory fine | CPU limit binding — usually fan-out | Fix parallelism caps before raising the limit. |
 | `memory.peak` near `memory.max`, many `max` events | Memory ceiling, thrashing | Find the fan-out or runaway code; raise the limit only if the peak is legitimate. |
-| `oom_kill > 0`, sandbox alive | A child process was killed | Command output is probably truncated; safe to retry a smaller step. |
+| `oom_kill` increased, sandbox alive | A process in the cgroup was OOM-killed | Inspect affected processes and partial effects before rerunning. |
 | Current sandbox user container terminated with `OOMKilled` | Confirmed sandbox OOM | Inspect memory use and parallelism before rerunning. |
 | `nproc` ≠ CPUs in `cpu.max` | This cluster does not overlay CPU counts | Rely on `derive_cpu_env`; cap environment-blind runners in the image. |

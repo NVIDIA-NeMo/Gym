@@ -5,7 +5,7 @@ description: Boundary failures, their explicit causes and the failure report, wi
 
 Gym records an observed failure as one `NgFailureEvent` exception. The same object
 is raised and serialized with `to_record()`; `from_record()` reconstructs it. It names the boundary that observed it (`model`, `harness`,
-`agent`, `resources_server`, `environment` or `collection`), its kind, stage, HTTP
+`agent`, `sandbox`, `resources_server`, `environment` or `collection`), its kind, stage, HTTP
 status and the event ID of its explicit cause. Existing handlers, outcome policy,
 retry budgets and scoring remain in control.
 
@@ -24,6 +24,18 @@ The flow for one failure:
    path for callers whose retry or routing logic depends on `ClientResponseError`.
 5. Collection saves the report beside the existing result or failure record
    (`_ng_failure_events`, `_ng_failure_id`).
+
+## Recovered failures
+
+Before retrying a failed operation, call `observe_failure(error)` from `nemo_gym.core`.
+It adds the event and its explicit causes to the current request's failure log, so the reply can carry
+them even when a later attempt succeeds. It does not raise, choose an outcome action or mark the request
+failed. Outside a request capture scope it does nothing.
+
+Reports deduplicate events by `event_id`; count each ID once across saved reports. A recovered failure
+remains diagnostic evidence and does not by itself change a successful result, score or health assessment.
+
+## Causes and transport
 
 An environment uses `handled_episode_failure(...)` with event fields, its local
 `terminal` decision and separate partial evidence. It returns an `NgFailureEvent`;
