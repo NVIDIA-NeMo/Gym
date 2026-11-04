@@ -9,7 +9,7 @@
 //        node sandbox_launcher.mjs --snapshot SESSION_DIR
 
 import { spawn } from "node:child_process";
-import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { constants } from "node:os";
@@ -219,12 +219,15 @@ export function nativeSession(directory) {
         // JSON may hold U+2028 and similar inside a string, so only \n, \r\n and \r end a line.
         const fileLines = readFileSync(join(root, name), "utf8").split(/\r\n|\n|\r/);
         if (fileLines.at(-1) === "") fileLines.pop();
-        lines.push(...fileLines);
+        // Spreading a long file into push() would overflow the call stack.
+        for (const line of fileLines) lines.push(line);
     }
     return lines.join("\n");
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Node names the main module by its real path, so compare that: the session directory may sit under a symlink.
+const main = process.argv[1];
+if (main && existsSync(main) && import.meta.url === pathToFileURL(realpathSync(main)).href) {
     if (process.argv[2] === "--snapshot") {
         const transcript = nativeSession(process.argv[3]);
         if (transcript !== null) writeFileSync(join(process.argv[3], "native_session.jsonl"), transcript);

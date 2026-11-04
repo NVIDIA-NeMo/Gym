@@ -339,6 +339,26 @@ def test_snapshot_joins_native_sessions_in_path_order(tmp_path):
     ]
 
 
+def test_launcher_reached_through_a_symlink_still_runs(tmp_path):
+    (tmp_path / "home/.codex/sessions").mkdir(parents=True)
+    (tmp_path / "home/.codex/sessions/rollout.jsonl").write_text('{"id":"only"}\n')
+    # For example, a task image whose /tmp is a symlink.
+    linked = tmp_path / "linked"
+    linked.symlink_to(LAUNCHER.parent, target_is_directory=True)
+    subprocess.run(
+        ["node", str(linked / LAUNCHER_FILE), "--snapshot", str(tmp_path)], check=True, capture_output=True, timeout=10
+    )
+    assert (tmp_path / "native_session.jsonl").read_text() == '{"id":"only"}'
+
+
+def test_snapshot_keeps_every_line_of_a_long_rollout_file(tmp_path):
+    (tmp_path / "home/.codex/sessions").mkdir(parents=True)
+    lines = [json.dumps({"index": index}) for index in range(200_000)]
+    (tmp_path / "home/.codex/sessions/rollout.jsonl").write_text("\n".join(lines) + "\n")
+    subprocess.run(["node", str(LAUNCHER), "--snapshot", str(tmp_path)], check=True, capture_output=True, timeout=30)
+    assert (tmp_path / "native_session.jsonl").read_text().split("\n") == lines
+
+
 def test_snapshot_without_native_sessions_writes_nothing(tmp_path):
     subprocess.run(["node", str(LAUNCHER), "--snapshot", str(tmp_path)], check=True, capture_output=True, timeout=10)
     assert not (tmp_path / "native_session.jsonl").exists()
