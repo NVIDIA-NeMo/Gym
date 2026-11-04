@@ -19,8 +19,8 @@ from typing_extensions import Self
 
 from nemo_gym.client.http_client import format_exception_with_response_body
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
-from nemo_gym.core.episode_context import rollout_context
-from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId
+from nemo_gym.core.episode_context import recording_agent_activations, rollout_context
+from nemo_gym.core.episode_types import AgentInstanceResult, BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId
 from nemo_gym.core.failure_kinds import EPISODE_FAILED, SESSION_RELEASE_FAILED, FailureStage
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
 from nemo_gym.core.failure_transport import reply_failure_report, report_for_current_request
@@ -243,6 +243,22 @@ def dependency_failure(
     return handled
 
 
+def _with_agent_instance_terminals(response: EpisodeResponseT, activations: dict[str, str]) -> EpisodeResponseT:
+    """Fill each named agent instance's ``terminal_response_id`` from its last activation in the episode.
+
+    A value the environment set already, and its per-agent rewards, are kept. A failed episode reports none.
+    """
+    if response.result is None or not activations:
+        return response
+    agent_instances = dict(response.agent_instances or {})
+    for agent_instance, response_id in activations.items():
+        current = agent_instances.get(agent_instance) or AgentInstanceResult()
+        if current.terminal_response_id is None:
+            current = current.model_copy(update={"terminal_response_id": response_id})
+        agent_instances[agent_instance] = current
+    return response.model_copy(update={"agent_instances": agent_instances})
+
+
 def require_distinct_agent_instances(agent_instances: Iterable[str | None]) -> None:
     """Refuse, before seeding, an episode that would seed two agent sessions as the same agent instance.
 
@@ -345,7 +361,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         deadline: asyncio.Timeout | None = None
         # Every downstream call of this episode, including final cleanup, carries its attempt-qualified
         # rollout id, so Resources and Model Server calls stay correlated with the rollout.
-        with rollout_context(request.episode_id.capture_key):
+        with rollout_context(request.episode_id.capture_key), recording_agent_activations() as activations:
             try:
                 try:
                     deadline = asyncio.timeout(await self.episode_timeout_seconds(request))
@@ -410,7 +426,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 update={"failure_report": (response.failure_report or FailureReport()).merged(cleanup.failure_report)}
             )
         self.validate_response_identity(request, response)
-        return response
+        return _with_agent_instance_terminals(response, activations)
 
     def setup_environment_checkpoint(self, app: FastAPI) -> None:
         """Take part in partial-rollout checkpoints when they are enabled.
