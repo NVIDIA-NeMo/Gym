@@ -5,6 +5,7 @@ import ast
 import re
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from omegaconf import OmegaConf
 import nemo_gym.server_runtime.base_server
 import nemo_gym.server_runtime.ray_support
 from nemo_gym import PARENT_DIR
+from nemo_gym.cli.env import _ray_server_names
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_class_flag
@@ -354,3 +356,17 @@ def test_ray_servers_request_the_ray_extra() -> None:
 
     missing = sorted(str(c) for c in ray_components if "ray" not in _requested_nemo_gym_extras(PARENT_DIR / c))
     assert not missing, "Servers declaring ray_enabled = True must request nemo-gym[ray]:\n" + "\n".join(missing)
+
+
+def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch):
+    def unexpected_ray_check():
+        pytest.fail("sandbox-only server must not check or initialize Ray")
+
+    monkeypatch.setattr("nemo_gym.cli.env.ray_is_installed", unexpected_ray_check)
+    monkeypatch.setattr("nemo_gym.server_runtime.ray_support.initialize_ray", unexpected_ray_check)
+    server = SimpleNamespace(
+        top_level_path="code_gen",
+        dir_path=PARENT_DIR / "resources_servers/code_gen",
+        entrypoint_fpath=Path("sandbox_app.py"),
+    )
+    assert _ray_server_names([server]) == []
