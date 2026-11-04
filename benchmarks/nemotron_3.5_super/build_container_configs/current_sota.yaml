@@ -2,7 +2,7 @@ input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym.sqsh
 output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
 
 slurm:
-  account: nemotron_n4_post
+  account: nemotron_rl_algo
   partition: batch
   qos: short
   gpus-per-node: "4"
