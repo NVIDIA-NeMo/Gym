@@ -1309,7 +1309,7 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
     with rollout_context(f.agent.rollout_id_from_run(body)):
         result = await f.agent.run(f.request, body)
-    from tests.unit_tests.test_recovery_saved_generation import persist_producer_result
+    from tests.unit_tests.orchestration.test_recovery_saved_generation import persist_producer_result
 
     decision, store, projected = await persist_producer_result(
         tmp_path / "persisted", monkeypatch, result.model_dump(mode="json")
