@@ -12,9 +12,10 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
-from nemo_gym.failure_transport import RequestFailureLog
+from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_transport import RequestFailureLog
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
@@ -24,7 +25,6 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.verification.judge import JudgeError, call_judge, judge_failsafe
 
@@ -391,8 +391,8 @@ def test_owner_observation_outside_verification_does_not_create_an_invocation():
 
 
 def _verifier_cause_chain():
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
     model = NgFailureEvent(
         boundary=FailureBoundary.MODEL,
@@ -413,7 +413,7 @@ def _verifier_cause_chain():
 
 @pytest.mark.asyncio
 async def test_a_verify_failure_returned_as_500_keeps_its_selected_failure_and_causes():
-    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.core.failure_transport import FailureHeader
 
     resources, model = _verifier_cause_chain()
 
@@ -440,8 +440,8 @@ async def test_a_verify_failure_returned_as_500_keeps_its_selected_failure_and_c
 async def test_an_http_exception_keeps_its_explicit_cause_and_an_existing_report():
     from starlette.exceptions import HTTPException
 
-    from nemo_gym.failure_transport import FailureHeader
-    from nemo_gym.server_runtime.episode_types import FailureReport
+    from nemo_gym.core.failure_records import FailureReport
+    from nemo_gym.core.failure_transport import FailureHeader
 
     resources, model = _verifier_cause_chain()
 
@@ -474,7 +474,7 @@ async def test_an_http_exception_keeps_its_explicit_cause_and_an_existing_report
 
 @pytest.mark.asyncio
 async def test_a_plain_verify_error_records_only_its_observed_verify_failure():
-    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.core.failure_transport import FailureHeader
 
     async def verify():
         raise RuntimeError("scoring broke")
@@ -511,7 +511,7 @@ _VERIFY_BODY = {
 def test_the_registered_verify_route_keeps_a_raised_failure_and_its_cause(tmp_path, http: bool):
     from starlette.exceptions import HTTPException
 
-    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.core.failure_transport import FailureHeader
 
     resources, model = _verifier_cause_chain()
 

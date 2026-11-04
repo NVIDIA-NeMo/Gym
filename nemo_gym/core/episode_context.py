@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Episode identity, and the episode that the current request or task belongs to."""
+"""The episode that the current request or task belongs to."""
 
 import re
 from collections.abc import Iterator, Mapping
@@ -20,58 +20,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Optional
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-)
-from typing_extensions import Self
+from pydantic import BaseModel
 
-
-_CAPTURE_KEY_ATTEMPT = re.compile(r"-a([1-9][0-9]*)$")
-
-
-class EpisodeId(BaseModel):
-    """Identify one physical attempt of a logical rollout."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    rollout_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-    attempt: int = Field(default=0, ge=0)
-
-    @field_validator("rollout_id")
-    @classmethod
-    def reserve_attempt_suffix(cls, rollout_id: str) -> str:
-        """Keep the derived capture key injective without changing existing keys."""
-        if _CAPTURE_KEY_ATTEMPT.search(rollout_id):
-            raise ValueError("rollout_id must not end with the reserved attempt suffix '-a<N>'")
-        return rollout_id
-
-    @property
-    def capture_key(self) -> str:
-        """Return the attempt-qualified key used by capture routes."""
-        return self.rollout_id if self.attempt == 0 else f"{self.rollout_id}-a{self.attempt}"
-
-    @classmethod
-    def from_capture_key(cls, capture_key: str) -> Self:
-        """Invert ``capture_key``; the reserved attempt suffix makes the mapping one-to-one."""
-        match = _CAPTURE_KEY_ATTEMPT.search(capture_key)
-        if match is None:
-            return cls(rollout_id=capture_key)
-        return cls(rollout_id=capture_key[: match.start()], attempt=int(match.group(1)))
-
-
-class TaskId(BaseModel):
-    """Identify one task within a run-qualified taskset."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    taskset: str = Field(
-        min_length=1,
-        description="Run-unique taskset name; use the '<environment>:<taskset>' convention for blended runs.",
-    )
-    task_id: str = Field(min_length=1)
+from nemo_gym.core.episode_types import EpisodeId
 
 
 VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
@@ -100,7 +51,7 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     Reused task and rollout indices produce a repeated capture key.
     Use an explicit id when numbering restarts across dispatches.
     """
-    # Imported here because global_config imports feature modules that import the episode identity above.
+    # Imported here because global_config imports feature modules that import the episode identity.
     from nemo_gym.config.global_config import (
         ATTEMPT_INDEX_KEY_NAME,
         ROLLOUT_ID_KEY_NAME,

@@ -22,13 +22,13 @@ from environment_servers.single_agent_turn.app import (
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core import FailureReportRow
 from nemo_gym.rollouts import RolloutStore
 from resources_servers.equivalence_llm_judge.app import LLMJudgeResourcesServer, LLMJudgeResourcesServerConfig
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
-from tests.unit_tests.test_agent_environment_collection_failures import _serve
+from tests.unit_tests.rollouts.test_agent_environment_collection_failures import _serve
 
 
 @pytest.mark.parametrize(

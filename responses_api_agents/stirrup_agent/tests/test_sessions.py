@@ -12,8 +12,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, agent_tools
-from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, agent_tools, raises_agent_failure
 from nemo_gym.agents.utils import uv_bootstrap
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef

@@ -39,6 +39,7 @@ from nemo_gym.core import (
     EpisodeId,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     TaskId,
 )
 from nemo_gym.server_runtime import (
@@ -51,7 +52,6 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.typed_exceptions import NgFailureEvent
 from tests.single_agent_turn_helpers import _agent_response, _Client, _environment_server, _request, _Response
 
 

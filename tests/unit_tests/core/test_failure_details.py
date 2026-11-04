@@ -12,14 +12,14 @@ from aiohttp.test_utils import TestServer
 from pydantic import ValidationError
 
 from nemo_gym.client.http_client import raise_boundary_failure
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow, RequestFailureLog, observe_failure
-from nemo_gym.rollouts.rollout_collection import _episode_record
-from nemo_gym.server_runtime.episode_types import (
+from nemo_gym.core.failure_records import (
     FailureEvent,
     ModelFailureDetails,
     SandboxFailureDetails,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow, RequestFailureLog, observe_failure
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
+from nemo_gym.rollouts.rollout_collection import _episode_record
 
 
 @pytest.mark.parametrize(
