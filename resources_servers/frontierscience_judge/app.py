@@ -67,7 +67,8 @@ _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
 _JUDGEMENT_RE = re.compile(r"Judgement:\s*(YES|NO)", re.IGNORECASE)
-_RUBRIC_VERDICT_RE = re.compile(r"VERDICT:\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))", re.IGNORECASE)
+_NUMERIC_SCORE_RE = re.compile(r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))")
+_RUBRIC_VERDICT_RE = re.compile(r"VERDICT:\s*" + _NUMERIC_SCORE_RE.pattern, re.IGNORECASE)
 
 
 def _strip_thinking_traces(text: str) -> str:
@@ -127,7 +128,7 @@ def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[flo
     final_line = lines[-1].strip("`*_ \t.,;")
     match = _RUBRIC_VERDICT_RE.fullmatch(final_line)
     if match is None:
-        match = re.fullmatch(r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))", judge_text.strip())
+        match = _NUMERIC_SCORE_RE.fullmatch(judge_text.strip())
     if match is None:
         return None
     score = float(match.group(1))
