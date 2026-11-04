@@ -62,7 +62,8 @@ from typing import Any, NamedTuple, Optional, Protocol
 from pydantic import JsonValue
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
-from nemo_gym.core.episode import EpisodeId, current_episode_id
+from nemo_gym.core.episode_context import current_episode_id
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointMode,
     CheckpointParticipant,

@@ -1004,7 +1004,7 @@ _moved_lazy_names = moved_attr_getter(
             ),
             "nemo_gym.rollouts.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode",
+        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode_context",
     },
 )
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.

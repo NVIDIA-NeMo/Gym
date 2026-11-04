@@ -226,7 +226,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         "#!/bin/sh\n"
         'echo "$*" >> "$UV_TEST_CALLS"\n'
         'case "$1" in\n'
-        "  --version) echo 'uv 0.11.29' ;;\n"
+        "  --version) echo 'uv 0.13.4' ;;\n"
         "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
         "  sync) ;;\n"
         "  *) exit 2 ;;\n"
@@ -272,7 +272,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         text=True,
     )
     assert later_step.returncode == 0, later_step.stderr
-    assert later_step.stdout.strip() == "uv 0.11.29"
+    assert later_step.stdout.strip() == "uv 0.13.4"
 
 
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
@@ -379,7 +379,7 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert (
-        "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]"
+        "needs: [pre-flight, classify_changes, component_locks, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]"
         in workflow
     )
     assert "if: always() && !cancelled()" in workflow
@@ -388,6 +388,7 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     assert '"$DOCS_ONLY" == "true"' in workflow
     assert '"$IS_NIGHTLY" == "true"' in workflow
     assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
+    assert "COMPONENT_LOCKS_RESULT: ${{ needs.component_locks.result }}" in workflow
     assert '"$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped"' in workflow
 
 
@@ -406,6 +407,7 @@ def _run_step(job_name: str, step_name: str, env_overrides: dict[str, str]) -> s
 _ALL_SUCCESS_RESULTS = {
     "PREFLIGHT_RESULT": "success",
     "CLASSIFY_RESULT": "success",
+    "COMPONENT_LOCKS_RESULT": "success",
     "DOCS_ONLY": "false",
     "UNIT_TEST_RESULT": "success",
     "CONTAINER_BUILD_RESULT": "success",
@@ -421,6 +423,15 @@ _ALL_SUCCESS_RESULTS = {
         ("pull_request", {}, True),
         ("pull_request", {"CONTAINER_BUILD_RESULT": "failure"}, True),
         ("pull_request", {"UNIT_TEST_RESULT": "failure"}, False),
+        ("push", {"COMPONENT_LOCKS_RESULT": "failure"}, False),
+        ("merge_group", {"COMPONENT_LOCKS_RESULT": "cancelled"}, False),
+        ("push", {"COMPONENT_LOCKS_RESULT": "skipped"}, False),
+        ("push", {"COMPONENT_LOCKS_RESULT": ""}, False),
+        (
+            "push",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped", "COMPONENT_LOCKS_RESULT": "failure"},
+            False,
+        ),
         (
             "pull_request",
             {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
@@ -449,6 +460,7 @@ _ALL_SUCCESS_RESULTS = {
             True,
         ),
         ("schedule", {"UNIT_TEST_RESULT": "failure"}, False),
+        ("schedule", {"COMPONENT_LOCKS_RESULT": "failure"}, False),
         ("workflow_dispatch", {"CONTAINER_BUILD_RESULT": "failure"}, False),
         ("workflow_dispatch", {}, True),
     ],
@@ -462,6 +474,20 @@ def test_nemo_cicd_test_gate_matches_event_and_job_results(
     result = _run_step("Nemo_CICD_Test", "Check test results", env)
 
     assert (result.returncode == 0) == expect_success, result.stdout + result.stderr
+
+
+def test_component_lock_freshness_runs_in_required_pipeline() -> None:
+    """Check every managed lock on both platforms before the required summary can pass."""
+    jobs = _cicd_main_jobs()
+    locks = jobs["component_locks"]
+    assert locks["uses"] == "./.github/workflows/component-locks.yml"
+    assert "if" not in locks
+    assert "component_locks" in jobs["Nemo_CICD_Test"]["needs"]
+    workflow = yaml.load((REPO_ROOT / ".github/workflows/component-locks.yml").read_text(), Loader=yaml.BaseLoader)
+    assert "workflow_call" in workflow["on"]
+    check = workflow["jobs"]["check"]
+    assert check["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-latest"]
+    assert any("python scripts/component_locks.py" in step.get("run", "") for step in check["steps"])
 
 
 def test_cicd_nightly_jobs_require_upstream_success() -> None:
@@ -597,7 +623,7 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
     action = CLASSIFY_CHANGES_ACTION.read_text()
     unit_workflow = UNIT_TEST_WORKFLOW.read_text()
 
-    for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
+    for path in ("**.md", "fern/**", "LICENSE"):
         assert path in action
     for path in (
         "resources_servers/**",
@@ -749,7 +775,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "runs-on: ubuntu-latest" in workflow
     assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
     assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
-    assert "https://astral.sh/uv/0.11.29/install.sh" not in workflow
+    assert "https://astral.sh/uv/0.13.4/install.sh" not in workflow
     assert "E2E_MODEL: ${{ matrix.model }}" in workflow
     assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
     assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
@@ -907,7 +933,7 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
         """#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-    --version) printf '%s\\n' 'uv 0.11.29' ;;
+    --version) printf '%s\\n' 'uv 0.13.4' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
         venv_dir="${@: -1}"
@@ -1037,7 +1063,7 @@ def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock
         """#!/usr/bin/env bash
 set -eu
 case "$1" in
-    --version) echo 'uv 0.11.29' ;;
+    --version) echo 'uv 0.13.4' ;;
     cache) echo "${UV_CACHE_DIR}" ;;
     lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
     sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;

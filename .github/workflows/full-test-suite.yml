@@ -32,10 +32,8 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.21+ supports Python 3.13.14; 0.11.29 is the latest stable.
-  # 0.11.20 had a regression dropping pinned deps (fixed in 0.11.21).
-  # 
-  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
+  # Managed lockfiles require uv 0.13.4+, including the corrected certificate trust store.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.13.4/install.sh"
 
 jobs:
   full-test-suite:
@@ -247,10 +245,14 @@ jobs:
           source .venv/bin/activate
           ng_init_resources_server +entrypoint=resources_servers/hello_world
           test -f resources_servers/hello_world/app.py
-          test -f resources_servers/hello_world/requirements.txt
+          test -f resources_servers/hello_world/pyproject.toml
           test -f resources_servers/hello_world/configs/hello_world.yaml
           test -d resources_servers/hello_world/tests
-          grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
+          grep -q "nemo-gym" resources_servers/hello_world/pyproject.toml
+          # Scaffolding emits dependency metadata; resolve and verify the lock before setup.
+          uv lock --project resources_servers/hello_world
+          uv lock --check --project resources_servers/hello_world
+          test -f resources_servers/hello_world/uv.lock
           echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 

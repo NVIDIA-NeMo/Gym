@@ -19,8 +19,8 @@ import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.cli.eval import _check_saved_completion
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.core.episode_types import EpisodeFailure
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_records import (
     coverage_path_for,
@@ -1077,6 +1077,8 @@ async def test_no_progress_resume_uses_bounded_infrastructure_retries(runner_con
     from tests.unit_tests.test_resume_script import _run_prologue
 
     client = install_fake_server_client(monkeypatch, AsyncMock())
+    (tmp_path / "artifacts").mkdir()
+    runner_config.output_jsonl_fpath = str(tmp_path / "artifacts" / "rollouts.jsonl")
     runner_config.dispatch_budget_s = 0
     runner_config.num_samples_in_parallel = 1
     for attempt in range(3):

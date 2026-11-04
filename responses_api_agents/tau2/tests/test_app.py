@@ -299,9 +299,11 @@ class TestApp:
         validated = Tau2FailureResponse.model_validate(result)
         assert validated.reward == 0.0
         assert result[NG_FAILURE_CLASS_KEY] == expected_failure_class
+        # No model call failed: no caller is named and no kind is stamped.
+        assert "failure_caller" not in result and result.get("failure_kind") is None
+        assert result["response"]["output"] == []
         assert result["error"] != "stale"
         assert result["response"]["object"] == "response"
-        assert result["response"]["output"][0]["content"][0]["text"] == ""
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
 
@@ -702,6 +704,10 @@ class TestApp:
         assert result[NG_FAILURE_CLASS_KEY] == TAU2_AGENT_FAILURE_CLASS
         # An empty record does not prove that no policy call finished, so usage is not reported as zero.
         assert result["response"]["usage"] is None
+        # The user simulator's call failed: an evaluation-side episode failure, named with its caller.
+        assert (result["failure_caller"], result["failure_kind"]) == ("user_simulator", "environment_episode_failed")
+        # No stand-in answer: the failure reply's response has no output.
+        assert result["response"]["output"] == []
 
     async def test_concurrent_runs_keep_their_own_policy_usage(self) -> None:
         config = Tau2Config(

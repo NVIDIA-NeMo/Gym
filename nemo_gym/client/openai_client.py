@@ -49,9 +49,9 @@ from nemo_gym.client.http_client import (
     raise_for_status,
     request,
 )
-from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.core.episode_types import FailureBoundary, ModelFailureDetails, SdkErrorDetails
+from nemo_gym.core.episode_context import current_rollout_id, note_verifier_model_request
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.core.failure_records import FailureBoundary, ModelFailureDetails, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure, observe_model_operation
 from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
 
@@ -375,6 +375,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
+        # A judge request inside a verify execution is a model request: that grading is not model-free.
+        note_verifier_model_request(self.base_url)
         request_headers = request_kwargs.pop("headers", {})
         connection_retries = self.max_connection_retries
         if connection_retries is None and request_kwargs.get("_resend_after_disconnect") is False:
