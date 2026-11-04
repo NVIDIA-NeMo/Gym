@@ -2,8 +2,6 @@
 title: "New Environment"
 description: "Compose task and harness components, declare a workload manifest, and validate a contribution."
 ---
-# New Environment
-
 An environment is the logical execution composition of a task, agent harness, model bindings, resources, and episode protocol. A Gym config selects and connects these participants. The task defines what must be done and how it is scored; the harness decides how to solve it.
 In Gym, a benchmark is a special kind of environment: a reproducible evaluation workload that requires a canonical split, a data preparation step, and a fixed prompt configuration so any user can reproduce the same score.
 General-purpose environments and benchmarks are stored in `environments` and `benchmarks` directories, respectively, each composed with a resources server under `resources_servers/`.
