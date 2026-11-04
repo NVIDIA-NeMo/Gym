@@ -152,8 +152,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEMO_GYM_ALLOW_PRERELEASE: "true"
-      UV_INDEX_URL: "http://127.0.0.1:8888/"
-      UV_EXTRA_INDEX_URL: "https://pypi.org/simple/"
+      # Extra indexes take priority over the default index: resolve Gym from our wheel first.
+      UV_INDEX_URL: "https://pypi.org/simple/"
+      UV_EXTRA_INDEX_URL: "http://127.0.0.1:8888/"
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -175,7 +176,8 @@ jobs:
 
       - name: Build wheel and serve as local PyPI index
         run: |
-          uv build
+          # The local index is not serving yet; resolve build dependencies from PyPI.
+          env -u UV_EXTRA_INDEX_URL uv build
           mkdir -p /tmp/local-pypi/nemo-gym
           cp dist/*.whl /tmp/local-pypi/nemo-gym/
           ls /tmp/local-pypi/nemo-gym/ | sed 's|.*|<a href="&">&</a>|' > /tmp/local-pypi/nemo-gym/index.html
@@ -253,6 +255,12 @@ jobs:
           uv lock --project resources_servers/hello_world
           uv lock --check --project resources_servers/hello_world
           test -f resources_servers/hello_world/uv.lock
+          # The child must use the parent wheel, not a different release from PyPI.
+          NEMO_GYM_VERSION=$(python -c "from importlib.metadata import version; print(version('nemo-gym'))")
+          uv sync --locked --project resources_servers/hello_world
+          resources_servers/hello_world/.venv/bin/python -c \
+            "import sys; from importlib.metadata import version; import nemo_gym.server_runtime; assert version('nemo-gym') == sys.argv[1]" \
+            "$NEMO_GYM_VERSION"
           echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 
