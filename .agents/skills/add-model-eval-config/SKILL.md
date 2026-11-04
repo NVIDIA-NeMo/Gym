@@ -224,9 +224,12 @@ config points at it instead of restating it.
 Each benchmark is a directory `benchmarks/<benchmark>/` in the Gym commit that `driver.gym_install.ref`
 pins. Most hold one `config.yaml`. Some hold one config per harness or setting,
 `benchmarks/<benchmark>/<flavor>.yaml`, which `gym eval run --benchmark <benchmark>/<flavor>` loads, and a
-few hold variants in subdirectories, `benchmarks/<benchmark>/<variant>/config.yaml`
-(`--benchmark <benchmark>/<variant>`). The benchmark's README names the config to use. Most directories
-also have these files:
+few hold variants in subdirectories, `benchmarks/<benchmark>/<variant>/`. A variant directory often
+holds only a `manifest.yaml` whose `config_path`, relative to it, names a YAML beside it: AA-LCR v1.1 is
+`benchmarks/aalcr/config_v1_1/manifest.yaml` with `config_path: ../config_v1_1.yaml`, and
+`--benchmark aalcr/config_v1_1` loads `benchmarks/aalcr/config_v1_1.yaml`. Name the YAML file itself,
+never the directory. The benchmark's README names the config to use. Most directories also have these
+files:
 
 - The config (`config.yaml` or a flavor file) is the evaluation config. Through its own `config_paths`
   it chains to the resources server's config, `resources_servers/<server>/configs/<server>.yaml`, and
@@ -236,8 +239,8 @@ also have these files:
 - `manifest.yaml` describes the benchmark: its servers, its datasets, the reward range, and
   `canonical_split`, the split of the source data it measures. That is the source's name for it
   (`test`, `train`, ...), not Gym's `split`.
-- `prepare.py` builds the dataset file the config reads (the dataset's `prepare_script`). Prepared
-  data is not checked in, so a benchmark whose dataset has a `prepare_script` needs a `prepare` block,
+- The dataset's `prepare_script` (usually `prepare.py`; a variant may name its own, such as
+  `prepare_v1_1.py`) builds the dataset file the config reads. Prepared data is not checked in, so a benchmark whose dataset has a `prepare_script` needs a `prepare` block,
   or the job finds no data.
 - `README.md` names the source data, how it is graded, and the benchmark's own commands.
 
