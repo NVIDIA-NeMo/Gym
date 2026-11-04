@@ -40,6 +40,7 @@ from nemo_gym.client import (
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
+    BaseSeedSessionRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     SimpleResourcesServer,
@@ -554,6 +555,50 @@ VERIFY_BODY = {
 
 
 class TestResourcesSessions:
+    async def test_cookie_reseed_waits_for_delegated_verify_and_keeps_replacement_state(self) -> None:
+        manager = FakePythonToolManager()
+        server, _ = _session_server(manager)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "cookie"}
+        request.json = AsyncMock(return_value={"code": "print(4)"})
+        seed_body = BaseSeedSessionRequest.model_validate(VERIFY_BODY)
+        await server.seed_session(seed_body, request=request)
+        await server.execute_tool("stateful_python_code_exec", request)
+        verifying = asyncio.Event()
+        finish_verification = asyncio.Event()
+        reseeding = asyncio.Event()
+        reply = AsyncMock()
+        reply.json = AsyncMock(return_value={"reward": 1.0})
+
+        async def delegate(**kwargs):
+            verifying.set()
+            await finish_verification.wait()
+            return reply
+
+        async def reseed_and_execute() -> None:
+            reseeding.set()
+            await server.seed_session(seed_body, request=request)
+            await server.execute_tool("stateful_python_code_exec", request)
+
+        server.server_client.post = AsyncMock(side_effect=delegate)
+        verify = asyncio.create_task(server.verify(request, NSToolsVerifyRequest.model_validate(VERIFY_BODY)))
+        reseed = None
+        try:
+            await asyncio.wait_for(verifying.wait(), timeout=5)
+            reseed = asyncio.create_task(reseed_and_execute())
+            await asyncio.wait_for(reseeding.wait(), timeout=5)
+            await asyncio.sleep(0)
+            assert not reseed.done()
+        finally:
+            finish_verification.set()
+            await asyncio.wait_for(asyncio.gather(verify, *([reseed] if reseed else [])), timeout=5)
+        assert verify.result().num_tool_calls == 1
+        assert manager.python_sessions == {"cookie": ["print(4)"]}
+        assert len(server._timing_by_session["cookie"]) == 1
+        assert "cookie" not in server._verified_sessions
+        assert (await server.verify(request, NSToolsVerifyRequest.model_validate(VERIFY_BODY))).num_tool_calls == 1
+        assert manager.python_sessions == {} and server._timing_by_session == {}
+
     def test_checkpoint_failed_verify_cleanup_stays_owned_until_retry(self) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
@@ -601,7 +646,10 @@ class TestResourcesSessions:
         # Default wait verification unbinds before the HTTP reply. A replacement may never send close.
         assert not server.checkpoint_participant.is_open("rs-1")
         assert server._session_episodes == {}
-        assert server._verified_sessions.get("rs-1") == (EPISODE_ID, TaskId.model_validate(_seed("rs-1")["task_id"]))
+        assert server._verified_sessions.get("rs-1")[0] == (
+            EPISODE_ID,
+            TaskId.model_validate(_seed("rs-1")["task_id"]),
+        )
         second = client.post(prefix + "/verify", json=VERIFY_BODY)
         assert second.status_code == 200 and second.json()["reward"] == 1.0
         assert client.post(prefix + "/seed_session", json=_seed("rs-1")).status_code == 409
@@ -614,7 +662,6 @@ class TestResourcesSessions:
             base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
         )
         assert server._verified_sessions.get("rs-1") is None
-        assert server._verification_metrics.get("rs-1") is None
 
     async def test_checkpoint_retire_releases_owned_python_state_and_retries_failure(self) -> None:
         from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
@@ -624,7 +671,7 @@ class TestResourcesSessions:
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
         request.json = AsyncMock(return_value={"code": "print(4)"})
-        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
         await server.execute_tool("stateful_python_code_exec", request)
         participant = ResourcesParticipant(server, "restart_only")
         participant.seeded("rs-1", EPISODE_ID)
@@ -677,7 +724,7 @@ class TestResourcesSessions:
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
         request.json = AsyncMock(return_value={"code": "print(4)"})
-        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
 
         async def run_tool() -> None:
             with CancelScope() as scope:
@@ -891,7 +938,7 @@ class TestResourcesSessions:
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
         request.json = AsyncMock(return_value={"code": "print(1)"})
-        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_seed("rs-1")))
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
         started, finish = asyncio.Event(), asyncio.Event()
 
         async def pause_execution(request_id: str) -> None:
@@ -980,12 +1027,12 @@ class TestResourcesSessions:
         timings = server._timing_by_session[session_id]
         if verified:
             assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == 1
-        metrics = server._verification_metrics.get(session_id)
+        metrics = server._verified_sessions.get(session_id)
 
         assert client.post("/seed_session", json=_seed(session_id)).status_code == 409
         assert server._session_episodes == {}
         if verified:
-            assert server._verification_metrics.get(session_id) is metrics
+            assert server._verified_sessions.get(session_id) is metrics
             assert manager.python_sessions == {}
         else:
             assert manager.python_sessions[session_id] is python_session
@@ -993,7 +1040,7 @@ class TestResourcesSessions:
             assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == (1 if verified else 2)
 
-    def test_two_legacy_runs_reusing_a_cookie_keep_separate_verification_metrics(self) -> None:
+    def test_cookie_reseed_keeps_id_and_replaces_verification_metrics(self) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1003,27 +1050,79 @@ class TestResourcesSessions:
 
         # SimpleAgent /run forwards its caller's cookies to seed, then uses the returned cookies for tools/verify.
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
-        first_cookies = dict(client.cookies)
         assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         [first_session] = manager.python_sessions
         first = client.post("/verify", json=VERIFY_BODY)
         assert first.status_code == 200 and first.json()["num_tool_calls"] == 1
         assert manager.python_sessions == {} and server._timing_by_session == {}
+        assert client.post("/verify", json=VERIFY_BODY).json() == first.json()
 
-        # The same external cookie starts a new legacy run rather than reviving the completed one.
+        # Deprecated cookie seeds reuse the ID but start a new run and discard the old retry record.
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert first_session not in server._verified_sessions
+        assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         [second_session] = manager.python_sessions
-        assert second_session != first_session
+        assert second_session == first_session
         second = client.post("/verify", json=VERIFY_BODY)
-        assert second.status_code == 200 and second.json()["num_tool_calls"] == 1
+        assert second.status_code == 200 and second.json()["num_tool_calls"] == 2
         assert manager.python_sessions == {} and server._timing_by_session == {}
 
-        # A resend for the old run still carries its old cookie and keeps the old aggregate.
-        retry_client = TestClient(app)
-        retry_client.cookies.update(first_cookies)
-        retried = retry_client.post("/verify", json=VERIFY_BODY)
-        assert retried.status_code == 200 and retried.json() == first.json()
+    def test_failed_cookie_reseed_keeps_verification_metrics_and_python_ownership(self) -> None:
+        manager = FakePythonToolManager()
+        server, app = _session_server(manager)
+        client = TestClient(app, raise_server_exceptions=False)
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        [session_id] = manager.python_sessions
+        python_session = manager.python_sessions[session_id]
+        manager.cleanup_error = RuntimeError("sandbox release unavailable")
+        assert client.post("/verify", json=VERIFY_BODY).status_code == 500
+        receipt = server._verified_sessions.get(session_id)
+
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 500
+        assert server._verified_sessions.get(session_id) is receipt
+        assert manager.python_sessions[session_id] is python_session
+        manager.cleanup_error = None
+        assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == 1
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert session_id not in server._verified_sessions
+        assert manager.python_sessions == {}
+
+    def test_expired_verification_metrics_do_not_hide_failed_python_release(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import nemo_gym.server_runtime.base_resources_server as base_resources
+
+        manager = FakePythonToolManager()
+        server, app = _session_server(manager)
+        client = TestClient(app, raise_server_exceptions=False)
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
+        [session_id] = manager.python_sessions
+        manager.cleanup_error = RuntimeError("sandbox release unavailable")
+        assert client.post("/verify", json=VERIFY_BODY).status_code == 500
+        now = base_resources.monotonic()
+        monkeypatch.setattr(
+            base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
+        )
+        assert server._verified_sessions.get(session_id) is None
+
+        assert client.post("/seed_session", json=_seed(session_id)).status_code == 409
+        assert server._session_episodes == {}
+        assert session_id in manager.python_sessions
+        assert server._timing_by_session[session_id] == []
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 500
+        assert server._timing_by_session[session_id] == []
+        manager.cleanup_error = None
+        assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
+        assert manager.python_sessions == {} and server._timing_by_session == {}
 
     @pytest.mark.parametrize("state", ["active", "verified", "closed"])
     def test_legacy_seed_does_not_take_over_a_typed_cookie(self, state: str) -> None:

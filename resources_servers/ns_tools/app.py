@@ -32,7 +32,6 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
-from uuid import uuid4
 
 import httpx
 from aiohttp import ClientTimeout
@@ -43,26 +42,17 @@ from fastapi.responses import PlainTextResponse
 from nemo_skills.mcp.servers.python_tool import DirectPythonTool
 from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.mcp.utils import locate
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY, raise_for_status
 from nemo_gym.client import request as http_request
 from nemo_gym.config import ResourcesServerRef
-from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
-    ResourcesSessionConflictError,
-    ResourcesSessionFence,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
@@ -241,18 +231,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
-    # The episode and task each Environment Server seed bound to its resources_session_id.
-    _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = {}
-    _fence: ResourcesSessionFence = PrivateAttr()
-    # Verify unbinds checkpoint ownership; keep only expiring identity for retries and the eventual close.
-    _verified_sessions: ClosedResourcesSessionRecords[tuple[EpisodeId, TaskId]] = PrivateAttr()
-    _verification_metrics: ClosedResourcesSessionRecords[Dict[str, float | int]] = PrivateAttr()
-
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
-        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
-        self._verification_metrics = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -442,11 +420,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # The session middleware always sets the session ID, which keys the stateful python session.
         session_id = request.session[SESSION_ID_KEY]
-        if (
-            self._fence.closed_episode(session_id) is not None
-            or session_id in self._verified_sessions
-            or session_id in self._verification_metrics
-        ):
+        if self._fence.closed_episode(session_id) is not None or session_id in self._verified_sessions:
             raise ResourcesSessionLostError(f"ns_tools session {session_id} is closed")
 
         if session_id not in self._timing_by_session:
@@ -514,78 +488,19 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     # Sessions
     # --------------------------------------------------------
 
-    async def seed_session(
-        self,
-        request: Request,
-        body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
-    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Bind an Environment Server's resources session to the request's cookie.
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._timing_by_session
 
-        The python session itself starts lazily on the first tool call. An Agent's ``/run`` seeds with its legacy
-        body, which keeps no state here; verify releases that rollout's python session.
-        """
-        if not isinstance(body, ResourcesSeedSessionRequest):
-            session_id = request.session[SESSION_ID_KEY]
-            async with self._fence.locked(session_id):
-                self._fence.raise_if_closed(session_id)
-                if session_id in self._session_episodes or session_id in self._verified_sessions:
-                    raise ResourcesSessionConflictError("The session cookie belongs to a typed resources session")
-                if session_id in self._verification_metrics:
-                    # /run may reuse an external cookie. Its old verify can still retry against the old aggregate.
-                    request.session[SESSION_ID_KEY] = str(uuid4())
-            return BaseSeedSessionResponse()
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Release a prior cookie run; Skills still creates Python state on the first tool call."""
+        if self.has_session_state(session_id) or session_id in self._verified_sessions:
+            await self.release_session_state(session_id)
 
-        resources_session_id = body.resources_session_id
-        async with self._fence.locked(resources_session_id):
-            self._fence.raise_if_closed(resources_session_id)
-            if resources_session_id in self._verified_sessions:
-                raise ResourcesSessionConflictError("resources session has already been verified")
-            if resources_session_id not in self._session_episodes and (
-                resources_session_id in self._timing_by_session or resources_session_id in self._verification_metrics
-            ):
-                raise ResourcesSessionConflictError("resources_session_id already belongs to a cookie session")
-            identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
-            if identity != (body.episode_id, body.task_id):
-                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
-        # Tool calls and verify find the python session by the cookie, so it must name this resources session.
-        request.session[SESSION_ID_KEY] = resources_session_id
-        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
-
-    async def retire_session_state(self, session_id: str) -> None:
-        """Release Python state before checkpoint retirement forgets its owning attempt."""
-        async with self._fence.locked(session_id):
-            if self.tool_manager is not None:
-                await self.tool_manager.cleanup_request(session_id)
-            self._timing_by_session.pop(session_id, None)
-            identity = self._session_episodes.pop(session_id, None)
-            if identity is not None:
-                self._fence.mark_closed(session_id, identity[0])
-
-    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Release the session's python session and tool timings, even when verify never ran.
-
-        Releases by ``resources_session_id``, since a close whose seed reply was lost carries no cookie. A cleanup
-        failure propagates, so the session is not recorded as closed and the caller can retry.
-        """
-        resources_session_id = body.resources_session_id
-        async with self._fence.locked(resources_session_id):
-            closed_episode = self._fence.closed_episode(resources_session_id)
-            if closed_episode is not None:
-                if closed_episode != body.episode_id:
-                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-                return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
-            identity = self._session_episodes.get(resources_session_id) or self._verified_sessions.get(
-                resources_session_id
-            )
-            if identity is not None and identity[0] != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
-            # Verify has already released a verified episode's python session; cleaning up again is a no-op.
-            if self.tool_manager is not None:
-                await self.tool_manager.cleanup_request(resources_session_id)
-            self._timing_by_session.pop(resources_session_id, None)
-            self._session_episodes.pop(resources_session_id, None)
-            self._fence.mark_closed(resources_session_id, body.episode_id)
-        return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
+    async def release_session_state(self, session_id: str) -> None:
+        """Keep Python ownership and timings until the sandbox acknowledges release."""
+        if self.tool_manager is not None:
+            await self.tool_manager.cleanup_request(session_id)
+        self._timing_by_session.pop(session_id, None)
 
     # --------------------------------------------------------
     # Verification
@@ -594,10 +509,13 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     def _aggregate_timing_metrics(self, session_id: Optional[str]) -> Dict[str, float | int]:
         """Aggregate tool execution timing metrics for a session."""
         if session_id:
-            previous = self._verification_metrics.get(session_id)
+            previous = self._verified_sessions.get(session_id)
             if previous is not None:
-                return previous
-        tool_timings = self._timing_by_session.pop(session_id, []) if session_id else []
+                return previous[1]
+        tool_timings = self._timing_by_session.get(session_id, []) if session_id else []
+        if session_id in self._timing_by_session:
+            # Drop detailed timings but keep ownership visible if release fails and the retry record expires.
+            self._timing_by_session[session_id] = []
 
         total_tool_time = sum(t["execution_time_seconds"] for t in tool_timings)
         num_tool_calls = len(tool_timings)
@@ -615,7 +533,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         if session_id:
             # A lost verify reply must not turn this rollout into one with zero tool calls. Keep only the
             # aggregate for the routing retry window; release the detailed timing list and Python state.
-            self._verification_metrics.remember(session_id, metrics)
+            self._verified_sessions.remember(session_id, (self._session_episodes.get(session_id), metrics))
         return metrics
 
     async def verify(self, request: Request, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
@@ -630,18 +548,21 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         Detailed per-call and summary logging is controlled by verbose_tool_logging.
         """
         session_id = request.session.get(SESSION_ID_KEY) if request else None
+        if session_id:
+            # Cookie reseeds keep their ID. Do not let an old delegated verify release a replacement run.
+            async with self._fence.locked(session_id):
+                return await self._verify(request, body)
+        return await self._verify(request, body)
+
+    async def _verify(self, request: Request, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
+        session_id = request.session.get(SESSION_ID_KEY) if request else None
         if session_id is not None and self._fence.closed_episode(session_id) is not None:
             # Close released the session's tool timings, so its metrics would read as a rollout without tool calls.
             return NSToolsVerifyResponse(
                 **(body.model_dump() | lost_session_verification(f"ns_tools session {session_id} is closed"))
             )
         try:
-            if session_id:
-                # Finish any accepted tool call before freezing the aggregate for retries.
-                async with self._fence.locked(session_id):
-                    metrics = self._aggregate_timing_metrics(session_id)
-            else:
-                metrics = self._aggregate_timing_metrics(session_id)
+            metrics = self._aggregate_timing_metrics(session_id)
             if self.config.verbose_tool_logging:
                 logger.info(
                     f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
@@ -681,15 +602,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             )
         finally:
             if session_id:
-                # Under the fence, so a tool call still running for this session records its python session first.
-                async with self._fence.locked(session_id):
-                    # A successful verify reply ends checkpoint ownership. Cleanup failure must fail the
-                    # request too, so its retry or checkpoint retirement can still find the Python state.
-                    if self.tool_manager is not None:
-                        await self.tool_manager.cleanup_request(session_id)
-                    identity = self._session_episodes.pop(session_id, None)
-                    if identity is not None:
-                        self._verified_sessions.remember(session_id, identity)
+                # A successful verify reply ends checkpoint ownership. Cleanup failure must fail the
+                # request too, so its retry or checkpoint retirement can still find the Python state.
+                await self.release_session_state(session_id)
+                self._session_episodes.pop(session_id, None)
 
     # --------------------------------------------------------
     # Cleanup
