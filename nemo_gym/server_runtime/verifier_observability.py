@@ -19,12 +19,12 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse, Response
 
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     current_rollout_id,
     verifier_invocation_context,
 )
-from nemo_gym.core.episode_types import FailureBoundary
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
+from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.trajectory.trajectory_record import (

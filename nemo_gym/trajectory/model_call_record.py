@@ -9,7 +9,7 @@ from typing import Any, Literal, Mapping, Optional
 from pydantic import BaseModel, Field
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.episode_types import FailureReport
+from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import ModelOperationObservation
 
 

@@ -44,7 +44,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
 from nemo_gym.core.failure_transport import FailureHeader, observe_reply
