@@ -30,12 +30,27 @@ VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifier_invocation_id", default=None)
+_VERIFIER_MODEL_REQUESTS: ContextVar[Optional[list[str]]] = ContextVar(
+    "nemo_gym_verifier_model_requests", default=None
+)
 
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
 # Restrict it to characters that survive a path round trip.
 # Exclude leading dots because stores also use the id as a filename component.
 # Middleware uses the same pattern.
 ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The capture key, a rollout id with its attempt suffix, also names the model server's capture files, of which
+# `<key>.capture.incomplete` is the longest, and a file name holds at most 255 bytes. Room is kept for `-a9999`.
+MAX_ROLLOUT_ID_LENGTH = 255 - len(".capture.incomplete") - len("-a9999")
+
+
+def check_rollout_id_length(rollout_id: str) -> None:
+    """Refuse a rollout id whose capture files would pass the 255-byte file name limit at some attempt."""
+    if len(rollout_id.encode()) > MAX_ROLLOUT_ID_LENGTH:
+        raise ValueError(
+            f"Rollout id {rollout_id!r} is {len(rollout_id.encode())} bytes, more than the {MAX_ROLLOUT_ID_LENGTH} "
+            "its capture file names allow with an attempt suffix; use a shorter _ng_rollout_id"
+        )
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
@@ -129,7 +144,21 @@ def current_verifier_invocation_id() -> Optional[str]:
 def verifier_invocation_context(invocation_id: str) -> Iterator[None]:
     """Carry one verify execution's identity across its concurrent judge calls."""
     token = _VERIFIER_INVOCATION_ID.set(invocation_id)
+    requests = _VERIFIER_MODEL_REQUESTS.set([])
     try:
         yield
     finally:
+        _VERIFIER_MODEL_REQUESTS.reset(requests)
         _VERIFIER_INVOCATION_ID.reset(token)
+
+
+def note_verifier_model_request(server_name: str) -> None:
+    """Note that the enclosing verify execution sent a request to a model server; outside one, do nothing."""
+    requests = _VERIFIER_MODEL_REQUESTS.get()
+    if requests is not None:
+        requests.append(server_name)
+
+
+def verifier_model_requests() -> list[str]:
+    """The model servers the enclosing verify execution has sent requests to so far."""
+    return list(_VERIFIER_MODEL_REQUESTS.get() or [])
