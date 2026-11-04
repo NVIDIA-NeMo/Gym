@@ -162,5 +162,21 @@ def exit_cleanly_on_config_error(fn):
     return wrapper
 
 
+def exit_cleanly_on_job_error(fn):
+    """Decorator: turn a `gym job` command's ValueError/RuntimeError (unknown id, unreachable scheduler) into
+    a message on stderr and a non-zero exit, so stdout stays clean for `--json`."""
+    from functools import wraps
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, RuntimeError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            raise SystemExit(1)
+
+    return wrapper
+
+
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
 __getattr__ = moved_names_getattr(__name__)

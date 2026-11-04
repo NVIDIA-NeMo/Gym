@@ -27,7 +27,7 @@ from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
-from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, exit_cleanly_on_job_error
 from nemo_gym.utils.text import did_you_mean
 from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
@@ -693,6 +693,64 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+# `gym job` commands print JSON themselves, so they do not take the shared flag that also translates to a
+# Hydra override.
+JOB_JSON = Flag(
+    register=lambda p: p.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Output as machine-readable JSON."
+    ),
+)
+
+
+def _reject_overrides(args: argparse.Namespace, overrides: list[str], command: str) -> None:
+    # `-v` reaches every command as a `+verbose=true` override; anything else is a stray Hydra override.
+    if [override for override in overrides if override != "+verbose=true"]:
+        args._parser.error(f"{command} does not accept Hydra overrides")
+
+
+def _split_names(value: str | None) -> list[str] | None:
+    names = [name.strip() for name in value.split(",") if name.strip()] if value else []
+    return names or None
+
+
+def _add_limit_or_all(parser: argparse.ArgumentParser) -> None:
+    how_many = parser.add_mutually_exclusive_group()
+    how_many.add_argument(
+        "--limit", type=int, default=10, metavar="N", help="With no ids, show the newest N submissions (default 10)."
+    )
+    how_many.add_argument("--all", action="store_true", help="With no ids, show every submission.")
+
+
+def _job_list(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job list")
+    from nemo_gym.cli import job
+
+    job.list_command(limit=args.limit, as_json=getattr(args, "json", False))
+
+
+@exit_cleanly_on_job_error
+def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job status")
+    from nemo_gym.cli import job
+
+    job.status_command(
+        args.gym_job_ids,
+        benchmarks=_split_names(args.benchmark),
+        limit=None if args.all else args.limit,
+        as_json=getattr(args, "json", False),
+    )
+
+
+@exit_cleanly_on_job_error
+def _job_info(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "job info")
+    from nemo_gym.cli import job
+
+    job.info_command(
+        args.gym_job_id, benchmark=args.benchmark, show_config=args.config, as_json=getattr(args, "json", False)
+    )
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
@@ -948,6 +1006,7 @@ GROUPS = {
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
+    "job": "Look at the runs `gym eval submit` queued.",
     "dev": "Contributor helpers.",
 }
 
@@ -1693,6 +1752,64 @@ COMMANDS = {
                 "Report artifacts to write (default: both).",
                 choices=("md", "json", "both"),
             ),
+        ),
+    ),
+    "job list": Command(
+        target=_job_list,
+        summary="List the submissions in this machine's job index (offline).",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--limit", type=int, metavar="N", help="Show only the newest N submissions."
+                ),
+            ),
+            JOB_JSON,
+        ),
+    ),
+    "job status": Command(
+        target=_job_status,
+        summary="Show what is happening to submitted runs; the only job command that asks the scheduler.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_ids",
+                    nargs="*",
+                    metavar="ID",
+                    help="Submission ids, as printed by `gym eval submit`. With none, the newest submissions.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--benchmark",
+                    metavar="NAME[,NAME...]",
+                    help="Only these benchmarks. With ids, a submission that lacks one is an error; "
+                    "without ids, only submissions that have all of them are shown.",
+                ),
+            ),
+            Flag(register=lambda p: _add_limit_or_all(p)),
+            JOB_JSON,
+        ),
+    ),
+    "job info": Command(
+        target=_job_info,
+        summary="Describe one submission and where its parts are.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "benchmark", nargs="?", metavar="BENCHMARK", help="Describe only this benchmark."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--config", action="store_true", help="Also print the resolved config the run was submitted with."
+                ),
+            ),
+            JOB_JSON,
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
