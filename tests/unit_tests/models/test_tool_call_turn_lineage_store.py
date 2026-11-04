@@ -99,7 +99,7 @@ async def _publish(
         await writer.record(_commit(call_id, output, tokens, version))
     else:
         entry = TokenEntry(
-            rollout_id="r",
+            capture_key="r",
             model_call_id=call_id,
             prompt_token_ids=tokens[:-1],
             generation_token_ids=tokens[-1:],
