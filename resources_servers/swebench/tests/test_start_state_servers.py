@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from resources_servers.swebench import start_state
 from resources_servers.swebench.tests.test_start_state import LocalSandbox, git, repo  # noqa: F401
@@ -76,6 +77,50 @@ def inputs(name, **kwargs):
     return verification(name).VerificationInputs(
         instance_id="toy", workdir="/w", patch="agent\n", **SERVERS[name]["inputs"], **kwargs
     )
+
+
+@pytest.mark.parametrize("name", [*SERVERS, "swe_rebench"])
+def test_task_data_declares_the_start_state_fields_like_the_request(name):
+    """Undeclared, the fields count as unknown keys and fail collation in task_data_validation=error."""
+    task_data = importlib.import_module(f"resources_servers.{name}.task_data").TaskData
+    seed = SERVERS[name]["seed"] if name in SERVERS else "SWERebenchSeedSessionRequest"
+    request = getattr(importlib.import_module(f"resources_servers.{name}.app"), seed)
+    for field, bad in (("setup_patch", ["not", "a", "patch"]), ("squash_history", "sometimes")):
+        assert task_data.model_fields[field].default == request.model_fields[field].default
+        with pytest.raises(ValidationError) as error:
+            task_data.model_validate({field: bad})
+        assert (field,) in [e["loc"] for e in error.value.errors()]
+
+
+MINIMAL_ROWS = {
+    "swe_rebench": dict(instance_id="t", repo="o/r", base_commit="abc", image_name="img"),
+    "scale_swe": dict(instance_id="t", workdir="/w", image_url="img"),
+    "swe_next": dict(instance_id="t", image_ref="img"),
+    "swemer_v1": dict(instance_id="t", image_ref="img", test_framework="pytest", test_command="pytest"),
+    "swemer_v2": dict(instance_id="t", image_ref="img", test_framework="pytest", test_command="pytest"),
+    "swemer_oml": dict(instance_id="t", image_ref="img", test_sh="exit 0", config_json="{}", grade_py=""),
+}
+
+
+@pytest.mark.parametrize("name", MINIMAL_ROWS)
+def test_collation_accepts_start_state_rows_and_still_flags_unknown_fields(name):
+    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+
+    adapter = load_task_data_schema(Path(start_state.__file__).parents[1] / name)
+    base = {"responses_create_params": {"input": [{"role": "user", "content": "fix"}]}, **MINIMAL_ROWS[name]}
+    rows = [
+        base,
+        {**base, "setup_patch": "diff --git a/x b/x\n", "squash_history": True},
+        {**base, "squash_history": True},
+    ]
+    clean = TaskDataValidator(server_name=name, adapter=adapter, dataset_fpath="d.jsonl")
+    for index, row in enumerate(rows):
+        clean.validate_row(index, row)
+    assert clean.report.clean, clean.report.summary()
+
+    dirty = TaskDataValidator(server_name=name, adapter=adapter, dataset_fpath="d.jsonl")
+    dirty.validate_row(0, {**rows[1], "not_a_task_field": 1})
+    assert dirty.report.unknown_keys == {"not_a_task_field": 1}
 
 
 @pytest.mark.parametrize("name", SERVERS)
