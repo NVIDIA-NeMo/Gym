@@ -46,7 +46,7 @@ def _server(tmp_path: Path, **overrides) -> TavilySearchResourcesServer:
         exclude_domains_file_path=_EXCLUDE_DOMAINS_FILE,
         use_judge=False,
         workspace_root=str(tmp_path),
-        **overrides,
+        **({"allow_host_execution": True} | overrides),
     )
     return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
