@@ -1543,15 +1543,19 @@ class TestBenchmarkLifecycle:
             assert client.post.await_args.kwargs["json"]["response"]["output"] == []
             assert result.model_dump()["library_reward"] == 0.0
         else:
-            with raises(RuntimeError, match="OpenCode export unavailable"):
+            with raises(NgFailureEvent, match="OpenCode export unavailable"):
                 await server.run(request, body)
             assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
         sandbox.stop.assert_awaited_once()
 
-    async def test_confirmed_agent_sandbox_oom_returns_a_scored_zero(self, monkeypatch, tmp_path: Path):
+    @mark.parametrize("verifier_reward", [0.0, 1.0])
+    async def test_confirmed_agent_sandbox_oom_keeps_verifier_verdict(
+        self, monkeypatch, tmp_path: Path, verifier_reward
+    ):
         config = self._create_config()
         config.preinstalled_opencode = True
         config.report_agent_sandbox_oom = True
+        config.execution_failure_reward_zero = True
         config.opencode_version = "test"
         ripgrep = tmp_path / "rg"
         ripgrep.write_text("#!/bin/sh\necho rg test\n")
@@ -1568,6 +1572,11 @@ class TestBenchmarkLifecycle:
             assert kwargs["url_path"] == "/verify"
             payload = kwargs["json"]
             assert payload["response"]["output"] == []
+            from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+
+            outcome = AgentOutcome.model_validate_json(payload["response"]["metadata"][AGENT_OUTCOME_METADATA_KEY])
+            assert outcome.failure_kind == PROVIDER_OOM_KILLED
+            assert outcome.status_code is None
             observation = SandboxObservation.model_validate_json(
                 payload["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY]
             )
@@ -1584,7 +1593,7 @@ class TestBenchmarkLifecycle:
                     return_value=json.dumps(
                         payload
                         | {
-                            "reward": 0.0,
+                            "reward": verifier_reward,
                             "mask_sample": False,
                             "failure_kind": PROVIDER_OOM_KILLED,
                             "failure_reason": payload["failure_report"]["events"][observation.failure_id][
@@ -1623,7 +1632,7 @@ class TestBenchmarkLifecycle:
         with RequestFailureLog.capture():
             result = await server.run(request, body)
 
-        assert result.reward == 0.0
+        assert result.reward == verifier_reward
         assert result.mask_sample is False
         assert result.failure_kind == PROVIDER_OOM_KILLED
         assert "OOM-killed" in (result.failure_reason or "")
@@ -1783,6 +1792,10 @@ class TestBenchmarkLifecycle:
                 "missing its launch marker",
             ),
             (
+                SimpleNamespace(stdout=None, stderr="", return_code=124, error_type="timeout"),
+                "missing its launch marker",
+            ),
+            (
                 SimpleNamespace(stdout="Shell: bash\npartial", stderr="", return_code=0, error_type=None),
                 "without a trustworthy completion marker",
             ),
@@ -1819,9 +1832,12 @@ class TestBenchmarkLifecycle:
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
         )
 
-        with raises(NgFailureEvent, match=message):
+        with raises(NgFailureEvent, match=message) as caught:
             await server.run(request, body)
 
+        assert caught.value.boundary == "harness"
+        assert caught.value.failure_kind == "agent_route_failed"
+        assert caught.value.operation == "opencode.capture"
         assert sandbox.exec.await_count == 2
         sandbox.download.assert_not_awaited()
         sandbox.stop.assert_awaited_once()
@@ -1948,8 +1964,22 @@ async def test_export_failure_raises_without_a_scored_response(tmp_path, failure
     (tmp_path / "session").mkdir()
     (tmp_path / "session" / "export.json").write_text('{"messages":[{"info":{"role":"assistant"}}]}')
     body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
-    with raises((RuntimeError, ValueError), match=error):
+    with raises(NgFailureEvent, match=error) as caught:
         await server.responses(request, body)
+    assert caught.value.boundary == "harness"
+    assert caught.value.failure_kind == "agent_route_failed"
+    expected_operation = (
+        "opencode.session_list"
+        if failure.startswith("list_")
+        else "opencode.export"
+        if failure in {"exception", "command", "export_status"}
+        else "opencode.download"
+        if failure in {"download", "missing"}
+        else "opencode.capture"
+    )
+    assert caught.value.operation == expected_operation
+    if failure in {"list_exception", "exception", "download", "list_empty", "invalid_json"}:
+        assert caught.value.__cause__ is not None
     assert server._sandbox_id_to_run_result == {}
     export_path = tmp_path / "session" / "export.json"
     if export_path.exists():
@@ -1992,7 +2022,7 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
     request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "trial"}})
     body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
 
-    with raises(RuntimeError, match="OpenCode export .* had no assistant messages or was invalid"):
+    with raises(NgFailureEvent, match="OpenCode export .* had no assistant messages or was invalid"):
         await server.run(request, body)
 
     assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session"]
@@ -2017,7 +2047,7 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
     )
     monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
     monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
-    with raises(RuntimeError, match="Required Gym MCP"):
+    with raises(NgFailureEvent, match="Required Gym MCP"):
         await server.responses(
             request=MagicMock(
                 session={SESSION_ID_KEY: "trial"},
@@ -2290,7 +2320,7 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
     with raises(NgFailureEvent) as caught:
         await server.responses(request, body)
     assert caught.value.boundary == "harness"
-    assert caught.value.failure_kind == "agent_invalid_output"
+    assert caught.value.failure_kind == "agent_route_failed"
     assert caught.value.operation == "opencode.execute"
     reason = f" reason={error_type}" if error_type else ""
     assert caught.value.failure_reason == (
@@ -2335,4 +2365,39 @@ async def test_a_provider_ending_the_agents_sandbox_records_its_code_status_and_
     assert own.foreign_error.message == "Sandbox ended (OOMKilled)" and own.foreign_error.http_status == 410
     assert own.failure_kind == "agent_route_failed"
     assert own.http_status is None
+    assert server._sandbox_id_to_run_result == {}
+
+
+@mark.parametrize("failure", ["exit", "timeout", "foreign"])
+async def test_agent_preflight_failure_is_typed_and_cannot_reach_agent_or_grading(tmp_path, failure):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.preinstalled_opencode = True
+    config.report_agent_sandbox_oom = True
+    config.artifacts_dir = str(tmp_path)
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    foreign = OSError("setup connection lost")
+    sandbox = MagicMock(upload=AsyncMock(), download=AsyncMock())
+    sandbox.exec = AsyncMock(
+        side_effect=foreign if failure == "foreign" else None,
+        return_value=SimpleNamespace(
+            return_code=1 if failure == "exit" else -1, error_type="timeout" if failure == "timeout" else None
+        ),
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    with raises(NgFailureEvent) as caught:
+        await server.responses(
+            request, NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+        )
+    assert caught.value.boundary == "harness"
+    assert caught.value.failure_kind == "agent_route_failed"
+    assert caught.value.operation == "opencode.setup"
+    assert caught.value.__cause__ is (foreign if failure == "foreign" else None)
+    sandbox.exec.assert_awaited_once()
+    assert "opencode run" not in sandbox.exec.await_args.kwargs["command"]
+    sandbox.download.assert_not_awaited()
+    server.server_client.post.assert_not_called()
     assert server._sandbox_id_to_run_result == {}

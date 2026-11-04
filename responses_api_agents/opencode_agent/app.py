@@ -34,6 +34,7 @@ from openai.types.responses.response import IncompleteDetails
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
@@ -53,6 +54,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -839,12 +841,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
                 workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
                 if workspace.return_code != 0 or workspace.error_type:
-                    raise RuntimeError(
-                        f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
+                    raise NgFailureEvent(
+                        boundary="harness",
+                        failure_kind=AGENT_ROUTE_FAILED,
+                        operation="opencode.setup",
+                        failure_reason=f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}",
                     )
             state.sandbox_id = sandbox.sandbox_id
             if state.sandbox_id is None:
-                raise RuntimeError("OpenCode sandbox provider did not return a sandbox_id")
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.setup",
+                    failure_reason="OpenCode sandbox provider did not return a sandbox_id",
+                )
             command = _sandbox_prepare_command(workdir, directory, runtime)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
@@ -949,9 +959,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     @staticmethod
     def _check_sandbox_setup(command: str, result: SandboxExecResult) -> None:
         if result.return_code != 0 or result.error_type is not None:
-            raise RuntimeError(
-                f"OpenCode setup failed: command={command!r}, exit={result.return_code}, "
-                f"error={result.error_type}; stderr={result.stderr}; stdout={result.stdout}"
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.setup",
+                failure_reason=f"OpenCode setup failed: command={command!r}, "
+                f"error={result.error_type}; stderr={result.stderr}; stdout={result.stdout}",
             )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
@@ -1545,6 +1558,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 outcome=OpenCodeRunOutcome(status="failed", error_type="server_error"),
             )
             response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json(exclude_none=True)
+            response.metadata[AGENT_OUTCOME_METADATA_KEY] = AgentOutcome(
+                failure_kind=execution_oom.failure_kind
+            ).model_dump_json()
             return response
         if failure is not None:
             raise failure
