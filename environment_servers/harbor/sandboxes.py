@@ -860,7 +860,9 @@ class HarborSandboxMixin:
                 except Exception:
                     # Still owned: shutdown retries the stop. Do not start a second sandbox under the same key.
                     LOGGER.exception(f"{task.task_id}: could not stop the {what} of a failed image pull")
-                    raise exc from None
+                    # Hide cleanup context without erasing the provider failure's existing cause.
+                    exc.__suppress_context__ = True
+                    raise exc
                 await asyncio.sleep(_pull_retry_delay(attempt))
         raise AssertionError("unreachable")  # pragma: no cover
 

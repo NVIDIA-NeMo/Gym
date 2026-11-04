@@ -290,7 +290,7 @@ class TestSbatchScript:
             "+meta.benchmark=gpqa",
         ):
             assert expected in script
-        assert script.index(f"{STEP} evalrdl") > script.index("uv pip install")
+        assert script.index(f"{STEP} evalrdl") > script.index("uv sync --locked")
 
     def test_every_effective_export_gets_a_command_in_order(self) -> None:
         script = _script(_submit(gym_install=True, job_exports={"atif": {"agent_version": "1"}, "evalrdl": {}}))
@@ -299,8 +299,9 @@ class TestSbatchScript:
 
     @staticmethod
     def _install_extras(script: str) -> list[str]:
-        match = re.search(r'uv pip install -e "\.\[([^\]]*)\]"', script)
-        return match.group(1).split(",") if match else []
+        """Read the extras requested by the driver's locked sync command."""
+        match = re.search(r"\buv sync --locked([^\n]*)", script)
+        return re.findall(r"--extra ([\w-]+)", match.group(1)) if match else []
 
     def test_in_process_exporters_add_their_extra_to_the_gym_install_once(self) -> None:
         config = _submit(

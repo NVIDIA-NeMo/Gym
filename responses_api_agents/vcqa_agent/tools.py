@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-from responses_api_agents.vcqa_agent.sandbox import Sandbox
+from responses_api_agents.vcqa_agent.sandbox import Sandbox, SandboxInfraError
 
 
 MAX_TOOL_OUTPUT_BYTES = 32 * 1024  # 32 KiB per tool call
@@ -32,12 +32,24 @@ class _BaseToolArgs(BaseModel):
 
 class ReadFileArgs(_BaseToolArgs):
     path: str = Field(description="Path to the file to read, relative to /codebase.")
+    start_line: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional 1-indexed first line to return. With start_line or end_line set, "
+        "each returned line is prefixed with its line number.",
+    )
+    end_line: Optional[int] = Field(
+        default=None, ge=1, description="Optional 1-indexed last line to return (inclusive)."
+    )
     max_bytes: Optional[int] = Field(default=None, description="Optional cap on returned bytes. Defaults to 32 KiB.")
 
 
 class GrepArgs(_BaseToolArgs):
     pattern: str = Field(description="Regex pattern to search for.")
     path: Optional[str] = Field(default=None, description="Optional file or directory under /codebase to search in.")
+    include: Optional[str] = Field(
+        default=None, description="Optional glob restricting which files are searched, e.g. '*.go'."
+    )
     fixed_strings: bool = Field(default=False, description="Treat pattern as a literal string, not a regex.")
     case_insensitive: bool = Field(default=False, description="Case-insensitive match.")
     max_count: Optional[int] = Field(default=200, description="Maximum number of matches to return.")
@@ -135,7 +147,8 @@ def build_tool_definitions(include_distractors: bool = True) -> List[Dict[str, A
     is true.
     """
     descriptions: Dict[str, str] = {
-        "read_file": "Read a file from the repo working tree at /codebase.",
+        "read_file": "Read a file from the repo working tree at /codebase, optionally only a 1-indexed line range "
+        "(returned with line numbers).",
         "grep": "Search for a pattern in the repo working tree using ripgrep.",
         "glob": "Find files matching a pattern using fd.",
         "list_dir": "List the contents of a directory under /codebase.",
@@ -239,7 +252,22 @@ async def _read_file(args: ReadFileArgs, sandbox: Sandbox) -> Dict[str, Any]:
     if abs_path is None:
         return _make_error(f"path '{args.path}' resolves outside the working tree")
     cap = args.max_bytes if args.max_bytes else MAX_TOOL_OUTPUT_BYTES
-    cmd = f"head -c {int(cap)} -- {shlex.quote(abs_path)}"
+    if args.start_line is None and args.end_line is None:
+        cmd = f"head -c {int(cap)} -- {shlex.quote(abs_path)}"
+    else:
+        start = args.start_line or 1
+        if args.end_line is not None and args.end_line < start:
+            return _make_error(f"end_line ({args.end_line}) is before start_line ({start})")
+        line_range = f"{start},{args.end_line}p" if args.end_line is not None else f"{start},$p"
+        path = shlex.quote(abs_path)
+        # `cat -n`-style numbering that starts at `start`, so cited line numbers are the file's own. POSIX sh only:
+        # provider sandboxes run a non-root user's command through `su -s /bin/sh` (dash on Debian images), which
+        # rejects `set -o pipefail`, so a missing or unreadable file is checked before the pipeline.
+        cmd = (
+            f"if ! [ -f {path} ] || ! [ -r {path} ]; then echo 'no such readable file' >&2; exit 1; fi; "
+            f"sed -n {shlex.quote(line_range)} -- {path} | nl -ba -w6 -s {shlex.quote(chr(9))} -v {int(start)} "
+            f"| head -c {int(cap)}"
+        )
     res = await sandbox.exec(cmd)
     if res.timed_out:
         return _make_error("read_file timed out")
@@ -257,6 +285,8 @@ async def _grep(args: GrepArgs, sandbox: Sandbox) -> Dict[str, Any]:
         flags.append("--ignore-case")
     if args.max_count:
         flags.append(f"--max-count={int(args.max_count)}")
+    if args.include:
+        flags.append(f"--glob={args.include}")
     target = sandbox.codebase_path
     if args.path:
         resolved = _resolve_under_codebase(args.path, sandbox.codebase_path)
@@ -403,5 +433,8 @@ async def dispatch_tool(name: str, raw_arguments: Dict[str, Any], sandbox: Sandb
 
     try:
         return await _DISPATCH[name](parsed, sandbox)
+    except SandboxInfraError:
+        # The sandbox itself failed: abort the rollout rather than show the model an environment error.
+        raise
     except Exception as e:
         return _make_error(f"{name} raised {type(e).__name__}: {e}")

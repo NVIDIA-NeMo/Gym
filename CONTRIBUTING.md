@@ -184,7 +184,7 @@ If DCO checks fail after you have already pushed, see the [Development Setup Gui
 
 - Declare each new import in the narrowest appropriate dependency file. Keep
   environment-, agent-, and model-specific packages in that component's
-  `pyproject.toml` or `requirements.txt`; add a root dependency only when shared
+  `pyproject.toml` (with its `uv.lock`); add a root dependency only when shared
   Gym runtime code requires it.
 - Root dependencies in `pyproject.toml` must record why they are needed, when
   they were updated, and their license. Do not introduce a license incompatible
