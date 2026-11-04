@@ -21,7 +21,6 @@ import logging
 import os
 import signal
 import site
-import stat
 import subprocess
 import sys
 import sysconfig
@@ -753,7 +752,6 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     This is not tracking acceptance. Unknown health exports a known=0 signal, never a healthy rate.
     Scientific aggregate entries and scores remain unchanged; only the reserved run metadata is replaced.
     """
-    import tempfile
 
     from nemo_gym.artifacts.exporters.base import _artifact_version
     from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
@@ -772,6 +770,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial_population,
         trial_verdict,
     )
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file
 
     artifacts = RunArtifacts(output)
     version = _artifact_version(artifacts)
@@ -889,24 +888,9 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     flatten_aggregate_metrics(aggregate, source_artifacts=health_version)
 
     def atomic_json(path, value):
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
-        ) as stream:
-            temporary = Path(stream.name)
-            json.dump(value, stream, indent=2)
-            stream.write("\n")
-        try:
-            # NamedTemporaryFile creates the file 0600; keep the replaced file's mode, or the default for a new one.
-            try:
-                mode = stat.S_IMODE(path.stat().st_mode)
-            except FileNotFoundError:
-                umask = os.umask(0)
-                os.umask(umask)
-                mode = 0o666 & ~umask
-            os.chmod(temporary, mode)
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        # Exclusive creation under the caller's umask; a rewrite keeps the file's existing mode.
+        with atomic_output_file(path) as stream:
+            stream.write((json.dumps(value, indent=2) + "\n").encode("utf-8"))
 
     atomic_json(artifacts.aggregate_metrics_json_fpath, aggregate)
     if (
