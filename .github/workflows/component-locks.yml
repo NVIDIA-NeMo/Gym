@@ -1,6 +1,7 @@
 name: Component locks
 
 on:
+  workflow_call:
   pull_request:
     paths:
       - '**/pyproject.toml'
@@ -8,8 +9,6 @@ on:
       - '**/setup.py'
       - 'scripts/component*'
       - '.github/workflows/component-locks.yml'
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

@@ -3495,7 +3495,7 @@ class TestFailureGroupsAreNamedByRetry:
 
     @pytest.mark.parametrize("command", ["run", "aggregate"])
     def test_the_cli_flag_names_the_not_final_group(self, command: str, monkeypatch: pytest.MonkeyPatch) -> None:
-        from tests.unit_tests.test_cli_main import _dispatch_for
+        from tests.unit_tests.cli.test_cli_main import _dispatch_for
 
         _, overrides = _dispatch_for(monkeypatch, ["eval", command, "--health-max-not-final-failure-fraction", "0.05"])
         assert overrides == ["+health_check_max_not_final_failure_fraction=0.05"]
