@@ -30,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DIRECTORY = Path(__file__).resolve().parent
 DATA = DIRECTORY / "data" / "benchmark.jsonl"
 VERSION = "1.0.0"
-REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"
-PERSONAS_SHA256 = "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"
+REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
+PERSONAS_SHA256 = "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"  # pragma: allowlist secret
 REQUIREMENTS = ROOT / "environments/nemo_user_sim/requirements.txt"
 # Other spellings that also count as the expected model, keyed by its casefolded name: the
 # transliterations UserSim's vocabulary lists for Nemotron. Other models default to none.
