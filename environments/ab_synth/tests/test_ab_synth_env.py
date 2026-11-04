@@ -6,6 +6,7 @@ import copy
 import json
 import tempfile
 import unittest
+import unittest.mock
 
 from automationbench.schema.world import WorldState
 from verifiers.legacy.types import AssistantMessage
@@ -52,6 +53,14 @@ PROMOTE = {"method": "PATCH", "url": CONTACTS + "101", "body": {"properties": {"
 def new_clock():
     world = WorldState(**copy.deepcopy(INITIAL_STATE))
     return env.Clock(world, copy.deepcopy(INFO["events"]), INFO["period_end"])
+
+
+class VisibleTextTest(unittest.TestCase):
+    def test_reasoning_is_dropped_closed_open_or_unclosed(self):
+        self.assertEqual(env._text("<think>private</think>Visible question?"), "Visible question?")
+        self.assertEqual(env._text("private</think>Visible question?"), "Visible question?")
+        self.assertEqual(env._text("Visible question?<think>private notes, never closed"), "Visible question?")
+        self.assertEqual(env._text("Plain speech stays."), "Plain speech stays.")
 
 
 class NamesTest(unittest.TestCase):
@@ -101,6 +110,22 @@ class ClockTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no record '999' in hubspot.contacts"):
             clock.wait("2026-03-04T09:00:00")
+
+    def test_record_added_to_an_empty_collection_is_typed_and_takes_later_events(self):
+        events = [
+            {"at": "2026-03-03T08:00:00", "patch": {"app": "hubspot", "collection": "contacts", "add": {"id": "202"}}},
+            {
+                "at": "2026-03-03T09:00:00",
+                "patch": {"app": "hubspot", "collection": "contacts", "id": "202", "set": {"lifecyclestage": "lead"}},
+            },
+        ]
+        world = WorldState(**{**copy.deepcopy(INITIAL_STATE), "hubspot": {"contacts": []}})
+        clock = env.Clock(world, events, INFO["period_end"])
+
+        clock.wait("2026-03-04T09:00:00")
+        added = clock.world.hubspot.contacts[0]
+        self.assertEqual(type(added).__name__, "HubSpotContact")
+        self.assertEqual(added.lifecyclestage, "lead")
 
     def test_writes_are_logged_at_simulated_time_and_failed_writes_are_not(self):
         clock = new_clock()
@@ -251,6 +276,55 @@ class RequesterTest(unittest.TestCase):
         self.assertEqual(state["requester_tool_calls"], 1)
         self.assertEqual(state["world"].hubspot.contacts[0].lifecyclestage, "customer")
         self.assertEqual(asyncio.run(env.reward(state)), 1.0)
+
+    def test_requester_tool_budget_counts_calls_not_responses(self):
+        vf_env, state = load({**SINGLE_DAY, "requester_services": ["hubspot"]}, max_requester_tool_calls=1)
+        promote = json.dumps({"method": "PATCH", "url": CONTACTS + "101", "body": PROMOTE["body"]})
+        other = json.dumps({"method": "PATCH", "url": CONTACTS + "1010", "body": PROMOTE["body"]})
+        calls = [
+            {"id": "c1", "function": {"name": "api_fetch", "arguments": promote}},
+            {"id": "c2", "function": {"name": "api_fetch", "arguments": other}},
+        ]
+        replies = iter([{"content": "", "tool_calls": calls}, {"content": "Done."}])
+        choices = []
+
+        async def chat(messages, **body):
+            choices.append(body["tool_choice"])
+            return next(replies)
+
+        vf_env._chat = chat
+        end_turn(state, "Please update the contacts in your HubSpot.")
+        asyncio.run(vf_env.no_tools_called(state))
+        self.assertEqual(state["requester_tool_calls"], 1)
+        self.assertEqual(state["world"].hubspot.contacts[1].lifecyclestage, "lead")
+        self.assertEqual(choices, ["auto", "none"])
+
+    def test_a_requester_that_never_answers_fails_after_its_tries(self):
+        vf_env, state = load(
+            {**SINGLE_DAY, "user_card": "notes"},
+            requester_base_url="http://127.0.0.1:9/v1",
+            requester_model="m",
+            requester_max_tries=2,
+            requester_timeout_s=0.2,
+        )
+
+        async def never_answers(*args, **kwargs):
+            await asyncio.Event().wait()  # a stalled connection: the request never completes
+
+        real_sleep = asyncio.sleep
+
+        async def no_backoff(seconds):
+            await real_sleep(0)
+
+        with unittest.mock.patch("nemo_gym.client.request", never_answers):
+            with unittest.mock.patch.object(env.asyncio, "sleep", no_backoff):
+                with self.assertRaisesRegex(env.RequesterUnavailable, "TimeoutError"):
+                    asyncio.run(vf_env._chat([{"role": "user", "content": "hi"}]))
+
+    def test_requester_timeout_must_be_positive_and_finite(self):
+        for bad in (0, -1, float("inf")):
+            with self.assertRaises(ValueError):
+                load(SINGLE_DAY, requester_timeout_s=bad)
 
 
 if __name__ == "__main__":

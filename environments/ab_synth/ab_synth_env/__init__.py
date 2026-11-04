@@ -30,7 +30,9 @@ come from the requester model.
 import asyncio
 import copy
 import json
+import math
 import re
+import typing
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
@@ -42,7 +44,7 @@ from automationbench.tools.api.fetch import api_fetch as upstream_api_fetch
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DAY_ASSERTIONS = {"acted_on_day", "not_acted"}
 OUT_OF_SCOPE = re.compile(r'"code": 401, "message": "No (\w+) account is connected')
-THINK = re.compile(r"<think>.*?</think>", re.S)
+THINK = re.compile(r"<think>.*?(</think>|\Z)", re.S)  # an unclosed block runs to the end of the message
 REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
 
 # Instructions to the requester model only. The policy sees the requester's replies, never this text.
@@ -106,10 +108,13 @@ def _get(msg, key):
 
 def apply_patch(world: WorldState, patch: dict) -> None:
     """Apply one dated event: set fields on a record (`app`, `collection`, `id`, `set`) or add one (`add`)."""
-    collection = getattr(getattr(world, patch["app"]), patch["collection"])
+    app = getattr(world, patch["app"])
+    collection = getattr(app, patch["collection"])
     if "add" in patch:
-        model = type(collection[0]) if collection else None
-        collection.append(model(**patch["add"]) if model else patch["add"])
+        # The record type comes from the collection's declared schema (list[Contact] -> Contact), so a record added
+        # to an empty collection is the same typed object as one loaded with the world.
+        (model,) = typing.get_args(type(app).model_fields[patch["collection"]].annotation)
+        collection.append(model.model_validate(patch["add"]))
         return
     record = next((r for r in collection if str(r.id) == str(patch["id"])), None)
     if record is None:
@@ -300,6 +305,7 @@ def load_environment(
     max_user_turns: int = 3,
     max_requester_tool_calls: int = 8,
     requester_max_tries: int = 4,
+    requester_timeout_s: float = 300.0,
     unavailable_call_break: bool = False,
     **kwargs,
 ):
@@ -307,8 +313,12 @@ def load_environment(
 
     `requester_base_url` and `requester_model` name the OpenAI-compatible chat endpoint that plays the requester on
     multi-turn rows (`user_card` or `requester_services`). Rows without those keys never call it. `requester_body` is
-    merged into every requester request (for example `{"chat_template_kwargs": {"thinking": false}}`).
+    merged into every requester request (for example `{"chat_template_kwargs": {"thinking": false}}`). Each requester
+    try ends after `requester_timeout_s`; after `requester_max_tries` failed tries the episode ends with
+    `requester_failed` set.
     """
+    if not (0 < requester_timeout_s < math.inf):
+        raise ValueError(f"requester_timeout_s must be positive and finite, got {requester_timeout_s!r}")
     import verifiers as vf
     from automationbench_env import AutomationBenchEnv
     from datasets import Dataset
@@ -402,22 +412,28 @@ def load_environment(
             return msgs
 
         async def _chat(self, messages: list[dict], **body) -> dict:
-            """One requester call through Gym's shared aiohttp client, retried, raising RequesterUnavailable after the
-            last try. A reply cut at max_tokens or with neither text nor tool calls counts as a failed try."""
-            from nemo_gym.client.http_client import request
+            """One requester call through Gym's shared aiohttp client, raising RequesterUnavailable after the last try.
+            This loop owns the retries: each try (request and body read) ends after `requester_timeout_s`, so a refused
+            or stalled requester cannot hang the rollout. A reply cut at max_tokens or with neither text nor tool calls
+            counts as a failed try."""
+            from nemo_gym.client import request
 
             if not (requester_base_url and requester_model):
                 raise RequesterUnavailable("requester_base_url and requester_model are not set")
             url = requester_base_url.rstrip("/") + "/chat/completions"
+            payload = {"model": requester_model, "messages": messages, **(requester_body or {}), **body}
+
+            async def attempt_once() -> dict:
+                response = await request("POST", url, json=payload)
+                response.raise_for_status()
+                return (await response.json())["choices"][0]
+
             error = None
             for attempt in range(requester_max_tries):
                 if attempt:
                     await asyncio.sleep(min(60, 5 * 3**attempt))
                 try:
-                    payload = {"model": requester_model, "messages": messages, **(requester_body or {}), **body}
-                    response = await request("POST", url, json=payload)
-                    response.raise_for_status()
-                    choice = (await response.json())["choices"][0]
+                    choice = await asyncio.wait_for(attempt_once(), requester_timeout_s)
                     message = choice["message"]
                     if choice.get("finish_reason") != "length" and (
                         _text(message.get("content")) or message.get("tool_calls")
@@ -447,8 +463,10 @@ def load_environment(
                 records=own_records(world, services),
             )
             tools = [t for t in self._all_oai_tools if t["function"]["name"] in ("api_search", "api_fetch")]
-            for n in range(max_requester_tool_calls + 1):
-                choice = "auto" if n < max_requester_tool_calls else "none"
+            # The budget counts tool calls, not model responses: one response may carry several calls.
+            remaining = max_requester_tool_calls
+            for _ in range(max_requester_tool_calls + 1):
+                choice = "auto" if remaining > 0 else "none"
                 message = await self._chat(msgs, temperature=0.7, max_tokens=8192, tools=tools, tool_choice=choice)
                 if not message.get("tool_calls"):
                     return _text(message.get("content"))
@@ -457,11 +475,15 @@ def load_environment(
                 )
                 for call in message["tool_calls"]:
                     fn = call["function"]
-                    result = requester_tool(world, services, fn["name"], fn.get("arguments"))
+                    if remaining > 0:
+                        result = requester_tool(world, services, fn["name"], fn.get("arguments"))
+                        remaining -= 1
+                        state["requester_tool_calls"] = state.get("requester_tool_calls", 0) + 1
+                    else:
+                        result = json.dumps({"error": "requester tool-call limit reached; reply without tools"})
                     msgs.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result[:REQUESTER_RESULT_CHARS]}
                     )
-                    state["requester_tool_calls"] = state.get("requester_tool_calls", 0) + 1
             return ""
 
     def wait(until: str, clock: Clock) -> str:

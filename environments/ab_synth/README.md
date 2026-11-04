@@ -36,15 +36,10 @@ When the agent ends a turn without tool calls, a requester model answers as the 
 
 The requester is any OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`, extra request fields in
 `requester_body`), called through Gym's HTTP client. It sees only the visible conversation, never reasoning or tool
-traffic. A requester that still fails after `requester_max_tries` ends the episode and sets `requester_failed`, so a
-training run can mask those rollouts:
-
-```yaml
-mask_sample_rules:
-  - name: requester_failed
-    field: requester_failed
-    equals: 1
-```
+traffic. Each try ends after `requester_timeout_s` (default 300). A requester that still fails after
+`requester_max_tries` ends the episode and sets the `requester_failed` metric. The agent config in `config.yaml` lists
+it in `mask_sample_metrics`, so `verifiers_agent` returns that rollout with `mask_sample: true`
+(`failure_kind: verifiers_agent:requester_failed`) and the reward is not counted as a measurement.
 
 ## Reward and metrics
 
@@ -70,7 +65,22 @@ gym env start --config environments/ab_synth/config.yaml --model-type vllm_model
 ```
 
 Set `requester_base_url` and `requester_model` in `vf_env_args` for multi-turn rows. No dataset is shipped. Put the rows
-at `data/train.jsonl`.
+at `data/train.jsonl`, one JSON object per line, for example a single-day row:
+
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "Mark contact 101 in HubSpot as a customer."}]},
+ "info": {"initial_state": {"hubspot": {"contacts": [{"id": "101", "email": "a@example.com"}]}},
+          "assertions": [{"type": "hubspot_contact_has_property", "contact_id": "101", "property": "lifecyclestage",
+                          "value": "customer"}]},
+ "task_idx": 0, "agent_ref": {"name": "ab_synth"}}
+```
+
+With the servers up, collect rollouts:
+
+```bash
+gym eval run --no-serve --config environments/ab_synth/config.yaml --model-type vllm_model \
+    --agent ab_synth --input environments/ab_synth/data/train.jsonl --output results/ab_synth.jsonl
+```
 
 ## Tests
 
