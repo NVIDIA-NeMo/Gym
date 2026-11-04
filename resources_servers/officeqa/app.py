@@ -115,11 +115,12 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: object, /) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("OfficeQA process-local sandboxes require num_workers=1")
         self._sessions: dict[str, _DocumentSession] = {}
         self._locks = ResourcesSessionLocks()
         self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        return "OfficeQA document sandboxes live in the server's memory"
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

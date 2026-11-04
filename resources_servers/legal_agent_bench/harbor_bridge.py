@@ -20,6 +20,12 @@ class LegalAgentBenchHarborBridge(HarborAgent):
 
     ray_enabled = True
 
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        return (
+            "this entrypoint lives outside the harbor_agent directory, "
+            "so uvicorn workers cannot import it by the module path Gym gives them"
+        )
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/aggregate_metrics")(self.aggregate_metrics)

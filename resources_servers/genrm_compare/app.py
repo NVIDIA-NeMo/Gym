@@ -61,6 +61,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, is_judge_failure
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
@@ -286,14 +287,6 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     genrm_parse_retries: int = 3
     genrm_parse_retry_sleep_s: float = 0.2
 
-    @model_validator(mode="after")
-    def _validate_cohort_workers(self):
-        if (self.comparison_mode == "fixed_baseline" or self.num_rollouts_per_prompt > 1) and (
-            self.num_workers or 1
-        ) > 1:
-            raise ValueError("GenRM cohort verification requires one HTTP worker because group state is process-local")
-        return self
-
 
 class GenRMCompareVerifyRequest(BaseVerifyRequest):
     """Verify request with optional principle for cohort-based GenRM comparison."""
@@ -427,6 +420,15 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     _cohort_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _closed: bool = PrivateAttr(default=False)
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        if self.config.comparison_mode == "rollout_cohort" and self.config.num_rollouts_per_prompt <= 1:
+            return None
+        return (
+            "cohort verification (comparison_mode=fixed_baseline or num_rollouts_per_prompt > 1) collects "
+            "the rollouts of a prompt in this process's memory, keyed by the request body, "
+            "so a cohort split across workers never completes"
+        )
 
     def _own_task(self, coro, *, name: str) -> asyncio.Task:
         task = asyncio.create_task(coro, name=name, context=Context())
@@ -1731,3 +1733,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     GenRMCompareResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GenRMCompareResourcesServer.run_webserver()  # noqa: F401

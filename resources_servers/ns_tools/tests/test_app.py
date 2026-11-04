@@ -49,6 +49,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     check_resources_session_contract,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 
 
 class TestApp:
@@ -61,6 +62,24 @@ class TestApp:
             name="ns_tools",
         )
         NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize("uses_sidecar", [True, False])
+    def test_several_workers_are_refused_only_with_the_http_python_tool(self, uses_sidecar: bool) -> None:
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            num_workers=2,
+            nemo_skills_tools=["nemo_skills.mcp.servers.python_tool::PythonTool"],
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        with patch.object(NSToolsResourcesServer, "_tool_uses_python_tool_sidecar", return_value=uses_sidecar):
+            if uses_sidecar:
+                with pytest.raises(ValueError, match="needs num_workers=1: the HTTP PythonTool starts a sidecar"):
+                    refuse_unsupported_num_workers(server)
+            else:
+                refuse_unsupported_num_workers(server)
 
     def test_config_with_verifiers(self) -> None:
         """Test configuration with verifiers."""
@@ -599,6 +618,34 @@ class FakePythonToolManager:
 
     async def shutdown(self) -> None:
         pass
+
+
+async def test_tools_load_in_the_lifespan_when_the_server_is_built_inside_a_running_loop() -> None:
+    # A uvicorn worker imports the entrypoint, and so builds the server, from inside its running event loop.
+    class ListingManager:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def list_all_tools(self) -> list[Dict[str, Any]]:
+            return [{"name": "stateful_python_code_exec"}]
+
+        async def shutdown(self) -> None:
+            pass
+
+    config = NSToolsConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="ns_tools",
+        nemo_skills_tools=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+    )
+    server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    with patch("app.NSToolsToolManager", ListingManager):
+        app = server.setup_webserver()
+    assert server._tool_name_map == {}
+
+    async with app.router.lifespan_context(app):
+        assert server._tool_name_map == {"stateful_python_code_exec": "stateful_python_code_exec"}
 
 
 def _session_server(tool_manager: FakePythonToolManager | ToolManager) -> tuple[NSToolsResourcesServer, FastAPI]:

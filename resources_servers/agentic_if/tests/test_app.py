@@ -851,8 +851,10 @@ async def test_a_session_less_verify_only_reads_its_own_persisted_episode(world,
 
 
 def test_a_session_server_refuses_more_than_one_worker(tmp_path):
-    with pytest.raises(ValueError, match="num_workers"):
-        make_server(tmp_path, Backends(), num_workers=2)
+    from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+
+    with pytest.raises(ValueError, match="needs num_workers=1: agentic IF sessions hold sandbox connections"):
+        refuse_unsupported_num_workers(make_server(tmp_path, Backends(), num_workers=2))
 
 
 def test_the_server_declares_stateless_reverification_and_no_ray():
