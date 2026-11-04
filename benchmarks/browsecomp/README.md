@@ -45,7 +45,7 @@ config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
 benchmarks/browsecomp/config_single_agent_turn.yaml"
 ```
 
-Tasks, prompts and correct-answer grading are unchanged. Compared with the previous host `/run` recipe, failure handling changes the scored denominator:
+Tasks, prompts and correct-answer grading are unchanged. The sandbox path adds a 3600-second activation cap by default (`sandbox_runner_timeout_seconds`); when `rollout_timeout_s` is unset, that cap also bounds the loop. Account for this limit when comparing with previous step-only runs. Compared with the previous host `/run` recipe, failure handling changes the scored denominator:
 
 | Case | Previous host `/run` recipe | Current sandbox session recipe |
 | --- | --- | --- |
