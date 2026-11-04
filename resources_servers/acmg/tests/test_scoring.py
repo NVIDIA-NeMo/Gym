@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from .. import official_reward
-from ..scoring import final_answer_text, metrics, score, summarize
+from ..scoring import composite_reward, final_answer_text, label_closeness, metrics, score, summarize
 
 
 UPSTREAM_SHA256 = "e2a80a9d3d0cc5051d73c9d6ea6245e4e2272ea5ef00cb6375a978b152666f1f"  # pragma: allowlist secret
@@ -36,6 +36,32 @@ def test_default_scalar_is_the_published_weighting() -> None:
     assert parts["criterion_f1"] == pytest.approx(2 / 3)
     assert parts["self_consistent"] == 1.0
     assert official_reward.scalar(parts) == pytest.approx(0.5 + 0.3 * 2 / 3 + 0.2)
+
+
+@pytest.mark.parametrize(
+    ("predicted", "reference", "expected"),
+    [
+        ("LP", REFERENCE, 1.0),
+        ("P", REFERENCE, 0.5),
+        ("VUS", REFERENCE, 0.5),
+        ("B", REFERENCE, 0.0),
+        (None, REFERENCE, 0.0),
+        ("P", {**REFERENCE, "label_scoring": "any_of", "accepted_labels": ["LP", "P"]}, 1.0),
+        ("VUS", {**REFERENCE, "label_scoring": "any_of", "accepted_labels": ["LP", "P"]}, 0.5),
+        ("B", {**REFERENCE, "label_scoring": "excluded", "accepted_labels": []}, None),
+    ],
+)
+def test_label_closeness_steps_down_the_ordered_scale(predicted, reference, expected) -> None:
+    assert label_closeness(predicted, reference) == expected
+
+
+def test_composite_reward_is_gated_by_self_consistency() -> None:
+    parts = {"answered": 1.0, "self_consistent": 1.0, "evidence_score": 0.75}
+    assert composite_reward(parts, 1.0) == pytest.approx(0.875)
+    assert composite_reward(parts, 0.5) == pytest.approx(0.625)
+    assert composite_reward(parts, None) == 0.75
+    assert composite_reward({**parts, "self_consistent": 0.0}, 1.0) == 0.0
+    assert composite_reward({**parts, "answered": 0.0, "self_consistent": 0.0}, 1.0) == 0.0
 
 
 @pytest.mark.parametrize(
@@ -84,6 +110,12 @@ def test_summarize_pools_criterion_counts_rather_than_averaging() -> None:
     assert summary["criterion_recall"] == pytest.approx(3 / 4)
     assert summary["exact_criteria"] == 0.5
     assert summary["label_accuracy"] == 1.0
+    assert summary["label_closeness"] == 1.0
+    # Noisy: 12 points combine to P, not the stated LP, so the composite is gated to 0 while the scalar keeps the
+    # label and a 1/3 F1 (precision 1/4, recall 1/2).
+    assert summary["gate"] == 0.5
+    assert summary["reward"] == pytest.approx(0.5)
+    assert summary["official_reward"] == pytest.approx((1.0 + (0.5 + 0.3 / 3)) / 2)
     assert summary["responses"] == 2
     assert summarize([]) == {}
 

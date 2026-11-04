@@ -12,6 +12,12 @@ THINK_BLOCK = re.compile(r"<(think|thinking)\b[^>]*>.*?(?:</\1\s*>|$)", re.IGNOR
 THINK_END = re.compile(r"</(?:think|thinking)\s*>", re.IGNORECASE)
 ARMS = ("with_rules", "without_rules")
 COMPONENT_MEANS = ("exact_criteria", "self_consistent", "evidence_score")
+# The composite reward of the team's grading recipe (sdg-pipelines `recipes/acmg-grading/composite.py`): the answer
+# must follow from its own criteria to score at all, a label one step off on the ordered scale earns half credit, and
+# the criteria half is the scorer's evidence-point closeness.
+LABEL_ORDER = {"B": 0, "LB": 1, "VUS": 2, "LP": 3, "P": 4}
+ADJACENT_CREDIT = 0.5
+LABEL_SHARE = 0.5
 
 
 def final_answer_text(text: str) -> str:
@@ -21,8 +27,35 @@ def final_answer_text(text: str) -> str:
     return THINK_END.split(text)[-1].strip()
 
 
+def label_closeness(predicted: str | None, reference: dict[str, Any]) -> float | None:
+    """1 for an accepted label, 0.5 one step away from the nearest accepted label on B-LB-VUS-LP-P, else 0.
+
+    None when the reference's label is not scored (`label_scoring: excluded`).
+    """
+    if reference.get("label_scoring", "scored") == "excluded":
+        return None
+    if predicted not in LABEL_ORDER:
+        return 0.0
+    accepted = [
+        label for label in (reference.get("accepted_labels") or [reference.get("label")]) if label in LABEL_ORDER
+    ]
+    gap = min(abs(LABEL_ORDER[predicted] - LABEL_ORDER[label]) for label in accepted) if accepted else None
+    return 1.0 if gap == 0 else ADJACENT_CREDIT if gap == 1 else 0.0
+
+
+def composite_reward(components: dict[str, Any], closeness: float | None) -> float:
+    """`gate x (0.5 x label closeness + 0.5 x evidence score)`, or `gate x evidence score` when the label is not scored.
+
+    The gate is 1 when a classification was given and follows from the response's own criteria, else 0.
+    """
+    if not (components["answered"] and components["self_consistent"]):
+        return 0.0
+    evidence = components["evidence_score"]
+    return evidence if closeness is None else LABEL_SHARE * closeness + (1 - LABEL_SHARE) * evidence
+
+
 def score(text: str, reference: dict[str, Any], arm: str) -> dict[str, Any]:
-    """The upstream components and scalar, plus the pooled counts behind the published criteria metrics."""
+    """The composite reward, the upstream components and scalar, and the pooled counts behind the published metrics."""
     components = official_reward.reward(text, reference, arm)
     label, criteria = official_reward.parse_answer(text)
     returned = (criteria or {}) if label is not None else {}
@@ -36,8 +69,12 @@ def score(text: str, reference: dict[str, Any], arm: str) -> dict[str, Any]:
             if arm == "with_rules" and combining
             else official_reward.standard_classes(returned)
         )
+    closeness = label_closeness(label, reference)
     return {
-        "reward": official_reward.scalar(components),
+        "reward": composite_reward(components, closeness),
+        "official_reward": official_reward.scalar(components),
+        "gate": float(bool(components["answered"] and components["self_consistent"])),
+        "label_closeness": closeness,
         "components": components,
         "predicted_label": label,
         "predicted_criteria": criteria,
@@ -52,15 +89,17 @@ def score(text: str, reference: dict[str, Any], arm: str) -> dict[str, Any]:
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """One arm's metrics as the dataset's baseline report defines them.
 
-    Label accuracy is over the cases whose label is scored. Criterion precision, recall and F1 pool the
-    (code, strength) counts over responses rather than averaging per-response values. Self-consistency is
-    over the responses whose criteria could be combined at all. A missing classification is an output failure.
+    Label accuracy and label closeness are over the cases whose label is scored. Criterion precision, recall and
+    F1 pool the (code, strength) counts over responses rather than averaging per-response values. Self-consistency
+    is over the responses whose criteria could be combined at all. A missing classification is an output failure.
+    `reward` is the composite and `official_reward` the dataset's default scalar.
     """
     n = len(rows)
     if not n:
         return {}
     components = [row["components"] for row in rows]
     scorable = [c["label"] for c in components if c["label"] is not None]
+    closeness = [row["label_closeness"] for row in rows if row["label_closeness"] is not None]
     returned = sum(row["returned_n"] for row in rows)
     good = sum(row["returned_acceptable"] for row in rows)
     required = sum(row["required_n"] for row in rows)
@@ -70,9 +109,12 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     recall = hit / required if required else (1.0 if not returned else precision)
     summary: dict[str, Any] = {
         "responses": n,
-        "official_reward": sum(row["reward"] for row in rows) / n,
+        "reward": sum(row["reward"] for row in rows) / n,
+        "official_reward": sum(row["official_reward"] for row in rows) / n,
+        "gate": sum(row["gate"] for row in rows) / n,
         "label_scorable": len(scorable),
         "label_accuracy": sum(scorable) / len(scorable) if scorable else None,
+        "label_closeness": sum(closeness) / len(closeness) if closeness else None,
         "criterion_precision": precision,
         "criterion_recall": recall,
         "criterion_f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,

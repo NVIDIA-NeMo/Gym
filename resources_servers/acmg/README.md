@@ -14,8 +14,16 @@ vendored file.
 is ever read from reasoning), parses the `CRITERIA:` and `CLASSIFICATION:` lines tolerantly (markdown, `PM2_Supporting`,
 `PM2 (Supporting)`, full label names or a JSON answer), and returns:
 
-- `reward`: the dataset's default scalar, `0.5 x label + 0.3 x criterion F1 + 0.2 x self-consistency`, 0.0 without a
-  classification; when `label_scoring` is `excluded` the label drops out and the other weights are renormalised;
+- `reward`: the team's composite, `gate x (0.5 x label_closeness + 0.5 x evidence_score)`, from the grading recipe
+  in sdg-pipelines (`recipes/acmg-grading/composite.py`). `gate` is 1 when a classification was given and follows
+  from the response's own criteria (the scorer's `self_consistent`), else 0, so an unanswered or inconsistent
+  response scores 0. `label_closeness` is 1 for an accepted label, 0.5 one step from the nearest accepted label on
+  B-LB-VUS-LP-P, else 0. `evidence_score` is the scorer's `max(0, 1 - evidence_distance / 8)`: a missing required
+  criterion costs its points, an unaccepted one twice its points, a matched one its strength gap. When
+  `label_scoring` is `excluded` only the evidence half is used: `gate x evidence_score`;
+- `official_reward`: the dataset's default scalar, `0.5 x label + 0.3 x criterion F1 + 0.2 x self-consistency`, 0.0
+  without a classification; when the label is excluded it drops out and the other weights are renormalised;
+- `gate`, `label_closeness` (None when the label is excluded);
 - `components`: `answered`, `label` (None when excluded), `criterion_precision`, `criterion_recall`, `criterion_f1`,
   `exact_criteria`, `self_consistent`, `evidence_distance`, `evidence_score`;
 - `predicted_label`, `predicted_criteria`, and the pooled counts (`returned_n`, `returned_acceptable`, `required_n`,
