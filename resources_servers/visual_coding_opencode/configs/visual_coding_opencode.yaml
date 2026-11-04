@@ -15,7 +15,7 @@ visual_coding_opencode:
       judge_model_server:
         type: responses_api_models
         name: visual_coding_opencode_judge_model
-      judge_model: ${oc.select:visual_coding_opencode_judge_model_name,us/azure/openai/gpt-4o-mini}
+      judge_model: ${oc.select:visual_coding_opencode_judge_model_name,gpt-4o-mini}
 
 visual_coding_opencode_agent:
   responses_api_agents:
@@ -32,7 +32,7 @@ visual_coding_opencode_agent:
       command: opencode
       opencode_version: 1.17.11
       thinking: false
-      # The only hard stop, as in Python_call_gen: OpenCode itself has no turn cap.
+      # The only hard stop: OpenCode itself has no turn cap.
       timeout: 1800
       context_window: 131072
       max_output_tokens: 32768
@@ -66,9 +66,19 @@ visual_coding_opencode_judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
-      openai_base_url: ${oc.select:visual_coding_opencode_judge_base_url,https://inference-api.nvidia.com/v1}
+      # Any OpenAI-compatible endpoint: set visual_coding_opencode_judge_base_url and
+      # visual_coding_opencode_judge_model_name to use another judge.
+      openai_base_url: ${oc.select:visual_coding_opencode_judge_base_url,https://api.openai.com/v1}
       # Default empty: `gym eval prepare` loads this config without the run's key override.
       openai_api_key: ${oc.env:OPENAI_API_KEY,""}
-      openai_model: ${oc.select:visual_coding_opencode_judge_model_name,us/azure/openai/gpt-4o-mini}
+      openai_model: ${oc.select:visual_coding_opencode_judge_model_name,gpt-4o-mini}
       openai_default_headers: {}
       max_concurrent_requests: 32
+
+visual_coding_opencode_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: visual_coding_opencode_agent

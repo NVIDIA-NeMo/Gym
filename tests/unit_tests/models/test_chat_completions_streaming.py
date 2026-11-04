@@ -163,9 +163,7 @@ class TestSanitizeStreamingChatBody:
                     "role": "assistant",
                     "content": "",
                     "reasoning": "look at the image first",
-                    "tool_calls": [
-                        {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
-                    ],
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
                 },
                 {"role": "tool", "tool_call_id": "c1", "content": "ok"},
             ],

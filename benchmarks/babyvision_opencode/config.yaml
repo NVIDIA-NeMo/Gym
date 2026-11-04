@@ -1,5 +1,5 @@
-# BabyVision (388 rows) under OpenCode with a Python shell, as Python_call_gen evaluates it:
-# the same prompt, opencode 1.17.11 tools (bash/read/glob/grep/write/edit/todowrite, `read`
+# BabyVision (388 rows) under OpenCode with a Python shell: a visual-reasoning instruction,
+# opencode 1.17.11 tools (bash/read/glob/grep/write/edit/todowrite, `read`
 # returns images), 1800 s per task and no turn cap, and a gpt-4o-mini correctness judge.
 # The environment is the generic visual_coding_opencode; this file only adds the data.
 # Data: prepare.py reads $LMUData/BabyVision.tsv (or $BABYVISION_TSV).

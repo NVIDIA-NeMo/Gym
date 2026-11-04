@@ -8,8 +8,9 @@ and `expected_answer` for the judge.
 
 Users of it:
 
-- `benchmarks/babyvision_opencode`: BabyVision (388 puzzles), graded the way Python_call_gen's
-  opencode harness grades it.
+- `benchmarks/babyvision_opencode`: BabyVision (388 puzzles) with a visual-reasoning instruction.
+- `benchmarks/babyvision_opencode_question_only`: the same puzzles with only the question, for
+  models trained on OpenCode's own system prompt.
 - RL training sets in the same row format (e.g. synthetic visual-tracking puzzles: mazes,
   metro maps, tangled lines).
 
@@ -28,8 +29,9 @@ Users of it:
 
 ## Scoring
 
-The reward is a GPT judge's verdict (`us/azure/openai/gpt-4o-mini` on inference-api,
-temperature 0). The judge sees the question text, the gold answer, string_match's extraction
+The reward is a GPT judge's verdict (`gpt-4o-mini` at temperature 0 by default; any
+OpenAI-compatible endpoint via `visual_coding_opencode_judge_base_url` and
+`visual_coding_opencode_judge_model_name`, with the key in `OPENAI_API_KEY`). The judge sees the question text, the gold answer, string_match's extraction
 (the last "answer:", else the last `\boxed{}`), and the last 4000 characters of the model's
 text. It cannot see the image. Only `"equivalent"` scores 1; `"different"`, `"unsure"`, a judge
 error and an empty response score 0. `string_match_reward` is kept as a diagnostic.
@@ -40,7 +42,8 @@ error and an empty response score 0. `string_match_reward` is kept as a diagnost
 LMUData=/path/to/LMUData python benchmarks/babyvision_opencode/prepare.py
 ```
 
-BabyVision is internal (VLMEvalKit TSV, no public download). Two copies are accepted:
+`prepare.py` reads BabyVision in VLMEvalKit's TSV format (`BabyVision.tsv`; set `LMUData` to its
+directory, or `BABYVISION_TSV` to the file). Two copies are accepted:
 
 - md5 `b3a93182…`
 - md5 `4216333e…`
