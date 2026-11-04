@@ -1,0 +1,18 @@
+---
+title: "Legal Agent Bench"
+description: "Run Harvey LAB with NeMo Gym and interpret its versioned results."
+position: 20
+---
+
+Legal Agent Bench uses `benchmarks/legal_agent_bench/config.yaml`. The default
+harness is Harbor. LAB uses Gym's general Harbor bridge with native `job`
+configuration, while existing `legal_agent_bench::<task_name>` task IDs remain
+valid. The collector supplies task and rollout indices; direct `/run` callers
+must supply those indices too.
+
+Policy calls pass through the selected Gym Model Server with rollout identity.
+Harbor owns verification, ATIF conversion, concurrency, and cleanup. An agent
+timeout remains a graded outcome under the shared Harbor bridge's rules.
+
+This migration retains the pinned 1,749-task dataset and existing single-judge
+scoring. Historical example artifacts describe that dataset and protocol.

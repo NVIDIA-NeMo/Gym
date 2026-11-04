@@ -11,8 +11,8 @@
 """Harbor entrypoint and result writer for Legal Agent Bench verification.
 
 Generated Harbor tasks place the adjacent ``lab_harbor`` verifier package in
-``/tests``. Repository imports use the adjacent package at the pinned source
-revision.
+``/tests``. Repository imports use the adjacent package with adaptations from the pinned
+source revision.
 """
 
 from __future__ import annotations
