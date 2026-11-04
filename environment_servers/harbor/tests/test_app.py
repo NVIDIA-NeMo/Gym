@@ -72,8 +72,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import NgFailureEvent, failure_kinds
-from nemo_gym.core.failure_transport import RequestFailureLog
+from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
