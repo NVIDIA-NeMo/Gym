@@ -349,6 +349,10 @@ Ordinary `gym eval reverify` reads the selected completed answers directly from 
 retries or judge settlement, and writes new scores into a separate output. A later failure or interrupted attempt
 hides an earlier success. The new output records `_ng_reverification_source_run_id` as provenance and supports
 `--resume`; it does not alter the source run's outcomes, reservations or retry budget.
+Cached scores and failure-budget entries bind to the source run, selected attempt, and a hash of the saved answer.
+Resume refuses changed or missing bindings before judging or appending, and asks for a fresh output path.
+Older re-scoring outputs without these bindings need a fresh output too; legacy JSONL cache behavior is unchanged.
+A grade-only settlement that retains the same attempt and answer leaves its separate cached re-score valid.
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
 same rollout file. Readers also accept older runs whose companions exist only beside the alias, when neither location

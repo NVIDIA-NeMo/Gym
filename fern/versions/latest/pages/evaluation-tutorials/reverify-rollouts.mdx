@@ -39,6 +39,12 @@ Write the new scores to a separate output; the source run and its recovery state
 record `_ng_reverification_source_run_id` as source provenance, without claiming ownership of the source history,
 and support `--resume` after partial re-scoring. No policy inference is repeated.
 
+Resume checks that every cached score and failure still belongs to the same source run, selected attempt, and
+saved answer. If an answer was replaced or is no longer selected, choose a fresh output; the existing output is
+preserved. Outputs from older versions without these answer bindings also require a fresh output for managed-source
+re-scoring. A source grade changing on the same attempt and answer does not invalidate its cached re-score.
+`--limit` reads selected answers on demand instead of loading all selected trajectories.
+
 Managed judge-only recovery uses `--judge-failed-only --settle-into-source`, as described in
 [evaluation resume](/main/evaluation/resume). It keeps the original attempt identity and admits each re-judgment
 against the saved failure budget before dispatch. Ordinary re-scoring does not settle results into the source run.

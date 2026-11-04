@@ -6,10 +6,12 @@
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import orjson
 import pytest
 
 import nemo_gym.eval.rollout_reverification as reverify
-from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
+from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, RolloutRecord, materialized_path_for, read_records
+from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.rollouts.test_rollout_store import prepared_run, snapshot  # noqa: F401
 
@@ -127,9 +129,15 @@ async def test_rescore_source_provenance_stays_out_of_verifier_request(tmp_path,
     client = install_fake_server_client(monkeypatch, AsyncMock(return_value=reply))
     monkeypatch.setattr(reverify, "setup_server_client", lambda: client)
     monkeypatch.setattr(reverify, "_build_agent_to_resources_server_mapping", lambda _: {"agent": "judge"})
-    row = {"agent_ref": {"name": "agent"}, "response": {}, "_ng_reverification_source_run_id": "source-run"}
+    row = {
+        "agent_ref": {"name": "agent"},
+        "response": {},
+        "_ng_reverification_source_run_id": "source-run",
+        "_ng_reverification_source_answer": {"run_id": "source-run"},
+    }
     await next(reverify._run_verification_payloads([row]))
     assert "_ng_reverification_source_run_id" not in client.post.call_args.kwargs["json"]
+    assert "_ng_reverification_source_answer" not in client.post.call_args.kwargs["json"]
 
 
 @pytest.mark.parametrize(
@@ -172,4 +180,168 @@ async def test_rescore_rejects_malformed_completion_and_can_resume(prepared_run,
         config.model_copy(update={"resume_from_cache": True})
     )
     assert len(result) == 2 and all(row["reward"] == 0.0 for row in result)
+    assert snapshot(output) == before
+
+
+def _save_two_answers(prepared_run):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first, second = store.pending()
+        store.record_dispatches([first, second])
+        # A masked infrastructure result can receive a new execution during normal collection resume.
+        store.record_outcome(
+            first
+            | {
+                "reward": 0.0,
+                "response": {"answer": "old"},
+                "mask_sample": True,
+                "failure_kind": "session_lost",
+            }
+        )
+        store.record_outcome(second | {"reward": 1.0, "response": {"answer": "other"}})
+    return output, prepare
+
+
+def _install_scoring_judge(monkeypatch, status="success"):
+    seen = []
+    monkeypatch.setattr(reverify, "_guard_reverify_mode", AsyncMock(return_value=None))
+    monkeypatch.setattr(reverify, "get_exporters", list)
+
+    async def judge(row):
+        seen.append(row["response"]["answer"])
+        result = {"response": row["response"], "reward": 0.0}
+        if status != "success":
+            result.update(_ng_failure_class="judge_failed", _ng_failure_terminal=status == "terminal")
+        return row, result
+
+    monkeypatch.setattr(reverify, "_run_verification_payloads", lambda rows, **_: [judge(row) for row in rows])
+    return seen
+
+
+@pytest.mark.parametrize("newest", ["success", "failure", "interrupted"])
+@pytest.mark.parametrize("cached_status", ["success", "terminal", "exhausted"])
+@pytest.mark.parametrize("alias", [False, True])
+async def test_rescore_resume_rejects_a_superseded_cached_answer(
+    prepared_run, monkeypatch, newest, cached_status, alias
+):
+    from nemo_gym.config.config_types import ConfigError
+
+    if cached_status == "exhausted":
+        monkeypatch.setattr(reverify, "_get_max_rollout_attempts", lambda: 1)
+    output, prepare = _save_two_answers(prepared_run)
+    destination = output.parent / "rescored" / "rollouts.jsonl"
+    _install_scoring_judge(monkeypatch, cached_status)
+    config = _config(output, destination, limit=1)
+    await reverify.RolloutReverificationHelper().run_from_config(config)
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        [retry] = store.pending()
+        store.record_dispatch(retry)
+        assert retry["_ng_attempt_index"] == 1
+        if newest == "success":
+            store.record_outcome(retry | {"reward": 1.0, "response": {"answer": "new"}})
+        elif newest == "failure":
+            store.record_outcome(retry | {"_ng_failure_class": "agent_run_error"})
+    source = output
+    if alias:
+        source = output.with_name("shortcut.jsonl")
+        source.symlink_to(output)
+    before = snapshot(output)
+    cached = snapshot(destination)
+    seen = _install_scoring_judge(monkeypatch)
+    resumed = config.model_copy(update={"rollouts_jsonl_fpath": str(source), "resume_from_cache": True, "limit": None})
+    with pytest.raises(ConfigError, match="fresh output path"):
+        await reverify.RolloutReverificationHelper().run_from_config(resumed)
+    assert seen == [] and snapshot(destination) == cached and snapshot(output) == before
+    fresh = await reverify.RolloutReverificationHelper().run_from_config(
+        _config(output, output.parent / "fresh" / "rollouts.jsonl")
+    )
+    assert {row["response"]["answer"] for row in fresh} == ({"new", "other"} if newest == "success" else {"other"})
+
+
+@pytest.mark.parametrize("alias", [False, True])
+async def test_rescore_partial_resume_reuses_zero_reward_without_rejudging(prepared_run, monkeypatch, alias):
+    output, _ = _save_two_answers(prepared_run)
+    destination = output.parent / "rescored" / "rollouts.jsonl"
+    seen = _install_scoring_judge(monkeypatch)
+    config = _config(output, destination, limit=1)
+    [first] = await reverify.RolloutReverificationHelper().run_from_config(config)
+    assert first["reward"] == 0.0 and seen == ["old"]
+    source = output
+    if alias:
+        source = output.with_name("shortcut.jsonl")
+        source.symlink_to(output)
+    before = snapshot(output)
+    seen.clear()
+    results = await reverify.RolloutReverificationHelper().run_from_config(
+        config.model_copy(update={"rollouts_jsonl_fpath": str(source), "resume_from_cache": True, "limit": None})
+    )
+    assert seen == ["other"] and len(results) == 2
+    assert list(read_records(destination))[0] == first
+    assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("change", ["missing_binding", "wrong_answer", "wrong_attempt", "wrong_run"])
+async def test_rescore_resume_refuses_unbound_or_foreign_cache(prepared_run, monkeypatch, change):
+    from nemo_gym.config.config_types import ConfigError
+
+    output, _ = _save_two_answers(prepared_run)
+    destination = output.parent / "rescored" / "rollouts.jsonl"
+    _install_scoring_judge(monkeypatch)
+    config = _config(output, destination, limit=1)
+    await reverify.RolloutReverificationHelper().run_from_config(config)
+    [cached] = read_records(destination)
+    if change == "missing_binding":
+        cached.pop("_ng_reverification_source_answer")
+    else:
+        key, value = {
+            "wrong_answer": ("answer_sha256", "0" * 64),
+            "wrong_attempt": ("attempt", 42),
+            "wrong_run": ("run_id", "another-run"),
+        }[change]
+        cached["_ng_reverification_source_answer"][key] = value
+    destination.write_bytes(orjson.dumps(cached) + b"\n")
+    before = snapshot(destination)
+    seen = _install_scoring_judge(monkeypatch)
+    with pytest.raises(ConfigError, match="fresh output path"):
+        await reverify.RolloutReverificationHelper().run_from_config(
+            config.model_copy(update={"resume_from_cache": True})
+        )
+    assert seen == [] and snapshot(destination) == before
+
+
+@pytest.mark.parametrize("limit", [1, None])
+async def test_rescore_decodes_only_requested_selected_answers(tmp_path, monkeypatch, limit):
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(6)]
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+
+    def prepare():
+        return rows, RunManifest.create(source, rows, {}, {"agent": {"responses_api_agents": {"impl": {}}}})
+
+    output = tmp_path / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row in store.pending():
+            store.record_dispatch(row)
+            store.record_outcome(
+                row | {"reward": 0.0, "response": {"answer": str(row["_ng_task_index"]), "padding": "X" * 262144}}
+            )
+    original_read = RolloutRecord._read
+    decoded = []
+
+    def counted_read(record, file):
+        result = original_read(record, file)
+        if record.path == output:
+            decoded.append(result["_ng_task_index"])
+        return result
+
+    monkeypatch.setattr(RolloutRecord, "_read", counted_read)
+    seen = _install_scoring_judge(monkeypatch)
+    before = snapshot(output)
+    results = await reverify.RolloutReverificationHelper().run_from_config(
+        _config(output, tmp_path / "rescored" / "rollouts.jsonl", limit=limit)
+    )
+    # The loop may fetch one extra record before checking its post-predicate limit.
+    assert decoded == ([0, 1] if limit == 1 else list(range(6)))
+    expected = ["0"] if limit == 1 else [str(i) for i in range(6)]
+    assert seen == expected and len(results) == len(expected)
     assert snapshot(output) == before

@@ -27,7 +27,7 @@ from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import DictConfig
@@ -107,6 +107,7 @@ from nemo_gym.utils.path_utils import (
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
 ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
 _SOURCE_RUN_ID_KEY = "_ng_reverification_source_run_id"
+_SOURCE_ANSWER_KEY = "_ng_reverification_source_answer"
 ATIF_NO_PERSIST_FAILURE_CLASS = "kill_shaped"
 _CONFIG_BOOL_ADAPTER = TypeAdapter(bool)
 
@@ -660,7 +661,7 @@ def _yield_inputs_and_rollouts_paired(
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     *,
-    selected_rollouts: Optional[List[Dict]] = None,
+    selected_rollouts: Optional[Iterable[Dict]] = None,
 ) -> "Iterator[InputRolloutPair]":
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
@@ -776,10 +777,74 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
     # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
     # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
-    for key in _IDENTITY_KEYS:
+    for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     return payload
+
+
+def _rescoring_source_answer(row: Dict, run_id: str) -> dict[str, str | int]:
+    """Bind a re-score to its saved answer, independently of changes to the source grade."""
+    return {
+        "run_id": run_id,
+        "rollout_id": logical_rollout_id(row),
+        "attempt": row.get(ATTEMPT_INDEX_KEY_NAME, 0),
+        "task_index": row[TASK_INDEX_KEY_NAME],
+        "rollout_index": row[ROLLOUT_INDEX_KEY_NAME],
+        "answer_sha256": hashlib.sha256(orjson.dumps(_rollout_response(row), option=orjson.OPT_SORT_KEYS)).hexdigest(),
+    }
+
+
+def _selected_rescoring_rows(store: RolloutStore) -> Iterator[Dict]:
+    """Read answers on demand so a bounded re-score does not materialize the whole run."""
+    for record in store.selected_records("success").values():
+        row = record.read()
+        yield row | {
+            _SOURCE_RUN_ID_KEY: store.manifest.run_id,
+            _SOURCE_ANSWER_KEY: _rescoring_source_answer(row, store.manifest.run_id),
+        }
+
+
+def _validate_rescoring_cache(store: RolloutStore, output_fpaths: OutputPaths) -> None:
+    """Refuse stale successes and failure-budget entries before cache filtering or any dispatch."""
+    selected = store.selected_records("success")
+    # Repeated cached failures share an answer: retain its small binding, never its trajectory.
+    bindings: dict[tuple[str, int], dict[str, str | int]] = {}
+    for path in (output_fpaths.output, output_fpaths.failures):
+        if not path.exists():
+            continue
+        with path.open("rb") as file:
+            for line_number, line in enumerate(file, 1):
+                if not line.strip():
+                    continue
+                message = (
+                    f"Cached re-scoring row in {path}:{line_number} is not bound to the currently selected "
+                    "source answer. Choose a fresh output path; saved artifacts were not changed."
+                )
+                try:
+                    cached = orjson.loads(line)
+                except orjson.JSONDecodeError as error:
+                    raise ConfigError(message) from error
+                binding = cached.get(_SOURCE_ANSWER_KEY) if isinstance(cached, dict) else None
+                if not isinstance(binding, dict):
+                    raise ConfigError(message)
+                identity, attempt = binding.get("rollout_id"), binding.get("attempt")
+                if not isinstance(identity, str) or type(attempt) is not int:
+                    raise ConfigError(message)
+                key = (identity, attempt)
+                record = selected.get(key)
+                if record is None:
+                    raise ConfigError(message)
+                if key not in bindings:
+                    bindings[key] = _rescoring_source_answer(record.read(), store.manifest.run_id)
+                expected = bindings[key]
+                if (
+                    binding != expected
+                    or cached.get(_SOURCE_RUN_ID_KEY) != store.manifest.run_id
+                    or cached.get(TASK_INDEX_KEY_NAME) != expected["task_index"]
+                    or cached.get(ROLLOUT_INDEX_KEY_NAME) != expected["rollout_index"]
+                ):
+                    raise ConfigError(message)
 
 
 def _prepare_payloads(
@@ -791,7 +856,7 @@ def _prepare_payloads(
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     retry_terminal_timeouts: bool = False,
     *,
-    selected_rollouts: Optional[List[Dict]] = None,
+    selected_rollouts: Optional[Iterable[Dict]] = None,
 ) -> List[Dict]:
     all_payloads = [
         _build_verify_payload(pair)
@@ -883,7 +948,8 @@ def _run_verification_payloads(
             request_row = {
                 key: value
                 for key, value in row.items()
-                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY) and key not in _IDENTITY_KEYS
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                and key not in _IDENTITY_KEYS
             }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
@@ -1743,6 +1809,8 @@ class RolloutReverificationHelper(BaseModel):
             source_store = (
                 RolloutStore.read(rollouts_jsonl_fpath, import_legacy=False) if not config.judge_failed_only else None
             )
+            if source_store is not None:
+                _validate_rescoring_cache(source_store, output_fpaths)
 
             if config.judge_failed_only:
                 print(_RECOVERY_TWO_SOURCES_WARNING)
@@ -1788,11 +1856,8 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
-                **({"selected_rollouts": source_store.selected("success")} if source_store is not None else {}),
+                **({"selected_rollouts": _selected_rescoring_rows(source_store)} if source_store is not None else {}),
             )
-            if source_store is not None:
-                for payload in payloads_to_reverify:
-                    payload[_SOURCE_RUN_ID_KEY] = source_store.manifest.run_id
             if config.settle_into_source and settle_binding["saved_results"]:
                 # The bound saved results are read from the run's results, exactly as bound.
                 bound_results = {
@@ -1865,7 +1930,7 @@ class RolloutReverificationHelper(BaseModel):
                     result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-                for key in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY):
+                for key in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
                     if key in row:
                         result[key] = row[key]
 

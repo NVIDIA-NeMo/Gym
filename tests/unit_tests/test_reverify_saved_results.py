@@ -387,6 +387,20 @@ async def test_a_result_scored_in_a_separate_rescoring_output_is_still_settled_i
     assert "_ng_reverification_source_run_id" not in settled
     assert due_judge_failures(output) == [] and list(read_records(rescored)) == [row]
 
+    # Settlement changed the grade but kept the same attempt and answer. Its separate re-score stays reusable.
+    posted = list(verifier["posted"])
+    await reverify.RolloutReverificationHelper().run_from_config(
+        reverify.RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+            rollouts_jsonl_fpath=str(output),
+            output_jsonl_fpath=str(rescored),
+            resume_from_cache=True,
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    assert verifier["posted"] == posted and list(read_records(rescored)) == [row]
+
 
 async def test_an_unsupported_verifier_is_never_asked_to_reverify(tmp_path, verifier) -> None:
     output = _run(tmp_path, [verify_transport_masked()])
