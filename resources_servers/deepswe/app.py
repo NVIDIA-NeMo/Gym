@@ -21,7 +21,7 @@ from traceback import format_exc
 from typing import Any
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
@@ -32,9 +32,13 @@ from nemo_gym.core import (
     VERIFIER_ERROR,
     FailureBoundary,
     FailureReport,
+    FailureReportRow,
     NgFailureEvent,
+    OutcomeAction,
+    OutcomePolicyConfig,
     RequestFailureLog,
     SandboxFailureDetails,
+    choose_action,
     current_verifier_invocation_id,
     failure_kinds,
     observe_failure,
@@ -96,7 +100,9 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
-    score_agent_sandbox_oom_as_zero: bool = False
+    agent_failure_outcome_policy: OutcomePolicyConfig = Field(
+        default_factory=lambda: OutcomePolicyConfig(default_action=OutcomeAction.FAIL)
+    )
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -111,6 +117,21 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # a reported command deadline and a conclusive result are not run again; a patch that breaks the
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
+
+    @field_validator("agent_failure_outcome_policy", mode="before")
+    @classmethod
+    def retain_agent_failure_default(cls, value: object) -> object:
+        """Partial rule overrides retain the resource boundary's fail default."""
+        return {"default_action": OutcomeAction.FAIL} | value if isinstance(value, dict) else value
+
+    @field_validator("agent_failure_outcome_policy")
+    @classmethod
+    def require_supported_agent_failure_actions(cls, policy: OutcomePolicyConfig) -> OutcomePolicyConfig:
+        """A dead agent workspace can be failed or counted, but cannot be verified or replayed here."""
+        actions = {policy.default_action, *policy.by_failure_kind.values(), *policy.by_status_code.values()}
+        if actions - {OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO}:
+            raise ValueError("DeepSWE agent failure policy supports only fail and count_as_zero")
+        return policy
 
 
 class DeepSWEInstanceRequest(BaseModel):
@@ -581,6 +602,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         failure_kind = VERIFIER_ERROR
         failure_cause: Exception | None = None
         replayed = False
+        agent_failure_action: OutcomeAction | None = None
         failure_log = RequestFailureLog.current()
         if body.failure_report is not None and failure_log is not None:
             failure_log.add(body.failure_report)
@@ -596,8 +618,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     or agent_oom_observation.phase != "agent_execution"
                 ):
                     raise ValueError("Invalid agent sandbox OOM observation for DeepSWE scoring")
-                if not self.config.score_agent_sandbox_oom_as_zero:
-                    raise ValueError("DeepSWE agent sandbox OOM zero scoring is disabled")
                 report = body.failure_report
                 if report is None or report.omitted or report.failure_id is not None:
                     raise ValueError("DeepSWE agent sandbox OOM requires a complete diagnostic failure report")
@@ -672,6 +692,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     if agent_oom_observation is not None:
                         if agent_oom_event.details.sandbox_id != agent_session.sandbox_handle:
                             raise ValueError("Agent sandbox OOM observation does not match the seeded DeepSWE sandbox")
+                        agent_failure_action = choose_action(
+                            failure_kind=agent_oom_event.failure_kind,
+                            http_status=agent_oom_event.http_status,
+                            config=self.config.agent_failure_outcome_policy,
+                        )
                         patch_error = (
                             "Agent sandbox was OOM-killed during agent execution; no patch could be collected. "
                             f"{agent_oom_event.failure_reason}"
@@ -783,6 +808,19 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             failure.__cause__ = failure_cause
             observe_failure(failure)
 
+        agent_failure_fields = {}
+        if agent_failure_action == OutcomeAction.FAIL:
+            # This is a handled, terminal failure, not a failed HTTP request for the caller to retry.
+            # Select the original admitted event without rebuilding its identity or searching its causes.
+            selected_report = body.failure_report.model_copy(update={"failure_id": agent_oom_event.event_id})
+            agent_failure_fields = {
+                **FailureReportRow.fields(selected_report),
+                "failure_report": selected_report,
+                "_ng_failure_class": PROVIDER_OOM_KILLED,
+                "_ng_failure_terminal": True,
+                "_ng_failure_counts_as_zero": False,
+            }
+
         return DeepSWEVerifyResponse.model_validate(
             body.model_dump(exclude={"saved_model_patch", "saved_model_patch_sha256"})
             | result.model_dump()
@@ -801,12 +839,13 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "verification_attempts": verification_attempts,
                 "inconclusive_attempts": inconclusive_attempts,
                 "replayed_saved_patch": replayed,
-                "mask_sample": not result.evaluation_completed and agent_oom_observation is None,
+                "mask_sample": not result.evaluation_completed and agent_failure_action != OutcomeAction.COUNT_AS_ZERO,
                 "failure_kind": PROVIDER_OOM_KILLED
                 if agent_oom_observation is not None
                 else (None if result.evaluation_completed else failure_kind),
                 "failure_reason": None if result.evaluation_completed else result.verifier_error,
             }
+            | agent_failure_fields
             | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})
         )
 

@@ -18,6 +18,7 @@ from nemo_gym.core import (
     VERIFIER_ERROR,
     FailureBoundary,
     NgFailureEvent,
+    OutcomeAction,
     RequestFailureLog,
     SandboxFailureDetails,
     failure_kinds,
@@ -49,7 +50,7 @@ def _config(
     tasks_dir: Path,
     *,
     golden: bool = True,
-    score_agent_sandbox_oom_as_zero: bool = False,
+    agent_failure_outcome_policy: dict | None = None,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
         host="0.0.0.0",
@@ -59,10 +60,36 @@ def _config(
         tasks_dir=tasks_dir,
         expected_task_count=1,
         is_verifying_golden_patch=golden,
-        score_agent_sandbox_oom_as_zero=score_agent_sandbox_oom_as_zero,
+        **({"agent_failure_outcome_policy": agent_failure_outcome_policy} if agent_failure_outcome_policy else {}),
         sandbox_provider="test",
         sandbox_config={},
     )
+
+
+def test_agent_failure_policy_defaults_to_fail_and_accepts_partial_rules(task_assets: Path) -> None:
+    default = _config(task_assets).agent_failure_outcome_policy
+    assert default.default_action == OutcomeAction.FAIL
+    assert default.by_failure_kind == {} and default.by_status_code == {}
+    override = _config(
+        task_assets, agent_failure_outcome_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}}
+    ).agent_failure_outcome_policy
+    assert override.default_action == OutcomeAction.FAIL
+    assert override.by_failure_kind == {PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO}
+
+
+@pytest.mark.parametrize("action", ["verify", "retry"])
+@pytest.mark.parametrize("rule", ["default_action", "by_failure_kind", "by_status_code"])
+def test_agent_failure_policy_rejects_actions_this_boundary_cannot_execute(
+    task_assets: Path, action: str, rule: str
+) -> None:
+    value = action if rule == "default_action" else {503 if rule == "by_status_code" else PROVIDER_OOM_KILLED: action}
+    with pytest.raises(ValueError, match="supports only fail and count_as_zero"):
+        _config(task_assets, agent_failure_outcome_policy={rule: value})
+
+
+def test_agent_failure_policy_rejects_unregistered_failure_kind(task_assets: Path) -> None:
+    with pytest.raises(ValueError, match="Unregistered failure kinds"):
+        _config(task_assets, agent_failure_outcome_policy={"by_failure_kind": {"typo_oom": "count_as_zero"}})
 
 
 def _request() -> dict:
@@ -782,11 +809,36 @@ async def test_empty_agent_response_can_still_receive_a_completed_verifier_zero(
     verifier_sandbox.stop.assert_awaited_once()
 
 
-async def test_confirmed_agent_sandbox_oom_is_an_unmasked_zero_without_a_verifier(
-    task_assets: Path, monkeypatch: MonkeyPatch
+@pytest.mark.parametrize(
+    "policy,http_status,expected_action",
+    [
+        (None, None, OutcomeAction.FAIL),
+        (
+            {"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}, "by_status_code": {503: "fail"}},
+            None,
+            OutcomeAction.COUNT_AS_ZERO,
+        ),
+        (
+            {"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}, "by_status_code": {503: "fail"}},
+            503,
+            OutcomeAction.FAIL,
+        ),
+        (
+            {"default_action": "count_as_zero", "by_failure_kind": {PROVIDER_OOM_KILLED: "fail"}},
+            None,
+            OutcomeAction.FAIL,
+        ),
+    ],
+)
+async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_verifying(
+    task_assets: Path,
+    monkeypatch: MonkeyPatch,
+    policy: dict | None,
+    http_status: int | None,
+    expected_action: OutcomeAction,
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        config=_config(task_assets, golden=False, agent_failure_outcome_policy=policy),
         server_client=MagicMock(spec=ServerClient),
     )
     agent_sandbox = AsyncMock()
@@ -801,18 +853,36 @@ async def test_confirmed_agent_sandbox_oom_is_an_unmasked_zero_without_a_verifie
     request.session = {SESSION_ID_KEY: "test-session"}
 
     await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
-    body = DeepSWEVerifyRequest.model_validate(_agent_oom_request())
+    raw_body = _agent_oom_request()
+    selected = next(iter(raw_body["failure_report"]["events"].values()))
+    selected["http_status"] = http_status
+    # A status on a cause must never override the selected OOM event's policy.
+    cause = _sandbox_failure("provider_unavailable", "Prior provider request failed")
+    cause.http_status = 503
+    raw_body["failure_report"]["events"].update(failure_report_for(cause).model_dump(mode="json")["events"])
+    selected["cause_id"] = cause.event_id
+    body = DeepSWEVerifyRequest.model_validate(raw_body)
     with RequestFailureLog.capture() as log:
         response = await server.verify(request, body)
     assert log.report == body.failure_report
     assert log.report.failure_id is None
-    assert response.failure_report == body.failure_report
-    assert response.failure_report.failure_id is None
+    counted = expected_action == OutcomeAction.COUNT_AS_ZERO
+    original_id = next(iter(body.failure_report.events))
+    assert response.failure_report.events == body.failure_report.events
+    assert response.failure_report.failure_id == (None if counted else original_id)
+    fields = response.model_dump(mode="json")
+    if counted:
+        assert "_ng_failure_class" not in fields
+    else:
+        assert fields["_ng_failure_class"] == PROVIDER_OOM_KILLED
+        assert fields["_ng_failure_terminal"] is True
+        assert fields["_ng_failure_counts_as_zero"] is False
+        assert fields["_ng_failure_id"] == original_id
     observation = SandboxObservation.model_validate_json(response.response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
     assert observation.failure_id in response.failure_report.events
 
     assert response.reward == 0.0
-    assert response.mask_sample is False
+    assert response.mask_sample is (not counted)
     assert response.failure_kind == PROVIDER_OOM_KILLED
     assert response.response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY]
     assert response.model_patch_bytes == 0
@@ -829,7 +899,14 @@ async def test_confirmed_agent_sandbox_oom_is_an_unmasked_zero_without_a_verifie
 @pytest.mark.parametrize("saved_patch", [False, True])
 async def test_agent_sandbox_oom_zero_requires_a_seeded_session(task_assets: Path, saved_patch: bool) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        config=_config(
+            task_assets,
+            golden=False,
+            agent_failure_outcome_policy={
+                "default_action": "fail",
+                "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
+            },
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     request = MagicMock()
@@ -849,7 +926,14 @@ async def test_agent_sandbox_oom_zero_requires_a_seeded_session(task_assets: Pat
 
 async def test_agent_sandbox_oom_zero_cannot_grade_a_golden_patch(task_assets: Path) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=True, score_agent_sandbox_oom_as_zero=True),
+        config=_config(
+            task_assets,
+            golden=True,
+            agent_failure_outcome_policy={
+                "default_action": "fail",
+                "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
+            },
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     request = MagicMock()
@@ -859,20 +943,16 @@ async def test_agent_sandbox_oom_zero_cannot_grade_a_golden_patch(task_assets: P
         await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
 
 
-async def test_agent_sandbox_oom_zero_requires_benchmark_policy(task_assets: Path) -> None:
-    server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
-    )
-    request = MagicMock()
-    request.session = {SESSION_ID_KEY: "test-session"}
-
-    with pytest.raises(ValueError, match="zero scoring is disabled"):
-        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
-
-
 async def test_agent_sandbox_oom_zero_requires_matching_sandbox(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        config=_config(
+            task_assets,
+            golden=False,
+            agent_failure_outcome_policy={
+                "default_action": "fail",
+                "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
+            },
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     agent_sandbox = AsyncMock()
@@ -900,7 +980,12 @@ async def test_sandbox_loss_without_agent_execution_proof_fails_instead_of_scori
     task_assets: Path, monkeypatch: MonkeyPatch, failure_phase: str, failure_kind: str
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+        config=_config(
+            task_assets,
+            golden=False,
+            agent_failure_outcome_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}},
+        ),
+        server_client=MagicMock(spec=ServerClient),
     )
     agent_sandbox = AsyncMock()
     agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
@@ -1124,11 +1209,12 @@ def _sandbox_failure(kind: str, reason: str) -> NgFailureEvent:
         "wrong_image",
     ],
 )
+@pytest.mark.parametrize("action", ["fail", "count_as_zero"])
 async def test_agent_oom_scoring_requires_matching_canonical_execution_evidence(
-    task_assets: Path, monkeypatch: MonkeyPatch, invalid: str
+    task_assets: Path, monkeypatch: MonkeyPatch, invalid: str, action: str
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        config=_config(task_assets, golden=False, agent_failure_outcome_policy={"default_action": action}),
         server_client=MagicMock(spec=ServerClient),
     )
     sandbox = AsyncMock()
@@ -1269,7 +1355,14 @@ async def test_diagnostic_oom_event_without_execution_observation_does_not_choos
     task_assets: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        config=_config(
+            task_assets,
+            golden=False,
+            agent_failure_outcome_policy={
+                "default_action": "fail",
+                "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
+            },
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     agent_sandbox = AsyncMock()
@@ -1391,12 +1484,13 @@ async def test_saved_patch_recovery_keeps_diagnostic_failure_without_grading_fro
     sandbox.stop.assert_awaited_once()
 
 
-@pytest.mark.parametrize("invalid", ["disabled_policy", "missing_report", "wrong_provider"])
+@pytest.mark.parametrize("action", ["fail", "count_as_zero"])
+@pytest.mark.parametrize("invalid", ["missing_report", "wrong_provider"])
 async def test_rejected_oom_evidence_stops_only_its_owned_seeded_session(
-    task_assets: Path, monkeypatch: MonkeyPatch, invalid: str
+    task_assets: Path, monkeypatch: MonkeyPatch, invalid: str, action: str
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=invalid != "disabled_policy"),
+        config=_config(task_assets, golden=False, agent_failure_outcome_policy={"default_action": action}),
         server_client=MagicMock(spec=ServerClient),
     )
     owned, other = AsyncMock(), AsyncMock()
@@ -1430,7 +1524,14 @@ async def test_rejected_oom_evidence_keeps_its_original_error_when_owned_cleanup
     task_assets: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        config=_config(
+            task_assets,
+            golden=False,
+            agent_failure_outcome_policy={
+                "default_action": "fail",
+                "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
+            },
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     owned = AsyncMock()
