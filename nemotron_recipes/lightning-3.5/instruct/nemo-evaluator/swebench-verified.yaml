@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SWE-bench Verified (agentic coding tasks).
+#
+# Runs through nemo-evaluator, not Gym. Install it and apply the ECS Fargate Terraform
+# stack first (see instruct/README.md), and have .env loaded into your shell (this
+# recipe uses POLICY_API_KEY, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY). Results land
+# in ./results/swebench-verified.
+#
+#   nel eval run nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/swebench-verified.yaml                                # full benchmark (500 tasks x 5)
+#   nel eval run nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/swebench-verified.yaml -O benchmarks.0.max_problems=3 # quick smoke
+#   nel eval run nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/swebench-verified.yaml -O output.dir=<dir>            # output dir
+#
+# Note: serve the model with --reasoning-parser=nemotron_v3 plus
+# --enable-auto-tool-choice --tool-call-parser=qwen3_coder. Without the first, <think>
+# stays inline and reasoning_replay feeds back a different context each turn; without
+# the other two the agent gets no parsed tool calls and the run fails.
+
+defaults:
+  - {_base_: prompts/_openhands_system.yaml}
+  - _self_
+
+services:
+  nemotron:
+    type: api
+    url: https://<your-endpoint>/v1/chat/completions
+    protocol: chat_completions
+    model: <your-model-id>
+    api_key: ${POLICY_API_KEY}
+    max_input_tokens: 262144
+    max_output_tokens: 262144
+    generation:
+      temperature: 1.0
+      top_p: 0.95
+    proxy:
+      request_timeout: 3600
+      extra_body:
+        chat_template_kwargs: {enable_thinking: true}
+        skip_special_tokens: false
+      interceptors:
+        # OpenHands' own system prompt; turn_counter matches agent_kwargs.max_iterations.
+        - name: system_message
+          config:
+            strategy: replace
+            system_message: ${._openhands_system}
+        - name: turn_counter
+          config:
+            max_turns: 200
+            position: system_message
+        - name: drop_params
+          config:
+            params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]
+        - name: consolidate_system
+        - name: reasoning
+        - name: reasoning_replay
+          config:
+            mode: think_tags
+
+output:
+  dir: ./results/swebench-verified
+
+benchmarks:
+- playbook: swebench_verified
+  repeats: 5
+  # Throughput only, no effect on score. Raise together with sandbox.concurrency
+  # below — the lower of the two binds.
+  max_concurrent: 15
+  instruction_template: nemotron_recipes/lightning-3.5/instruct/nemo-evaluator/prompts/swebench-instruction.md
+  solver:
+    service: nemotron
+    timeout_strategy: max
+    run_timeout: 10800
+    cmd_timeout: 1800
+    agent_kwargs:
+      max_iterations: 200
+      version: "1.17.0"
+      llm_kwargs:
+        timeout: 3600
+  sandbox:
+    region: ${HARBOR_ECS_REGION:-us-east-2}
+    ecr_repository: "<AWS_ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/harbor-swebench"  # set to your harbor ECR account
+    concurrency: 15  # keep in sync with max_concurrent above
+    log_stream_prefix: swebench-verified-nemotron-local
+
+cluster:
+  type: local

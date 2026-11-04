@@ -41,19 +41,20 @@ from typing import Any, List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.verification import call_judge
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +261,11 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
 class InverseIFServer(SimpleResourcesServer):
     """Inverse IF evaluation server."""
 
+    # Each verification judges the request's rubric with the judge model: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+
     config: InverseIFConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -267,7 +273,12 @@ class InverseIFServer(SimpleResourcesServer):
         return app
 
     async def verify(self, body: InverseIFVerifyRequest) -> InverseIFVerifyResponse:
-        """Verify a model response against per-criterion rubric using the LLM judge."""
+        """Verify a model response against per-criterion rubric using the LLM judge.
+
+        A failed judge call (auth, rate limit, timeout, endpoint error) is a distinct
+        outcome, not a wrong answer: it raises JudgeError, so the row carries the
+        model's output to the failures sidecar and stays out of the denominator.
+        """
 
         # Extract the generated response (excluding thinking blocks)
         generated_response = _extract_text_from_response(body.response, exclude_thinking=True)
@@ -374,12 +385,13 @@ class InverseIFServer(SimpleResourcesServer):
         request_params.input = msgs
 
         # Call the judge model
-        response_obj = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=request_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
         judge_text = _extract_text_from_response(judge_response, exclude_thinking=True)
 
         # Extract verdict

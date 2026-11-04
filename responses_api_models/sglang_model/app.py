@@ -13,12 +13,13 @@ from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import Field
 
-from nemo_gym.base_responses_api_model import Body
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.models import Body
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.sglang_model._logic import extract_generated_tokens_and_logprobs
 from responses_api_models.sglang_model.tool_parsers import (
     normalize_tool_call_arguments,

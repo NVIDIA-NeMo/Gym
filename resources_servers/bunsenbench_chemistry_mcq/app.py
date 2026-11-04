@@ -8,9 +8,10 @@ import html
 import re
 import unicodedata
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,
     MCQAResourcesServerConfig,
@@ -21,7 +22,9 @@ from resources_servers.mcqa.app import (
 
 
 class BunsenChemResourcesServerConfig(MCQAResourcesServerConfig):
-    pass
+    # Reuses mcqa's MCQAResourcesServerConfig (STATELESS); pin back to the safe default so this
+    # benchmark does not inherit reverify support until it is separately reviewed.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
 
 class BunsenChemVerifyRequest(MCQAVerifyRequest):

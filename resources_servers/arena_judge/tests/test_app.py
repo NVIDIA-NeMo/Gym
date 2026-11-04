@@ -17,15 +17,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pytest import approx, fixture
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import is_judge_failure
 from resources_servers.arena_judge.app import (
     ArenaJudgeConfig,
     ArenaJudgeServer,
@@ -162,7 +164,7 @@ class TestExtractOutputText:
         assert ArenaJudgeServer._extract_response_output_text(response) == ""
 
     def test_chat_completion_extracts_content(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletion
+        from nemo_gym.core import NeMoGymChatCompletion
 
         completion = NeMoGymChatCompletion.model_validate(_make_chat_completion("judge verdict text"))
         assert ArenaJudgeServer._extract_chat_completion_text(completion) == "judge verdict text"
@@ -303,23 +305,22 @@ class TestArenaJudgeServer:
         assert result.invalid_base_gen is False
 
     @pytest.mark.asyncio
-    async def test_judge_call_exception_returns_invalid(self, config: ArenaJudgeConfig) -> None:
+    async def test_judge_call_exception_raises_judge_error(self, config: ArenaJudgeConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
         server = ArenaJudgeServer(config=config, server_client=server_mock)
 
-        result = await server.verify(
-            ArenaJudgeVerifyRequest(
-                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-                response=_make_response("ok"),
-                question="q",
-                baseline_answer="b",
-                category="hard_prompt",
+        with pytest.raises(NgFailureEvent) as failure:
+            await server.verify(
+                ArenaJudgeVerifyRequest(
+                    responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                    response=_make_response("ok"),
+                    question="q",
+                    baseline_answer="b",
+                    category="hard_prompt",
+                )
             )
-        )
-        assert result.reward == approx(0.0)
-        assert result.invalid_gen_base is True
-        assert result.invalid_base_gen is True
+        assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_unknown_category_falls_back_to_default(self, config: ArenaJudgeConfig) -> None:
@@ -473,6 +474,17 @@ class TestComputeAndKeyMetrics:
         # Score is a win-rate percentage, so 0-100.
         assert 0.0 <= metrics["arena_elo/score"] <= 100.0
 
+    def test_compute_metrics_takes_the_category_from_the_first_rollout_that_has_it(self) -> None:
+        """A row counted as zero for a rollout that never ran can come first and carries no category."""
+        server = ArenaJudgeServer(config=self._cfg(), server_client=MagicMock(spec=ServerClient))
+        verdicts = [("A>>B", "B>>A"), ("A=B", "A=B"), ("B>>A", "A>>B")]
+        tasks = [
+            [{"reward": 0.0}, {"verdict_gen_base": gen, "verdict_base_gen": base, "category": "hard_prompt"}]
+            for gen, base in verdicts
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["arena_elo/hard_prompt/n"] == 3
+
     def test_compute_metrics_degenerate_sweep_all_losses(self) -> None:
         """Regression test: if every battle has the same winner,
         logistic regression can't fit — the server should return a
@@ -516,7 +528,7 @@ class TestComputeAndKeyMetrics:
 
 class TestExtractChatCompletionEdgeCases:
     def test_no_choices_returns_empty(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletion
+        from nemo_gym.core import NeMoGymChatCompletion
 
         completion = NeMoGymChatCompletion.model_validate(
             {

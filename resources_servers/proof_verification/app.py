@@ -14,19 +14,20 @@ from typing import Any, Optional
 import yaml
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import get_response_json
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.verification import reraise_judge_errors
 
 
 LOG = logging.getLogger(__name__)
@@ -172,6 +173,10 @@ class ProofVerificationVerifyRequest(BaseVerifyRequest):
     ground_truth_verify_score: float
 
 
+class ProofVerificationVerifyResponse(BaseVerifyResponse):
+    pass
+
+
 class ProofVerificationResourcesServer(SimpleResourcesServer):
     config: ProofVerificationResourcesServerConfig
 
@@ -181,14 +186,14 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
     _ext_init_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
     _log_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
 
-    async def verify(self, body: ProofVerificationVerifyRequest) -> BaseVerifyResponse:
+    async def verify(self, body: ProofVerificationVerifyRequest) -> ProofVerificationVerifyResponse:
         problem = body.problem
         proof = body.proof
         ground_truth_judgement = body.ground_truth_judgement
         ground_truth_verify_score = body.ground_truth_verify_score
         full_response = self._extract_assistant_text(body.response)
         if not full_response:
-            return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+            return ProofVerificationVerifyResponse(**body.model_dump(), reward=0.0)
 
         reward, details = await self._judge_single(
             problem=problem,
@@ -205,7 +210,7 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
                 reward=reward,
                 details=details,
             )
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        return ProofVerificationVerifyResponse(**body.model_dump(), reward=reward)
 
     async def _append_log_jsonl(
         self,
@@ -307,7 +312,7 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
 
     async def _call_judge_internal(self, user_content: str) -> tuple[str, int]:
         """Call judge through Gym's server_client (judge model managed by Gym/Ray)."""
-        from nemo_gym.server_utils import raise_for_status
+        from nemo_gym.client import raise_for_status
 
         server_name = self.config.judge_model_server.name
         model = self.config.judge_model_name or server_name
@@ -338,8 +343,8 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
     async def _call_judge(self, user_content: str) -> tuple[str, int]:
         """Route to external (JUDGE_SERVER_ARGS) or internal (Gym /v1/responses) judge."""
         if os.environ.get("JUDGE_SERVER_ARGS"):
-            return await self._call_judge_external(user_content)
-        return await self._call_judge_internal(user_content)
+            return await reraise_judge_errors(self._call_judge_external(user_content))
+        return await reraise_judge_errors(self._call_judge_internal(user_content))
 
     async def _judge_single(
         self,

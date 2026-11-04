@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wires the opencode sandboxed agent to r2e_gym_resources_server for a training run. r2e_gym.yaml alone
+# only defines the resources server, which is enough for golden-patch validation but not to run an
+# agent against the dataset.
+#
+# This is training data (data/r2e_gym_training.jsonl, only the instances whose golden patch reproduced
+# the expected test statuses in every pass of the 3x sweep -- see the README), not a fixed eval benchmark.
+#
+#   gym env start --config resources_servers/r2e_gym/configs/r2e_gym_opencode.yaml
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/r2e_gym/configs/r2e_gym.yaml
+
+r2e_gym_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: r2e_gym_resources_server
+      datasets:
+        - name: r2e_gym
+          type: train
+          jsonl_fpath: resources_servers/r2e_gym/data/r2e_gym_training.jsonl
+          num_repeats: 1
+          # The R2E-Gym project (code and data pipeline) is MIT; the dataset card lists no license of its own.
+          license: MIT (R2E-Gym project license; dataset card unspecified)
+
+r2e_gym_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: r2e_gym_opencode_sandboxed_agent

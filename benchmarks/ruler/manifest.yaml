@@ -1,0 +1,30 @@
+name: ruler
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: RULER 1M-context synthetic tasks with a prepared assistant answer prefix
+  and string-match scoring.
+modality: text
+licensing: unknown
+authors:
+- Cheng-Ping Hsieh
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: ruler
+agent_server: simple_agent
+datasets:
+- name: ruler
+  type: benchmark
+  jsonl_fpath: benchmarks/ruler/data/ruler_nemotron_3_1m_benchmark.jsonl
+  prepare_script: benchmarks/ruler/prepare_nemotron_3_1m.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

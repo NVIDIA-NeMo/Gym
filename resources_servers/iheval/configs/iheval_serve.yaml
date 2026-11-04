@@ -1,0 +1,18 @@
+# Serve-only config: brings up JUST the IHEval resources server (scorer).
+#
+# All IHEval scorers are rule-based (F1 / ROUGE / IFEval / TensorTrust), so the
+# verify() path needs no model — unlike rolemrc's judge mode. This config is
+# used when the caller owns generation and calls only the resources server's
+# /verify endpoint.
+iheval:
+  resources_servers:
+    iheval:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      # Headline result_score: "hierarchy" = Conflict only (instruction-hierarchy
+      # stress test); "hierarchy_sysprompt" = mean(Aligned, Conflict), adding
+      # system-prompt instruction following.
+      accuracy_mode: hierarchy
+      description: IHEval instruction-hierarchy benchmark (task execution, safety, tool use, rule following) scored with the upstream rule-based checkers.
+      value: Improve instruction-hierarchy following across aligned/conflict/reference settings, including native tool-use trajectories.

@@ -23,7 +23,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,
@@ -31,7 +32,6 @@ from nemo_gym.sandbox import (
     list_providers,
     register_provider,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.litmus_agent.app import (
     _ANSWER_FORMAT_REGEXES,
     _CODE_EXEC_DRIVER_PATH,
@@ -93,36 +93,15 @@ def _make_verify_request(text: str, **fields) -> LitmusAgentVerifyRequest:
 
 
 class TestResolveAnswerType:
+    def test_explicit_answer_type(self):
+        assert resolve_answer_type(FLOAT) == FLOAT
+
     def test_supported_set(self):
         assert _SUPPORTED_ANSWER_TYPES == {FLOAT, BOOL, STRING}
 
-    def test_explicit_answer_type_wins(self):
-        assert resolve_answer_type(FLOAT, {"property_type": "float"}) == FLOAT
-
     def test_unsupported_answer_type_raises(self):
         with pytest.raises(ValueError, match="Unsupported answer_type='bogus'"):
-            resolve_answer_type("bogus", {})
-
-    @pytest.mark.parametrize(
-        ("property_type", "expected"),
-        [
-            ("float", FLOAT),
-            ("count", FLOAT),
-            ("fragment", FLOAT),
-            ("bool", BOOL),
-            ("presence", BOOL),
-        ],
-    )
-    def test_legacy_property_type_mapping(self, property_type, expected):
-        assert resolve_answer_type(None, {"property_type": property_type}) == expected
-
-    def test_missing_and_unmappable_raises(self):
-        with pytest.raises(ValueError, match="not mappable"):
-            resolve_answer_type(None, {"property_type": "mystery"})
-
-    def test_missing_entirely_raises(self):
-        with pytest.raises(ValueError, match="not mappable"):
-            resolve_answer_type(None, {})
+            resolve_answer_type("bogus")
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +115,6 @@ class TestExtractPredictedValue:
 
     def test_double_parens_last_occurrence_wins(self):
         assert extract_predicted_value("First ((3)), actually ((5))", FLOAT) == 5.0
-
-    def test_boxed_via_use_box_format(self):
-        assert extract_predicted_value(r"\boxed{12}", FLOAT, use_box_format=True) == 12.0
-
-    def test_default_double_parens_when_no_format(self):
-        assert extract_predicted_value("((7))", FLOAT, use_box_format=False) == 7.0
 
     def test_bare_number_rejected(self):
         assert extract_predicted_value("42", FLOAT) is None
@@ -172,10 +145,6 @@ class TestExtractPredictedValue:
     def test_unknown_answer_format_raises(self):
         with pytest.raises(ValueError, match="Unsupported answer_format='fmt_99'"):
             extract_predicted_value("((42))", FLOAT, answer_format="fmt_99")
-
-    def test_answer_format_overrides_use_box_format(self):
-        text = r"Ignore \boxed{7}. Final Answer = 42"
-        assert extract_predicted_value(text, FLOAT, answer_format="fmt_28", use_box_format=True) == 42.0
 
     def test_all_formats_registered(self):
         assert set(_ANSWER_FORMAT_REGEXES) == {f"fmt_{i:02d}" for i in range(31)}
@@ -331,6 +300,36 @@ class TestComputeRewardWithMatch:
 
 
 class TestVerify:
+    def test_answer_type_is_required(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="answer_type"):
+            _make_verify_request("((3))", expected_answer=3)
+
+    async def test_unresolvable_answer_type_raises(self):
+        server = _make_server()
+        with pytest.raises(ValueError, match="Unsupported answer_type"):
+            await server.verify(_make_verify_request("((3))", expected_answer="3", answer_type="unsupported"))
+
+    @pytest.mark.parametrize(
+        ("text", "expected_answer", "answer_type", "abs_error"),
+        [
+            ("((2.6))", 2.1, FLOAT, 0.5),
+            ("((2.1))", 2.1, FLOAT, 0.0),
+            ("((1))", 0, BOOL, None),
+            ("no answer here", 2.1, FLOAT, None),
+        ],
+    )
+    async def test_abs_error_uses_answer_type(self, text, expected_answer, answer_type, abs_error):
+        server = _make_server()
+        result = await server.verify(
+            _make_verify_request(text, expected_answer=expected_answer, answer_type=answer_type)
+        )
+        if abs_error is None:
+            assert result.abs_error is None
+        else:
+            assert result.abs_error == pytest.approx(abs_error)
+
     async def test_correct_numeric_int(self):
         server = _make_server()
         result = await server.verify(
@@ -393,23 +392,12 @@ class TestVerify:
         )
         assert result.reward == 1.0
 
-    async def test_legacy_property_type_passthrough(self):
-        server = _make_server()
-        result = await server.verify(_make_verify_request("((1))", expected_answer="1", property_type="fragment"))
-        assert result.reward == 1.0
-        assert result.resolved_answer_type == FLOAT
-
     async def test_passthrough_fields_echoed(self):
         server = _make_server()
         result = await server.verify(
             _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT, smiles="CCO")
         )
         assert (result.model_extra or {}).get("smiles") == "CCO"
-
-    async def test_unresolvable_answer_type_raises(self):
-        server = _make_server()
-        with pytest.raises(ValueError, match="not mappable"):
-            await server.verify(_make_verify_request("((3))", expected_answer="3"))
 
     async def test_string_content_message_extracted(self):
         # Some backends emit the assistant message content as a bare string
@@ -452,6 +440,37 @@ class TestVerify:
 
 
 class TestComputeMetrics:
+    def test_mae_grouped_per_property(self):
+        server = _make_server()
+
+        def _row(prop, answer_type, abs_error, correct):
+            return {
+                "method": "direct",
+                "resolved_answer_type": answer_type,
+                "property": prop,
+                "reward": 1.0 if correct else 0.0,
+                "correct": correct,
+                "abs_error": abs_error,
+            }
+
+        tasks = [
+            [_row("MolWt", "float", 0.0, True), _row("MolWt", "float", 4.0, False)],
+            [_row("HeavyAtomCount", "float", 2.0, False), _row("HeavyAtomCount", "float", None, False)],
+            [_row("HasBenzene", "bool", None, True)],
+        ]
+        by_property = server.compute_metrics(tasks)["by_property"]
+
+        assert by_property["MolWt"]["mae"] == pytest.approx(2.0)
+        assert by_property["MolWt"]["mae_count"] == 2
+        # The unparsed rollout is excluded from the mean but still counted.
+        assert by_property["HeavyAtomCount"]["mae"] == pytest.approx(2.0)
+        assert by_property["HeavyAtomCount"]["mae_count"] == 1
+        assert by_property["HeavyAtomCount"]["count"] == 2
+        # bool properties carry no abs_error, so they report no MAE.
+        assert by_property["HasBenzene"]["mae"] is None
+        assert by_property["HasBenzene"]["mae_count"] == 0
+        assert by_property["HasBenzene"]["accuracy"] == 1.0
+
     def _rollout(self, method, atype, reward, correct):
         return {"method": method, "resolved_answer_type": atype, "reward": reward, "correct": correct}
 
@@ -480,10 +499,50 @@ class TestComputeMetrics:
         assert metrics["unknown"]["by_answer_type"]["unknown"]["count"] == 1
         assert metrics["unknown"]["accuracy"] == 0.0
 
+    def test_pass_at_k_metrics_merged_in(self):
+        server = _make_server()
+        tasks = [
+            [
+                {**self._rollout("direct", FLOAT, 1.0, True), "predicted_value": 3.0},
+                {**self._rollout("direct", FLOAT, 0.0, False), "predicted_value": 4.0},
+            ],
+            [
+                {**self._rollout("direct", FLOAT, 0.0, False), "predicted_value": 7.0},
+                {**self._rollout("direct", FLOAT, 0.0, False), "predicted_value": None},
+            ],
+        ]
+        metrics = server.compute_metrics(tasks)
+
+        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(25.0)
+        assert metrics["pass@2/accuracy"] == pytest.approx(50.0)
+        assert metrics["pass@1[avg-of-2]/no_answer"] == pytest.approx(25.0)
+        assert "majority@2/accuracy" in metrics
+        # The method breakdown is preserved alongside.
+        assert metrics["direct"]["count"] == 4
+
     def test_get_key_metrics_filters(self):
         server = _make_server()
         out = server.get_key_metrics({"mean/reward": 0.5, "mean/correct": 0.5, "other": 9})
         assert out == {"mean/reward": 0.5, "mean/correct": 0.5}
+
+    def test_get_key_metrics_selects_highest_k(self):
+        server = _make_server()
+        out = server.get_key_metrics(
+            {
+                "mean/reward": 0.5,
+                "mean/output_tokens": 120.0,
+                "pass@1/accuracy": 40.0,
+                "pass@2/accuracy": 60.0,
+                "pass@1[avg-of-2]/accuracy": 50.0,
+                "pass@2/no_answer": 10.0,
+            }
+        )
+        assert out == {
+            "mean/reward": 0.5,
+            "mean/output_tokens": 120.0,
+            "pass@2/accuracy": 60.0,
+            "pass@1[avg-of-2]/accuracy": 50.0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +643,20 @@ async def _run_code(server: LitmusAgentResourcesServer, session_id: str, code: s
 
 
 class TestCodeExecTool:
+    async def test_verify_failure_still_cleans_up_session_sandbox(self):
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "print(1)")
+        provider = _LocalFakeProvider.instances[-1]
+
+        with pytest.raises(ValueError, match="Unsupported answer_type"):
+            await server._verify_and_cleanup(
+                _FakeRequest(session_id="s1"),
+                _make_verify_request("((3))", expected_answer="3", answer_type="unsupported"),
+            )
+
+        assert provider.closed == 1 and provider.aclosed == 1
+        assert "s1" not in server._sessions
+
     async def test_single_cell_output(self):
         server = _make_sandbox_server()
         assert (await _run_code(server, "s1", "print(2 + 3)")).strip() == "5"

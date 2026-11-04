@@ -12,17 +12,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import hashlib
 import json
+import logging
+import os
+import time
+from contextlib import nullcontext
+from copy import deepcopy
+from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp import ClientResponseError, RequestInfo
+from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch, mark, raises
+from yarl import URL
 
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym import PARENT_DIR
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI, PermanentEndpointError, ServerClient, raise_for_status
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.core import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    FailureBoundary,
+    FailureHeader,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
@@ -51,18 +68,152 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    NgFailureEvent,
+    rollout_context,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.models import PolicyModelParticipant, VLLMWorkerCaptureHandler, generation_cut_requester
+from nemo_gym.models.token_capture import (
+    CaptureContext,
+    InMemoryLineageStore,
+    ParentResolutionStatus,
+    TokenCaptureStore,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
+)
+from nemo_gym.models.token_capture.staging import CaptureAdmission
+from nemo_gym.rollouts import is_terminal_failure
+from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row
+from nemo_gym.server_runtime import (
+    CheckpointRequest,
+    GenerationCutInventory,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
+from responses_api_agents.simple_agent.app import (
+    ModelServerRef,
+    ResourcesServerRef,
+    SimpleAgent,
+    SimpleAgentConfig,
+    SimpleAgentRunRequest,
+)
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
+    _append_transport_io,
+    _redacted_error_repr,
+    _transport_images,
+    _transport_log_context,
 )
 
 
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
+
+_TEST_LINEAGE = InMemoryLineageStore()
+
+
+def lineage_index():
+    return _TEST_LINEAGE.index
+
+
+def test_strip_hosted_only_tool_fields_pops_strict() -> None:
+    body_dict = {
+        "tools": [
+            {"type": "function", "function": {"name": "get_weather", "strict": True}},
+            {"type": "custom", "custom": {"name": "not_a_function"}},
+        ]
+    }
+    VLLMModel._strip_hosted_only_tool_fields(body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
+    assert body_dict["tools"][0]["function"]["name"] == "get_weather"
+    assert body_dict["tools"][1] == {"type": "custom", "custom": {"name": "not_a_function"}}
+
+    # Tolerates absent tools.
+    VLLMModel._strip_hosted_only_tool_fields({})
+
+
+def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    body_dict = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "get_weather", "strict": True}}],
+    }
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
+
+
+def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
+    log_path = tmp_path / "model-io-transport.jsonl"
+    monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+                {"type": "text", "text": "inspect"},
+            ],
+        }
+    ]
+
+    _append_transport_io(
+        {
+            "schema_version": 1,
+            "event": "transport_request",
+            "request_payload": {"messages": messages},
+            "embedded_images": _transport_images(messages),
+        }
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["request_payload"]["messages"] == messages
+    assert row["embedded_images"][0]["decoded_bytes"] == 3
+
+
+def test_transport_log_context_reads_generic_headers_without_body_fields() -> None:
+    request = MagicMock()
+    request.headers = {
+        "x-nemo-gym-log-run-id": "run-001",
+        "x-nemo-gym-log-adapter": "gym",
+        "x-nemo-gym-log-sampling-event-id": "sampling-training-001",
+        "x-nemo-gym-log-source-group-id": "dataset-group-001",
+        "x-nemo-gym-log-rollout-id": "rollout-001",
+        "x-nemo-gym-log-group-id": "group-001",
+        "x-nemo-gym-log-rollout-index": "4",
+        "x-nemo-gym-log-attempt-index": "2",
+        "x-nemo-gym-log-task-id": "task-001",
+        "x-nemo-gym-log-domain": "chrome",
+        "x-nemo-gym-log-task-attempt": "2",
+        "x-nemo-gym-log-step": "3",
+        "x-nemo-gym-log-parse-attempt": "1",
+    }
+
+    assert _transport_log_context(request) == {
+        "run_id": "run-001",
+        "adapter": "gym",
+        "sampling_event_id": "sampling-training-001",
+        "source_group_id": "dataset-group-001",
+        "rollout_id": "rollout-001",
+        "group_id": "group-001",
+        "rollout_index": 4,
+        "attempt_index": 2,
+        "task_id": "task-001",
+        "domain": "chrome",
+        "task_attempt": 2,
+        "step": 3,
+        "parse_attempt": 1,
+    }
+
+
+def test_redacted_error_repr_without_request_info() -> None:
+    # NeMoGymAsyncOpenAI raises this with no request details after a permanent auth or quota failure.
+    error = PermanentEndpointError(request_info=None, history=(), status=401, message="spent key", headers=None)
+
+    assert _redacted_error_repr(error) == (
+        "PermanentEndpointError(status=401, message='spent key', method=None, url=None)"
+    )
 
 
 class FakeUUID:
@@ -73,8 +224,17 @@ class FakeUUID:
 
 COMMON_RESPONSE_PARAMS = dict(
     parallel_tool_calls=True,
+    status="completed",
     tool_choice="auto",
 )
+OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
+    "moderation",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "verbosity",
+    *CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+}
 
 PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a list, id: "ez_list" -----
@@ -469,7 +629,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="<think>I have identified the city as San Francisco based on user input.</think>",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -532,7 +691,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="<think>I'll first think about the user's question.</think><think>Then I will answer.</think>",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -613,7 +771,6 @@ PARAMETERIZE_DATA = [
                 NeMoGymChatCompletionAssistantMessageParam(
                     role="assistant",
                     content="Hello! How can I assist you today?",
-                    tool_calls=[],
                 )
             ],
         ),
@@ -660,8 +817,29 @@ PARAMETERIZE_DATA = [
 ]
 
 
+def _engine_bad_request_error(message: str, status: int = 400) -> ClientResponseError:
+    """Build an engine refusal in vLLM's error format: a JSON body with a top-level message and integer code."""
+    request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+    error = ClientResponseError(request_info, (), status=status, message="Bad Request")
+    error.response_content = json.dumps(
+        {"object": "error", "message": message, "type": "BadRequestError", "param": None, "code": status}
+    ).encode()
+    return error
+
+
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(
+        self,
+        monkeypatch: MonkeyPatch,
+        *,
+        propagate_context_overflow_errors: bool = False,
+        use_completions_api: bool = False,
+        external_staging_backend: str | None = None,
+        route_around_failing_endpoints: bool = False,
+        endpoint_failure_threshold: int = 3,
+        endpoint_retry_after_s: float = 60.0,
+        forward_session_id_as_conversation_id: bool = False,
+    ):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -672,16 +850,1034 @@ class TestApp:
             name="",
             return_token_id_information=False,
             uses_reasoning_parser=False,
+            propagate_context_overflow_errors=propagate_context_overflow_errors,
+            use_completions_api=use_completions_api,
+            route_around_failing_endpoints=route_around_failing_endpoints,
+            endpoint_failure_threshold=endpoint_failure_threshold,
+            endpoint_retry_after_s=endpoint_retry_after_s,
+            forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
         )
 
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = dict()
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
 
-        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        global_config = {}
+        if external_staging_backend is not None:
+            global_config = {
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "external_staging_backend": external_staging_backend,
+                    "rebuild_response": False,
+                }
+            }
+        return VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict=global_config),
+        )
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        self._setup_server(monkeypatch)
+        assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
+
+    @mark.parametrize("propagate", [False, True])
+    @mark.parametrize("responses_api", [False, True])
+    @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+    @mark.parametrize(
+        "error_content, expected_code, expected_param",
+        [
+            # The two refusals vLLM 0.29.0 issues when the window is full: the renderer's prompt-plus-
+            # output check (vllm/renderers/params.py) and the max-tokens resolution's prompt-only check
+            # (vllm/entrypoints/serve/utils/api_utils.py). Both bodies nest the message under "error"
+            # with the integer code 400 (vLLM 0.10.1 and later).
+            (
+                json.dumps(
+                    {
+                        "error": {
+                            "message": (
+                                "This model's maximum context length is 32768 tokens. However, you requested 256 "
+                                "output tokens and your prompt contains 32818 input tokens, for a total of 33074 "
+                                "tokens. Please reduce the length of the input prompt or the number of requested "
+                                "output tokens."
+                            ),
+                            "type": "BadRequestError",
+                            "param": "input_tokens",
+                            "code": 400,
+                        }
+                    }
+                ).encode(),
+                "context_length_exceeded",
+                "input_tokens",
+            ),
+            (
+                b'{"error":{"message":"Input length (32818) exceeds model\'s maximum context length (32768).",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # The engine's own check, which names the model length rather than the context length.
+            (
+                b'{"error":{"message":"The decoder prompt (length 32818) is longer than the maximum model length '
+                b'of 32768. Make sure that max_model_len is no smaller than the number of text tokens.",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # llama.cpp names the refusal by type, not by phrase.
+            (
+                b'{"error":{"type":"exceed_context_size_error","message":"request too long","code":400}}',
+                "context_length_exceeded",
+                None,
+            ),
+            # An invalid output-token parameter is a length refusal too, but compaction would not fix
+            # it, so the envelope carries no overflow code.
+            (
+                b'{"error":{"message":"max_tokens must be at least 1, got 0.","type":"BadRequestError",'
+                b'"param":null,"code":400}}',
+                None,
+                None,
+            ),
+            (
+                b'{"error":{"message":"max_completion_tokens=40000 cannot be greater than max_model_len (32768).",'
+                b'"type":"BadRequestError","param":null,"code":400}}',
+                None,
+                None,
+            ),
+        ],
+        ids=["prompt-plus-output", "prompt-only", "decoder-prompt", "llamacpp", "max-tokens", "max-completion-tokens"],
+    )
+    def test_context_overflow_propagation_flag(
+        self,
+        monkeypatch: MonkeyPatch,
+        propagate: bool,
+        responses_api: bool,
+        use_completions_api: bool,
+        error_content: bytes,
+        expected_code: str | None,
+        expected_param: str | None,
+    ) -> None:
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
+        server.config.use_completions_api = use_completions_api
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = error_content
+        model = NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="HTTP 400 from the model",
+            operation="model_request",
+            http_status=400,
+        )
+        error.__cause__ = model
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={"model": "dummy_model", "input": [{"role": "user", "content": "hi"}]}
+            if responses_api
+            else {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        if propagate:
+            # The engine's message and param are preserved verbatim inside OpenAI's error envelope.
+            # vLLM's raw body carries the integer 400 as its code, which OpenAI-compatible harnesses
+            # cannot match; the string code tells them whether compacting the prompt is the remedy.
+            assert response.status_code == 400
+            assert response.json() == {
+                "error": {
+                    "message": json.loads(error_content)["error"]["message"],
+                    "type": "invalid_request_error",
+                    "param": expected_param,
+                    "code": expected_code,
+                }
+            }
+            # The refusal ends the request: the reply names the model failure that caused it.
+            report = FailureHeader.decode(response.headers)
+            assert report is not None and report.failure_id == model.event_id
+        else:
+            assert response.status_code == 200
+            assert FailureHeader.decode(response.headers) is None
+            if responses_api:
+                assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
+                assert response.json()["usage"]["input_tokens"] == 0
+                assert response.json()["usage"]["output_tokens"] == 0
+                assert response.json()["usage"]["total_tokens"] == 0
+                assert response.json()["usage"]["input_tokens_details"]["cached_tokens"] == 0
+                assert response.json()["usage"]["output_tokens_details"]["reasoning_tokens"] == 0
+                assert response.json()["metadata"]["nemo_gym_context_window_exceeded"] == "true"
+            else:
+                assert '"finish_reason": "length"' in response.text
+
+        used_method = mock_client.create_completion if use_completions_api else mock_client.create_chat_completion
+        unused_method = mock_client.create_chat_completion if use_completions_api else mock_client.create_completion
+        used_method.assert_awaited_once()
+        unused_method.assert_not_awaited()
+
+    def test_streaming_responses_context_overflow_is_an_http_400_before_the_stream(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Generation is buffered, so nothing has been sent when the engine refuses: the streaming
+        # request gets the same HTTP 400 envelope as a plain one, which is how OpenAI answers an
+        # overflow on a streaming request and what the harnesses handle.
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"model": "dummy_model", "stream": True, "input": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "context_length_exceeded"
+        assert response.json()["error"]["message"] == "maximum context length"
+
+    def test_streaming_chat_completions_context_overflow_after_the_keepalive_carries_the_envelope(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Once the keepalive has committed the SSE headers, the refusal can only be an error event;
+        # it carries the same envelope as the HTTP path, so a chat-SSE harness can classify it too.
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"Input length (32818) exceeds model\'s maximum context length (32768).",'
+            b'"type":"BadRequestError","param":null,"code":400}}'
+        )
+
+        async def slow_refusal(**_kwargs):
+            await asyncio.sleep(0.05)
+            raise error
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=slow_refusal)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.text.startswith(": keep-alive")
+        error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+        payload = json.loads(error_lines[-1][len("data: ") :])
+        assert payload == {
+            "error": {
+                "message": "Input length (32818) exceeds model's maximum context length (32768).",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "context_length_exceeded",
+            }
+        }
+
+    @staticmethod
+    def _engine_window_refusal() -> ClientResponseError:
+        """vLLM's refusal of a request whose output budget does not fit beside its prompt.
+
+        The body names ``max_tokens`` and the context window, so the envelope carries
+        ``context_length_exceeded``.
+        """
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b"{\"error\":{\"message\":\"'max_tokens' or 'max_completion_tokens' is too large: 4000. This model's "
+            b"maximum context length is 4096 tokens and your request has 1000 input tokens (4000 > 4096 - 1000). "
+            b'Please reduce the length of the input prompt or the number of requested output tokens.",'
+            b'"type":"BadRequestError","param":null,"code":400}}'
+        )
+        return error
+
+    def _post_captured(self, server: VLLMModel, store: TokenCaptureStore, path: str, body: dict):
+        """Send one captured request through the real dispatch, which registers the call intent."""
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        try:
+            return TestClient(app).post(path, json=body)
+        finally:
+            reset_token_sink(token)
+
+    def _post_captured_chat_completion(self, server: VLLMModel, store: TokenCaptureStore, *, stream: bool = False):
+        body: dict = {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        if stream:
+            body["stream"] = True
+        return self._post_captured(server, store, "/v1/chat/completions", body)
+
+    @mark.parametrize(
+        "route",
+        [
+            "chat-completions",
+            "completions",
+            "chat-stream-before-headers",
+            "chat-stream-after-keepalive",
+            "responses",
+            "responses-stream",
+        ],
+    )
+    def test_a_captured_rollout_records_the_propagated_refusal_and_freezes_complete(
+        self, monkeypatch: MonkeyPatch, tmp_path, route: str
+    ) -> None:
+        # The dispatch registers the call's capture intent before the engine is called. The refused
+        # call generates nothing, so no token record resolves that intent; the refusal record does,
+        # and it tells a consumer the rollout ended at the context window rather than at the
+        # harness's own stopping point. Codex and OpenCode stream by default, so the record must
+        # also be written on the streaming paths: before the headers are committed the refusal is
+        # the same HTTP 400, and after the chat keepalive it is an SSE error event on a 200 that
+        # carries the same envelope, recorded from inside the dispatch task.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(
+            monkeypatch, propagate_context_overflow_errors=True, use_completions_api=route == "completions"
+        )
+        refusal = self._engine_window_refusal()
+        if route == "chat-stream-after-keepalive":
+            monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+
+            async def slow_refusal(**_kwargs):
+                await asyncio.sleep(0.05)
+                raise refusal
+
+            engine_call = AsyncMock(side_effect=slow_refusal)
+        else:
+            engine_call = AsyncMock(side_effect=refusal)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = engine_call
+        mock_client.create_completion = engine_call
+        server._clients = [mock_client]
+
+        if route.startswith("responses"):
+            body = {
+                "model": "dummy_model",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": route == "responses-stream",
+            }
+            response = self._post_captured(server, store, "/v1/responses", body)
+        else:
+            response = self._post_captured_chat_completion(server, store, stream=route.startswith("chat-stream"))
+
+        if route == "chat-stream-after-keepalive":
+            assert response.status_code == 200
+            assert response.text.startswith(": keep-alive")
+            error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+            assert json.loads(error_lines[-1][len("data: ") :])["error"]["code"] == "context_length_exceeded"
+        else:
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "context_length_exceeded"
+        snapshot = store.freeze_now("r0")
+        assert snapshot.entries == ()
+        assert snapshot.incomplete is False
+        (record,) = snapshot.engine_refusals
+        assert (record.model_call_id, record.code) == ("mc-1", "context_length_exceeded")
+        assert record.created_at > 0
+        # The dispatch resolved the request's lineage before the engine was called; a request with
+        # no model-authored history is a root, and the record carries that decision.
+        assert (record.parent_call_id, record.parent_resolution) == (None, ParentResolutionStatus.ROOT)
+
+    def test_a_max_tokens_only_400_is_a_refusal_without_a_code(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # A 400 that names only the output-token parameter is still a request the engine refused
+        # before generating, so it resolves the capture intent like any refusal. Its record carries
+        # no code because the envelope carried none: compaction is not the remedy.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = (
+            b'{"error":{"message":"max_tokens must be at least 1, got 0.","type":"BadRequestError",'
+            b'"param":null,"code":400}}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] is None
+        snapshot = store.freeze_now("r0")
+        assert snapshot.incomplete is False
+        assert [(record.model_call_id, record.code) for record in snapshot.engine_refusals] == [("mc-1", None)]
+
+    def test_the_absorbed_overflow_records_no_refusal(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        # Without propagate_context_overflow_errors the caller sees an exhausted generation, not a
+        # refusal, so nothing is recorded as refused.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=False)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        response = self._post_captured_chat_completion(server, store)
+
+        assert response.status_code == 200
+        assert store.freeze_now("r0").engine_refusals == ()
+
+    def test_an_uncaptured_request_is_still_refused_and_records_nothing(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        # A request outside a captured rollout has no rollout to record against.
+        store = TokenCaptureStore(tmp_path)
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 400
+        assert list(store.root.iterdir()) == []
+
+    @mark.parametrize("use_completions_api", [False, True])
+    def test_an_engine_error_the_server_does_not_handle_is_logged_with_its_body(
+        self, monkeypatch: MonkeyPatch, caplog, use_completions_api: bool
+    ) -> None:
+        # Unhandled engine errors preserve the upstream status/body for SDK classifiers.
+        # The warning also retains the request path and rollout id for diagnosis.
+        server = self._setup_server(monkeypatch, use_completions_api=use_completions_api)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=422, message="Unprocessable Entity")
+        error.response_content = (
+            b'{"object":"error","message":"tools.3.type: Input should be \'function\'","type":"BadRequestError",'
+            b'"param":null,"code":422}'
+        )
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        mock_client.create_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = TestClient(app).post(
+                "/ng-rollout/r0/v1/chat/completions",
+                json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        assert response.status_code == 422
+        assert response.content == error.response_content
+        logged = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "engine answered" in record.getMessage()
+        ]
+        assert len(logged) == 1
+        assert "engine answered 422" in logged[0]
+        assert "/v1/chat/completions" in logged[0]
+        assert "(rollout r0)" in logged[0]
+        assert "Input should be 'function'" in logged[0]
+
+    def test_transport_log_error_event_omits_request_headers(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        fake_api_key = "sk-FAKE-transport-log-key"  # pragma: allowlist secret
+        server = self._setup_server(monkeypatch)
+        # A failed model call with the bearer token in its request headers. The key is in the URL query too, so
+        # that logging `str(e)` (which includes the URL) also fails this test.
+        url = URL(f"http://vllm.test/v1/chat/completions?api-key={fake_api_key}")
+        request_info = RequestInfo(
+            url=url,
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict({"Authorization": f"Bearer {fake_api_key}"})),
+            real_url=url,
+        )
+        response = MagicMock(ok=False, request_info=request_info)
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=request_info, history=(), status=400, message="Bad Request"
+        )
+
+        async def failed_call(**kwargs: Any) -> None:
+            # The real `raise_for_status` keeps the request headers on the exception it raises.
+            await raise_for_status(response, b'{"error":{"message":"invalid request","code":400}}')
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=failed_call)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        TestClient(app).post(
+            "/v1/chat/completions", json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        )
+
+        log_text = log_path.read_text(encoding="utf-8")
+        assert fake_api_key not in log_text
+        (error_event,) = [json.loads(line) for line in log_text.splitlines() if "transport_error_response" in line]
+        assert error_event["error"] == (
+            "ClientResponseError(status=400, message='Bad Request', method='POST', "
+            "url='http://vllm.test/v1/chat/completions')"
+        )
+
+    @staticmethod
+    def _provider_reply(finish_reason: str) -> dict:
+        return {
+            "id": "chatcmpl-provider",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": finish_reason,
+                    "message": {"role": "assistant", "content": "18"},
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    @mark.parametrize("responses_api", [False, True])
+    @mark.parametrize("finish_reason", ["abort", "length", "stop"])
+    def test_provider_abort_is_an_error_before_response_conversion(
+        self, monkeypatch: MonkeyPatch, responses_api: bool, finish_reason: str
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        provider_reply = self._provider_reply(finish_reason)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(return_value=provider_reply)
+        server._clients = [provider]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={"input": [{"role": "user", "content": "hi"}], "max_output_tokens": 4096}
+            if responses_api
+            else {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4096},
+        )
+        assert provider.create_chat_completion.call_args.kwargs["max_tokens"] == 4096
+        if finish_reason == "abort":
+            assert response.status_code == 503
+            assert response.json()["detail"] == {
+                "type": "provider_cancelled",
+                "finish_reason": "abort",
+                "request_id": "chatcmpl-provider",
+                "message": "vLLM cancelled the generation; retry the rollout.",
+            }
+            assert "incomplete_details" not in response.json()
+            assert "output" not in response.json()
+            assert provider_reply["choices"][0]["finish_reason"] == "abort"
+        else:
+            assert response.status_code == 200
+            if responses_api:
+                assert response.json()["status"] == ("incomplete" if finish_reason == "length" else "completed")
+                assert response.json()["incomplete_details"] == (
+                    {"reason": "max_output_tokens"} if finish_reason == "length" else None
+                )
+            else:
+                assert response.json()["choices"][0]["finish_reason"] == finish_reason
+
+    @mark.parametrize(
+        "max_model_retries,abort_count",
+        [(None, 1), (None, 3), (0, 1)],
+        ids=["agent-recovers", "agent-exhausts-retries", "agent-retries-disabled"],
+    )
+    async def test_provider_abort_skips_scoring_and_can_be_retried(
+        self, monkeypatch: MonkeyPatch, max_model_retries: int | None, abort_count: int
+    ) -> None:
+        model = self._setup_server(monkeypatch)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            side_effect=[self._provider_reply("abort") for _ in range(abort_count)] + [self._provider_reply("stop")]
+        )
+        model._clients = [provider]
+        model_app = model.setup_webserver()
+        model.setup_exception_middleware(model_app)
+        model_client = TestClient(model_app)
+        transport = MagicMock(spec=ServerClient, global_config_dict={})
+        agent = SimpleAgent(
+            config=SimpleAgentConfig(
+                host="127.0.0.1",
+                port=8080,
+                name="agent",
+                entrypoint="",
+                model_server=ModelServerRef(type="responses_api_models", name="model"),
+                resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            ),
+            server_client=transport,
+        )
+        if max_model_retries is not None:
+            agent.config.max_model_retries = max_model_retries
+        request = MagicMock(cookies={}, path_params={}, headers={})
+        verify = AsyncMock()
+
+        def reply(payload: dict, status: int = 200) -> MagicMock:
+            result = MagicMock(ok=status < 400, status=status, cookies={})
+            result.read = AsyncMock(return_value=json.dumps(payload).encode())
+            result.content.read = result.read
+            if status >= 400:
+                result.raise_for_status.side_effect = ClientResponseError(
+                    MagicMock(real_url="http://model/v1/responses"), (), status=status
+                )
+            return result
+
+        async def post(*, server_name, url_path, json, cookies, headers=None):
+            if server_name == "model":
+                verify.assert_not_awaited()
+                result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
+                return reply(result.json(), result.status_code)
+            if url_path == "/seed_session":
+                return reply({})
+            if server_name == "agent":
+                result = await agent.responses(request, Response(), json)
+                return reply(result.model_dump())
+            assert url_path == "/verify"
+            await verify(json)
+            return reply({**json, "reward": 1.0})
+
+        transport.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "hi"}], max_output_tokens=4096
+            )
+        )
+        if abort_count > agent.config.max_model_retries:
+            with raises(ClientResponseError) as error:
+                await agent.run(request, body)
+            verify.assert_not_awaited()
+            assert provider.create_chat_completion.await_count == agent.config.max_model_retries + 1
+            failure = _agent_request_failure_row(error.value, error.value.status)
+            assert "provider_cancelled" in failure["_ng_failure_response_body"]
+            assert "abort" in failure["_ng_failure_response_body"]
+            assert "reward" not in failure and "response" not in failure
+            assert not is_terminal_failure(failure)
+
+        # Recovery happens within the agent retry budget, or in a fresh rollout
+        # after that budget is exhausted. Only the successful response is scored.
+        result = await agent.run(request, body)
+        verify.assert_awaited_once()
+        assert result.response.status == "completed"
+        assert result.response.incomplete_details is None
+        assert result.reward == 1.0
+        assert provider.create_chat_completion.await_count == abort_count + 1
+
+    def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
+        context = CaptureContext(
+            rollout_id="rollout-1",
+            model_call_id="c2",
+            token_sink=None,
+            external_staging=True,
+            capture_admission=CaptureAdmission(
+                capture_key="rollout-1",
+                model_call_id="c2",
+                parent_call_id="c1",
+                prev_len=3,
+                mode="token_in",
+                required_prefix_token_ids=[10, 11, 12],
+                parent_chain_hash="0" * 64,
+            ),
+        )
+        token = set_token_sink(context)
+        try:
+            outbound = server._preprocess_chat_completion_create_params(
+                MagicMock(),
+                {"messages": [{"role": "user", "content": "continue"}]},
+            )
+        finally:
+            reset_token_sink(token)
+
+        # The prefix contract travels only inside the admission in offload_params;
+        # the worker resolves it from staging_chain, so the body carries no prefix
+        # copy and requests no token echo.
+        assert "return_tokenized_data" not in outbound
+        assert "required_prefix_token_ids" not in outbound
+        assert outbound["logprobs"] is True
+        assert outbound["top_logprobs"] == 0
+        assert outbound["offload_params"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
+        assert "ng_capture" not in outbound
+        assert "return_tokens_as_token_ids" not in outbound
+
+    async def test_megatron_capture_handler_finalizes_through_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "minf-17",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "ng_commit_coords": {
+                    "schema_version": 3,
+                    "digest_version": 2,
+                    "extras_digest_version": 1,
+                    "capture_key": "rollout-1",
+                    "model_call_id": "c1",
+                    "parent_call_id": None,
+                    "prev_len": 0,
+                    "delta_len": 3,
+                    "cum_len": 3,
+                    "weight_version": 7,
+                    "disposition": "staged",
+                    "digest": "0" * 64,
+                    "extras_digest": "1" * 64,
+                    "staging_key": "rollout-1/c1",
+                    "chain_hash": "2" * 64,
+                    "cumulative_hash": "3" * 64,
+                },
+                # Transport-only token data at every location the capture handler
+                # must scrub before the completion leaves the model server.
+                "prompt_token_ids": [10, 11],
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": [12, 13, 14],
+                        "logprobs": {
+                            "content": [
+                                {"token": "token_id:12", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                                {"token": "token_id:13", "logprob": -0.2, "bytes": None, "top_logprobs": []},
+                                {"token": "token_id:14", "logprob": -0.3, "bytes": None, "top_logprobs": []},
+                            ]
+                        },
+                        "message": {
+                            "role": "assistant",
+                            "content": "done",
+                            "prompt_token_ids": [10, 11],
+                            # Megatron ``return_tokenized_data`` echo of the exact prompt form.
+                            "compact_prompt_token_ids": [10, 11],
+                            "generation_token_ids": [12, 13, 14],
+                            "generation_log_probs": [-0.1, -0.2, -0.3],
+                        },
+                    }
+                ],
+            }
+        )
+        server._clients = [client]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+        lineage_store = InMemoryLineageStore()
+        context = CaptureContext(
+            rollout_id="rollout-1",
+            model_call_id="c1",
+            token_sink=None,
+            lineage_store=lineage_store,
+            external_staging=True,
+            admitted_at=1.5,
+            request_items=[{"role": "user", "content": "go"}],
+            capture_admission=CaptureAdmission(
+                capture_key="rollout-1",
+                model_call_id="c1",
+                mode="text",
+            ),
+        )
+        token = set_token_sink(context)
+        try:
+            response = await server.chat_completions(
+                request,
+                NeMoGymChatCompletionCreateParamsNonStreaming(
+                    messages=[{"role": "user", "content": "go"}],
+                ),
+            )
+            # The worker acknowledgement is parked on the context until the
+            # final API representation is known; lineage is not yet published.
+            assert context.external_commit_coords is not None
+            assert context.external_commit_coords["staging_key"] == "rollout-1/c1"
+            assert context.committed is False
+            await server._finalize_served_response(response)
+        finally:
+            reset_token_sink(token)
+
+        outbound = client.create_chat_completion.await_args.kwargs
+        assert "return_tokenized_data" not in outbound
+        assert outbound["offload_params"]["ng_capture"] == context.capture_admission.model_dump(mode="json")
+        assert "ng_capture" not in outbound
+        assert context.committed is True
+        manifest = await lineage_store.manifest("rollout-1")
+        assert manifest["records"][0]["staging_key"] == "rollout-1/c1"
+        assert manifest["records"][0]["weight_version"] == 7
+        assert manifest["records"][0]["response_id"] == "minf-17"
+        # ``NeMoGymChatCompletion`` inherits the OpenAI SDK's ``extra="allow"``, so
+        # any transport field left on the dict would be re-admitted verbatim into
+        # the served response. Every injected location must therefore be gone.
+        response_payload = response.model_dump()
+        assert "prompt_token_ids" not in response_payload
+        assert "ng_commit_coords" not in response_payload
+        served_choice = response_payload["choices"][0]
+        assert "token_ids" not in served_choice
+        # ``logprobs`` is a declared ``Choice`` field: stripping the dict entry
+        # leaves the pydantic default rather than removing the key.
+        assert served_choice["logprobs"] is None
+        served_message = served_choice["message"]
+        for field_name in (
+            "prompt_token_ids",
+            "compact_prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+        ):
+            assert field_name not in served_message, field_name
+
+    def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
+        workers = [self._setup_server(monkeypatch) for _ in range(2)]
+        for worker in workers:
+            worker._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        workers[0]._session_id_to_client = {"prior-a": workers[0]._clients[0]}
+        workers[1]._session_id_to_client = {
+            "prior-b": workers[1]._clients[0],
+            "prior-c": workers[1]._clients[1],
+            "prior-d": workers[1]._clients[2],
+        }
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "target-session"}
+
+        client_indices = []
+        for worker in workers:
+            selected_client = worker._resolve_client(request)
+            client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
+
+        assert client_indices[0] == client_indices[1]
+
+    def test_calls_of_one_rollout_share_an_endpoint_whatever_their_session(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        with rollout_context("task-7-0"):
+            picked = {server._resolve_client(self._request_for_session(f"fresh-{i}")) for i in range(32)}
+
+        assert len(picked) == 1
+
+    def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(2)]
+
+        picked = []
+        for task in range(64):
+            with rollout_context(f"task-{task}-0"):
+                picked.append(server._resolve_client(self._request_for_session("one-shared-session")))
+
+        assert set(picked) == set(server._clients)
+
+    def test_without_a_rollout_the_session_still_picks_the_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        picked = server._resolve_client(self._request_for_session("session-a"))
+
+        assert picked is server._clients[self._hashed_client_idx("session-a", 4)]
+
+    @staticmethod
+    def _request_for_session(session_id: str) -> MagicMock:
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: session_id}
+        request.url.path = "/v1/chat/completions"
+        return request
+
+    @staticmethod
+    def _hashed_client_idx(session_id: str, n_clients: int) -> int:
+        digest = hashlib.sha256(session_id.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], byteorder="big") % n_clients
+
+    def _setup_routing_server(self, monkeypatch: MonkeyPatch, *, route_around: bool, **config_kwargs) -> VLLMModel:
+        server = self._setup_server(monkeypatch, route_around_failing_endpoints=route_around, **config_kwargs)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI, base_url=f"http://engine-{i}/v1") for i in range(4)]
+        return server
+
+    def test_a_failing_endpoint_loses_its_sessions_and_takes_no_new_ones(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=True, endpoint_failure_threshold=3)
+        pinned = server._resolve_client(self._request_for_session("session-a"))
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_failure(pinned)
+        # Two failures are below the threshold: the session stays where its id hashes.
+        assert server._resolve_client(self._request_for_session("session-a")) is pinned
+
+        server._note_endpoint_failure(pinned)
+        moved = server._resolve_client(self._request_for_session("session-a"))
+        assert moved is not pinned
+        # The move is sticky, and new sessions spread over the serving endpoints only.
+        assert server._resolve_client(self._request_for_session("session-a")) is moved
+        new_clients = {server._resolve_client(self._request_for_session(f"new-{i}")) for i in range(64)}
+        assert new_clients == set(server._clients) - {pinned}
+
+    def test_without_the_gate_a_failing_endpoint_keeps_its_sessions(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=False)
+        pinned = server._resolve_client(self._request_for_session("session-a"))
+        for _ in range(5):
+            server._note_endpoint_failure(pinned)
+        assert server._resolve_client(self._request_for_session("session-a")) is pinned
+        hashed = server._clients[self._hashed_client_idx("new-0", len(server._clients))]
+        assert server._resolve_client(self._request_for_session("new-0")) is hashed
+
+    def test_a_good_answer_resets_the_consecutive_failure_count(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=True, endpoint_failure_threshold=3)
+        pinned = server._resolve_client(self._request_for_session("session-a"))
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_success(pinned)
+        server._note_endpoint_failure(pinned)
+        server._note_endpoint_failure(pinned)
+        assert server._resolve_client(self._request_for_session("session-a")) is pinned
+
+    def test_a_failed_endpoint_takes_one_trial_call_per_retry_interval(self, monkeypatch: MonkeyPatch) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: clock[0])
+        server = self._setup_routing_server(
+            monkeypatch, route_around=True, endpoint_failure_threshold=1, endpoint_retry_after_s=60.0
+        )
+        failed = server._clients[0]
+        server._note_endpoint_failure(failed)
+        # New sessions whose id hashes onto the failed endpoint.
+        probes = [f"probe-{i}" for i in range(400) if self._hashed_client_idx(f"probe-{i}", 4) == 0]
+        assert len(probes) >= 6
+
+        clock[0] += 59.0
+        assert server._resolve_client(self._request_for_session(probes[0])) is not failed
+        clock[0] += 1.0
+        # The interval has run out: the first new session is the trial and restarts the interval.
+        assert server._resolve_client(self._request_for_session(probes[1])) is failed
+        assert server._resolve_client(self._request_for_session(probes[2])) is not failed
+        # A failed trial waits a whole interval again.
+        server._note_endpoint_failure(failed)
+        clock[0] += 59.0
+        assert server._resolve_client(self._request_for_session(probes[3])) is not failed
+        clock[0] += 1.0
+        assert server._resolve_client(self._request_for_session(probes[4])) is failed
+        # A good answer, here from the trial, puts the endpoint back in the pool.
+        server._note_endpoint_success(failed)
+        assert not server._endpoint_failed(failed)
+        assert server._resolve_client(self._request_for_session(probes[5])) is failed
+
+    def test_a_moved_session_returns_to_its_own_endpoint_when_it_serves_again(self, monkeypatch: MonkeyPatch) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: clock[0])
+        server = self._setup_routing_server(
+            monkeypatch, route_around=True, endpoint_failure_threshold=1, endpoint_retry_after_s=60.0
+        )
+        request = self._request_for_session("session-a")
+        own = server._resolve_client(request)
+        server._note_endpoint_failure(own)
+        moved = server._resolve_client(request)
+        assert moved is not own
+        clock[0] += 59.0
+        assert server._resolve_client(request) is moved
+        # With no new sessions in a wave, the moved session is what tries its own
+        # endpoint once the interval has run out; a failed trial sends it back.
+        clock[0] += 1.0
+        assert server._resolve_client(request) is own
+        server._note_endpoint_failure(own)
+        assert server._resolve_client(request) is moved
+        clock[0] += 60.0
+        assert server._resolve_client(request) is own
+        server._note_endpoint_success(own)
+        assert server._resolve_client(request) is own
+        assert server._resolve_client(request) is own
+
+    @staticmethod
+    def _served_completion(content: str) -> dict:
+        return NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content=content, tool_calls=[]),
+                )
+            ],
+        ).model_dump()
+
+    async def test_engine_server_errors_move_the_session_to_a_serving_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, route_around_failing_endpoints=True, endpoint_failure_threshold=2)
+        dead = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://dead/v1")
+        dead.create_chat_completion = AsyncMock(
+            side_effect=_engine_bad_request_error("Internal Server Error", status=500)
+        )
+        live = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://live/v1")
+        live.create_chat_completion = AsyncMock(return_value=self._served_completion("served"))
+        server._clients = [dead, live]
+        server._session_id_to_client["session-a"] = dead
+        request = self._request_for_session("session-a")
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model", messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hi")]
+        )
+
+        for _ in range(2):
+            with raises(ClientResponseError):
+                await server.chat_completions(request, body)
+        result = await server.chat_completions(request, body)
+
+        assert result.choices[0].message.content == "served"
+        assert dead.create_chat_completion.await_count == 2
+        assert live.create_chat_completion.await_count == 1
+
+    async def test_an_engine_refusal_does_not_count_against_its_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, route_around_failing_endpoints=True, endpoint_failure_threshold=1)
+        refusing = MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://refusing/v1")
+        refusing.create_chat_completion = AsyncMock(
+            side_effect=_engine_bad_request_error("tools.3.type: Input should be 'function'", status=422)
+        )
+        server._clients = [refusing, MagicMock(spec=NeMoGymAsyncOpenAI, base_url="http://other/v1")]
+        server._session_id_to_client["session-a"] = refusing
+        request = self._request_for_session("session-a")
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            model="dummy_model", messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hi")]
+        )
+
+        with raises(ClientResponseError):
+            await server.chat_completions(request, body)
+
+        assert server._resolve_client(request) is refusing
+
+    @mark.parametrize("forward", [False, True])
+    async def test_chat_completions_forwards_session_id_as_conversation_id(
+        self, monkeypatch: MonkeyPatch, forward: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch, forward_session_id_as_conversation_id=forward)
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl-conv",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="done", tool_calls=[]),
+                )
+            ],
+        )
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+
+        await server.chat_completions(
+            request,
+            NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "go"}]),
+        )
+
+        if forward:
+            assert captured_kwargs["conversation_params"] == {"conversation_id": "session-1"}
+        else:
+            assert "conversation_params" not in captured_kwargs
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -821,7 +2017,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -870,6 +2066,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the current status for a given order",
+                "strict": True,
             },
             {
                 "name": "get_delivery_date",
@@ -884,6 +2081,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the estimated delivery date for a given order",
+                "strict": True,
             },
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -978,7 +2176,7 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -1005,7 +2203,6 @@ class TestApp:
             {
                 "content": "<think>Considering ways to greet the user...</think>Hi, how can I help?",
                 "role": "assistant",
-                "tool_calls": [],
             },
             {
                 "content": [{"text": "What's the weather?", "type": "text"}],
@@ -1234,7 +2431,7 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -1304,7 +2501,6 @@ class TestApp:
             {
                 "content": "Order #1234 is shipped and arrives tomorrow.",
                 "role": "assistant",
-                "tool_calls": [],
             },
             {
                 "content": [
@@ -1342,6 +2538,7 @@ class TestApp:
                     },
                     "required": ["order_id", "date"],
                 },
+                "strict": True,
             }
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -1378,7 +2575,7 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=single_input)
@@ -1460,7 +2657,7 @@ class TestApp:
 
         assert captured_params["value"] == expected_chat_completion_create_params
 
-    def test_client_session_routing(self, monkeypatch: MonkeyPatch):
+    def test_client_session_routing(self):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -1521,7 +2718,7 @@ class TestApp:
 
         server._clients = [client_1, client_2]
 
-        # Test first query by client 1 goes to underlying client 1
+        # Record the backend selected for each new session.
         client_1 = TestClient(app)
         response_1_1 = client_1.post(
             "/v1/responses",
@@ -1529,9 +2726,8 @@ class TestApp:
         )
         assert response_1_1.status_code == 200
         data = response_1_1.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        routed_output_1 = data["output"][0]["content"][0]["text"]
 
-        # Test first query by client 2 goes to underlying client 2 (round robin)
         client_2 = TestClient(app)
         response_2_1 = client_2.post(
             "/v1/responses",
@@ -1539,9 +2735,8 @@ class TestApp:
         )
         assert response_2_1.status_code == 200
         data = response_2_1.json()
-        assert data["output"][0]["content"][0]["text"] == "2"
+        routed_output_2 = data["output"][0]["content"][0]["text"]
 
-        # Test first query by client 3 goes to underlying client 1 = 3 % 2 (round robin)
         client_3 = TestClient(app)
         response_3_1 = client_3.post(
             "/v1/responses",
@@ -1549,19 +2744,18 @@ class TestApp:
         )
         assert response_3_1.status_code == 200
         data = response_3_1.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        routed_output_3 = data["output"][0]["content"][0]["text"]
 
-        # Test second query by client 1 goes to the same underlying client 1 (not round robin since we've called it before)
-        # Here, we assume that TestClient will extract and propogate the response cookies
+        # TestClient preserves the session cookie, so every second request must
+        # return through the same backend selected for that session's first request.
         response_1_2 = client_1.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
         )
         assert response_1_2.status_code == 200
         data = response_1_2.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        assert data["output"][0]["content"][0]["text"] == routed_output_1
 
-        # Test second query by client 3 goes to the same underlying client 1 (not round robin since we've called it before)
         # We do this out of order as 1 -> 3 -> 2 instead of 1 -> 2 -> 3 to test any ordering effects.
         response_3_2 = client_3.post(
             "/v1/responses",
@@ -1569,16 +2763,75 @@ class TestApp:
         )
         assert response_3_2.status_code == 200
         data = response_3_2.json()
-        assert data["output"][0]["content"][0]["text"] == "1"
+        assert data["output"][0]["content"][0]["text"] == routed_output_3
 
-        # Test second query by client 2 goes to the same underlying client 2
         response_2_2 = client_2.post(
             "/v1/responses",
             json=request_body.model_dump(exclude_unset=True, mode="json"),
         )
         assert response_2_2.status_code == 200
         data = response_2_2.json()
-        assert data["output"][0]["content"][0]["text"] == "2"
+        assert data["output"][0]["content"][0]["text"] == routed_output_2
+
+    @mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+    @mark.parametrize("format_type", ["json_schema", "json_object"])
+    def test_structured_responses_preserve_literal_tags_and_judge_schema(
+        self, monkeypatch, reasoning_field, format_type
+    ):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        verdict = {"coverage_outcome": "fulfilled", "justification": "Literal <think>text</think> stays"}
+        final = json.dumps(verdict)
+        upstream = AsyncMock(
+            return_value={
+                "id": "judge",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": final,
+                            reasoning_field: "Check the claim",
+                        },
+                    }
+                ],
+            }
+        )
+        server._clients = [MagicMock(create_chat_completion=upstream)]
+        schema = {
+            "type": "object",
+            "properties": {"coverage_outcome": {"type": "string"}, "justification": {"type": "string"}},
+            "required": ["coverage_outcome", "justification"],
+            "additionalProperties": False,
+        }
+        format_config = {"type": format_type}
+        if format_type == "json_schema":
+            format_config.update(name="verdict", schema=schema, strict=True)
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "input": [{"role": "user", "content": "Judge this claim"}],
+                    "text": {"format": format_config},
+                    "temperature": 0,
+                    "max_output_tokens": 2048,
+                },
+            )
+        assert response.status_code == 200
+        output = response.json()["output"]
+        assert [item["type"] for item in output] == ["reasoning", "message"]
+        assert output[0]["summary"][0]["text"] == "Check the claim"
+        assert output[1]["content"][0]["text"] == final
+        sent = upstream.await_args.kwargs
+        expected = {"type": format_type}
+        if format_type == "json_schema":
+            expected["json_schema"] = {"name": "verdict", "schema": schema, "strict": True}
+        assert sent["response_format"] == expected
+        assert sent["temperature"] == 0 and sent["max_tokens"] == 2048
 
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
@@ -1763,7 +3016,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -1786,7 +3039,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -1794,7 +3046,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
         ]
@@ -1880,7 +3131,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -1888,7 +3138,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -1995,7 +3244,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2003,7 +3251,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2028,7 +3275,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [],
                 "reasoning_content": "None content test",
                 "reasoning": "None content test",
             },
@@ -2221,7 +3467,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2244,7 +3490,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2252,7 +3497,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
         ]
@@ -2338,7 +3582,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2346,7 +3589,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2453,7 +3695,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "Sure, one sec.",
-                "tool_calls": [],
                 "reasoning_content": "First reasoning item",
                 "reasoning": "First reasoning item",
             },
@@ -2461,7 +3702,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "I'm still checking",
-                "tool_calls": [],
             },
             {"content": [{"text": "ok", "type": "text"}], "role": "user"},
             {
@@ -2486,7 +3726,6 @@ class TestApp:
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [],
                 "reasoning_content": "None content test",
                 "reasoning": "None content test",
             },
@@ -2524,7 +3763,7 @@ class TestApp:
         ]
 
         expected_response = NeMoGymResponse(
-            **COMMON_RESPONSE_PARAMS,
+            **(COMMON_RESPONSE_PARAMS | {"status": "incomplete"}),
             id="resp_123",
             object="response",
             tools=[],
@@ -2555,7 +3794,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         response = client.post(
             "/v1/responses",
@@ -2627,7 +3866,8 @@ class TestVLLMConverter:
         )
 
         expected_chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
+            parallel_tool_calls=COMMON_RESPONSE_PARAMS["parallel_tool_calls"],
+            tool_choice=COMMON_RESPONSE_PARAMS["tool_choice"],
             messages=[
                 {
                     "role": "user",
@@ -2643,7 +3883,6 @@ class TestVLLMConverter:
                 {
                     "role": "assistant",
                     "content": "assistant content",
-                    "tool_calls": [],
                 },
                 {
                     "role": "system",
@@ -2693,7 +3932,7 @@ class TestVLLMConverter:
         ChatCompletion output -> Response output
         """
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
@@ -2723,7 +3962,7 @@ class TestVLLMConverter:
         assert main_content_none == "Just plain content here."
 
     def test_postprocess_chat_response_multiple_reasoning_items(self, monkeypatch: MonkeyPatch):
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         raw_model_response = (
@@ -2907,7 +4146,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output"]
-        assert expected_output == chat_completion_create_params.model_dump()
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
         converter = VLLMConverter(return_token_id_information=True)
@@ -3013,10 +4252,10 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output_return_token_id_information"]
-        assert expected_output == chat_completion_create_params.model_dump()
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         message = NeMoGymChatCompletionMessage(
             content="<think> \n \n I'm thinking \n \n </think> \n \n I'm chatting! \n \n ",
@@ -3127,6 +4366,204 @@ class TestVLLMConverter:
         ]
         assert expected_messages == actual_messages
 
+    @staticmethod
+    def _chat_client_capturing_upstream(**config_overrides: Any) -> tuple[TestClient, dict[str, Any]]:
+        """Chat-path vllm_model behind a TestClient; returns the kwargs sent upstream."""
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            **config_overrides,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        app = server.setup_webserver()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return NeMoGymChatCompletion(
+                id="chtcmpl",
+                object="chat.completion",
+                created=FIXED_TIME,
+                model="dummy_model",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="response", tool_calls=[]),
+                    )
+                ],
+            ).model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+        return TestClient(app), captured_kwargs
+
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize("aws_region_name", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_openhands_request_fields_are_accepted_and_not_forwarded(
+        self, stream: bool, aws_region_name: object
+    ) -> None:
+        """Exercise ingress and forwarding with OpenHands fields and #4483 replay metadata."""
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        tool_call = {"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}
+        body = {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tool_call],
+                    "provider_specific_fields": {"refusal": None},
+                },
+                {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+            ],
+            "aws_region_name": aws_region_name,
+            "stream": stream,
+        }
+
+        response = client.post("/v1/chat/completions", json=body)
+
+        assert response.status_code == 200, response.text
+        assert "aws_region_name" not in captured_kwargs
+        assert captured_kwargs["messages"] == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        if stream:
+            assert response.headers["content-type"].startswith("text/event-stream")
+            frames = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+            assert frames[-1] == "[DONE]"
+            chunks = [json.loads(frame) for frame in frames[:-1]]
+            assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+            assert "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks) == "response"
+        else:
+            assert response.json()["choices"][0]["message"]["content"] == "response"
+
+    @mark.parametrize("stream", [False, True])
+    def test_tool_message_image_reaches_the_backend(self, stream: bool) -> None:
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        tool_call = {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+                ],
+            },
+        ]
+
+        response = client.post("/v1/chat/completions", json={"messages": messages, "stream": stream})
+
+        assert response.status_code == 200, response.text
+        assert captured_kwargs["messages"] == messages
+
+    def test_request_chat_template_kwargs_precedence(self, caplog):
+        """Config baseline -> direct request field -> metadata override.
+
+        Stirrup sends ``chat_template_kwargs`` as a body field; the strict
+        schema must accept it, and when forwarding is opted in the proxy merges
+        it above the configured baseline and below per-request metadata.
+        """
+        client, captured_kwargs = self._chat_client_capturing_upstream(
+            chat_template_kwargs={"enable_thinking": False, "baseline_only": 1},
+            forward_request_chat_template_kwargs=True,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"enable_thinking": True, "request_only": 2},
+                },
+            )
+        assert response.status_code == 200
+        assert captured_kwargs["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "baseline_only": 1,
+            "request_only": 2,
+        }
+        assert "chat_template_kwargs" not in caplog.text
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"enable_thinking": True},
+                "metadata": {"chat_template_kwargs": json.dumps({"enable_thinking": False})},
+            },
+        )
+        assert response.status_code == 200
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is False
+
+        rejected = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": "not-a-mapping"},
+        )
+        assert rejected.status_code == 422
+
+    def test_request_chat_template_kwargs_dropped_by_default(self, caplog):
+        """By default the field is accepted at ingress but not forwarded.
+
+        Agents attach ``enable_thinking`` on every call; honoring it would
+        change the policy's generation regime relative to runs collected
+        without it, so the default drops it and warns once per server.
+        """
+        client, captured_kwargs = self._chat_client_capturing_upstream(chat_template_kwargs={"enable_thinking": True})
+        request = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"enable_thinking": False, "request_only": 2},
+        }
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            for _ in range(2):
+                response = client.post("/v1/chat/completions", json=request)
+                assert response.status_code == 200
+                assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": True}
+
+        warnings = [record for record in caplog.records if "chat_template_kwargs" in record.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].levelno == logging.WARNING
+        assert "forward_request_chat_template_kwargs is false" in warnings[0].getMessage()
+
+    def test_empty_request_chat_template_kwargs_does_not_warn(self, caplog):
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            response = client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": {}},
+            )
+        assert response.status_code == 200
+        assert "chat_template_kwargs" not in captured_kwargs
+        assert "chat_template_kwargs" not in caplog.text
+
+    def test_provider_reasoning_extensions_forwarded_unchanged(self):
+        """``thinking`` / ``output_config`` pass ingress and reach vLLM as sent on the chat path."""
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        extensions = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}}
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], **extensions},
+        )
+        assert response.status_code == 200
+        assert {field: captured_kwargs[field] for field in extensions} == extensions
+
     def test_metadata_chat_template_kwargs_override(self, monkeypatch: MonkeyPatch):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -3207,6 +4644,28 @@ class TestVLLMConverter:
         response = client.post(
             "/v1/responses",
             json=request_body_no_override.model_dump(exclude_unset=True, mode="json"),
+        )
+        assert response.status_code == 200
+
+        assert "chat_template_kwargs" in captured_kwargs
+        assert captured_kwargs["chat_template_kwargs"]["enable_thinking"] is True
+        assert captured_kwargs["chat_template_kwargs"]["some_other_param"] == "value1"
+
+        captured_kwargs.clear()
+        request_body_null_metadata = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                NeMoGymEasyInputMessage(
+                    type="message",
+                    role="user",
+                    content="hello",
+                )
+            ],
+            metadata=None,
+        )
+
+        response = client.post(
+            "/v1/responses",
+            json=request_body_null_metadata.model_dump(exclude_unset=True, mode="json"),
         )
         assert response.status_code == 200
 
@@ -3306,6 +4765,190 @@ class TestVLLMConverter:
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
 
+    def test_benchmark_extra_body_survives_model_type_config_and_reaches_vllm(self, tmp_path) -> None:
+        # `gym eval run --benchmark <b> --model-type vllm_model` merges the vllm_model config after the benchmark
+        # config; the per-request budget and template kwargs a benchmark sets must still reach the engine.
+        benchmark_settings = {
+            "extra_body": {"thinking_token_budget": 17408},
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        benchmark_config = tmp_path / "config.yaml"
+        benchmark_config.write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": benchmark_settings}}})
+        )
+        model_type_config = PARENT_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "config_paths": [str(benchmark_config), str(model_type_config)],
+                        "policy_base_url": "http://api.openai.com/v1",
+                        "policy_api_key": "dummy_key",  # pragma: allowlist secret
+                        "policy_model_name": "dummy_model",
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+        block = OmegaConf.to_container(resolved["policy_model"]["responses_api_models"]["vllm_model"], resolve=True)
+        config = VLLMModelConfig.model_validate({"name": "policy_model", **block})  # the parser assigns host/port
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="response", tool_calls=[]),
+                )
+            ],
+        )
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")]
+        )
+        response = TestClient(app).post("/v1/responses", json=request.model_dump(exclude_unset=True, mode="json"))
+
+        assert response.status_code == 200
+        assert captured_kwargs["thinking_token_budget"] == 17408
+        assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Assistant reasoning history preprocessing
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_reasoning_history_config(**overrides: Any) -> VLLMModelConfig:
+    return VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=True,
+        uses_interleaved_reasoning=True,
+        **overrides,
+    )
+
+
+def _make_reasoning_history_model(*, preserve_content: bool, **overrides: Any) -> VLLMModel:
+    config = _make_reasoning_history_config(preserve_reasoning_in_assistant_content=preserve_content, **overrides)
+    return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestAssistantReasoningHistoryPreprocess:
+    @staticmethod
+    def _body(content: Any) -> dict[str, Any]:
+        return {
+            "model": "caller-model",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": "next"},
+            ],
+        }
+
+    def test_default_still_splits_think_history(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=False)
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), self._body("<think>reason</think>\n## Action:\nact")
+        )
+
+        assistant = result["messages"][1]
+        assert assistant["content"] == "\n## Action:\nact"
+        assert assistant["reasoning_content"] == "reason"
+        assert assistant["reasoning"] == "reason"
+
+    def test_preserve_mode_keeps_string_history_byte_for_byte(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        original = "<think>reason</think>\n## Action:\nact"
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body(original))
+
+        assistant = result["messages"][1]
+        assert assistant == {"role": "assistant", "content": original}
+
+    def test_preserve_mode_keeps_list_history_byte_for_byte(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        original = [{"type": "text", "text": "<think>reason</think>\n## Action:\nact"}]
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body(original))
+
+        assistant = result["messages"][1]
+        assert assistant == {"role": "assistant", "content": original}
+
+
+class TestReasoningFieldConfig:
+    @staticmethod
+    def _body(content: Any) -> dict[str, Any]:
+        # Preprocessing strips reasoning in place; copy so parametrized cases stay independent.
+        return {"model": "caller-model", "messages": [{"role": "assistant", "content": deepcopy(content)}]}
+
+    @mark.parametrize(
+        "reasoning_field,expected_keys",
+        [
+            ("both", {"reasoning", "reasoning_content"}),
+            ("reasoning", {"reasoning"}),
+            ("reasoning_content", {"reasoning_content"}),
+        ],
+    )
+    @mark.parametrize(
+        "content",
+        ["<think>reason</think>act", [{"type": "text", "text": "<think>reason</think>act"}]],
+        ids=["string", "list"],
+    )
+    def test_reasoning_field_selects_outgoing_keys(
+        self, monkeypatch: MonkeyPatch, reasoning_field: str, expected_keys: set[str], content: Any
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
+        assistant = model._preprocess_chat_completion_create_params(MagicMock(), self._body(content))["messages"][0]
+
+        assert {key for key in ("reasoning", "reasoning_content") if key in assistant} == expected_keys
+        assert all(assistant[key] == "reason" for key in expected_keys)
+
+    @mark.parametrize("env_value,expected", [(None, "both"), ("", "both"), ("  reasoning ", "reasoning")])
+    def test_default_falls_back_to_env_var(self, monkeypatch: MonkeyPatch, env_value: Any, expected: str) -> None:
+        if env_value is None:
+            monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        else:
+            monkeypatch.setenv("NEMO_GYM_REASONING_FIELD", env_value)
+        assert _make_reasoning_history_config().reasoning_field == expected
+
+    def test_config_overrides_env_var(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_REASONING_FIELD", "reasoning")
+        assert (
+            _make_reasoning_history_config(reasoning_field="reasoning_content").reasoning_field == "reasoning_content"
+        )
+
+    def test_invalid_config_value_is_rejected(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        with raises(ValueError, match="reasoning_field"):
+            _make_reasoning_history_config(reasoning_field="reasoning_text")
+
+    def test_invalid_env_var_is_rejected_at_config_time(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_REASONING_FIELD", "reasoning_text")
+        with raises(ValueError, match="NEMO_GYM_REASONING_FIELD"):
+            _make_reasoning_history_config()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio sidechannel splice (metadata.audio_data → user-message content block)
@@ -3338,6 +4981,55 @@ def _make_minimal_audio_model() -> VLLMModel:
         uses_interleaved_reasoning=False,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _translate_responses_request(model: VLLMModel, request: NeMoGymResponseCreateParamsNonStreaming) -> dict:
+    chat = model._converter.responses_to_chat_completion_create_params(request)
+    return model._preprocess_chat_completion_create_params(MagicMock(), chat.model_dump(exclude_unset=True))
+
+
+def test_responses_metadata_sampling_reaches_vllm() -> None:
+    model = _make_minimal_audio_model()
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input="Solve the problem.",
+        temperature=1.0,
+        top_p=0.95,
+        max_output_tokens=120000,
+        metadata={
+            "chat_template_kwargs": json.dumps({"enable_thinking": True}),
+            "extra_body": json.dumps({"top_k": 64, "seed": 3}),
+        },
+    )
+
+    outbound = _translate_responses_request(model, request)
+
+    assert (outbound["temperature"], outbound["top_p"], outbound["max_tokens"]) == (1.0, 0.95, 120000)
+    assert outbound["top_k"] == 64
+    assert outbound["seed"] == 3
+    assert outbound["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_indic_ifeval_prepared_sampling_reaches_vllm() -> None:
+    from benchmarks.indic.ifeval.prepare import build_rows
+
+    row = build_rows(
+        [
+            {
+                "key": 1,
+                "prompt": "नमस्ते लिखिए।",
+                "instruction_id_list": ["keywords:existence"],
+                "kwargs": [{"keywords": ["नमस्ते"]}],
+                "tags": ["correct"],
+            }
+        ],
+        language="hi",
+    )[0]
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    outbound = _translate_responses_request(_make_minimal_audio_model(), request)
+    assert (outbound["temperature"], outbound["max_tokens"]) == (0.0, 1280)
+    assert outbound["messages"] == [{"role": "user", "content": "नमस्ते लिखिए।"}]
+    assert "top_k" not in outbound
+    assert "chat_template_kwargs" not in outbound
 
 
 class TestAudioDataSplice:
@@ -3448,6 +5140,9 @@ class TestAudioDataSplice:
 
 import base64 as _b64  # noqa: E402  (kept local to the audio_path tests)
 
+import nemo_gym.client.http_client
+import nemo_gym.client.server_client
+
 
 _AUDIO_BYTES = b"RIFF" + b"\x00" * 8 + b"WAVEfmt "  # not a valid WAV — splice doesn't decode
 
@@ -3471,17 +5166,16 @@ def _make_audio_path_model(audio_root: str | None = None) -> VLLMModel:
 
 
 class TestAudioPathSplice:
-    def test_absolute_path_encodes_to_data_uri(self, tmp_path) -> None:
+    def test_responses_audio_path_encodes_to_data_uri(self, tmp_path) -> None:
         wav = tmp_path / "clip.wav"
         wav.write_bytes(_AUDIO_BYTES)
 
         model = _make_audio_path_model()
-        body = {
-            "model": "dummy-model",
-            "messages": [{"role": "user", "content": "Transcribe."}],
-            "metadata": {"audio_path": str(wav)},
-        }
-        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input="Transcribe.",
+            metadata={"audio_path": str(wav)},
+        )
+        result = _translate_responses_request(model, request)
 
         # audio_path consumed; metadata empty → dropped.
         assert "metadata" not in result
@@ -3619,7 +5313,1079 @@ class TestAudioPathSplice:
                 raise AssertionError(f"expected ValueError for metadata={metadata}")
 
 
-def _make_top_logprobs_model(return_token_id_information: bool) -> VLLMModel:
+# ──────────────────────────────────────────────────────────────────────────────
+# /v1/completions backend tests
+#
+# Exercises VLLMModel when ``use_completions_api`` is True: the chat
+# completions handler talks to vLLM's /v1/completions instead of
+# /v1/chat/completions, and a synthesized chat-completion shape is returned to
+# the caller. Covers rendering rules, hard-rejects, and inline/fallback
+# token-ID extraction.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_completions_backend_model(
+    *,
+    return_token_id_information: bool = False,
+    extra_body: dict | None = None,
+) -> VLLMModel:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_completions",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="base-model",
+        return_token_id_information=return_token_id_information,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        use_completions_api=True,
+        extra_body=extra_body,
+    )
+    return VLLMModel(
+        config=config,
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
+
+
+_WINDOW_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, you requested 40010 tokens "
+        "(10 in the messages, 40000 in the completion). Please reduce the length of the messages or completion."
+    }
+)
+
+
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("budget", "error_content", "categories"),
+    [
+        (
+            {"max_tokens": 256, "max_completion_tokens": 40000},
+            _WINDOW_32768,
+            ("invalid_output_token_parameter", "context_length_exceeded"),
+        ),
+        (
+            {"max_tokens": 40000, "max_completion_tokens": 256},
+            _WINDOW_32768,
+            ("context_length_exceeded", "invalid_output_token_parameter"),
+        ),
+        ({"max_completion_tokens": 40000}, _WINDOW_32768, ("invalid_output_token_parameter",) * 2),
+        (
+            {"max_completion_tokens": 40000},
+            '{"message": "max_completion_tokens=40000 cannot be greater than max_model_len=32768."}',
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        (
+            {"max_tokens": 40000},
+            json.dumps(
+                {
+                    "message": "max_tokens=40000 cannot be greater than max_model_len=max_total_tokens=32768. "
+                    "Please request fewer output tokens. (parameter=max_tokens, value=40000)"
+                }
+            ),
+            ("invalid_output_token_parameter",) * 2,
+        ),
+        ({"max_tokens": 32768}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        (
+            {"max_tokens": 40000},
+            '{"message": "max_tokens must be at least 1, got -6677."}',
+            ("context_length_exceeded",) * 2,
+        ),
+    ],
+    ids=[
+        "chat-budget-over-window",
+        "completions-budget-over-window",
+        "alias-only-over-window",
+        "max-model-len",
+        "vllm-0.27-max-total-tokens",
+        "budget-equal-to-window",
+        "no-budget",
+        "no-window-named",
+    ],
+)
+async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
+    monkeypatch: MonkeyPatch,
+    propagate: bool,
+    use_completions_api: bool,
+    budget: dict,
+    error_content: str,
+    categories: tuple[str, str],
+) -> None:
+    """No prompt fits a budget larger than the whole window the engine names, so the budget is at fault. The budget
+    is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
+    model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
+    model.config.propagate_context_overflow_errors = propagate
+    error = ClientResponseError(MagicMock(), (), status=400, message="backend request failed")
+    error.response_content = error_content.encode()
+    client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    client.create_chat_completion = AsyncMock(side_effect=error)
+    client.create_completion = AsyncMock(side_effect=error)
+    model._clients = [client]
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "invalid-budget-test"}
+    request.headers = {}
+    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")], **budget
+    )
+
+    if propagate:
+        with raises(ClientResponseError):
+            await model.chat_completions(request, body)
+    else:
+        assert (await model.chat_completions(request, body)).choices[0].finish_reason == "length"
+
+    category = categories[use_completions_api]
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == category
+    assert execution["local_response_reason"] == (None if propagate else category)
+
+
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("status", "error_content", "expect_length"),
+    [
+        (400, '{"message": "This model\'s maximum context length is 262144 tokens."}', True),
+        (400, '{"message": "max_tokens must be at least 1, got -6677."}', True),
+        (
+            400,
+            json.dumps({"error": {"type": "exceed_context_size_error", "message": "request too long"}}),
+            True,
+        ),
+        (
+            400,
+            "request (268821 tokens) exceeds the available context size (262144 tokens), try increasing it",
+            True,
+        ),
+        (400, "input (268821 tokens) is larger than the max context size (262144 tokens)", True),
+        (
+            500,
+            json.dumps(
+                {
+                    "error": {
+                        "type": "exceed_context_size_error",
+                        "message": "request (268821 tokens) exceeds the available context size (262144 tokens)",
+                    }
+                }
+            ),
+            False,
+        ),
+        (500, '{"message": "context length allocation failed"}', False),
+        (500, "unified KV cache is full: context size exceeded", False),
+        (500, "speculative batch index is outside the sub-batch", False),
+        (401, '{"error": {"message": "Invalid API key"}}', False),
+        (400, '{"error": {"message": "Unknown model"}}', False),
+        (400, "Invalid context size configuration", False),
+        (400, "unified KV cache is full: context size exceeded", False),
+    ],
+    ids=[
+        "vllm-context-length",
+        "vllm-max-tokens",
+        "llamacpp-error-type",
+        "llamacpp-request-text",
+        "llamacpp-input-text",
+        "http500-overflow",
+        "http500-context-length",
+        "http500-unified-kv",
+        "http500-speculative-batch",
+        "http401-auth",
+        "http400-unrelated",
+        "http400-context-config",
+        "http400-unified-kv",
+    ],
+)
+async def test_backend_context_overflow_handling(
+    monkeypatch: MonkeyPatch,
+    propagate: bool,
+    use_completions_api: bool,
+    status: int,
+    error_content: str,
+    expect_length: bool,
+) -> None:
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
+    model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
+    model.config.propagate_context_overflow_errors = propagate
+    error = ClientResponseError(MagicMock(), (), status=status, message="backend request failed")
+    error.response_content = error_content.encode()
+    client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    client.create_chat_completion = AsyncMock(side_effect=error)
+    client.create_completion = AsyncMock(side_effect=error)
+    model._clients = [client]
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "context-overflow-test"}
+    request.headers = {}
+    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[NeMoGymChatCompletionUserMessageParam(role="user", content="hello")],
+    )
+
+    if expect_length and not propagate:
+        result = await model.chat_completions(request, body)
+        assert result.object == "chat.completion"
+        assert result.model == model.config.model
+        assert len(result.choices) == 1
+        assert result.choices[0].finish_reason == "length"
+        assert result.choices[0].message.role == "assistant"
+        assert result.choices[0].message.content is None
+        assert result.choices[0].message.tool_calls is None
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 0
+        assert result.usage.completion_tokens == 0
+        assert result.usage.total_tokens == 0
+        assert result.usage.prompt_tokens_details.cached_tokens == 0
+        assert result.usage.completion_tokens_details.reasoning_tokens == 0
+    else:
+        with raises(ClientResponseError) as exc_info:
+            await model.chat_completions(request, body)
+        assert exc_info.value is error
+        assert exc_info.value.status == status
+        assert exc_info.value.response_content == error_content.encode()
+
+    execution = request.state.nemo_gym_model_execution
+    assert execution["upstream_attempted"] is True
+    assert execution["upstream_status_code"] == status
+    if expect_length:
+        assert execution["error_category"] == "context_length_exceeded"
+    else:
+        assert "error_category" not in execution
+    if expect_length and not propagate:
+        assert execution["response_source"] == "local"
+        assert execution["local_response_reason"] == "context_length_exceeded"
+    else:
+        assert execution["response_source"] == "upstream"
+        assert execution["local_response_reason"] is None
+
+    used_method = client.create_completion if use_completions_api else client.create_chat_completion
+    unused_method = client.create_chat_completion if use_completions_api else client.create_completion
+    used_method.assert_awaited_once()
+    unused_method.assert_not_awaited()
+
+
+class TestCompletionsBackendRawRender:
+    def test_single_user_message_string_content(self) -> None:
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt([{"role": "user", "content": "Hello world"}])
+        assert prompt == "Hello world"
+
+    def test_single_user_message_text_block_list(self) -> None:
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt(
+            [{"role": "user", "content": [{"type": "text", "text": "Hello world"}]}]
+        )
+        assert prompt == "Hello world"
+
+    def test_input_text_block_type_accepted(self) -> None:
+        # VLLMConverter._format_message rewrites input_text → text, but be
+        # defensive: accept the input_text variant directly too.
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt(
+            [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]}]
+        )
+        assert prompt == "Hi"
+
+    def test_system_then_user_concatenated_with_double_newline(self) -> None:
+        model = _make_completions_backend_model()
+        prompt = model._render_messages_to_prompt(
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "What is 2+2?"},
+            ]
+        )
+        assert prompt == "You are helpful.\n\nWhat is 2+2?"
+
+    def test_assistant_message_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt(
+                [
+                    {"role": "user", "content": "x"},
+                    {"role": "assistant", "content": "y"},
+                ]
+            )
+        except ValueError as e:
+            assert "system, user" in str(e)
+        else:
+            raise AssertionError("expected ValueError for assistant message")
+
+    def test_three_messages_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt(
+                [
+                    {"role": "system", "content": "s"},
+                    {"role": "user", "content": "u1"},
+                    {"role": "user", "content": "u2"},
+                ]
+            )
+        except ValueError as e:
+            assert "at most" in str(e)
+        else:
+            raise AssertionError("expected ValueError for >2 messages")
+
+    def test_lone_system_message_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt([{"role": "system", "content": "s"}])
+        except ValueError as e:
+            assert "user message" in str(e)
+        else:
+            raise AssertionError("expected ValueError for lone system message")
+
+    def test_image_block_rejected(self) -> None:
+        model = _make_completions_backend_model()
+        try:
+            model._render_messages_to_prompt(
+                [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]
+            )
+        except ValueError as e:
+            assert "text content blocks" in str(e)
+        else:
+            raise AssertionError("expected ValueError for image block")
+
+
+class TestCompletionsBackendHardRejects:
+    def test_tools_rejected(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "f", "parameters": {"type": "object"}},
+                }
+            ],
+        )
+        try:
+            asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
+        except ValueError as e:
+            assert "tools are not supported" in str(e)
+        else:
+            raise AssertionError("expected ValueError when tools are set")
+
+    def test_audio_metadata_rejected(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            metadata={"audio_data": "data:audio/wav;base64,QUFB"},
+        )
+        try:
+            asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
+        except ValueError as e:
+            assert "audio metadata" in str(e)
+        else:
+            raise AssertionError("expected ValueError when audio metadata is set")
+
+
+class TestCompletionsBackendBodyTranslation:
+    def test_basic_fields_passthrough(self) -> None:
+        model = _make_completions_backend_model()
+        out = model._build_completion_body_from_chat_body(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 64,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "seed": 42,
+                "stop": ["</s>"],
+            },
+            prompt="hi",
+        )
+        assert out["model"] == "base-model"
+        assert out["prompt"] == "hi"
+        assert out["max_tokens"] == 64
+        assert out["temperature"] == 0.7
+        assert out["top_p"] == 0.9
+        assert out["seed"] == 42
+        assert out["stop"] == ["</s>"]
+        # No token-id machinery requested.
+        assert "logprobs" not in out
+        assert "return_token_ids" not in out
+        assert "return_tokens_as_token_ids" not in out
+        assert "prompt_logprobs" not in out
+
+    def test_max_completion_tokens_aliased(self) -> None:
+        model = _make_completions_backend_model()
+        out = model._build_completion_body_from_chat_body({"max_completion_tokens": 32}, prompt="x")
+        assert out["max_tokens"] == 32
+
+    def test_top_logprobs_maps_to_logprobs_int(self) -> None:
+        model = _make_completions_backend_model()
+        out = model._build_completion_body_from_chat_body({"top_logprobs": 5}, prompt="x")
+        assert out["logprobs"] == 5
+
+    def test_response_format_passthrough(self) -> None:
+        model = _make_completions_backend_model()
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {"type": "object"},
+            },
+        }
+        out = model._build_completion_body_from_chat_body(
+            {"response_format": response_format},
+            prompt="x",
+        )
+        assert out["response_format"] == response_format
+
+    def test_extra_body_does_not_override_request_fields(self) -> None:
+        model = _make_completions_backend_model(extra_body={"top_p": 0.1, "min_p": 0.05})
+        out = model._build_completion_body_from_chat_body(
+            {"top_p": 0.95},
+            prompt="x",
+        )
+        # Request-level top_p wins; min_p only present via extra_body.
+        assert out["top_p"] == 0.95
+        assert out["min_p"] == 0.05
+
+    def test_token_id_information_sets_logprobs_and_extra_flags(self) -> None:
+        model = _make_completions_backend_model(return_token_id_information=True)
+        out = model._build_completion_body_from_chat_body({}, prompt="x")
+        assert out["logprobs"] == 0
+        assert out["return_token_ids"] is True
+        assert out["return_tokens_as_token_ids"] is True
+        assert "prompt_logprobs" not in out
+
+
+class TestCompletionsBackendResponseTranslation:
+    def test_provider_metrics_preserved(self) -> None:
+        model = _make_completions_backend_model()
+        metrics = {"speculative_decoding": {"num_spec_steps": 4, "acceptance_histogram": [1, 0, 0, 3]}}
+        completion = model._completion_dict_to_chat_completion(
+            {
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+                "metrics": metrics,
+            }
+        )
+        assert completion.metrics == metrics
+
+    def test_text_lifted_into_assistant_message(self) -> None:
+        model = _make_completions_backend_model()
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "the answer is 4", "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9},
+            }
+        )
+        assert chat_completion.choices[0].message.role == "assistant"
+        assert chat_completion.choices[0].message.content == "the answer is 4"
+        assert chat_completion.choices[0].finish_reason == "stop"
+        assert chat_completion.usage.prompt_tokens == 5
+
+    def test_matched_stop_not_appended(self) -> None:
+        model = _make_completions_backend_model()
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "answer",
+                        "finish_reason": "stop",
+                        "matched_stop": "</s>",
+                    }
+                ],
+            }
+        )
+        assert chat_completion.choices[0].message.content == "answer"
+
+    def test_inline_token_ids_used(self) -> None:
+        model = _make_completions_backend_model(return_token_id_information=True)
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "ok",
+                        "finish_reason": "stop",
+                        "logprobs": {
+                            "tokens": ["token_id:42", "token_id:43"],
+                            "token_logprobs": [-0.1, -0.2],
+                        },
+                        "prompt_token_ids": [6, 7, 8],
+                        "token_ids": [42, 43],
+                    }
+                ],
+            }
+        )
+        msg = chat_completion.choices[0].message
+        assert isinstance(msg, NeMoGymChatCompletionMessageForTraining)
+        assert msg.generation_token_ids == [42, 43]
+        assert msg.generation_log_probs == [-0.1, -0.2]
+        assert msg.prompt_token_ids == [6, 7, 8]
+
+    def test_default_id_uses_chat_completion_prefix(self) -> None:
+        model = _make_completions_backend_model()
+        chat_completion = model._completion_dict_to_chat_completion(
+            {
+                "object": "text_completion",
+                "created": 123,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+            }
+        )
+        assert chat_completion.id == "chatcmpl-completions"
+
+    def test_missing_logprobs_raises(self) -> None:
+        model = _make_completions_backend_model(return_token_id_information=True)
+        with raises(RuntimeError, match="Cannot extract token IDs or logprobs"):
+            model._completion_dict_to_chat_completion(
+                {
+                    "id": "cmpl-1",
+                    "object": "text_completion",
+                    "created": 123,
+                    "model": "base-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": "ok",
+                            "finish_reason": "stop",
+                            "logprobs": None,
+                            "prompt_token_ids": [6, 7],
+                            "token_ids": [42],
+                        }
+                    ],
+                }
+            )
+
+
+class TestCompletionsBackendEndToEnd:
+    @staticmethod
+    def _install_fake_client(model: VLLMModel, completion_response: dict) -> tuple[MagicMock, dict]:
+        """Replace model._clients with a single mock client whose create_completion
+        returns ``completion_response``. Returns the mock and a captured-kwargs dict.
+        """
+        captured: dict = {}
+
+        async def fake_create_completion(**kwargs):
+            captured["kwargs"] = kwargs
+            return completion_response
+
+        fake_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        fake_client.create_completion = fake_create_completion
+        fake_client.create_chat_completion = AsyncMock(
+            side_effect=AssertionError("create_chat_completion must not be called")
+        )
+        model._clients = [fake_client]
+        # Reset the per-session client routing so the new mock is picked up.
+        model._session_id_to_client = {}
+        return fake_client, captured
+
+    def test_chat_completions_call_routes_to_create_completion(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
+
+        model = _make_completions_backend_model()
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "world", "finish_reason": "stop"}],
+            },
+        )
+
+        app = model.setup_webserver()
+        test_client = TestClient(app)
+        resp = test_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "ignored-by-server",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 8,
+                "temperature": 0.0,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["choices"][0]["message"]["content"] == "world"
+        # Forwarded prompt is the verbatim message content.
+        assert captured["kwargs"]["prompt"] == "hello"
+        assert captured["kwargs"]["max_tokens"] == 8
+        # Server-config model wins over whatever the caller put in "model".
+        assert captured["kwargs"]["model"] == "base-model"
+
+    def test_request_chat_template_kwargs_dropped_with_warning(self, monkeypatch: MonkeyPatch, caplog) -> None:
+        """The completions path never forwards a request's top-level chat_template_kwargs."""
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
+        model = _make_completions_backend_model()
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "world", "finish_reason": "stop"}],
+            },
+        )
+        test_client = TestClient(model.setup_webserver())
+
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            resp = test_client.post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hello"}], "chat_template_kwargs": {"x": 1}},
+            )
+        assert resp.status_code == 200, resp.text
+        assert "chat_template_kwargs" not in captured["kwargs"]
+        assert "use_completions_api is true" in caplog.text
+
+    def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+
+        model = _make_completions_backend_model()
+        _, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": FIXED_TIME,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": " 4", "finish_reason": "stop"}],
+            },
+        )
+
+        app = model.setup_webserver()
+        test_client = TestClient(app)
+        resp = test_client.post(
+            "/v1/responses",
+            json={"input": "What is 2+2?"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        output_texts = [
+            block["text"]
+            for item in data["output"]
+            if item.get("type") == "message"
+            for block in item.get("content", [])
+            if block.get("type") == "output_text"
+        ]
+        assert output_texts == [" 4"]
+        assert captured["kwargs"]["prompt"] == "What is 2+2?"
+
+    def test_inline_token_ids_skip_tokenize(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model(return_token_id_information=True)
+        fake_client, captured = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "ok",
+                        "finish_reason": "stop",
+                        "logprobs": {
+                            "tokens": ["token_id:42"],
+                            "token_logprobs": [-0.1],
+                        },
+                        "prompt_token_ids": [6, 7],
+                        "token_ids": [42],
+                    }
+                ],
+            },
+        )
+        fake_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called when inline IDs are present")
+        )
+        model._resolve_client = lambda _request: fake_client  # type: ignore[assignment]
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        result = asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
+
+        assert captured["kwargs"]["return_token_ids"] is True
+        fake_client.create_tokenize.assert_not_awaited()
+        message = result.choices[0].message
+        assert isinstance(message, NeMoGymChatCompletionMessageForTraining)
+        assert message.prompt_token_ids == [6, 7]
+        assert message.generation_token_ids == [42]
+
+    def test_missing_inline_token_ids_fall_back(self) -> None:
+        import asyncio
+
+        model = _make_completions_backend_model(
+            return_token_id_information=True,
+            extra_body={"add_special_tokens": False},
+        )
+        fake_client, _ = self._install_fake_client(
+            model,
+            {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "ok",
+                        "finish_reason": "stop",
+                        "logprobs": {
+                            "tokens": ["token_id:42", "token_id:43"],
+                            "token_logprobs": [-0.1, -0.2],
+                        },
+                    }
+                ],
+            },
+        )
+        fake_client.create_tokenize = AsyncMock(return_value={"tokens": [6, 7, 8]})
+        model._resolve_client = lambda _request: fake_client  # type: ignore[assignment]
+
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        result = asyncio.run(model._chat_completions_via_completions_api(MagicMock(), body))
+
+        fake_client.create_tokenize.assert_awaited_once_with(
+            model="base-model",
+            prompt="hello",
+            add_special_tokens=False,
+        )
+        message = result.choices[0].message
+        assert isinstance(message, NeMoGymChatCompletionMessageForTraining)
+        assert message.prompt_token_ids == [6, 7, 8]
+        assert message.generation_token_ids == [42, 43]
+        assert message.generation_log_probs == [-0.1, -0.2]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /v1/completions backend with render_chat_template=True
+#
+# Exercises the client-side HF AutoTokenizer.apply_chat_template render path.
+# Uses a stand-in tokenizer object (no transformers / HF download in tests) to
+# stay hermetic — VLLMModel only calls ``apply_chat_template(messages,
+# tokenize=False, add_generation_prompt=True, tools=..., **chat_template_kwargs)``,
+# so the test double captures those args and returns a known string.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeTokenizer:
+    """Minimal stand-in for AutoTokenizer used by the chat-template render path.
+
+    Records the apply_chat_template call args and returns a deterministic
+    string composed from the messages so tests can assert the render path
+    forwarded the right inputs.
+    """
+
+    def __init__(self, *, has_chat_template: bool = True):
+        self.chat_template = "<jinja>" if has_chat_template else None
+        self.last_call: dict | None = None
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.last_call = {"messages": messages, **kwargs}
+        rendered_parts = []
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list):
+                content = "".join(p.get("text", "") for p in content)
+            rendered_parts.append(f"<|{m['role']}|>{content}")
+        if kwargs.get("add_generation_prompt"):
+            rendered_parts.append("<|assistant|>")
+        return "".join(rendered_parts)
+
+
+def _make_chat_template_model(
+    *,
+    has_chat_template: bool = True,
+    chat_template_kwargs: dict | None = None,
+) -> tuple[VLLMModel, _FakeTokenizer]:
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_completions_ct",
+        base_url="http://localhost:9999/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="base-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+        use_completions_api=True,
+        # Note: render_chat_template is left False so VLLMModel doesn't try to
+        # actually load HF AutoTokenizer at construction. We flip it on after
+        # injecting a _FakeTokenizer instance.
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    model = VLLMModel(
+        config=config,
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
+    fake_tokenizer = _FakeTokenizer(has_chat_template=has_chat_template)
+    model._chat_template_tokenizer = fake_tokenizer
+    # Now flip the config flag — model_post_init has already run; we just
+    # need _chat_completions_via_completions_api to hit the chat_template branch.
+    object.__setattr__(model.config, "render_chat_template", True)
+    return model, fake_tokenizer
+
+
+class TestCompletionsBackendChatTemplateRender:
+    def test_multi_turn_messages_pass_through_to_apply_chat_template(self) -> None:
+        model, tokenizer = _make_chat_template_model()
+        messages = [
+            {"role": "system", "content": "Be terse."},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "what's 2+2?"},
+        ]
+        prompt = model._render_messages_via_chat_template({"messages": messages})
+
+        assert tokenizer.last_call["messages"] == messages
+        assert tokenizer.last_call["tokenize"] is False
+        assert tokenizer.last_call["add_generation_prompt"] is True
+        assert tokenizer.last_call["tools"] is None
+        # Sanity-check the rendered string surfaces the multi-turn structure.
+        assert prompt == ("<|system|>Be terse.<|user|>hi<|assistant|>hello<|user|>what's 2+2?<|assistant|>")
+
+    def test_tools_pass_through_to_apply_chat_template(self) -> None:
+        model, tokenizer = _make_chat_template_model()
+        tools = [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
+        model._render_messages_via_chat_template(
+            {
+                "messages": [{"role": "user", "content": "x"}],
+                "tools": tools,
+            }
+        )
+        assert tokenizer.last_call["tools"] == tools
+
+    def test_image_block_rejected(self) -> None:
+        model, _ = _make_chat_template_model()
+        with raises(ValueError, match="only accepts text content blocks"):
+            model._render_messages_via_chat_template(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "image_url", "image_url": {"url": "x"}}],
+                        }
+                    ]
+                }
+            )
+
+    def test_chat_template_kwargs_merged_with_metadata_override(self) -> None:
+        model, tokenizer = _make_chat_template_model(
+            chat_template_kwargs={"enable_thinking": True, "tool_use_mode": "tool_calls"},
+        )
+        body_dict = {
+            "messages": [{"role": "user", "content": "x"}],
+            "metadata": {
+                # Per-request override — JSON string, mirroring the chat-completions path.
+                "chat_template_kwargs": json.dumps({"enable_thinking": False, "extra_knob": 7}),
+            },
+        }
+        model._render_messages_via_chat_template(body_dict)
+
+        # Per-request override beats global config; non-overridden global keys persist;
+        # new metadata-only keys are added.
+        kwargs_seen = {
+            k: v
+            for k, v in tokenizer.last_call.items()
+            if k not in {"messages", "tokenize", "add_generation_prompt", "tools"}
+        }
+        assert kwargs_seen == {
+            "enable_thinking": False,  # metadata override
+            "tool_use_mode": "tool_calls",  # global config preserved
+            "extra_knob": 7,  # metadata-only addition
+        }
+
+    def test_post_init_loads_tokenizer_when_render_chat_template_is_set(self, monkeypatch: MonkeyPatch) -> None:
+        """Construction with render_chat_template=True triggers tokenizer load."""
+        captured = {}
+
+        class _StubAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name_or_path, **kwargs):
+                captured["name_or_path"] = name_or_path
+                captured["kwargs"] = kwargs
+                tok = _FakeTokenizer(has_chat_template=True)
+                return tok
+
+        # Inject a fake transformers module so `from transformers import AutoTokenizer` works.
+        import sys as _sys
+        import types as _types
+
+        fake_module = _types.SimpleNamespace(AutoTokenizer=_StubAutoTokenizer)
+        monkeypatch.setitem(_sys.modules, "transformers", fake_module)
+
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ct",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            model="base-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            use_completions_api=True,
+            render_chat_template=True,
+            tokenizer="some-instruct-model",
+        )
+        VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+        assert captured["name_or_path"] == "some-instruct-model"
+        assert captured["kwargs"].get("trust_remote_code") is True
+
+    def test_post_init_falls_back_to_model_when_tokenizer_unset(self, monkeypatch: MonkeyPatch) -> None:
+        captured = {}
+
+        class _StubAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name_or_path, **kwargs):
+                captured["name_or_path"] = name_or_path
+                return _FakeTokenizer(has_chat_template=True)
+
+        import sys as _sys
+        import types as _types
+
+        monkeypatch.setitem(_sys.modules, "transformers", _types.SimpleNamespace(AutoTokenizer=_StubAutoTokenizer))
+
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ct",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            model="base-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            use_completions_api=True,
+            render_chat_template=True,
+            # tokenizer left unset
+        )
+        VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        assert captured["name_or_path"] == "base-model"
+
+    def test_post_init_raises_when_loaded_tokenizer_has_no_chat_template(self, monkeypatch: MonkeyPatch) -> None:
+        class _StubAutoTokenizer:
+            @staticmethod
+            def from_pretrained(name_or_path, **kwargs):
+                return _FakeTokenizer(has_chat_template=False)
+
+        import sys as _sys
+        import types as _types
+
+        monkeypatch.setitem(_sys.modules, "transformers", _types.SimpleNamespace(AutoTokenizer=_StubAutoTokenizer))
+
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ct",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            model="base-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            use_completions_api=True,
+            render_chat_template=True,
+        )
+        try:
+            VLLMModel(
+                config=config,
+                server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+            )
+        except RuntimeError as e:
+            assert "no chat_template" in str(e)
+        else:
+            raise AssertionError("expected RuntimeError when tokenizer has no chat_template")
+
+    def test_tools_allowed_in_chat_template_mode(self) -> None:
+        """Tools must NOT be rejected when render_chat_template=True."""
+        import asyncio
+
+        model, _tokenizer = _make_chat_template_model()
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "f", "parameters": {"type": "object"}},
+                }
+            ],
+        )
+        # Mock the underlying client.create_completion so the request reaches
+        # rendering but doesn't actually hit the network.
+        captured: dict = {}
+
+        async def fake_create_completion(**kwargs):
+            captured["kwargs"] = kwargs
+            return {
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "base-model",
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+            }
+
+        fake_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        fake_client.create_completion = fake_create_completion
+        model._clients = [fake_client]
+        model._session_id_to_client = {}
+
+        # Patch _resolve_client to skip the session machinery.
+        model._resolve_client = lambda r: fake_client  # type: ignore[assignment]
+        request = MagicMock()
+
+        result = asyncio.run(model._chat_completions_via_completions_api(request, body))
+        assert result.choices[0].message.content == "ok"
+        # Prompt forwarded contains the rendered template (with the tool slot
+        # delegated to the template implementation; here our fake just emits
+        # the role+content marker).
+        assert "<|user|>hi" in captured["kwargs"]["prompt"]
+
+
+def _make_top_logprobs_model(
+    return_token_id_information: bool,
+    *,
+    extra_body: dict[str, Any] | None = None,
+    sampling_overrides: dict[str, Any] | None = None,
+    request_prompt_and_generation_token_ids: bool = False,
+) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
         host="0.0.0.0",
@@ -3630,8 +6396,11 @@ def _make_top_logprobs_model(return_token_id_information: bool) -> VLLMModel:
         api_key="dummy_key",  # pragma: allowlist secret
         model="dummy_model",
         return_token_id_information=return_token_id_information,
+        request_prompt_and_generation_token_ids=request_prompt_and_generation_token_ids,
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
+        extra_body=extra_body,
+        sampling_overrides=sampling_overrides,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -3642,6 +6411,88 @@ class TestTopLogprobsHandling:
     replayed rollout JSONL and empties the captured token ids, zeroing the training loss
     mask. These tests cover how the model server defends against that.
     """
+
+    @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
+    @mark.parametrize("count", [None, 0, 16])
+    @mark.parametrize("captured", [False, True])
+    def test_normalizes_after_all_overrides(self, source: str, count: int | None, captured: bool) -> None:
+        fields = {"top_logprobs": count}
+        model = _make_top_logprobs_model(
+            return_token_id_information=False,
+            extra_body=fields if source == "extra_body" else None,
+            sampling_overrides=fields if source == "sampling_overrides" else None,
+        )
+        body = {"messages": [{"role": "user", "content": "hi"}], "logprobs": not captured, "temperature": 0.6}
+        if source == "request":
+            body.update(fields)
+        if captured:
+            model._external_capture_handler = VLLMWorkerCaptureHandler()
+            token = set_token_sink(
+                CaptureContext(
+                    rollout_id="r1",
+                    model_call_id="c1",
+                    token_sink=None,
+                    external_staging=True,
+                    capture_admission=CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"),
+                )
+            )
+        try:
+            result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        finally:
+            if captured:
+                reset_token_sink(token)
+        assert result["logprobs"] is True
+        assert result["top_logprobs"] == (0 if count is None else count)
+        assert result["temperature"] == 0.6
+
+    @mark.parametrize("source", ["request", "extra_body", "sampling_overrides"])
+    @mark.parametrize("token_ids", [[1], list(range(16))])
+    def test_topk_capture_rejects_specific_logprob_ids(self, source: str, token_ids: list[int]) -> None:
+        fields = {"logprob_token_ids": token_ids}
+        model = _make_top_logprobs_model(
+            return_token_id_information=False,
+            extra_body=fields if source == "extra_body" else None,
+            sampling_overrides=fields if source == "sampling_overrides" else None,
+        )
+        model._external_capture_handler = VLLMWorkerCaptureHandler()
+        body = {"messages": [{"role": "user", "content": "hi"}], "top_logprobs": 16}
+        if source == "request":
+            body.update(fields)
+        token = set_token_sink(
+            CaptureContext(
+                rollout_id="r1",
+                model_call_id="c1",
+                token_sink=None,
+                external_staging=True,
+                capture_admission=CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"),
+            )
+        )
+        try:
+            with raises(HTTPException) as error:
+                model._preprocess_chat_completion_create_params(MagicMock(), body)
+        finally:
+            reset_token_sink(token)
+        assert error.value.status_code == 400
+        assert "logprob_token_ids" in error.value.detail
+
+    @mark.parametrize("token_ids", [None, []])
+    def test_topk_capture_allows_unset_specific_logprob_ids(self, token_ids: list[int] | None) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=False)
+        body = {
+            "messages": [],
+            "logprobs": True,
+            "top_logprobs": 16,
+            "ng_capture": {"rollout_id": "r1"},
+            "logprob_token_ids": token_ids,
+        }
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["top_logprobs"] == 16
+
+    def test_specific_logprob_ids_without_capture_are_preserved(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=False)
+        body = {"messages": [], "logprobs": True, "top_logprobs": 16, "logprob_token_ids": [1, 2]}
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+        assert result["logprob_token_ids"] == [1, 2]
 
     def test_capture_path_pins_top_logprobs_to_zero(self) -> None:
         """With return_token_id_information=True the server pins top_logprobs=0 regardless
@@ -3656,6 +6507,7 @@ class TestTopLogprobsHandling:
         assert result["top_logprobs"] == 0
         assert result["logprobs"] is True
         assert result["return_tokens_as_token_ids"] is True
+        assert "return_token_ids" not in result
 
         # Inbound non-zero value must also be overridden, not inherited.
         result = model._preprocess_chat_completion_create_params(
@@ -3664,9 +6516,34 @@ class TestTopLogprobsHandling:
         )
         assert result["top_logprobs"] == 0
 
-    def test_noncapture_path_strips_null_top_logprobs(self) -> None:
-        """On the non-capture path a null top_logprobs is dropped (letting vLLM apply its
-        default) rather than forwarded as null (which vLLM reads as "no logprobs")."""
+    def test_capture_path_can_request_prompt_and_generation_token_ids(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            request_prompt_and_generation_token_ids=True,
+        )
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert result["return_token_ids"] is True
+
+    def test_capture_path_rejects_multiple_choices(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+
+        with raises(ValueError, match="requires n=1"):
+            model._preprocess_chat_completion_create_params(
+                MagicMock(),
+                {
+                    "model": "dummy_model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "n": 2,
+                },
+            )
+
+    def test_noncapture_path_normalizes_null_top_logprobs(self) -> None:
+        """Enabled logprobs use an explicit zero count instead of forwarding null."""
         model = _make_top_logprobs_model(return_token_id_information=False)
 
         result = model._preprocess_chat_completion_create_params(
@@ -3678,7 +6555,7 @@ class TestTopLogprobsHandling:
                 "top_logprobs": None,
             },
         )
-        assert "top_logprobs" not in result
+        assert result["top_logprobs"] == 0
 
         # A genuine integer value must pass through untouched.
         result = model._preprocess_chat_completion_create_params(
@@ -3700,25 +6577,33 @@ class TestTopLogprobsHandling:
         assert "top_logprobs" not in result
 
     def _capture_chat_completion_dict(
-        self, logprobs: Union[dict, None], message_extra: Union[dict, None] = None
+        self,
+        logprobs: Union[dict, None],
+        message_extra: Union[dict, None] = None,
+        choice_extra: Union[dict, None] = None,
+        response_extra: Union[dict, None] = None,
     ) -> dict:
         message = {"role": "assistant", "content": "hi", "tool_calls": None}
         if message_extra:
             message.update(message_extra)
-        return {
+        choice = {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": message,
+            "logprobs": logprobs,
+        }
+        if choice_extra:
+            choice.update(choice_extra)
+        response = {
             "id": "chtcmpl",
             "object": "chat.completion",
             "created": FIXED_TIME,
             "model": "dummy_model",
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "message": message,
-                    "logprobs": logprobs,
-                }
-            ],
+            "choices": [choice],
         }
+        if response_extra:
+            response.update(response_extra)
+        return response
 
     def test_capture_path_succeeds_with_inbound_null_top_logprobs(self) -> None:
         """End-to-end regression: a request with top_logprobs=null no longer empties capture;
@@ -3761,6 +6646,190 @@ class TestTopLogprobsHandling:
         assert message["generation_token_ids"] == [123, 456]
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
+
+    def test_capture_path_prefers_vllm_response_token_ids(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            request_prompt_and_generation_token_ids=True,
+        )
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            assert kwargs["return_token_ids"] is True
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                        {"token": "token_id:456", "logprob": -0.2, "bytes": None, "top_logprobs": []},
+                    ]
+                },
+                choice_extra={"token_ids": [123, 456]},
+                response_extra={"prompt_token_ids": [10, 20, 30]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called when inline IDs are present")
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        mock_client.create_tokenize.assert_not_awaited()
+        data = response.json()
+        message = data["choices"][0]["message"]
+        assert message["prompt_token_ids"] == [10, 20, 30]
+        assert message["generation_token_ids"] == [123, 456]
+        assert message["generation_log_probs"] == [-0.1, -0.2]
+        assert "prompt_token_ids" not in data
+        assert "token_ids" not in data["choices"][0]
+
+    def test_capture_path_accepts_framework_message_bundle(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        token_bundle = {
+            "prompt_token_ids": [10, 20],
+            "generation_token_ids": [123],
+            "generation_log_probs": [-0.1],
+        }
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra=token_bundle,
+                choice_extra={"token_ids": [123]},
+                response_extra={"prompt_token_ids": [10, 20]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called for a framework token bundle")
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        for field, value in token_bundle.items():
+            assert message[field] == value
+        mock_client.create_tokenize.assert_not_awaited()
+
+    def test_capture_path_rejects_disagreeing_duplicate_ids(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123],
+                    "generation_log_probs": [-0.1],
+                },
+                choice_extra={"token_ids": [999]},
+                response_extra={"prompt_token_ids": [10, 20]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="disagrees with vLLM response token IDs"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_forwards_prompt_affecting_fields_to_tokenize(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            extra_body={
+                "mm_processor_kwargs": {"fps": 2},
+                "required_prefix_token_ids": [1, 2, 3],
+            },
+        )
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [10, 20]})
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        mock_client.create_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hi"}],
+            mm_processor_kwargs={"fps": 2},
+            required_prefix_token_ids=[1, 2, 3],
+        )
+
+    def test_capture_path_rejects_partial_message_bundle(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={"prompt_token_ids": [10, 20]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="partial token metadata"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_rejects_mismatched_generation_lengths(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123, 456],
+                    "generation_log_probs": [-0.1],
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="mismatched generation token IDs"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
 
     def test_capture_path_preserves_routed_experts(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
@@ -3856,3 +6925,1678 @@ class TestTopLogprobsHandling:
             )
         # The tokenize endpoint must not be reached once the contract check fails.
         mock_client.create_tokenize.assert_not_called()
+
+
+class TestSamplingOverrides:
+    """Forcing the sampling params on every request.
+
+    An external harness picks its own temperature and top_p. On-policy RL requires
+    generation to match the distribution the policy is optimized under, so the
+    server overrides whatever the client sent rather than trusting it.
+    """
+
+    @staticmethod
+    def _server(overrides: dict[str, object] | None, **kwargs: object) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            sampling_overrides=overrides,
+            **kwargs,
+        )
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def test_overrides_replace_what_the_client_sent(self) -> None:
+        server = self._server({"temperature": 1.0, "top_p": 1.0})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "top_p": 0.5}
+        )
+        assert out["temperature"] == 1.0
+        assert out["top_p"] == 1.0
+
+    def test_overrides_apply_even_when_the_client_sent_nothing(self) -> None:
+        server = self._server({"temperature": 1.0})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert out["temperature"] == 1.0
+
+    def test_unset_leaves_the_request_alone(self) -> None:
+        server = self._server(None)
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2}
+        )
+        assert out["temperature"] == 0.2
+
+    def test_overrides_reach_the_completions_api_path(self) -> None:
+        """``use_completions_api`` skips chat preprocessing entirely.
+
+        ``chat_completions`` branches into ``_chat_completions_via_completions_api`` before
+        ``_preprocess_chat_completion_create_params`` runs, so a pin applied only there would be
+        silently inert on the path base-model training uses.
+        """
+        server = self._server({"temperature": 1.0, "top_p": 1.0, "top_k": -1}, use_completions_api=True)
+        out = server._build_completion_body_from_chat_body(
+            {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "top_p": 0.5, "top_k": 50},
+            "hi",
+        )
+        assert out["temperature"] == 1.0
+        assert out["top_p"] == 1.0
+        # No first-class /v1/completions field; the body is forwarded as raw JSON so it still lands.
+        assert out["top_k"] == -1
+
+    def test_overrides_win_over_extra_body_on_the_completions_path(self) -> None:
+        """``extra_body`` merges under the request body; the pin is applied after both."""
+        server = self._server(
+            {"temperature": 1.0},
+            use_completions_api=True,
+            extra_body={"temperature": 0.7, "min_p": 0.05},
+        )
+        out = server._build_completion_body_from_chat_body({"messages": [], "temperature": 0.2}, "hi")
+        assert out["temperature"] == 1.0
+        assert out["min_p"] == 0.05
+
+    def test_overrides_reach_the_responses_native_path(self) -> None:
+        server = self._server({"temperature": 1.0}, is_responses_native=True)
+        body = {"model": "dummy_model", "temperature": 0.2}
+        assert server._apply_sampling_overrides(body)["temperature"] == 1.0
+
+    def test_transport_log_records_the_request_the_engine_receives(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        """The opt-in transport log is the request trace: it records the body after overrides."""
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        server = self._server({"temperature": 1.0, "top_p": 1.0})
+        sent: dict[str, Any] = {}
+
+        async def create_chat_completion(**kwargs: Any) -> dict[str, Any]:
+            sent.update(kwargs)
+            return {
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
+        server._clients = [provider]
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")],
+            temperature=0.2,
+            top_p=0.5,
+            metadata={"extra_body": json.dumps({"new_param": "value"})},
+        )
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=request.model_dump(exclude_unset=True, mode="json")
+        )
+
+        assert response.status_code == 200
+        (event,) = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if json.loads(line)["event"] == "transport_request"
+        ]
+        assert event["request_payload"]["temperature"] == sent["temperature"] == 1.0
+        assert event["request_payload"]["top_p"] == sent["top_p"] == 1.0
+        assert event["request_payload"]["new_param"] == sent["new_param"] == "value"
+        # Nothing is printed per request; the trace exists only when the log is enabled.
+        assert capsys.readouterr().out == ""
+
+
+class TestEndpointFile:
+    def _make_server(self, tmp_path, **overrides) -> VLLMModel:
+        params = dict(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://placeholder:8712/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="safety_judge_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            endpoint_file=str(tmp_path / "endpoint.txt"),
+        )
+        params.update(overrides)
+        return VLLMModel(config=VLLMModelConfig(**params), server_client=MagicMock(spec=ServerClient))
+
+    def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1000, 1000))
+        server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
+        server._session_id_to_client["session-on-old-host"] = server._clients[0]
+
+        server._maybe_rebind_endpoint()
+
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        assert [client.base_url for client in server._clients] == ["http://new-host:8712/v1"]
+        # endpoint_file-backed clients are retry-bounded so in-flight calls
+        # against a dead host fail fast and re-enter through the rebound
+        # client; sessions re-resolve onto the new host.
+        assert server._clients[0].max_connection_retries == 8
+        assert server._clients[0].max_rate_limit_wait_seconds == 0
+        assert not server._session_id_to_client
+        # Within endpoint_check_interval_s the filesystem is left alone, so a
+        # fresh publish is only seen once the window is over.
+        (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1001, 1001))
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        server._endpoint_last_check_at = None  # window over: the next call re-checks
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://newer-host:8712/v1"]
+        # Static base_url clients without route-around keep unbounded connection retries.
+        static = self._make_server(tmp_path, endpoint_file=None)._clients[0]
+        assert static.max_connection_retries is None
+        assert static.max_rate_limit_wait_seconds == 0
+
+    def test_route_around_bounds_connection_retries_over_a_static_url_list(self, tmp_path) -> None:
+        """``route_around_failing_endpoints`` needs bounded clients even without an endpoint file.
+
+        ``_call_endpoint`` counts a connection error against an endpoint only once the client
+        raises it, and a client built with ``max_connection_retries=None`` retries a refused
+        connection forever, so an unbounded client would never let a dead endpoint reach the
+        failure threshold that moves its sessions elsewhere.
+        """
+        static_urls = ["http://engine-0:8712/v1", "http://engine-1:8712/v1"]
+        server = self._make_server(
+            tmp_path,
+            endpoint_file=None,
+            base_url=static_urls,
+            route_around_failing_endpoints=True,
+            endpoint_connection_retries=3,
+        )
+        assert [client.max_connection_retries for client in server._clients] == [3, 3]
+        # Without route-around or an endpoint file, the same list keeps unbounded retries.
+        server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
+        assert [client.max_connection_retries for client in server._clients] == [None, None]
+
+    def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        endpoint_file = tmp_path / "endpoint.txt"
+        server = self._make_server(tmp_path)  # grace defaults to 300s
+        now = 1000.0
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: now)
+
+        server._maybe_rebind_endpoint()  # absent: the clock starts, last known-good client kept
+        assert server.config.base_url == ["http://placeholder:8712/v1"]
+        now = 1100.0
+        endpoint_file.write_text("")  # empty is as unpublished as missing: no clock reset
+        os.utime(endpoint_file, (now, now))
+        server._maybe_rebind_endpoint()
+        now = 1301.0  # past the grace COUNTED FROM 1000, proving the empty write reset nothing
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+
+        endpoint_file.write_text("http://placeholder:8712/v1\n")  # republish on the SAME host
+        now = 1301.5  # within the check window: the publish is not seen yet, the raise stays loud
+        # Explicit mtimes keep rapid writes distinct on coarse-resolution filesystems.
+        os.utime(endpoint_file, (now, now))
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+        now = 1311.5  # next window: heals with no rebind needed
+        server._maybe_rebind_endpoint()
+        assert server._endpoint_missing_since is None
+
+        now = 1400.0
+        endpoint_file.unlink()
+        server._maybe_rebind_endpoint()  # a fresh absence starts a fresh clock
+        now = 1650.0
+        server._maybe_rebind_endpoint()  # 250s in: within grace, so the republish reset the clock
+        now = 1701.0
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+
+
+@mark.parametrize(
+    ("control_urls", "expected_routes"),
+    [
+        (
+            None,
+            {
+                "http://worker-0:8000/ng-control/v1/generation-cut": ["call-0"],
+                "http://worker-1:8000/ng-control/v1/generation-cut": ["call-1"],
+            },
+        ),
+        (
+            ["http://control-0:9000", "http://control-1:9000/"],
+            {
+                "http://control-0:9000/ng-control/v1/generation-cut": ["call-0"],
+                "http://control-1:9000/ng-control/v1/generation-cut": ["call-1"],
+            },
+        ),
+        (["http://control-0:9000"], None),
+    ],
+    ids=["own-route", "control-url", "misaligned-control-url"],
+)
+@mark.asyncio
+async def test_generation_cut_reaches_each_owning_backend(
+    monkeypatch: MonkeyPatch,
+    control_urls: list[str] | None,
+    expected_routes: dict[str, list[str]] | None,
+) -> None:
+    with nullcontext() if expected_routes else raises(ValueError, match="one control URL per base_url"):
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url=["http://worker-0:8000/v1", "http://worker-1:8000/v1"],
+            generation_cut_control_url=control_urls,
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+        )
+    if expected_routes is None:
+        return
+    model = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+    participant = PolicyModelParticipant(
+        server_name="policy",
+        cut_requester=generation_cut_requester("t", control_root=model.generation_cut_control_root),
+    )
+    for index, client in enumerate(model._clients):
+        ticket = participant.gate.enter(f"rollout-{index}")
+        ticket.backend = client.base_url
+        ticket.capture = CaptureContext(
+            rollout_id=f"rollout-{index}", model_call_id=f"call-{index}", token_sink=None, request_items=[]
+        )
+    routes: dict[str, list[str]] = {}
+
+    async def fake_request(**kwargs: Any) -> SimpleNamespace:
+        worker_inventory = GenerationCutInventory.model_validate(kwargs["json"])
+        routes[kwargs["url"]] = [prefix.model_call_id for prefix in worker_inventory.active_prefixes]
+        receipt = GenerationCutReceipt(
+            checkpoint_id=worker_inventory.checkpoint_id,
+            cut_id=f"worker-{worker_inventory.inventory_digest}",
+            inventory_digest=worker_inventory.inventory_digest,
+            inventory=worker_inventory,
+            backend_snapshot_id=f"tq-{worker_inventory.inventory_digest}",
+            prefixes=tuple(
+                GenerationCutPrefixAck(
+                    **prefix.model_dump(mode="json"),
+                    disposition="durable_prefix",
+                    cut_kind="active_prefix",
+                    frozen_buffer_id="buffer-1",
+                    staging_keys=(f"prefix-{prefix.ticket_id}",),
+                    prefix_token_count=5,
+                    prefix_digest="a" * 64,
+                    effective_output_limit=128,
+                )
+                for prefix in worker_inventory.active_prefixes
+            ),
+        )
+        return SimpleNamespace(payload=receipt.model_dump(mode="json"))
+
+    async def fake_raise_for_status(_response: SimpleNamespace) -> None:
+        return None
+
+    async def fake_get_response_json(response: SimpleNamespace) -> dict[str, Any]:
+        return response.payload
+
+    monkeypatch.setattr("nemo_gym.client.http_client.request", fake_request)
+    monkeypatch.setattr("nemo_gym.client.http_client.raise_for_status", fake_raise_for_status)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_response_json", fake_get_response_json)
+
+    await participant.close_admission(CheckpointRequest(checkpoint_id="checkpoint-1", deadline_ts=time.time() + 5))
+
+    assert routes == expected_routes
+    assert {ticket.cut.disposition for ticket in participant.gate.tickets} == {"durable_prefix"}
+
+
+class TestPrefixSupply:
+    """Supply a verified parent's exact tokens to the engine.
+
+    Re-rendering can tokenize an assistant turn differently from generation.
+    A reasoning template can also omit earlier thinking.
+    Either case breaks the token chain.
+    """
+
+    @staticmethod
+    def _server(monkeypatch: MonkeyPatch, *, enabled: bool) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=enabled,
+            uses_reasoning_parser=False,
+            supply_prefix_token_ids=enabled,
+        )
+        get_global_config_dict_mock = MagicMock(return_value={})
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    @staticmethod
+    def _armed(rollout_id: str, tmp_path) -> CaptureContext:
+        return CaptureContext(
+            rollout_id=rollout_id,
+            model_call_id="call-x",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+
+    def test_requires_token_information_for_generation_proof(self) -> None:
+        with raises(ValueError, match="return_token_id_information=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=False,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+            )
+
+    def test_rejects_completions_api_prefix_supply(self) -> None:
+        with raises(ValueError, match="not supported with use_completions_api=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=True,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+                use_completions_api=True,
+            )
+
+    def test_supplies_the_parents_cumulative_tokens(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        first_turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-0").record("parent", first_turn, [1, 2, 3, 4], "d")
+
+        token = set_token_sink(self._armed("sup-0", tmp_path))
+        try:
+            asyncio.run(resolve_parent(first_turn + [{"role": "user", "content": "next"}]))
+            out = server._apply_prefix_supply({"messages": first_turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3, 4]
+
+    def test_off_by_default(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=False)
+        turn = [{"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-1").record("parent", turn, [1, 2], "d")
+
+        token = set_token_sink(self._armed("sup-1", tmp_path))
+        try:
+            asyncio.run(resolve_parent(turn))
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_uncorrelated_call_is_left_alone(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        asyncio.run(resolve_parent([{"role": "assistant", "content": "hello"}]))
+        out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "hello"}]})
+        assert "required_prefix_token_ids" not in out
+
+    def test_fingerprint_miss_falls_back_rather_than_supplying_something_wrong(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        """Leave a rewritten history untouched.
+
+        The backend trusts the supplied prefix.
+        A wrong prefix would generate from a conversation that the harness never requested.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        lineage_index().for_rollout("sup-2").record("parent", [{"role": "assistant", "content": "hello"}], [1, 2], "d")
+
+        token = set_token_sink(self._armed("sup-2", tmp_path))
+        try:
+            asyncio.run(resolve_parent([{"role": "assistant", "content": "a summary"}]))
+            out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "a summary"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_ambiguous_parent_is_not_supplied(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        turn = [{"role": "assistant", "content": "same"}]
+        lineage = lineage_index().for_rollout("sup-3")
+        lineage.record("a", turn, [1, 2], "da")
+        lineage.record("b", turn, [3, 4], "db")
+
+        token = set_token_sink(self._armed("sup-3", tmp_path))
+        try:
+            asyncio.run(resolve_parent(turn))
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_a_fork_gets_the_parents_prefix_not_the_previous_calls(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """Give each branch the verified parent's cumulative tokens.
+
+        A running cursor would include the first branch's generation in the second branch.
+        The backend would then generate from a conversation that never happened.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        shared = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "plan"}]
+        lineage = lineage_index().for_rollout("sup-4")
+        lineage.record("parent", shared, [1, 2, 3], "dp")
+        lineage.record(
+            "branch-a",
+            shared + [{"role": "user", "content": "a"}, {"role": "assistant", "content": "A"}],
+            [1, 2, 3, 9, 9],
+            "da",
+        )
+
+        token = set_token_sink(self._armed("sup-4", tmp_path))
+        try:
+            asyncio.run(resolve_parent(shared + [{"role": "user", "content": "b"}]))
+            out = server._apply_prefix_supply({"messages": shared + [{"role": "user", "content": "b"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3]
+
+    def test_reasoning_stripped_history_still_supplies_the_real_tokens(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        """Restore reasoning tokens omitted from the rendered history.
+
+        A reasoning template can drop earlier thinking from a later prompt.
+        The rendered prompt then cannot extend the previous generation.
+        The verified parent's recorded tokens restore the chain.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        # The recorded turn included reasoning.
+        # The history returned by the harness does not.
+        recorded_turn = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}]
+        real_tokens_including_reasoning = [1, 2, 3, 4, 5, 6, 7]
+        lineage_index().for_rollout("sup-5").record("parent", recorded_turn, real_tokens_including_reasoning, "d")
+
+        token = set_token_sink(self._armed("sup-5", tmp_path))
+        try:
+            asyncio.run(resolve_parent(recorded_turn + [{"role": "user", "content": "next"}]))
+            out = server._apply_prefix_supply({"messages": recorded_turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == real_tokens_including_reasoning
+
+
+class TestPrefixSupplyAccounting:
+    """Distinguish requested prefixes from prefixes proven to be applied.
+
+    Contiguous chains do not prove that supply fired.
+    ``prefix_requested`` records intent only.
+    ``prefix_supplied`` records generation-time proof.
+    A lock protects the diagnostic counters.
+    """
+
+    def test_supplied_call_is_only_requested_until_generation_proves_it(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        turn = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+        lineage_index().for_rollout("acct-0").record("parent", turn, [1, 2, 3], "d")
+
+        ctx = CaptureContext(
+            rollout_id="acct-0",
+            model_call_id="c",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        token = set_token_sink(ctx)
+        try:
+            asyncio.run(resolve_parent(turn + [{"role": "user", "content": "next"}]))
+            out = server._apply_prefix_supply({"messages": turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3]
+        assert ctx.prefix_requested is True
+        assert ctx.prefix_supplied is False
+        # A resolved parent makes this call eligible.
+        # Generation proof has not landed yet.
+        assert server._prefix_supply_counts == [0, 1, 1]
+
+    def test_fallback_counts_in_total_but_not_as_eligible(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        lineage_index().for_rollout("acct-1").record("parent", [{"role": "assistant", "content": "a"}], [1, 2], "d")
+
+        ctx = CaptureContext(
+            rollout_id="acct-1",
+            model_call_id="c",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        token = set_token_sink(ctx)
+        try:
+            # A rewritten history has no unique verified parent.
+            # Prefix supply must decline.
+            asyncio.run(resolve_parent([{"role": "assistant", "content": "rewritten"}]))
+            out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "rewritten"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+        assert ctx.prefix_supplied is False
+        # A call without a resolved parent is not eligible.
+        assert server._prefix_supply_counts == [0, 0, 1]
+
+
+class TestPrefixSupplyReachesTokenize:
+    """Require generation-time proof for supplied prefixes.
+
+    The generation request carries ``required_prefix_token_ids``.
+    A supplied request skips the separate tokenize call.
+    The generation response must return the actual ``prompt_token_ids``.
+    Those token IDs prove whether the backend applied the requested prefix.
+    """
+
+    @staticmethod
+    def _model() -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="vllm_model",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=True,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            supply_prefix_token_ids=True,
+        )
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def test_supplied_prefix_uses_generation_prompt_proof(self, tmp_path) -> None:
+        model = self._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("tok-0").record("parent", turn, [11, 12, 13], "d")
+
+        chat_kwargs: dict[str, Any] = {}
+        tokenize_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            chat_kwargs.update(kwargs)
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "prompt_token_ids": [11, 12, 13, 77],
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": [77],
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {
+                            "content": [{"token": "token_id:77", "logprob": -0.5, "bytes": None, "top_logprobs": []}]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_tokenize(**kwargs):
+            tokenize_kwargs.update(kwargs)
+            return {"tokens": [11, 12, 13, 77]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        sink = set_token_sink(
+            CaptureContext(
+                rollout_id="tok-0",
+                model_call_id="call-y",
+                token_sink=TokenCaptureStore(tmp_path),
+                lineage_store=_TEST_LINEAGE,
+            )
+        )
+        try:
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        finally:
+            reset_token_sink(sink)
+
+        assert response.status_code == 200
+        assert chat_kwargs["required_prefix_token_ids"] == [11, 12, 13]
+        assert tokenize_kwargs == {}
+        assert mock_client.create_tokenize.await_count == 0
+
+    def _supply_and_return_prompt(
+        self, tmp_path, prompt_tokens: list[int] | None, rollout: str
+    ) -> tuple[CaptureContext, RuntimeError | None]:
+        """Run one supplied call against an engine that returns ``prompt_tokens``."""
+        model = self._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout(rollout).record("parent", turn, [11, 12, 13], "d")
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "prompt_token_ids": prompt_tokens,
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": [77],
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {
+                            "content": [{"token": "token_id:77", "logprob": -0.5, "bytes": None, "top_logprobs": []}]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_tokenize(**kwargs):
+            return {"tokens": prompt_tokens}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        context = CaptureContext(
+            rollout_id=rollout,
+            model_call_id="call-v",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        sink = set_token_sink(context)
+        error = None
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        except RuntimeError as caught:
+            error = caught
+            response = None
+        finally:
+            reset_token_sink(sink)
+        if response is not None:
+            assert response.status_code == 200
+        return context, error
+
+    def test_a_backend_that_ignores_the_prefix_is_recorded_as_not_supplied(self, tmp_path, caplog) -> None:
+        """Treat a requested prefix as intent until the generation response proves application.
+
+        A backend can ignore an unsupported request field and answer normally.
+        Only generation-time prompt_token_ids can detect that behavior.
+        """
+        with caplog.at_level(logging.ERROR):
+            context, error = self._supply_and_return_prompt(tmp_path, [900, 901, 77], "ver-ignored")
+        assert error is not None
+        assert context.prefix_supplied is False
+        assert "do not start with required_prefix_token_ids" in str(error)
+
+    def test_a_backend_that_applies_the_prefix_is_recorded_as_supplied(self, tmp_path) -> None:
+        """Record supply when generation-time prompt_token_ids start with the requested prefix."""
+        context, error = self._supply_and_return_prompt(tmp_path, [11, 12, 13, 77], "ver-applied")
+        assert error is None
+        assert context.prefix_supplied is True
+
+    def test_a_backend_without_generation_prompt_proof_fails_closed(self, tmp_path) -> None:
+        context, error = self._supply_and_return_prompt(tmp_path, None, "ver-unproved")
+        assert error is not None
+        assert "did not include prompt_token_ids" in str(error)
+        assert context.prefix_supplied is False
+
+    def test_tokenize_body_omits_the_prefix_when_supply_did_not_fire(self, tmp_path) -> None:
+        """Omit the prefix when no verified parent was resolved."""
+        model = self._model()
+        app = model.setup_webserver()
+
+        tokenize_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {
+                            "content": [{"token": "token_id:77", "logprob": -0.5, "bytes": None, "top_logprobs": []}]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_tokenize(**kwargs):
+            tokenize_kwargs.update(kwargs)
+            return {"tokens": [5]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        sink = set_token_sink(
+            CaptureContext(
+                rollout_id="tok-unknown",
+                model_call_id="call-z",
+                token_sink=TokenCaptureStore(tmp_path),
+                lineage_store=_TEST_LINEAGE,
+            )
+        )
+        try:
+            client = TestClient(app)
+            response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        finally:
+            reset_token_sink(sink)
+
+        assert response.status_code == 200
+        assert "required_prefix_token_ids" not in tokenize_kwargs
+
+
+class TestPrefixSupplyUsesTheRequestAsReceived:
+    """Resolve the parent before request conversion or preprocessing.
+
+    Responses-to-Chat conversion and preprocessing can reshape the request body.
+    The lineage index records the request as received.
+    Resolving from the reshaped body could miss a verified parent.
+    """
+
+    def test_supply_does_not_fire_without_a_resolved_parent(self, monkeypatch, tmp_path):
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-x").record("parent", turn, [1, 2, 3], "d")
+
+        token = set_token_sink(TestPrefixSupply._armed("sup-x", tmp_path))
+        try:
+            # No parent resolution proved that this request continues another call.
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_a_body_reshaped_after_resolution_still_supplies(self, monkeypatch, tmp_path):
+        """Preserve a verified parent decision across later request reshaping."""
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        original = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-y").record("parent", original, [7, 8, 9], "d")
+
+        token = set_token_sink(TestPrefixSupply._armed("sup-y", tmp_path))
+        try:
+            asyncio.run(resolve_parent(original))
+            # Conversion reshaped the messages before prefix supply ran.
+            out = server._apply_prefix_supply(
+                {"messages": [{"role": "user", "content": "reshaped beyond recognition"}]}
+            )
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [7, 8, 9]
+
+
+class TestGenerationProofAcceptsBundleShape:
+    """Read generation-time prompt tokens from every supported response shape.
+
+    A backend can return prompt token IDs in a message-level bundle or a top-level transport field.
+    Prefix verification uses the same priority order as token capture.
+    """
+
+    def test_a_backend_returning_a_message_bundle_passes_verification(self, tmp_path) -> None:
+        model = TestPrefixSupplyReachesTokenize._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("bundle-0").record("parent", turn, [11, 12, 13], "d")
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok",
+                            "prompt_token_ids": [11, 12, 13, 77],
+                            "generation_token_ids": [77],
+                            "generation_log_probs": [-0.5],
+                        },
+                    }
+                ],
+            }
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        context = CaptureContext(
+            rollout_id="bundle-0",
+            model_call_id="call-b",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        sink = set_token_sink(context)
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        finally:
+            reset_token_sink(sink)
+
+        assert response.status_code == 200
+        assert context.prefix_supplied is True
+        assert mock_client.create_tokenize.await_count == 0
+
+    def _verify(self, tmp_path, response: dict) -> CaptureContext:
+        model = TestPrefixSupplyReachesTokenize._model()
+        context = CaptureContext(
+            rollout_id="bundle-1",
+            model_call_id="call-b",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        context.prefix_requested = True
+        token = set_token_sink(context)
+        try:
+            result = model._verify_generation_prefix({"required_prefix_token_ids": [11, 12, 13]}, response)
+        finally:
+            reset_token_sink(token)
+        assert result is None  # The proof has no consumer; the function returns nothing.
+        return context
+
+    def test_message_level_prompt_token_ids_outrank_top_level(self, tmp_path) -> None:
+        context = self._verify(
+            tmp_path,
+            {
+                "prompt_token_ids": [900, 901],
+                "choices": [{"index": 0, "message": {"role": "assistant", "prompt_token_ids": [11, 12, 13, 77]}}],
+            },
+        )
+        assert context.prefix_supplied is True
+
+    def test_top_level_prompt_token_ids_remain_a_valid_source(self, tmp_path) -> None:
+        context = self._verify(
+            tmp_path,
+            {
+                "prompt_token_ids": [11, 12, 13, 77],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            },
+        )
+        assert context.prefix_supplied is True
+
+
+class TestPrefixSupplyRejectsResponsesNative:
+    def test_rejected_at_construction(self) -> None:
+        with raises(ValueError, match="not supported with is_responses_native=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=True,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+                is_responses_native=True,
+            )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Responses request fields with no Chat Completions representation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestUnrepresentableRequestFields:
+    """``drop_unrepresentable_request_fields`` decides what the server does with a Responses
+    request field that the Chat Completions conversion cannot express.
+
+    ``include`` stands for the whole group here: it names extra fields the provider is asked to
+    report on the response object, so it changes nothing about what the model generates.
+    """
+
+    BODY = {"input": "hi", "include": ["reasoning.encrypted_content"]}
+
+    @staticmethod
+    def _client(monkeypatch: MonkeyPatch, *, drop: bool) -> tuple[TestClient, dict[str, Any]]:
+        """A test client for a model server, plus the dict that records the converted chat params."""
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="vllm_model",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy-model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            drop_unrepresentable_request_fields=drop,
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        captured: dict[str, Any] = {}
+
+        async def _capture(self, request, create_params):
+            captured["value"] = create_params
+            return NeMoGymChatCompletion(
+                id="chatcmpl-123",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="hello"),
+                    )
+                ],
+                created=FIXED_TIME,
+                model="dummy-model",
+                object="chat.completion",
+            )
+
+        monkeypatch.setattr(VLLMModel, "chat_completions", _capture)
+        return TestClient(server.setup_webserver()), captured
+
+    def test_refused_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        client, _ = self._client(monkeypatch, drop=False)
+
+        with raises(NotImplementedError, match="include"):
+            client.post("/v1/responses", json=self.BODY)
+
+    def test_dropped_when_configured(self, monkeypatch: MonkeyPatch) -> None:
+        client, captured = self._client(monkeypatch, drop=True)
+
+        assert client.post("/v1/responses", json=self.BODY).status_code == 200
+        assert "include" not in captured["value"].model_dump(exclude_unset=True)
+        assert captured["value"].messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+    def test_dropped_on_the_streaming_path_too(self, monkeypatch: MonkeyPatch) -> None:
+        # Codex always sends `stream: true`; the streaming dispatch sanitizes the body and then
+        # runs the same conversion, so the switch applies there as well.
+        client, captured = self._client(monkeypatch, drop=True)
+
+        response = client.post("/v1/responses", json={**self.BODY, "stream": True})
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.completed" in response.text
+        assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+
+class TestPreserveEnvelopeIdFollowsCaptureContext:
+    """The served envelope id is kept per request, not per server."""
+
+    def test_uncaptured_request_on_external_staging_server_mints_resp_id(self) -> None:
+        model = TestPrefixSupplyReachesTokenize._model()
+        model._external_capture_handler = VLLMWorkerCaptureHandler()
+
+        assert model._preserve_envelope_id() is False
+
+        captured = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-a",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=True,
+        )
+        token = set_token_sink(captured)
+        try:
+            assert model._preserve_envelope_id() is True
+        finally:
+            reset_token_sink(token)
+
+        local = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-b",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=False,
+        )
+        token = set_token_sink(local)
+        try:
+            assert model._preserve_envelope_id() is False
+        finally:
+            reset_token_sink(token)
+
+
+def _control_url_config(**overrides: Any) -> VLLMModelConfig:
+    return VLLMModelConfig(
+        **{
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "",
+            "name": "policy",
+            "base_url": ["http://worker-0:8000/v1"],
+            "generation_cut_control_url": ["http://control-0:9000"],
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+            "uses_interleaved_reasoning": False,
+        }
+        | overrides
+    )
+
+
+def test_generation_cut_control_urls_are_refused_with_an_endpoint_file() -> None:
+    # The endpoint file moves the backends to base URLs that no control URL is listed for.
+    with raises(ValueError, match="cannot be used with endpoint_file"):
+        _control_url_config(endpoint_file="/tmp/endpoint")
+
+
+def test_a_backend_without_a_control_url_fails_its_cut_instead_of_guessing_a_root() -> None:
+    model = VLLMModel(config=_control_url_config(), server_client=MagicMock(spec=ServerClient))
+
+    assert model.generation_cut_control_root("http://worker-0:8000/v1") == "http://control-0:9000"
+    with raises(ValueError, match="no generation_cut_control_url is configured for backend http://worker-9:8000/v1"):
+        model.generation_cut_control_root("http://worker-9:8000/v1")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Codex CLI requests on the chat-backed Responses path
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestCodexRequests:
+    """Options that let the chat-backed Responses path serve the Codex CLI's requests as sent."""
+
+    REASONING_TEXT = "Look at the failing test before editing."
+    SHELL_TOOL = {
+        "type": "function",
+        "name": "shell_command",
+        "description": "Run a shell command.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        "strict": False,
+    }
+    APPLY_PATCH_TOOL = {
+        "type": "custom",
+        "name": "apply_patch",
+        "description": "Use the `apply_patch` tool to edit files.",
+        "format": {"type": "grammar", "syntax": "lark", "definition": "start: begin_patch hunk+ end_patch"},
+    }
+    # What a Codex deployment against a chat backend turns on for its request fields.
+    CODEX_FIELDS = {"drop_unrepresentable_request_fields": True, "forward_unvalidated_reasoning_effort": True}
+
+    @staticmethod
+    def _server(**overrides: Any) -> tuple[VLLMModel, MagicMock]:
+        settings = dict(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://vllm.test/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="served-model",
+            entrypoint="",
+            name="policy",
+            return_token_id_information=False,
+            uses_reasoning_parser=True,
+            reasoning_field="both",
+        )
+        config = VLLMModelConfig(**{**settings, **overrides})
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._clients = [client]
+        return server, client
+
+    @staticmethod
+    def _completion(message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "served-model",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16},
+        }
+
+    @classmethod
+    def _codex_body(cls, input_items: list[dict[str, Any]]) -> dict[str, Any]:
+        """A streaming request shaped like the ones the Codex CLI sends, effort max and reasoning context on."""
+        return {
+            "model": "codex-model",
+            "instructions": "You are Codex.",
+            "input": input_items,
+            "tools": [cls.SHELL_TOOL, cls.APPLY_PATCH_TOOL],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "reasoning": {"effort": "max", "summary": "auto", "context": "all_turns"},
+            "store": False,
+            "stream": True,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "019a-thread",
+            "text": {"verbosity": "low"},
+            "client_metadata": {"x-codex-turn": "1"},
+        }
+
+    @staticmethod
+    def _events(text: str) -> list[dict[str, Any]]:
+        return [json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")]
+
+    USER = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the test"}]}
+
+    def test_forward_unvalidated_reasoning_effort_requires_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(forward_unvalidated_reasoning_effort=True, is_responses_native=True)
+        # /v1/completions has no reasoning_effort, so the forwarded effort would be dropped silently.
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(forward_unvalidated_reasoning_effort=True, use_completions_api=True)
+        default, _ = self._server()
+        assert not default.config.forward_unvalidated_reasoning_effort
+
+    def test_codex_turns_convert_to_the_expected_chat_requests(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True)
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "shell_command", "arguments": '{"command":"ls"}'},
+        }
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion(
+                {"role": "assistant", "content": None, "reasoning": self.REASONING_TEXT, "tool_calls": [call]}
+            )
+        )
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        assert first.status_code == 200
+        events = self._events(first.text)
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        reasoning_item, call_item = (event["item"] for event in events[1:3])
+        assert reasoning_item["type"] == "reasoning"
+        assert reasoning_item["summary"] == [{"type": "summary_text", "text": self.REASONING_TEXT}]
+        assert reasoning_item["encrypted_content"] is None
+        assert call_item["type"] == "function_call"
+        expected_request = {
+            "model": "served-model",
+            "messages": [
+                {"role": "system", "content": "You are Codex."},
+                {"role": "user", "content": [{"type": "text", "text": "fix the test"}]},
+            ],
+            # The custom apply_patch tool is dropped by drop_custom_tools.
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "shell_command",
+                        "description": "Run a shell command.",
+                        "parameters": self.SHELL_TOOL["parameters"],
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "reasoning_effort": "max",
+            "store": False,
+            "prompt_cache_key": "019a-thread",
+            "verbosity": "low",
+        }
+        assert client.create_chat_completion.await_args.kwargs == expected_request
+
+        # Codex replays the reasoning item it received (summary only) with the call and its output.
+        # The reasoning reaches the engine on the assistant turn that made the call.
+        output = {"type": "function_call_output", "call_id": "call_1", "output": "a.py"}
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "Fixed.", "reasoning": "Done."})
+        )
+
+        second = TestClient(app).post(
+            "/v1/responses", json=self._codex_body([self.USER, reasoning_item, call_item, output])
+        )
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs == {
+            **expected_request,
+            "messages": [
+                *expected_request["messages"],
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": self.REASONING_TEXT,
+                    "reasoning": self.REASONING_TEXT,
+                    "tool_calls": [call],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "a.py"},
+            ],
+        }
+
+    def test_slow_codex_turn_streams_keepalives_until_the_completion_returns(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True, stream_keepalive_s=0.02)
+
+        async def slow_completion(**_: Any) -> dict[str, Any]:
+            await asyncio.sleep(0.3)
+            return self._completion({"role": "assistant", "content": "Fixed.", "reasoning": "Long thought."})
+
+        client.create_chat_completion = AsyncMock(side_effect=slow_completion)
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        assert response.status_code == 200
+        types = [event["type"] for event in self._events(response.text)]
+        assert types[:2] == ["response.created", "response.in_progress"]
+        assert types.count("response.in_progress") >= 2
+        assert types.count("response.created") == 1
+        assert types[-3:] == ["response.output_item.done", "response.output_item.done", "response.completed"]
+        assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == "max"
+        events = self._events(response.text)
+        assert {event["response"]["id"] for event in events if "response" in event} == {events[0]["response"]["id"]}
+
+    def test_keepalive_streams_are_refused_on_the_native_responses_path(self) -> None:
+        # vLLM issues the native path's response ids, which a keepalive stream cannot announce in advance.
+        server, _ = self._server(is_responses_native=True, stream_keepalive_s=0.02)
+        with raises(ValueError, match="stream_keepalive_s"):
+            server.setup_webserver()
+
+    def test_non_streaming_request_forwards_the_effort_too(self) -> None:
+        server, client = self._server(forward_unvalidated_reasoning_effort=True)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "ok", "reasoning": "r"})
+        )
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "hi", "reasoning": {"effort": "max"}}
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "completed"
+        assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == "max"
+
+    @mark.parametrize(
+        "overrides, reasoning, include, expected",
+        [
+            # Defaults are unchanged: the SDK enum rejects "max", and the conversion refuses the rest.
+            ({}, {"effort": "max"}, None, 422),
+            ({}, {"effort": "high"}, ["reasoning.encrypted_content"], "failed"),
+            ({}, {"effort": "high", "summary": "auto"}, None, "failed"),
+            ({}, {"effort": "high", "context": "all_turns"}, None, "failed"),
+            # Each option relaxes only its own fields.
+            ({"forward_unvalidated_reasoning_effort": True}, {"effort": "max"}, None, "max"),
+            (
+                {"forward_unvalidated_reasoning_effort": True},
+                {"effort": "max"},
+                ["reasoning.encrypted_content"],
+                "failed",
+            ),
+            ({"forward_unvalidated_reasoning_effort": True}, {"effort": ""}, None, 422),
+            (
+                {"drop_unrepresentable_request_fields": True},
+                {"effort": "high"},
+                ["reasoning.encrypted_content"],
+                "high",
+            ),
+            ({"drop_unrepresentable_request_fields": True}, {"effort": "max"}, ["reasoning.encrypted_content"], 422),
+            (
+                {"drop_unrepresentable_request_fields": True},
+                {"effort": "high", "summary": "auto", "context": "all_turns"},
+                None,
+                "high",
+            ),
+            (
+                {"drop_unrepresentable_request_fields": True},
+                {"effort": "high", "context": "current_turn"},
+                None,
+                "failed",
+            ),
+            # Efforts the SDK lists keep their existing path, "none" included.
+            (CODEX_FIELDS, {"effort": "none", "summary": "auto"}, None, "none"),
+            (CODEX_FIELDS, {"effort": "xhigh"}, ["reasoning.encrypted_content"], "xhigh"),
+            (
+                CODEX_FIELDS,
+                {"effort": "max", "summary": "auto", "context": "all_turns"},
+                ["reasoning.encrypted_content"],
+                "max",
+            ),
+        ],
+    )
+    def test_each_option_is_opt_in(
+        self, overrides: dict[str, Any], reasoning: dict[str, Any], include: Any, expected: Union[int, str]
+    ) -> None:
+        server, client = self._server(**overrides)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "ok", "reasoning": "r"})
+        )
+        body = {"stream": True, "input": "hi", "reasoning": reasoning}
+        if include is not None:
+            body["include"] = include
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json=body)
+
+        if isinstance(expected, int):
+            assert response.status_code == expected
+            client.create_chat_completion.assert_not_awaited()
+            return
+        assert response.status_code == 200
+        terminal = self._events(response.text)[-1]
+        if expected == "failed":
+            assert terminal["type"] == "response.failed"
+            client.create_chat_completion.assert_not_awaited()
+        else:
+            assert terminal["type"] == "response.completed"
+            assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == expected
+
+    PATCH = "*** Begin Patch\n*** Update File: a.py\n@@\n-x = 1\n+x = 2\n*** End Patch\n"
+    PATCH_OUTPUT = "Success. Updated the following files:\nM a.py\n"
+
+    @classmethod
+    def _apply_patch_completion(cls) -> dict[str, Any]:
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "apply_patch", "arguments": json.dumps({"input": cls.PATCH})},
+        }
+        return cls._completion(
+            {"role": "assistant", "content": None, "reasoning": cls.REASONING_TEXT, "tool_calls": [call]}
+        )
+
+    def test_codex_apply_patch_round_trips_through_the_function_bridge(self) -> None:
+        # The configuration a Codex deployment uses: the request-field options and main's function
+        # bridge for apply_patch. drop_custom_tools stays off, because it would drop the tool first.
+        server, client = self._server(**self.CODEX_FIELDS, custom_tool_strategy="function_bridge")
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        assert first.status_code == 200
+        events = self._events(first.text)
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        reasoning_item, call_item = (event["item"] for event in events[1:3])
+        assert reasoning_item["type"] == "reasoning"
+        assert call_item == {
+            "type": "custom_tool_call",
+            "call_id": "call_1",
+            "id": "call_1",
+            "name": "apply_patch",
+            "input": self.PATCH,
+            "namespace": None,
+            "status": "completed",
+        }
+        assert events[-1]["response"]["output"] == [reasoning_item, call_item]
+        sent_tools = client.create_chat_completion.await_args.kwargs["tools"]
+        assert sent_tools[1] == {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "The raw text payload of this free-form tool."}
+                    },
+                    "required": ["input"],
+                },
+            },
+        }
+        assert sent_tools[0]["function"]["name"] == "shell_command"
+
+        # Codex replays the reasoning, the custom tool call and its output on the next turn.
+        output = {"type": "custom_tool_call_output", "call_id": "call_1", "output": self.PATCH_OUTPUT}
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "Fixed.", "reasoning": "Done."})
+        )
+
+        second = TestClient(app).post(
+            "/v1/responses", json=self._codex_body([self.USER, reasoning_item, call_item, output])
+        )
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"] == [
+            {"role": "system", "content": "You are Codex."},
+            {"role": "user", "content": [{"type": "text", "text": "fix the test"}]},
+            {
+                # The prior reasoning reaches the engine on the turn that made the call.
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": self.REASONING_TEXT,
+                "reasoning": self.REASONING_TEXT,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": json.dumps({"input": self.PATCH})},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": self.PATCH_OUTPUT},
+        ]
+
+    def test_non_streaming_response_carries_the_custom_tool_call(self) -> None:
+        server, client = self._server(custom_tool_strategy="function_bridge")
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "fix the test", "tools": [self.APPLY_PATCH_TOOL]}
+        )
+
+        assert response.status_code == 200
+        output = response.json()["output"]
+        assert [item["type"] for item in output] == ["reasoning", "custom_tool_call"]
+        assert (output[1]["call_id"], output[1]["name"], output[1]["input"]) == ("call_1", "apply_patch", self.PATCH)
+        # The response echoes the custom tool as the client sent it.
+        assert [(tool["type"], tool["name"]) for tool in response.json()["tools"]] == [("custom", "apply_patch")]
+        sent_tool = client.create_chat_completion.await_args.kwargs["tools"][0]
+        assert (sent_tool["type"], sent_tool["function"]["name"]) == ("function", "apply_patch")
+
+    def test_custom_tools_are_unchanged_without_the_conversion(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS)
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        # The custom tool is forwarded as a Chat Completions custom tool, and the call stays a function call.
+        assert client.create_chat_completion.await_args.kwargs["tools"][1] == {
+            "type": "custom",
+            "custom": {
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files.",
+                "format": {
+                    "type": "grammar",
+                    "grammar": {"syntax": "lark", "definition": "start: begin_patch hunk+ end_patch"},
+                },
+            },
+        }
+        assert self._events(first.text)[2]["item"]["type"] == "function_call"
+
+        # A replayed custom tool call has no chat representation.
+        client.create_chat_completion.reset_mock()
+        call_item = {"type": "custom_tool_call", "call_id": "call_1", "name": "apply_patch", "input": self.PATCH}
+        output = {"type": "custom_tool_call_output", "call_id": "call_1", "output": self.PATCH_OUTPUT}
+        second = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER, call_item, output]))
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.failed"
+        client.create_chat_completion.assert_not_awaited()
+
+    VIEW_IMAGE_CALL = {
+        "type": "function_call",
+        "call_id": "call_img",
+        "name": "view_image",
+        "arguments": json.dumps({"path": "/app/work/plot.png"}),
+    }
+    PNG_URL = "data:image/png;base64,iVBORw0KGgo="
+    # As the Codex CLI sends it: the image alone, with detail "high".
+    VIEW_IMAGE_OUTPUT = {
+        "type": "function_call_output",
+        "call_id": "call_img",
+        "output": [{"type": "input_image", "image_url": PNG_URL, "detail": "high"}],
+    }
+
+    def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(inline_tool_output_images=True, is_responses_native=True)
+
+    @mark.parametrize(
+        ("overrides", "content"),
+        [
+            (
+                {"inline_tool_output_images": True},
+                [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}],
+            ),
+            # Without it, drop_unrepresentable_request_fields puts its placeholder in the image's place.
+            ({}, [{"type": "text", "text": "[image omitted from tool output]"}]),
+        ],
+        ids=["inline", "placeholder"],
+    )
+    def test_codex_view_image_output_reaches_the_engine(
+        self, overrides: dict[str, Any], content: list[dict[str, Any]]
+    ) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, **overrides)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "done", "reasoning": "r"})
+        )
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=self._codex_body([self.USER, self.VIEW_IMAGE_CALL, self.VIEW_IMAGE_OUTPUT])
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"][-1] == {
+            "role": "tool",
+            "tool_call_id": "call_img",
+            "content": content,
+        }
+
+    def test_view_image_output_fails_the_turn_by_default(self) -> None:
+        server, client = self._server()
+        client.create_chat_completion = AsyncMock()
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses",
+            json={"stream": True, "input": [self.USER, self.VIEW_IMAGE_CALL, self.VIEW_IMAGE_OUTPUT]},
+        )
+
+        assert response.status_code == 200
+        terminal = self._events(response.text)[-1]
+        assert terminal["type"] == "response.failed"
+        assert "input_image" in terminal["response"]["error"]["message"]
+        client.create_chat_completion.assert_not_awaited()
+
+
+def _custom_tool_config(**overrides: Any) -> VLLMModelConfig:
+    return VLLMModelConfig(
+        **{
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "",
+            "name": "policy",
+            "base_url": "http://worker-0:8000/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+        }
+        | overrides
+    )
+
+
+def test_get_converter_forwards_the_custom_tool_strategy() -> None:
+    model = VLLMModel(
+        config=_custom_tool_config(custom_tool_strategy="function_bridge"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert model.get_converter().custom_tool_strategy == "function_bridge"
+
+
+def test_function_bridge_is_rejected_with_the_native_responses_route() -> None:
+    with raises(ValueError, match="custom_tool_strategy=function_bridge is not supported with is_responses_native"):
+        _custom_tool_config(custom_tool_strategy="function_bridge", is_responses_native=True)
+
+
+def test_streaming_sanitize_applies_the_configured_custom_tool_strategy() -> None:
+    # The helper is the one shared by every `/v1/responses` dispatch (the compaction
+    # server's included), so this pins the config-to-sanitizer wiring for all of them.
+    def body() -> dict:
+        return {
+            "model": "policy",
+            "stream": True,
+            "tools": [],
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "id": "at_1",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "exec", "description": "Run JavaScript."}],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+            ],
+        }
+
+    bridged = VLLMModel(
+        config=_custom_tool_config(custom_tool_strategy="function_bridge"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    cleaned, _ = bridged._sanitize_streaming_responses_body(body())
+    assert [(tool["type"], tool["name"]) for tool in cleaned["tools"]] == [("custom", "exec")]
+
+    passthrough = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
+    cleaned, _ = passthrough._sanitize_streaming_responses_body(body())
+    assert cleaned["tools"] == []
+
+
+@mark.parametrize("request_timeout_seconds", [None, 30.0])
+def test_request_timeout_reaches_every_engine_client(request_timeout_seconds) -> None:
+    """Unset keeps the engine request unbounded; a value bounds each HTTP attempt of every client."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8081,
+        base_url=["http://engine-a/v1", "http://engine-b/v1"],
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        entrypoint="",
+        name="vllm_model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        **({} if request_timeout_seconds is None else {"request_timeout_seconds": request_timeout_seconds}),
+    )
+    server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    assert [client.request_timeout_seconds for client in server._clients] == [request_timeout_seconds] * 2

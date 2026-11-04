@@ -1,0 +1,266 @@
+---
+title: "Model-call capture"
+description: "Optional per-rollout model-call evidence for evaluation and debugging"
+position: 5
+---
+
+Model-call capture records requests, responses, token usage, tool calls, reasoning, latency, and
+errors at a Gym model server. Capture is opt-in and does not modify model responses, agent responses,
+or rollout rewards.
+
+## Run an evaluation with capture
+
+This example extends the [quickstart](/get-started/quickstart) MCQA evaluation. It assumes that your
+model credentials are already configured in `env.yaml`.
+
+In the first terminal, choose an absolute capture directory and start the servers with capture
+enabled:
+
+```bash
+mkdir -p results/model-calls
+capture_dir="$(pwd)/results/model-calls"
+
+gym env start \
+    --resources-server mcqa \
+    --model-type openai_model \
+    ++observability_enabled=true \
+    ++model_call_capture_dir="${capture_dir}"
+```
+
+In a second terminal, activate the same environment and pass the same capture settings to rollout
+collection:
+
+```bash
+source .venv/bin/activate
+capture_dir="$(pwd)/results/model-calls"
+
+gym eval run --no-serve \
+    --agent mcqa_simple_agent \
+    --input resources_servers/mcqa/data/example.jsonl \
+    --output results/mcqa_rollouts.jsonl \
+    --limit 1 \
+    --num-repeats 1 \
+    ++observability_enabled=true \
+    ++model_call_capture_dir="${capture_dir}"
+```
+
+Inspect the attachment on the first rollout and list the raw capture files:
+
+```bash
+head -n 1 results/mcqa_rollouts.jsonl | jq '.ng_model_call_capture'
+ls -1 "${capture_dir}"
+```
+
+The rollout record is the usual starting point for analysis. Use its `ng_model_call_capture` field
+for normalized calls and aggregate metrics; use the matching file in `CaptureStore` when you need the
+original request and response payloads.
+
+## What capture contains
+
+### Rollout-record attachment
+
+`rollout_collection` attaches available model-call data to each rollout. This representative example
+includes a gap to show the complete shape. The `gaps` field is omitted when there are no gaps.
+
+```json
+{
+  "ng_model_call_capture": {
+    "rollout_id": "0-0",
+    "metrics": {
+      "tokens_in": 94,
+      "tokens_out": 28,
+      "tokens_reasoning": 12,
+      "tokens_total": 122,
+      "cached_tokens": 0,
+      "latency_total_ms": 842.7,
+      "num_calls": 1
+    },
+    "calls": [
+      {
+        "model_call_id": "863410a8d52e4be6a31efc5c6e9d4629",
+        "response_id": "resp_123",
+        "call_index": 0,
+        "model_ref": {
+          "type": "responses_api_models",
+          "name": "policy_model"
+        },
+        "model": "gpt-4.1-2025-04-14",
+        "dialect": "responses",
+        "status_code": 200,
+        "response_status": "completed",
+        "tokens_in": 94,
+        "tokens_out": 28,
+        "tokens_reasoning": 12,
+        "tokens_total": 122,
+        "latency_total_ms": 842.7
+      }
+    ],
+    "gaps": [
+      {
+        "code": "model_call_capture_incomplete"
+      }
+    ]
+  }
+}
+```
+
+`metrics.num_calls` is the number of captured calls. Token and latency totals include only values
+reported by the provider; a `null` value means unknown, not zero. For example, Anthropic does not
+report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
+
+After successful [`ng_trajectory`](/reference/trajectory-capabilities) projection, attached calls
+omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
+remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
+`multimodal_history_redacted` gap omit payload copies from `ng_trajectory`.
+
+The attachment is additive: it does not replace or rewrite the existing response, reward,
+`NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B
+rollout tables omit `ng_trajectory` and model-call request and response payloads.
+
+### Raw `CaptureStore` record
+
+Each rollout has an append-only file named `<rollout_id>.capture.jsonl`. Each line contains one raw
+model-server exchange, including its request and response.
+The following synthetic record shows the exact persisted field shape. It is formatted across lines
+for readability but stored as one JSONL line.
+
+```json
+{
+  "model_call_id": "863410a8d52e4be6a31efc5c6e9d4629",
+  "dialect": "responses",
+  "model_ref": {
+    "type": "responses_api_models",
+    "name": "policy_model"
+  },
+  "started_at": 1786032154.12,
+  "completed_at": 1786032154.96,
+  "latency_ms": 842.7,
+  "latency_ttft_ms": 213.4,
+  "status_code": 200,
+  "error_category": null,
+  "request": {
+    "model": "gpt-4.1-2025-04-14",
+    "input": [{"role": "user", "content": "Which option is correct?"}]
+  },
+  "response": {
+    "id": "resp_123",
+    "status": "completed",
+    "usage": {
+      "input_tokens": 94,
+      "output_tokens": 28,
+      "total_tokens": 122
+    }
+  }
+}
+```
+
+Writes are flushed and fsynced. Capture failures are logged without failing model requests. Resume
+attempts use an `-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch,
+the collector clears any existing capture for the exact rollout-attempt id.
+
+Read raw records programmatically when you need more than the rollout attachment:
+
+```python
+from nemo_gym.base_responses_api_model import (
+    CaptureStore,
+    aggregate_model_call_metrics,
+    read_model_call_records,
+)
+
+store = CaptureStore("/absolute/path/to/results/model-calls")
+calls = read_model_call_records(store, rollout_id)
+totals = aggregate_model_call_metrics(store, rollout_id)
+```
+
+`ModelCallRecord` includes the server-generated `model_call_id`, protocol `response_id`, typed
+`model_ref`, UTC `started_at` and `completed_at` timestamps, durable `call_index`, API dialect, token
+and cache usage, status, finish reason, latency, error details, tool calls, reasoning, and captured
+payloads. `call_index` and timestamps do not establish causal ordering between concurrent calls.
+
+Streaming Responses, Chat Completions, and Anthropic Messages are reassembled for capture on a
+best-effort basis. If reassembly fails, request, status, correlation, and latency data remain
+available. A successful-status stream that closes without its dialect's terminal event retains any
+partial reconstruction and is marked `stream_truncated`.
+
+## Configure capture
+
+The CLI workflow above sets these top-level global-config fields:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
+| `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
+
+You can put the same settings in a YAML config instead:
+
+```yaml
+observability_enabled: true
+model_call_capture_dir: /absolute/path/to/model-calls
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+```
+
+Model servers and `rollout_collection` must resolve `model_call_capture_dir` to the same location.
+For separate pods or nodes, mount that absolute path in every producer and the collector. Multiple
+model servers can append to one rollout file when the shared filesystem supports POSIX advisory file
+locking.
+
+Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id. Use a
+separate capture directory for concurrent collection jobs whose indices can overlap.
+
+## If you build a custom agent
+
+Capture requires a caller-supplied rollout correlation id. Gym's built-in compatible agents handle
+this routing; custom agent authors must preserve it on model calls.
+
+Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append `/v1/responses`,
+`/v1/chat/completions`, or `/v1/messages`, and the model server removes the rollout prefix before
+routing. An unprefixed call is forwarded normally but is not captured. Calls sent directly to an
+external provider instead of through a Gym model server are also not captured.
+
+Agents based on `SimpleResponsesAPIAgent` can use `url_path_for_run(url_path, body)` to prefix a
+downstream call from the run request's task and rollout indices. Use
+`url_path_for_request(url_path, request)` to carry an inbound prefixed self-call through to the model
+call. The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on every
+agent by default.
+
+SDK harnesses that configure a client once can use `base_url_for_run(base_url, body)`. Harnesses that
+must thread the id through multiple layers can use `rollout_id_from_run(body)` with
+`resolve_model_base_url(name, rollout_id)`.
+
+## Agent observations
+
+Currently, only `claude_code_agent` emits `ng_agent_observations`. This attachment is available when
+observability is enabled and is collected independently from model-call capture. It contains typed
+agent invocations, model-visible conversation items, tool-call intervals, context-compaction events,
+sandbox observations, and `gaps` for unavailable evidence.
+
+### Advanced: correlation, compaction, and sandbox evidence
+
+Join an agent invocation to captured model calls by `model_call_id`, or by the exact
+`(model_ref, response_id)` pair when the harness observes the protocol response ID. A producer may
+resolve a hidden call only through a unique exact match in its retained artifact and raw capture.
+Ambiguous matches remain unowned; timestamps and list position are not sufficient.
+
+Compaction records distinguish calls immediately before and after a context change from model calls
+used to perform the compaction. Integrations without an explicit identifier or unique match leave
+those references empty and report a gap.
+
+Model-visible tool calls and results remain in `AgentInvocation.conversation`. Execution timing and
+outcome, when observable, live in `ToolCallObservation` and join through
+`(invocation_id, tool_call_id)`. Tool timestamps are UTC Unix seconds when available; `duration_ms`
+is the measured interval and `timing_source` identifies its source.
+
+Each `SandboxObservation` covers one sandbox execution. Usage fields contain measured values, not
+configured limits. A tool observation can reference its enclosing `sandbox_id`, but overlapping tool
+calls cannot share sandbox-level CPU or memory usage as if it were per-call usage.
+
+## Limitations
+
+The model-server boundary observes model HTTP requests and responses. It can record tool calls,
+reasoning, and tool results present in those payloads, but it does not observe tool execution,
+environment events, context compaction, semantic turns, or subagent structure. Those require
+instrumentation at the agent, tool, environment, or rollout layer.

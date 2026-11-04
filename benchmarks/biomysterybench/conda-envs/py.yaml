@@ -1,0 +1,18 @@
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - biopython
+  - pysam
+  - pyvcf3
+  - plotly
+  - statsmodels
+  - networkx
+  - h5py
+  - jupyterlab

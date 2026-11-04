@@ -114,7 +114,7 @@ same one (creation order is `[GPU0×A, GPU1×A, ...]`; dispatch order becomes
 
 uv ships python-build-standalone binaries whose absolute paths differ across
 containers. `segale_actor.py` copies the venv's Python root to a
-shared-FS path at `LONGMT_EVAL_PY_CACHE` (default `/opt/Gym/.cache/longmt-python`)
+shared-FS path at `LONGMT_EVAL_PY_CACHE` (default `<Gym cache directory>/longmt-python`)
 so remote Ray workers can resolve a stable `py_executable` at runtime. Set
 `LONGMT_EVAL_PY_CACHE` to a Lustre path when running across nodes.
 
@@ -196,11 +196,12 @@ For a full SLURM run with SEGALE enabled on WMT24++ see
 
 | Variable | Purpose |
 |----------|---------|
-| `LASER_HOME` | Path to the LASER2 model weights (required for SEGALE actors) |
+| `LASER_HOME` | Path to the LASER2 model weights; defaults to `<Gym cache directory>/longmt-laser` |
 | `HF_HOME` / `HF_HUB_CACHE` | HuggingFace cache; COMETKiwi checkpoint resolved here |
 | `HF_HUB_OFFLINE` | Set to `1` to prevent any HF Hub network calls |
-| `ERSATZ` | Path to the ersatz segmenter model weights |
-| `LONGMT_EVAL_PY_CACHE` | Shared-FS path for the mirrored uv Python root used by Ray workers |
+| `ERSATZ` | Path to the ersatz segmenter model weights; defaults to `<Gym cache directory>/longmt-ersatz` |
+| `LONGMT_COMET_CACHE` | Path to downloaded COMET checkpoints; defaults to `<Gym cache directory>/longmt-comet` |
+| `LONGMT_EVAL_PY_CACHE` | Shared-FS path for the mirrored uv Python root; defaults to `<Gym cache directory>/longmt-python` |
 
 ## Licensing
 

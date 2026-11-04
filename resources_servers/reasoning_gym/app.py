@@ -19,7 +19,7 @@ import reasoning_gym
 from fastapi import FastAPI
 from reasoning_gym.utils import extract_answer
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -44,6 +44,10 @@ class ReasoningGymVerifyResponse(BaseVerifyResponse):
 
 
 class ReasoningGymResourcesServer(SimpleResourcesServer):
+    # Each verification scores the answer with its reasoning_gym task: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: ReasoningGymResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

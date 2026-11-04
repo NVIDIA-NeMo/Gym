@@ -20,6 +20,14 @@ from pathlib import Path
 from typing import Callable, List, Optional, Union
 
 
+logger = logging.getLogger(__name__)
+
+# Old import paths of code moved by the package reorganization keep working; see nemo_gym/_moved_paths.py.
+from nemo_gym._moved_paths import install_moved_module_finder, moved_names_getattr  # noqa: E402
+
+
+install_moved_module_finder()
+
 # /path/to/dir/Gym (PARENT_DIR)
 # |- cache (CACHE_DIR)
 # |- results (RESULTS_DIR)
@@ -58,17 +66,21 @@ def component_search_roots(*, sys_path: List[Path] | None = None) -> List[Path]:
     looks for components — used by path resolution (:func:`_resolve_under_cwd_or_install`), module imports
     (:func:`_augment_sys_path`) and the ``gym list``/``gym search`` discovery functions.
 
-    ``sys_path`` weaves existing ``sys.path`` entries in for import precedence: they slot in after the extra
-    roots but before cwd/built-ins. Any entry that is itself cwd or the install root is dropped so those two
-    always stay last — matching the file-lookup order even in a wheel install, where the install root is
-    already on ``sys.path`` as ``site-packages``.
+    ``sys_path`` weaves existing import paths in after the extra roots. Editable installs move cwd and the
+    install root to the end. Non-editable installs preserve existing entry order and append cwd and the
+    install root only when missing: moving a shared install root behind cwd would shadow dependencies,
+    while demoting an explicit server path could break sibling imports. File lookup (no ``sys_path``)
+    remains extra roots, cwd, then the install root in either mode.
     """
-    # cwd and the built-ins are always searched last; drop them from the woven sys.path entries so they
-    # can't get pinned mid-path (e.g. site-packages == PARENT_DIR in a wheel install).
-    trailing = [Path.cwd(), PARENT_DIR]
-    trailing_resolved = {root.resolve() for root in trailing}
-    middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
-    candidates = [*_extra_roots(), *middle, *trailing]
+    if _is_editable_install:
+        # Keep source-checkout precedence: cwd and built-ins are searched last, in that order.
+        trailing_resolved = {Path.cwd().resolve(), PARENT_DIR.resolve()}
+        middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
+    else:
+        # Wheels and --target installs share their root with dependencies. Preserve their position,
+        # including server directories explicitly placed ahead of them via PYTHONPATH.
+        middle = list(sys_path or [])
+    candidates = [*_extra_roots(), *middle, Path.cwd(), PARENT_DIR]
     roots: List[Path] = []
     seen: set[Path] = set()
     for root in candidates:
@@ -111,13 +123,15 @@ def _resolve_under_cwd_or_install(
 def _augment_sys_path() -> None:
     """Put the artifact roots on ``sys.path`` so plugin modules (e.g. a benchmark's ``prepare.py``) import.
 
-    Extra roots go to the front and cwd/``PARENT_DIR`` (the built-ins) to the end, so import precedence
-    matches file resolution under :func:`component_search_roots` (a plugin shadows a same-named Gym module).
+    Extra roots go to the front. Editable installs move cwd/``PARENT_DIR`` (the built-ins) to the end;
+    non-editable installs preserve existing import order and append those roots only when missing.
+    Use explicit extra roots (or ``--search-dir``) to override both files and modules of an installed
+    built-in, since cwd-first file lookup does not necessarily match non-editable import precedence.
     Idempotent; reads ``NEMO_GYM_EXTRA_ROOTS`` at call time, so it can be re-run after ``--search-dir`` folds
     roots into the env (see nemo_gym.cli.main).
     """
     new_path = [str(root) for root in component_search_roots(sys_path=(Path(path) for path in sys.path))]
-    logging.debug(f"Replacing sys.path {sys.path} with {new_path}")
+    logger.debug(f"Replacing sys.path {sys.path} with {new_path}")
     sys.path[:] = new_path
 
 
@@ -161,3 +175,85 @@ from nemo_gym.package_info import (
     __shortversion__,
     __version__,
 )
+
+
+# Public API surface for downstream environment, agent, and model authors.
+#
+# Symbols are resolved lazily via PEP 562.
+# Importing ``nemo_gym`` does not eagerly pull in FastAPI, pydantic, OpenAI, or the server stack.
+# Keep this surface focused on common extension points and boundary types.
+# Specialized implementation types remain available from their defining modules.
+#
+# Maps each public name to its defining submodule. Existing deep import paths continue to work.
+_LAZY_EXPORTS: dict[str, str] = {
+    # Resources server extension points and contracts
+    "BaseResourcesServerConfig": "server_runtime.base_resources_server",
+    "SimpleResourcesServer": "server_runtime.base_resources_server",
+    "BaseRunRequest": "server_runtime.base_resources_server",
+    "BaseVerifyRequest": "server_runtime.base_resources_server",
+    "BaseVerifyResponse": "server_runtime.base_resources_server",
+    "BaseMultiRewardVerifyResponse": "server_runtime.base_resources_server",
+    "BaseSeedSessionRequest": "server_runtime.base_resources_server",
+    "BaseSeedSessionResponse": "server_runtime.base_resources_server",
+    "ReverifyMode": "server_runtime.base_resources_server",
+    # Agent and model extension points
+    "BaseResponsesAPIAgentConfig": "agents.base_responses_api_agent",
+    "SimpleResponsesAPIAgent": "agents.base_responses_api_agent",
+    "BaseResponsesAPIModelConfig": "models.base_responses_api_model",
+    "SimpleResponsesAPIModel": "models.base_responses_api_model",
+    # Common server-client utilities
+    "ServerClient": "client.server_client",
+    "raise_for_status": "client.http_client",
+    "get_response_json": "client.http_client",
+    "SESSION_ID_KEY": "client.server_client",
+    # Author-facing config and metrics types
+    "BaseServerConfig": "config.config_types",
+    "BaseRunServerInstanceConfig": "config.config_types",
+    "Domain": "config.config_types",
+    "AggregateMetrics": "config.config_types",
+    "AggregateMetricsRequest": "config.config_types",
+    "ModelServerRef": "config.config_types",
+    # High-level OpenAI-compatible client and API boundary types
+    "NeMoGymAsyncOpenAI": "client.openai_client",
+    "NeMoGymResponse": "core.responses_api_types",
+    "NeMoGymResponseCreateParamsNonStreaming": "core.responses_api_types",
+    "NeMoGymChatCompletion": "core.responses_api_types",
+    "NeMoGymChatCompletionCreateParamsNonStreaming": "core.responses_api_types",
+}
+
+# Eagerly-defined names (path constants + package metadata) that live directly in this module.
+_EAGER_PUBLIC: tuple[str, ...] = (
+    "ROOT_DIR",
+    "PARENT_DIR",
+    "WORKING_DIR",
+    "CACHE_DIR",
+    "RESULTS_DIR",
+    "__version__",
+    "__package_name__",
+)
+
+__all__ = sorted({*_EAGER_PUBLIC, *_LAZY_EXPORTS})
+
+
+_moved_names = moved_names_getattr(__name__)
+
+
+def __getattr__(name: str):
+    # PEP 562 calls module-level __getattr__ only for names that are absent from the module globals.
+    # Eager symbols and resolved lazy symbols never reach this function.
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        # A module that moved out of the package, such as `nemo_gym.config.global_config`, resolves with a warning.
+        return _moved_names(name)
+
+    import importlib
+
+    module = importlib.import_module(f"{__name__}.{module_name}")
+    value = getattr(module, name)
+    # Cache on the package so subsequent lookups skip __getattr__ entirely.
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_LAZY_EXPORTS})

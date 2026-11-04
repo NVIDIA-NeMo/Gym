@@ -14,11 +14,23 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
+
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.utils.exception_inspection import error_to_http_status
+
+
+# How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
+# and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
+# above the provider's budget, so the provider can report what it found before the caller gives up.
+ORPHAN_REAP_TIMEOUT_S = 60.0
 
 
 class SandboxStatus(str, Enum):
@@ -26,9 +38,39 @@ class SandboxStatus(str, Enum):
 
     STARTING = "starting"
     RUNNING = "running"
+    PAUSED = "paused"
     STOPPED = "stopped"
     ERROR = "error"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class SandboxEndpoint:
+    """Provider-neutral route to a long-lived service inside a sandbox.
+
+    ``endpoint`` is an absolute URL. ``headers`` carries provider-required
+    authentication or routing headers without exposing the provider's opaque
+    handle to callers.
+    """
+
+    endpoint: str
+    headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.endpoint, str) or not self.endpoint.strip():
+            raise ValueError("Sandbox endpoint must be a non-empty absolute URL")
+        endpoint = self.endpoint.strip()
+        parsed = urlsplit(endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("Sandbox endpoint must be a non-empty absolute URL")
+        if not isinstance(self.headers, Mapping):
+            raise TypeError("Sandbox endpoint headers must be a mapping")
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(
+            self,
+            "headers",
+            {str(key): str(value) for key, value in self.headers.items()},
+        )
 
 
 @dataclass(frozen=True)
@@ -60,6 +102,55 @@ class SandboxResources:
         )
 
 
+# The resources a scheduler compares request against limit for; ``gpu_type`` is a selector, not a quantity.
+SCHEDULABLE_RESOURCE_KEYS = ("cpu", "memory_mib", "disk_gib", "gpu")
+
+
+def clamp_resource_requests(
+    requests: Mapping[str, Any] | SandboxResources,
+    limits: Mapping[str, Any] | SandboxResources,
+) -> tuple[dict[str, Any], dict[str, tuple[Any, Any]]]:
+    """Cap each scheduling request at the limit the spec declares for the same key.
+
+    Kubernetes never schedules a pod whose request exceeds its limit, and OpenSandbox reports such a
+    sandbox only as "pending allocation", so a request above a task's declared limit must not reach the
+    create call. Returns the requests with the offending keys set to their limit, and
+    ``{key: (request, limit)}`` for the keys that changed so the caller can log a warning naming them.
+    Keys the limits do not declare pass through untouched.
+    """
+    requested = requests if isinstance(requests, SandboxResources) else SandboxResources.from_mapping(requests)
+    limited = limits if isinstance(limits, SandboxResources) else SandboxResources.from_mapping(limits)
+    clamped = dict(requests.__dict__ if isinstance(requests, SandboxResources) else requests)
+    changed: dict[str, tuple[Any, Any]] = {}
+    for key in SCHEDULABLE_RESOURCE_KEYS:
+        request, limit = getattr(requested, key), getattr(limited, key)
+        if request is None or limit is None or request <= limit:
+            continue
+        changed[key] = (clamped[key], limit)
+        clamped[key] = limit
+    return clamped, changed
+
+
+@dataclass(frozen=True)
+class SandboxSidecarSpec:
+    """An extra container started with the sandbox from its own image.
+
+    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    How the sandbox reaches a sidecar over the network is provider-specific.
+    """
+
+    name: str
+    image: str
+    env: dict[str, str] = field(default_factory=dict)
+    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.image:
+            raise ValueError("A sandbox sidecar needs a name and an image")
+        if not isinstance(self.resources, SandboxResources):
+            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+
+
 @dataclass(frozen=True)
 class SandboxSpec:
     """Sandbox creation request."""
@@ -74,10 +165,46 @@ class SandboxSpec:
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
+    ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    # Extra containers started with the sandbox (mappings are accepted); needs a provider that
+    # implements `SupportsSandboxSidecars`.
+    sidecars: tuple[SandboxSidecarSpec, ...] | list[SandboxSidecarSpec | Mapping[str, Any]] = field(
+        default_factory=tuple
+    )
+    # The user commands run as when an exec names none (a Dockerfile's final ``USER``). Providers that
+    # cannot set a container default apply it per exec through the sandbox facade.
+    user: str | int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if not isinstance(self.sidecars, (list, tuple)):
+            raise TypeError("Sandbox sidecars must be a list or tuple of sidecar specs or mappings")
+        sidecars = tuple(
+            sidecar if isinstance(sidecar, SandboxSidecarSpec) else SandboxSidecarSpec(**sidecar)
+            for sidecar in self.sidecars
+        )
+        if len({sidecar.name for sidecar in sidecars}) != len(sidecars):
+            raise ValueError("Sandbox sidecar names must be unique")
+        object.__setattr__(self, "sidecars", sidecars)
+        if not isinstance(self.ports, (list, tuple)):
+            raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
+        normalized_ports: list[int] = []
+        for raw_port in self.ports:
+            if isinstance(raw_port, bool):
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
+            if not isinstance(raw_port, (int, str)):
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}")
+            try:
+                port = int(raw_port)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid sandbox TCP port: {raw_port!r}") from exc
+            if port < 1 or port > 65535:
+                raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
+            if port in normalized_ports:
+                raise ValueError(f"Duplicate sandbox TCP port: {port}")
+            normalized_ports.append(port)
+        object.__setattr__(self, "ports", tuple(normalized_ports))
 
 
 @dataclass
@@ -111,6 +238,63 @@ class SandboxExecResult:
 
 
 ExecResult = SandboxExecResult
+
+
+@dataclass(frozen=True)
+class SandboxPtySpec:
+    """Interactive PTY session request.
+
+    ``command`` runs under the backend's interactive shell; ``None`` spawns the
+    shell itself. Backends without native env/user support may rewrite the
+    command (mirroring ``exec()``'s user rewrite) and must raise ``ValueError``
+    for values they cannot honor. ``pty=False`` selects pipe mode: no TTY,
+    stdout and stderr delivered as separate streams, ``rows``/``cols`` ignored.
+    Backends that cannot size a terminal at spawn apply ``rows``/``cols`` as
+    soon as it connects, so a ``command`` reading the size immediately may
+    observe the backend default.
+    """
+
+    command: str | None = None
+    cwd: str | None = None
+    env: dict[str, str] | None = None
+    rows: int = 24
+    cols: int = 80
+    user: str | int | None = None
+    pty: bool = True
+
+
+class SandboxPtyError(RuntimeError):
+    """Raised when a PTY session fails outside normal process exit."""
+
+
+def sandbox_credentials_rejected(
+    error: BaseException,
+    *,
+    operation: str,
+    details: SandboxFailureDetails | None = None,
+    stage: FailureStage | None = None,
+    sdk_message: str | None = None,
+) -> NgFailureEvent | None:
+    """A sandbox-boundary failure for an observed HTTP 401/403, caused by ``error``; else ``None``.
+
+    The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
+    the caller selected for the provider's SDK (see ``sdk_error_details``).
+    """
+    status = error_to_http_status(error)
+    if status not in (401, 403):
+        return None
+    rejected = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        details=details,
+        failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
+        operation=operation,
+        stage=stage,
+        http_status=status,
+        foreign_error=sdk_error_details(error, message=sdk_message),
+    )
+    rejected.__cause__ = error
+    return rejected
 
 
 class SandboxCreateError(RuntimeError):
@@ -167,4 +351,307 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxBackgroundServices(Protocol):
+    """Optional execution override for services needed by a later command."""
+
+    async def exec_with_background_services(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
+class SupportsSandboxNetwork(Protocol):
+    """Optional direct networking between sandboxes, preserving service ports."""
+
+    def validate_networking(self) -> None: ...
+
+    async def network_address(self, handle: SandboxHandle) -> str: ...
+
+    async def set_hosts(self, handle: SandboxHandle, hosts: Mapping[str, str]) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxRuntimeRequirements(Protocol):
+    """Optional validation and setup of task-declared runtime requirements."""
+
+    def validate_runtime_requirements(
+        self, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> dict[str, str] | None:
+        """Validate support and return any required create-time metadata."""
+        ...
+
+    async def configure_runtime(
+        self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxPortForwarding(Protocol):
+    """Optional loopback TCP forwarding, running until cancellation."""
+
+    def validate_port_forwarding(self) -> None: ...
+
+    async def forward_ports(
+        self, handle: SandboxHandle, target_address: str, ports: tuple[int, ...], *, ready_file: str
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxSharedStorage(Protocol):
+    """Optional shared filesystem provisioned by the operator's provider config.
+
+    ``shared_volume_options`` returns provider options containing a ``volumes``
+    list of opaque mount descriptors. Collections concatenate these lists.
+    ``source`` is relative to the configured shared root; ``None`` mounts that
+    root for initialization and cleanup. Metadata supplies placement settings.
+    """
+
+    def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]: ...
+
+    def shared_volume_metadata(self) -> dict[str, str]: ...
+
+
+# The per-service container settings a Compose file may declare behind ``SupportsSandboxServiceOptions``.
+COMPOSE_SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+
+@runtime_checkable
+class SupportsSandboxServiceOptions(Protocol):
+    """Optional container settings a Compose service declares: ``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``.
+
+    ``SERVICE_OPTION_FIELDS`` names the subset the provider can apply; it is a class attribute so prepare
+    can check a task against a provider by name, without instantiating it. ``service_options`` returns
+    the ``provider_options`` that apply the given values at create time (an empty mapping when none are
+    given) and raises ``ValueError`` for a value it cannot express.
+    """
+
+    SERVICE_OPTION_FIELDS: frozenset[str]
+
+    def service_options(
+        self,
+        *,
+        tmpfs: tuple[str, ...] = (),
+        ulimits: Mapping[str, Any] | None = None,
+        sysctls: Mapping[str, str] | None = None,
+        security_opt: tuple[str, ...] = (),
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxPullPolicy(Protocol):
+    """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).
+
+    ``pull_policy_options`` returns the ``provider_options`` that apply it at create time. A provider
+    without this capability leaves the pull behaviour to the deployment's default.
+    """
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxIndependentUploads(Protocol):
+    """Optional provider capability: a file upload never waits for capacity that running commands hold.
+
+    A provider that bounds its concurrent operations with one limit shared by commands and file transfers
+    (CLI slots, worker threads, pooled connections) cannot promise this: once long-running commands hold every
+    slot, an upload waits until one of them ends. ``SandboxSession.expire`` needs it to stop a running harness,
+    because the stop is a file the harness's supervisor watches for. The answer may depend on configuration.
+    """
+
+    def uploads_independent_of_execs(self) -> bool: ...
+
+
+@runtime_checkable
+class SupportsSandboxEndpoint(Protocol):
+    """Optional provider capability for resolving declared service ports."""
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxSidecars(Protocol):
+    """Optional provider capability to run sidecar containers next to the sandbox.
+
+    The provider creates the sidecars declared in ``SandboxSpec.sidecars`` together with the sandbox, then runs
+    commands in them and reads files from them through these calls. Commands run as an argv without a shell,
+    because sidecar images can be distroless.
+    """
+
+    async def sidecar_exec(
+        self,
+        handle: SandboxHandle,
+        sidecar: str,
+        argv: list[str],
+        *,
+        timeout_s: int | float,
+        on_stdout: Callable[[str], None] | None = None,
+    ) -> SandboxExecResult:
+        """Run ``argv`` in ``sidecar``; ``on_stdout`` receives stdout text as it arrives, for long-running services."""
+        ...
+
+    async def download_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
+    ) -> None:
+        """Download one file from ``sidecar`` to the local filesystem."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxPauseResume(Protocol):
+    """Optional provider capability to pause and resume a sandbox.
+
+    What survives a pause beyond the filesystem is backend-specific.
+    """
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause a sandbox while preserving its state."""
+        ...
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume a paused sandbox and refresh its handle."""
+        ...
+
+
+@runtime_checkable
+class SandboxPtySession(Protocol):
+    """One live interactive terminal. Async context manager; exit closes it."""
+
+    session_id: str
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` has run; a closed session cannot run commands."""
+        ...
+
+    mode: str | None
+    """``"pty"`` or ``"pipe"`` once connected, ``None`` before that. Only pipe
+    mode splits stderr; in PTY mode all output arrives through ``read()``."""
+
+    async def read(self, *, timeout_s: float | None = None) -> bytes:
+        """Return the next output chunk (all terminal output in PTY mode;
+        stdout only in pipe mode). ``b""`` means the process exited and the
+        stream is drained. Raises ``TimeoutError`` on timeout and
+        ``SandboxPtyError`` if the session died without exiting.
+        """
+        ...
+
+    async def read_stderr(self, *, timeout_s: float | None = None) -> bytes:
+        """Return the next stderr chunk. Only pipe mode (``pty=False``)
+        carries stderr separately; in PTY mode this stream is empty and
+        returns ``b""`` once the process exits. Same timeout/error semantics
+        as ``read()``.
+        """
+        ...
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield output chunks until EOF."""
+        ...
+
+    async def write(self, data: bytes) -> None:
+        """Send raw bytes to the terminal's stdin."""
+        ...
+
+    async def resize(self, rows: int, cols: int) -> None:
+        """Resize the terminal."""
+        ...
+
+    async def send_signal(self, signal: str) -> None:
+        """Deliver a named signal, e.g. ``"SIGTERM"``, to the session's process
+        group. Interactive shells run foreground jobs in their own group, so
+        signals reliably reach the process only for command sessions; whether
+        ``SIGINT`` interrupts at all also depends on the sandbox runtime's
+        inherited signal dispositions.
+        """
+        ...
+
+    async def wait_exit(self, *, timeout_s: float | None = None) -> int:
+        """Block until the process exits and return its exit code."""
+        ...
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        """Run one command holding the transport only for brief completion
+        polls; returns ``(merged output, exit code or None)``. The server
+        retains a bounded window of output between polls, and exceeding it
+        raises rather than returning truncated output."""
+        ...
+
+    async def close(self) -> None:
+        """Idempotent: release local resources; a session this client created
+        is also ended, while an attached one is merely detached and lives on
+        for its owner."""
+        ...
+
+    async def __aenter__(self) -> "SandboxPtySession": ...
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxPty(Protocol):
+    """Optional provider capability: interactive PTY sessions."""
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
+        """Open an interactive terminal inside a sandbox."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxPtyAttach(Protocol):
+    """Optional provider capability: re-attach to a PTY session by id.
+
+    Separate from ``SupportsSandboxPty`` because it requires sessions that live
+    in the sandbox rather than in the client, so a provider may offer terminals
+    without offering re-attach.
+    """
+
+    async def attach_pty(
+        self,
+        handle: SandboxHandle,
+        session_id: str,
+        *,
+        takeover: bool = True,
+        since: int | None = None,
+    ) -> SandboxPtySession:
+        """Re-attach to an existing session by id.
+
+        ``takeover`` evicts the current holder, whose session then fails with
+        ``SandboxPtyError``; without it, attaching to a held session fails.
+        ``since`` is a byte offset into the session's retained output to replay
+        before live output (``0`` replays everything still retained).
+        """
+        ...
+
+
+@runtime_checkable
+class ConnectableProvider(Protocol):
+    """Optional capability: rebuild a handle in another process from a descriptor.
+
+    Providers whose sandboxes are reachable by id (external control plane, e.g.
+    OpenSandbox and Fargate, and the sandbox server's remote provider) implement
+    this. A provider that does not implement it can only be shared by fronting it
+    with a sandbox server. Membership is checked with ``isinstance`` because the
+    protocol is ``runtime_checkable``.
+    """
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a JSON-serializable descriptor that ``connect`` can rebuild a
+        handle from. ``scope`` is honored by providers that mint leases (the
+        remote provider) and ignored by the rest."""
+        ...
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a live handle in this process from a descriptor."""
         ...

@@ -25,8 +25,11 @@ sandbox:
       keepalive_shell: /bin/sh
       keepalive_cmd: "while :; do sleep 2147483647; done"
       start_timeout_s: 600
+      transport_retries: 2
+      transport_retry_delay_s: 1.0
       use_init: true
       apply_resource_limits: true
+      publish_host: 127.0.0.1
       # Isolation knobs -- opt in when running untrusted code (see README):
       # network: none          # cut all networking (also breaks pip/git installs)
       # read_only: true        # read-only root filesystem

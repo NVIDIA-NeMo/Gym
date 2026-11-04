@@ -24,11 +24,13 @@ and installed during `gym env start`. The `.installed` marker tracks whether the
 clone has been done.
 """
 
+import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from stat import S_IWUSR
 
 
 IFBENCH_COMMIT = "c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c"  # pragma: allowlist secret
@@ -36,6 +38,12 @@ IFBENCH_REPO = "https://github.com/allenai/IFBench.git"
 SERVER_DIR = Path(__file__).parent
 IFBENCH_DIR = SERVER_DIR / ".ifbench"
 INSTALL_MARKER = IFBENCH_DIR / ".installed"
+NLTK_RESOURCES = {
+    "punkt": "tokenizers/punkt",
+    "punkt_tab": "tokenizers/punkt_tab",
+    "stopwords": "corpora/stopwords",
+    "averaged_perceptron_tagger_eng": "taggers/averaged_perceptron_tagger_eng",
+}
 
 
 def _add_to_path() -> None:
@@ -46,29 +54,49 @@ def _add_to_path() -> None:
 
 
 def _ensure_nltk_data() -> None:
-    """Download required NLTK if not already present.
+    """Ensure required data exists, respecting NLTK_DATA for a shared cache."""
+    # Preserve the pre-imports needed by NLTK's safe import finder when this
+    # module runs directly during image builds (see PR #2290).
+    import defusedxml.ElementTree  # noqa: F401
+    import regex  # noqa: F401
+    import nltk  # isort: skip
 
-    NLTK stores its data in a user-level directory (~/.nltk_data),
-    not inside the venv, so we always check and download if missing,
-    regardless of whether the .installed marker exists.
-    """
-    try:
-        import nltk
+    download_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "nltk_data"
+    if str(download_dir) not in nltk.data.path:
+        nltk.data.path.append(str(download_dir))
+    for kind, resource in NLTK_RESOURCES.items():
+        try:
+            nltk.data.find(resource)
+        except LookupError:
+            # NLTK also rejects mounted data owned by another UID. Preserve its
+            # ownership checks by copying explicit supplied data into our cache.
+            download_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            download_dir.chmod(0o700)
+            data_root = os.environ.get("NEMO_GYM_TEST_DATA_ROOT")
+            supplied = Path(data_root) / "nltk_data" / resource if data_root else None
+            if supplied is not None and supplied.is_dir():
+                target = download_dir / resource
+                shutil.copytree(supplied, target, dirs_exist_ok=True, copy_function=shutil.copyfile)
+                for path in (target, *target.rglob("*")):
+                    path.chmod(0o700 if path.is_dir() else 0o600)
+            else:
+                nltk.download(kind, download_dir=str(download_dir), quiet=True, raise_on_error=True)
+            # Do not publish a successful setup marker for incomplete data.
+            nltk.data.find(resource)
 
-        for resource, kind in [
-            ("tokenizers/punkt", "punkt"),
-            ("tokenizers/punkt_tab", "punkt_tab"),
-            ("corpora/stopwords", "stopwords"),
-            ("taggers/averaged_perceptron_tagger_eng", "averaged_perceptron_tagger_eng"),
-        ]:
-            try:
-                nltk.data.find(resource)
-            except LookupError:
-                nltk.download(kind, quiet=True)
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"NLTK setup warning: {e}")
+
+def _patch_nltk_downloads(source: Path) -> None:
+    """Use setup's cached data instead of fetching NLTK's index during scoring."""
+    text = source.read_text(encoding="utf-8")
+    patched = text
+    for kind, resource in NLTK_RESOURCES.items():
+        patched = re.sub(
+            rf"nltk\.download\((['\"]){kind}\1\)",
+            f"nltk.data.find({resource!r})",
+            patched,
+        )
+    if patched != text:
+        source.write_text(patched, encoding="utf-8")
 
 
 def _patch_spacy_download(instructions_py: Path) -> None:
@@ -89,13 +117,16 @@ def _patch_spacy_download(instructions_py: Path) -> None:
         instructions_py.write_text(patched, encoding="utf-8")
 
 
-def ensure_ifbench() -> None:
+def ensure_ifbench(*, source_dir: Path | None = None) -> None:
     """Clone the IFBench repo if needed and make it importable.
 
-    The .installed marker ensures we only clone once. Afterwards, we
-    just re-add the repo to sys.path and re-check that NTLK data exists.
+    The .installed marker ensures we only clone once. Afterwards, apply any
+    setup patches, re-add the repo to sys.path, and check the NLTK data.
     """
     if INSTALL_MARKER.exists():
+        # Upgrade existing clones as well as fresh installs.
+        _patch_nltk_downloads(IFBENCH_DIR / "instructions.py")
+        _patch_nltk_downloads(IFBENCH_DIR / "instructions_util.py")
         _add_to_path()
         _ensure_nltk_data()
         return
@@ -104,21 +135,43 @@ def ensure_ifbench() -> None:
     if IFBENCH_DIR.exists():
         shutil.rmtree(IFBENCH_DIR)
 
-    print(f"Cloning IFBench @ {IFBENCH_COMMIT} ...")
-    subprocess.run(
-        ["git", "clone", "--quiet", IFBENCH_REPO, str(IFBENCH_DIR)],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(IFBENCH_DIR), "checkout", "--quiet", IFBENCH_COMMIT],
-        check=True,
-    )
+    data_root = os.environ.get("NEMO_GYM_TEST_DATA_ROOT")
+    if source_dir is None and data_root:
+        source_dir = Path(data_root) / "ifbench" / IFBENCH_COMMIT
+    if source_dir is not None and source_dir.is_dir():
+        revision = source_dir / "REVISION"
+        if not revision.is_file() or revision.read_text().strip() != IFBENCH_COMMIT:
+            raise ValueError(f"IFBench source revision does not match {IFBENCH_COMMIT}: {source_dir}")
+        # The shared source is read-only; apply setup patches to a private copy.
+        shutil.copytree(
+            source_dir,
+            IFBENCH_DIR,
+            ignore=shutil.ignore_patterns(".git", ".installed"),
+            copy_function=shutil.copyfile,
+        )
+        # copytree preserves directory modes; the private cache must also work
+        # when the supplied source has 0444 files and 0555 directories.
+        IFBENCH_DIR.chmod(IFBENCH_DIR.stat().st_mode | S_IWUSR)
+        for directory in IFBENCH_DIR.rglob("*"):
+            if directory.is_dir():
+                directory.chmod(directory.stat().st_mode | S_IWUSR)
+    else:
+        print(f"Cloning IFBench @ {IFBENCH_COMMIT} ...")
+        subprocess.run(
+            ["git", "clone", "--quiet", IFBENCH_REPO, str(IFBENCH_DIR)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(IFBENCH_DIR), "checkout", "--quiet", IFBENCH_COMMIT],
+            check=True,
+        )
 
     # Disable the spaCy auto-download that runs at import time
     _patch_spacy_download(IFBENCH_DIR / "instructions.py")
+    _patch_nltk_downloads(IFBENCH_DIR / "instructions.py")
+    _patch_nltk_downloads(IFBENCH_DIR / "instructions_util.py")
 
-    # Download NLTK data before we first import instructions_util, which
-    # triggers its own download attempt at import time
+    # Populate the NLTK cache before importing the patched instruction checks.
     _ensure_nltk_data()
 
     # Touch the marker for future calls (which skip straight to _add_to_path())

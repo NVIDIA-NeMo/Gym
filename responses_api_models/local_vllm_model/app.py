@@ -12,11 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import sys
 from argparse import Namespace
 from pathlib import Path
 from time import sleep
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import ray
 import requests
@@ -25,14 +26,23 @@ from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from requests.exceptions import ConnectionError
-from vllm.entrypoints.openai.api_server import (
-    FlexibleArgumentParser,
-    cli_env_setup,
-    make_arg_parser,
-    validate_parsed_serve_args,
-)
 
-from nemo_gym.global_config import (
+
+try:
+    # vLLM 0.29 moved the OpenAI server entry points from vllm.entrypoints.openai.api_server to
+    # vllm.entrypoints.launchers; the old module is a deprecated shim that no longer exports these.
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
+    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+except ImportError:  # Older vLLM, such as the macOS pin in setup.py.
+    from vllm.entrypoints.openai.api_server import (
+        FlexibleArgumentParser,
+        cli_env_setup,
+        make_arg_parser,
+        validate_parsed_serve_args,
+    )
+
+from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
     find_open_port,
     get_global_config_dict,
@@ -73,6 +83,8 @@ class GetInnerVLLMConfigResponse(BaseModel):
 
 
 class LocalVLLMModel(VLLMModel):
+    ray_enabled = True
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("GET", "/get_inner_vllm_config")})
     config: LocalVLLMModelConfig
 
     _local_vllm_model_actor: LocalVLLMModelActor
@@ -162,6 +174,20 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
+    def _ray_actor_path(self) -> str:
+        """PATH for the Ray actor running vLLM.
+
+        runtime_env.py_executable gives the actor this server's venv interpreter, but does not
+        put that venv's bin directory on its PATH, so console scripts installed next to the
+        interpreter are not resolvable in the actor or its child processes. vLLM declares ninja
+        as a runtime dependency and shells out to it when compiling kernels, which fails with
+        "No such file or directory: 'ninja'" even though ninja is installed in the venv.
+
+        Prepend the interpreter's directory, keeping the inherited PATH as a fallback.
+        """
+        venv_bin_dir = str(Path(self.config.ray_worker_py_executable).resolve().parent)
+        return os.pathsep.join(filter(None, [venv_bin_dir, os.environ.get("PATH", "")]))
+
     def _select_vllm_server_head_node(self, server_args: Namespace, env_vars: Dict[str, str]) -> PlacementGroup:
         """
         Our LocalVLLMModelActor Ray actor scheduling strategy is as follows:
@@ -216,6 +242,8 @@ Total Ray cluster resources: {cluster_resources()}""")
                 env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                     "PYTHONPATH": pythonpath,
+                    # Listed before `env_vars` so a server config can still override PATH.
+                    "PATH": self._ray_actor_path(),
                     **env_vars,
                 },
             ),

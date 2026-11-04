@@ -1,0 +1,9 @@
+# MathArena's ArXivMath prompt (eth-sri/matharena
+# `configs/competitions/arxiv/may.yaml`). Upstream's block scalar leaves the
+# backslash doubled (`\\boxed{}`); normalised to a single backslash here.
+user: |-
+  You are given a difficult question. Your task is to solve the problem.
+  Put the final answer you find within \boxed{{}}.
+
+
+  {question}

@@ -1,0 +1,2 @@
+-e nemo-gym[dev] @ ../../
+simple-strands-agent @ git+https://github.com/strands-labs/benchmark-harnesses.git@fd9395b672b670ddb6b90de19723327f007b0655#subdirectory=simple-strands-agent

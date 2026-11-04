@@ -3,16 +3,21 @@
 import asyncio
 import glob
 import json
+import logging
 import os
 import re
+import shlex
 import shutil
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, is_dataclass
+from uuid import uuid4
 
-import httpx
+
+LOG = logging.getLogger(__name__)
 
 
 def nested_dataclass(*args, **kwargs):
@@ -95,11 +100,18 @@ class LocalSandbox:
         host: str = os.getenv("NEMO_SKILLS_SANDBOX_HOST", "127.0.0.1"),
         port: str = os.getenv("NEMO_SKILLS_SANDBOX_PORT", "6000"),
     ):
+        # Lazy: ccc_eval.py is also uploaded into the sandbox image, which has only the standard library.
+        import httpx
+
         self.host = host
         self.port = port
         self.http_session = httpx.AsyncClient(
             limits=httpx.Limits(max_keepalive_connections=2048, max_connections=2048),
         )
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}/execute"
 
     async def close(self):
         await self.http_session.aclose()
@@ -114,6 +126,8 @@ class LocalSandbox:
         session_id=None,
         traceback_verbosity="plain",
     ):
+        import httpx
+
         if session_id is not None:
             raise RuntimeError("Stateful execution is not supported by this sandbox client.")
 
@@ -127,7 +141,7 @@ class LocalSandbox:
         }
         try:
             response = await self.http_session.post(
-                url=f"http://{self.host}:{self.port}/execute",
+                url=self.url,
                 content=json.dumps(request),
                 timeout=timeout + 5.0,
                 headers={"Content-Type": "application/json"},
@@ -138,8 +152,18 @@ class LocalSandbox:
                 output = response.json()
             except json.JSONDecodeError:
                 output = {"process_status": "error", "stdout": "", "stderr": "Unknown error"}
-        except (httpx.TimeoutException, httpx.TransportError):
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # The request never reached the sandbox, so the result says nothing about the code.
+            output = {
+                "process_status": "timeout",
+                "stdout": "",
+                "stderr": f"{type(e).__name__}: {e}\n",
+                "sandbox_unreachable": True,
+            }
+        except httpx.TimeoutException:
             output = {"process_status": "timeout", "stdout": "", "stderr": "Client timed out\n"}
+        except httpx.TransportError as e:
+            output = {"process_status": "timeout", "stdout": "", "stderr": f"{type(e).__name__}: {e}\n"}
         return output, None
 
 
@@ -151,7 +175,13 @@ class CCCEvaluatorConfig(BaseEvaluatorConfig):
     time_scale: float = 2.0
     overwrite: bool = False
     shared_dir: str = "/tmp"
+    local_compile_dir: str | None = "/tmp/nemo-gym-compile"
     run_all_tests: bool = False
+    # Grade every subtask of the row's problem, not only the row's own subtask, as NeMo Skills does.
+    grade_all_subtasks: bool = False
+    # Score a `min` subtask as its lowest test score times its points, as IOI does, instead of
+    # all-or-nothing. Grading of the subtask stops at the first test that settles its score either way.
+    partial_credit: bool = False
 
 
 _precompile_loop_tls = threading.local()
@@ -167,25 +197,135 @@ def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, languag
     return loop.run_until_complete(sandbox.execute_code(cmd, language=language, timeout=timeout))[0]
 
 
-def _get_thread_test_sandbox() -> LocalSandbox:
+# Printed, as the whole stdout, by a guard that runs before compile.sh.
+WORK_DIR_NOT_VISIBLE = "CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX"
+# Key under which eval_single returns the answer it graded (the extracted code block, before includes).
+GRADED_ANSWER_KEY = "graded_answer"
+
+
+def _require_visible(work_dir: str, script: str) -> str:
+    """Shell guard: stop before ``script`` runs if the sandbox cannot see ``work_dir``."""
+    return f"[ -f {shlex.quote(os.path.join(work_dir, script))} ] || {{ echo {WORK_DIR_NOT_VISIBLE}; exit 3; }}"
+
+
+def sandbox_unreachable_error(result: dict) -> str | None:
+    """Why a sandbox call never reached the sandbox, or None. No code ran, so the solution cannot have caused it."""
+    if result.get("sandbox_unreachable"):
+        return f"NeMo Skills sandbox unreachable: {result.get('stderr', '').strip()}"
+    return None
+
+
+def compile_infra_error(compile_result: dict) -> str | None:
+    """Why a compile failed for a reason outside the solution, or None.
+
+    The marker counts only here: compile.sh comes from the problem metadata and compiles without running the
+    solution, and compilers print diagnostics to stderr, so the solution cannot make it the whole stdout. run.sh
+    runs the solution, so nothing it prints or returns is trusted.
+    """
+    unreachable = sandbox_unreachable_error(compile_result)
+    if unreachable:
+        return unreachable
+    if (
+        compile_result.get("process_status") != "completed"
+        and compile_result.get("stdout", "").strip() == WORK_DIR_NOT_VISIBLE
+    ):
+        return (
+            "NeMo Skills sandbox cannot see the shared work directory; mount shared_dir into the sandbox at the "
+            "same path (see 'Sandbox prerequisite' in resources_servers/competitive_coding_challenges/README.md)"
+        )
+    return None
+
+
+# Anything with LocalSandbox's async execute_code(); sandbox/sandbox_runner.py supplies a local-process one.
+SandboxFactory = Callable[[], LocalSandbox]
+
+
+def _get_thread_test_sandbox(sandbox_factory: SandboxFactory = LocalSandbox) -> LocalSandbox:
     sandbox = getattr(_test_sandbox_tls, "sandbox", None)
-    if sandbox is None:
-        sandbox = LocalSandbox()
+    if sandbox is None or getattr(_test_sandbox_tls, "factory", None) is not sandbox_factory:
+        sandbox = sandbox_factory()
         _test_sandbox_tls.sandbox = sandbox
+        _test_sandbox_tls.factory = sandbox_factory
     return sandbox
 
 
-def wait_for_sandbox(sandbox, timeout: int = 240, poll: float = 1.0):
+def _compile_in_sandbox(
+    tls: threading.local,
+    sandbox: LocalSandbox,
+    work_dir: str,
+    local_compile_dir: str | None,
+    *,
+    timeout: int = 120,
+    ignore_failure: bool = False,
+) -> dict:
+    """Compile in node-local storage and publish the result to ``work_dir``.
+
+    ``work_dir`` remains on shared storage so a later sandbox request can run on
+    any node. When ``local_compile_dir`` is configured, the compiler only works
+    in a request-unique directory below that node-local root. The completed tree
+    is copied back once after compilation.
+    """
+    quoted_work_dir = shlex.quote(work_dir)
+    if not local_compile_dir:
+        command = f"cd {quoted_work_dir} && ./compile.sh"
+    else:
+        local_work_dir = os.path.join(local_compile_dir, os.path.basename(work_dir.rstrip(os.sep)))
+        quoted_local_work_dir = shlex.quote(local_work_dir)
+        command = f"""
+shared_work_dir={quoted_work_dir}
+local_work_dir={quoted_local_work_dir}
+cleanup_local_compile_dir() {{
+  rm -rf -- "$local_work_dir"
+}}
+trap cleanup_local_compile_dir EXIT
+mkdir -p -- "$local_work_dir"
+cp -R -- "$shared_work_dir"/. "$local_work_dir"/
+cd "$local_work_dir"
+compile_status=0
+./compile.sh || compile_status=$?
+publish_status=0
+cp -R -- "$local_work_dir"/. "$shared_work_dir"/ || publish_status=$?
+if [ "$publish_status" -ne 0 ]; then
+  exit "$publish_status"
+fi
+exit "$compile_status"
+""".strip()
+
+    command = f"{_require_visible(work_dir, 'compile.sh')}\n{command}"
+    if ignore_failure:
+        command = f"({command}) || true"
+    return _exec_sync(tls, sandbox, command, language="shell", timeout=timeout)
+
+
+def wait_for_sandbox(sandbox: LocalSandbox, timeout: float = 240, poll: float = 1.0) -> None:
+    """Wait until the external NeMo Skills sandbox runs a shell command.
+
+    Connection errors are retried until ``timeout``: NeMo Skills' ``with_sandbox=True`` starts the sandbox next to
+    this server, so it may still be booting.
+    """
     deadline = time.monotonic() + timeout
+    last_problem = "no probe completed"
+    warned = False
     while time.monotonic() < deadline:
         try:
             resp = _exec_sync(_precompile_loop_tls, sandbox, "echo hello world", language="shell", timeout=10)
             if resp.get("stdout", "").strip() == "hello world":
                 return
-        except Exception:
-            pass
+            last_problem = f"process_status={resp.get('process_status')!r}, stderr={resp.get('stderr', '').strip()!r}"
+        except Exception as e:
+            last_problem = f"{type(e).__name__}: {e}"
+        if not warned:
+            warned = True
+            LOG.warning(
+                "NeMo Skills sandbox at %s is not ready (%s); waiting up to %ss.", sandbox.url, last_problem, timeout
+            )
         time.sleep(poll)
-    raise RuntimeError(f"Sandbox not ready after waiting {timeout}s")
+    raise RuntimeError(
+        f"NeMo Skills sandbox at {sandbox.url} did not run `echo hello world` within {timeout}s "
+        f"(last probe: {last_problem}). Start the sandbox first, see 'Sandbox prerequisite' in "
+        "resources_servers/competitive_coding_challenges/README.md, or set NEMO_SKILLS_SANDBOX_HOST and "
+        "NEMO_SKILLS_SANDBOX_PORT to a running one."
+    )
 
 
 def _safe_fs_name(text: str) -> str:
@@ -343,9 +483,12 @@ def _precompile_problem(
     run_code: str,
     sandbox: LocalSandbox,
     shared_dir: str,
+    local_compile_dir: str | None,
+    *,
+    sandbox_factory: SandboxFactory = LocalSandbox,
 ) -> str:
     if getattr(sandbox, "_owner_tid", None) != threading.get_ident():
-        sandbox = LocalSandbox()
+        sandbox = sandbox_factory()
         wait_for_sandbox(sandbox)
         sandbox._owner_tid = threading.get_ident()
 
@@ -366,48 +509,82 @@ def _precompile_problem(
             f.write(script_content)
         os.chmod(script_path, 0o755)
 
-    _exec_sync(_precompile_loop_tls, sandbox, f"cd {pre_dir} && ./compile.sh || true", language="shell", timeout=120)
+    _compile_in_sandbox(
+        _precompile_loop_tls,
+        sandbox,
+        pre_dir,
+        local_compile_dir,
+        timeout=120,
+        ignore_failure=True,
+    )
     return pre_dir
 
 
+def _test_result_from_compile(compile_result: dict) -> dict:
+    return {
+        "compile_success": compile_result.get("process_status") == "completed",
+        "compile_stdout": compile_result.get("stdout", ""),
+        "compile_stderr": compile_result.get("stderr", ""),
+        "run_stdout": "",
+        "run_stderr": "",
+        "error": "",
+        "score": 0.0,
+    }
+
+
+def _compile_solution_once(
+    problem_id: str,
+    task_type: str,
+    generated_code: str,
+    precompiled_dir: str,
+    shared_dir: str,
+    local_compile_dir: str | None,
+    *,
+    sandbox_factory: SandboxFactory = LocalSandbox,
+) -> tuple[str, dict]:
+    """Compile one generated solution and publish a reusable shared artifact."""
+    solution_dir = f"{shared_dir}/ccc_solution_{uuid4().hex}"
+    try:
+        os.makedirs(os.path.join(solution_dir, "graders"), exist_ok=True)
+        if precompiled_dir and os.path.isdir(precompiled_dir):
+            shutil.copytree(precompiled_dir, solution_dir, dirs_exist_ok=True)
+        if task_type == "SIMULATION":
+            with open(os.path.join(solution_dir, "solution.odo"), "w", encoding="utf-8") as f:
+                f.write(generated_code)
+        else:
+            with open(os.path.join(solution_dir, "graders", f"{problem_id}.cpp"), "w", encoding="utf-8") as f:
+                f.write(generated_code)
+
+        sandbox = _get_thread_test_sandbox(sandbox_factory)
+        compile_result = _compile_in_sandbox(
+            _test_loop_tls,
+            sandbox,
+            solution_dir,
+            local_compile_dir,
+            timeout=120,
+        )
+        return solution_dir, compile_result
+    except Exception:
+        shutil.rmtree(solution_dir, ignore_errors=True)
+        raise
+
+
 def run_test_case(task_args: dict, worker_id: int) -> dict:
+    result = _test_result_from_compile(task_args["compile_result"])
+    if not result["compile_success"]:
+        return result
+
     unique_dir = f"{task_args['shared_dir']}/ccc_run_{worker_id}_{os.getpid()}_{time.time_ns()}"
     try:
-        precompiled_dir = task_args.get("precompiled_dir")
-        os.makedirs(unique_dir, exist_ok=True)
-        os.makedirs(os.path.join(unique_dir, "graders"), exist_ok=True)
+        compiled_solution_dir = task_args["compiled_solution_dir"]
+        shutil.copytree(compiled_solution_dir, unique_dir)
         os.makedirs(os.path.join(unique_dir, "tmp"), exist_ok=True)
-        if precompiled_dir and os.path.isdir(precompiled_dir):
-            shutil.copytree(precompiled_dir, unique_dir, dirs_exist_ok=True)
-        if task_args.get("task_type") == "SIMULATION":
-            with open(os.path.join(unique_dir, "solution.odo"), "w", encoding="utf-8") as f:
-                f.write(task_args["generated_code"])
-        else:
-            with open(
-                os.path.join(unique_dir, "graders", f"{task_args['problem_id']}.cpp"), "w", encoding="utf-8"
-            ) as f:
-                f.write(task_args["generated_code"])
         with open(os.path.join(unique_dir, "input.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_input"])
         with open(os.path.join(unique_dir, "correct_output.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_output"])
 
-        sandbox = _get_thread_test_sandbox()
-        compile_result = _exec_sync(
-            _test_loop_tls, sandbox, f"cd {unique_dir} && ./compile.sh", language="shell", timeout=120
-        )
-        result = {
-            "compile_success": not compile_result.get("stderr"),
-            "compile_stdout": compile_result.get("stdout", ""),
-            "compile_stderr": compile_result.get("stderr", ""),
-            "run_stdout": "",
-            "run_stderr": "",
-            "error": "",
-            "score": 0.0,
-        }
-        if not result["compile_success"]:
-            return result
-
+        sandbox = _get_thread_test_sandbox(task_args.get("sandbox_factory", LocalSandbox))
         run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
@@ -417,9 +594,13 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
             language="shell",
             timeout=run_timeout,
         )
-        result["run_time_s"] = time.monotonic() - run_start
         result["run_stdout"] = run_result.get("stdout", "")
         result["run_stderr"] = run_result.get("stderr", "")
+        infra_error = sandbox_unreachable_error(run_result)
+        if infra_error:
+            result["infra_error"] = infra_error
+            return result
+        result["run_time_s"] = time.monotonic() - run_start
         try:
             result["score"] = float(result["run_stdout"].strip())
         except (ValueError, TypeError):
@@ -472,9 +653,12 @@ def add_includes(code: str, problem_header_include: str | None = None, problem_i
 
 
 class CCCEvaluator(BaseEvaluator):
-    def __init__(self, config: dict, num_parallel_requests: int = 20):
+    def __init__(
+        self, config: dict, num_parallel_requests: int = 20, *, sandbox_factory: SandboxFactory = LocalSandbox
+    ):
         super().__init__(config, num_parallel_requests)
         self.eval_cfg = CCCEvaluatorConfig(_init_nested=True, **config)
+        self.sandbox_factory = sandbox_factory
         self.sandbox = None
         self.metadata = None
         self.metadata_by_competition = None
@@ -492,16 +676,24 @@ class CCCEvaluator(BaseEvaluator):
                 return
 
             def _setup():
-                sbox = LocalSandbox()
+                sbox = self.sandbox_factory()
                 wait_for_sandbox(sbox)
                 sbox._owner_tid = threading.get_ident()
-                if not os.path.exists(self.eval_cfg.test_file):
-                    raise FileNotFoundError(f"Metadata file {self.eval_cfg.test_file} does not exist.")
-                metadata_by_competition_local, problem_index_local = _load_metadata_file(self.eval_cfg.test_file)
                 pool_local = ThreadPoolExecutor(max_workers=self.eval_cfg.test_batch_size)
-                return sbox, metadata_by_competition_local, problem_index_local, pool_local
+                return sbox, pool_local
 
-            self.sandbox, self.metadata_by_competition, self.problem_index, self.pool = await asyncio.to_thread(_setup)
+            await self.load_metadata()
+            self.sandbox, self.pool = await asyncio.to_thread(_setup)
+
+    async def load_metadata(self) -> None:
+        """Load problem metadata only; enough for scoring when execution happens elsewhere."""
+        if self.problem_index is not None:
+            return
+        if not os.path.exists(self.eval_cfg.test_file):
+            raise FileNotFoundError(f"Metadata file {self.eval_cfg.test_file} does not exist.")
+        self.metadata_by_competition, self.problem_index = await asyncio.to_thread(
+            _load_metadata_file, self.eval_cfg.test_file
+        )
         # Keep a flat fast-path for legacy callers when problem ids are globally unique.
         self.metadata = {
             problem_id: next(iter(problem_metadata_by_comp.values()))
@@ -556,22 +748,21 @@ class CCCEvaluator(BaseEvaluator):
             problem_metadata["run"],
             self.sandbox,
             self.eval_cfg.shared_dir,
+            self.eval_cfg.local_compile_dir,
+            sandbox_factory=self.sandbox_factory,
         )
         self.precompiled_cache[cache_key] = {"grader": grader_dir}
         return grader_dir
 
-    def _build_test_task(
-        self, problem_id: str, pre_dir: str, completion: str, test_data: dict, task_type: str = "Batch"
-    ):
+    def _build_test_task(self, compiled_solution_dir: str, compile_result: dict, test_data: dict):
         return {
-            "generated_code": completion,
-            "task_type": task_type,
-            "problem_id": problem_id,
-            "precompiled_dir": pre_dir,
+            "compiled_solution_dir": compiled_solution_dir,
+            "compile_result": compile_result,
             "test_input": test_data["input"],
             "test_output": test_data["output"],
             "time_scale": self.eval_cfg.time_scale,
             "shared_dir": self.eval_cfg.shared_dir,
+            "sandbox_factory": self.sandbox_factory,
         }
 
     def _aggregate_subtask_score(self, subtask_meta: dict, outputs: list[dict], failed: bool = False) -> float:
@@ -589,31 +780,14 @@ class CCCEvaluator(BaseEvaluator):
             return float(sum(1 for out in outputs if float(out.get("score", 0.0)) > 0.0))
         raise ValueError(f"Unsupported aggregation: {aggregation}")
 
-    async def _evaluate_entry(self, entry: dict) -> dict:
-        await self._initialize_runtime()
-
-        problem_id = entry.get("problem_id") or entry.get("ioi_id")
-        if not problem_id:
-            raise ValueError("Missing 'problem_id' field in entry")
-
-        competition_id = self._get_competition_id(entry)
-        problem_metadata = self.get_problem_metadata(problem_id, competition_id)
-        task_config = extract_task_config(problem_metadata)
-        task_type = str(task_config.get("task_type", "Batch"))
-        if task_type == "SIMULATION":
-            completion = extract_final_code_block((entry.get("generation") or ""), ("txt", "text", "plain"))
-        elif task_type == "MULTIFILE":
-            completion = extract_final_code_block((entry.get("generation") or ""), ("cpp",))
-        else:
-            completion = add_includes(
-                extract_final_code_block((entry.get("generation") or ""), ("cpp",)),
-                problem_metadata.get("problem_header_include"),
-                problem_id,
-            )
-        cache_key = self._cache_key(problem_id, competition_id)
-        pre_dir = await asyncio.to_thread(self._get_precompiled_dir, cache_key, problem_id, problem_metadata)
-        time_scale = self.eval_cfg.time_scale * (0.5 if float(entry.get("total_time") or 0.0) > 300.0 else 1.0)
-
+    async def _evaluate_compiled_solution(
+        self,
+        entry: dict,
+        problem_metadata: dict,
+        compiled_solution_dir: str,
+        compile_result: dict,
+        time_scale: float,
+    ) -> dict:
         subtask_state = {
             subtask_name: {
                 "aggregation": subtask_meta["aggregation"],
@@ -629,11 +803,13 @@ class CCCEvaluator(BaseEvaluator):
 
         all_test_items = list(problem_metadata["all_tests"].items())
         target_subtask = entry.get("subtask")
-        if target_subtask and target_subtask in problem_metadata["subtasks"]:
+        # Unless every subtask is graded, only the row's own subtask matters, so its tests are the only ones run.
+        if not self.eval_cfg.grade_all_subtasks and target_subtask and target_subtask in problem_metadata["subtasks"]:
             target_tests = set(problem_metadata["subtasks"][target_subtask]["test_names"])
             all_test_items = [(name, data) for name, data in all_test_items if name in target_tests]
         batch_size = self.eval_cfg.test_batch_size
         all_run_times: list[float] = []
+        run_infra_errors: list[str] = []
         for i in range(0, len(all_test_items), batch_size):
             candidate_batch = all_test_items[i : i + batch_size]
             batch = []
@@ -650,7 +826,7 @@ class CCCEvaluator(BaseEvaluator):
                 if not should_run:
                     continue
                 batch.append((test_name, test_data))
-                task = self._build_test_task(problem_id, pre_dir, completion, test_data, task_type=task_type)
+                task = self._build_test_task(compiled_solution_dir, compile_result, test_data)
                 task["time_scale"] = time_scale
                 tasks.append(task)
             if not batch:
@@ -661,6 +837,8 @@ class CCCEvaluator(BaseEvaluator):
             for (test_name, _), result in zip(batch, results):
                 if "run_time_s" in result:
                     all_run_times.append(result["run_time_s"])
+                if result.get("infra_error"):
+                    run_infra_errors.append(result["infra_error"])
                 result["test_name"] = test_name
                 test_group = problem_metadata["all_tests"][test_name].get("group")
                 if test_group is not None:
@@ -670,7 +848,12 @@ class CCCEvaluator(BaseEvaluator):
                     if not self.eval_cfg.run_all_tests and state["aggregation"] == "min" and state["failed"]:
                         continue
                     state["outputs"].append(dict(result))
-                    if state["aggregation"] == "min" and float(result.get("score", 0.0)) < 1.0:
+                    # A min subtask stops at the first test that settles it: any test below full marks
+                    # when only a full solve counts, or a zero with partial credit.
+                    score = float(result.get("score", 0.0))
+                    if state["aggregation"] == "min" and (
+                        score == 0.0 if self.eval_cfg.partial_credit else score < 1.0
+                    ):
                         state["failed"] = True
 
         test_case_results = {}
@@ -682,7 +865,7 @@ class CCCEvaluator(BaseEvaluator):
             }
 
         num_tests_run = len(all_run_times)
-        return {
+        details = {
             "name": entry["name"],
             "subtask": entry["subtask"],
             "test_case_results": test_case_results,
@@ -690,6 +873,60 @@ class CCCEvaluator(BaseEvaluator):
             "total_test_execution_time_s": sum(all_run_times),
             "mean_test_execution_time_s": sum(all_run_times) / num_tests_run if num_tests_run else 0.0,
         }
+        # No solution code runs before the compile result, so its infra error always counts. Tests run
+        # concurrently, so one test's solution could crash the sandbox for the others: a run-stage infra error
+        # counts only when no test of this solution was measured. Count from all results, not `outputs`, which
+        # `min` aggregation trims after the first failure.
+        infra_error = compile_infra_error(compile_result)
+        if not infra_error and num_tests_run == 0 and run_infra_errors:
+            infra_error = run_infra_errors[0]
+        if infra_error:
+            details["infra_error"] = infra_error
+        return details
+
+    async def _evaluate_entry(self, entry: dict) -> dict:
+        await self._initialize_runtime()
+
+        problem_id = entry.get("problem_id") or entry.get("ioi_id")
+        if not problem_id:
+            raise ValueError("Missing 'problem_id' field in entry")
+
+        competition_id = self._get_competition_id(entry)
+        problem_metadata = self.get_problem_metadata(problem_id, competition_id)
+        task_config = extract_task_config(problem_metadata)
+        task_type = str(task_config.get("task_type", "Batch"))
+        langs = ("txt", "text", "plain") if task_type == "SIMULATION" else ("cpp",)
+        answer = extract_final_code_block((entry.get("generation") or ""), langs)
+        if task_type in ("SIMULATION", "MULTIFILE"):
+            completion = answer
+        else:
+            completion = add_includes(answer, problem_metadata.get("problem_header_include"), problem_id)
+        cache_key = self._cache_key(problem_id, competition_id)
+        pre_dir = await asyncio.to_thread(self._get_precompiled_dir, cache_key, problem_id, problem_metadata)
+        time_scale = self.eval_cfg.time_scale * (0.5 if float(entry.get("total_time") or 0.0) > 300.0 else 1.0)
+        compiled_solution_dir, compile_result = await asyncio.to_thread(
+            _compile_solution_once,
+            problem_id,
+            task_type,
+            completion,
+            pre_dir,
+            self.eval_cfg.shared_dir,
+            self.eval_cfg.local_compile_dir,
+            sandbox_factory=self.sandbox_factory,
+        )
+        try:
+            details = await self._evaluate_compiled_solution(
+                entry,
+                problem_metadata,
+                compiled_solution_dir,
+                compile_result,
+                time_scale,
+            )
+        finally:
+            shutil.rmtree(compiled_solution_dir, ignore_errors=True)
+        # The answer as graded, before includes are added: the server reports it as the row's vote identity.
+        details[GRADED_ANSWER_KEY] = answer
+        return details
 
     async def eval_full(self, input_files):  # type: ignore[override]
         await self._initialize_runtime()

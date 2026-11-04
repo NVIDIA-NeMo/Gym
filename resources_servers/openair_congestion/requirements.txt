@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# NeMo-Gym itself (editable), same as the other resources_servers.
+-e nemo-gym[dev] @ ../../
+jsonschema>=4.25.1,<5
+
+# The telco domain package is colocated with this resource server. A clean
+# NeMo Gym checkout therefore needs no sibling repository or PYTHONPATH entry.

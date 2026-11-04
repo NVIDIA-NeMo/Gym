@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -26,6 +26,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
+
+
+# Harbor's verifier raises these when uploading the tests to the sandbox, or downloading the verifier's output from
+# it, fails; the verifier then reports no result.
+VERIFIER_SETUP_EXCEPTIONS = frozenset({"AddTestsDirError", "DownloadVerifierDirError"})
 
 
 @dataclass
@@ -77,7 +82,7 @@ class HarborAgentUtils:
             "truncation": "disabled",
             "usage": {
                 "input_tokens": 0,
-                "input_tokens_details": {"cached_tokens": 0},
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
                 "output_tokens": 0,
                 "output_tokens_details": {"reasoning_tokens": 0},
                 "total_tokens": 0,
@@ -87,6 +92,22 @@ class HarborAgentUtils:
             "safety_identifier": None,
             "store": True,
         }
+
+    @staticmethod
+    def verifier_setup_failure(trial_result: Optional[Dict[str, Any]]) -> Optional[str]:
+        """``"<exception type>: <message>"`` when Harbor could not move the verifier's files to or from the
+        sandbox (``harbor.verifier.verifier``) and the trial has no verifier result, else ``None``.
+
+        Such a trial was never measured, so its missing reward is not a 0 the model earned. A verifier that ran and
+        failed (a timeout, no reward file) and an agent timeout are not setup failures and stay scored zeros.
+        """
+        if not trial_result or trial_result.get("verifier_result") is not None:
+            return None
+        exception_info = trial_result.get("exception_info") or {}
+        exception_type = exception_info.get("exception_type")
+        if exception_type not in VERIFIER_SETUP_EXCEPTIONS:
+            return None
+        return f"{exception_type}: {exception_info.get('exception_message') or ''}"
 
     @staticmethod
     def extract_reward(verifier_result: Optional[Dict[str, Any]]) -> float:
@@ -184,7 +205,9 @@ class HarborAgentUtils:
 
         return {
             "input_tokens": input_tokens,
-            "input_tokens_details": {"cached_tokens": cached_tokens},
+            # cache_write_tokens is required by openai>=2.40 InputTokensDetails;
+            # vLLM backends do not report cache writes.
+            "input_tokens_details": {"cached_tokens": cached_tokens, "cache_write_tokens": 0},
             "output_tokens": output_tokens,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": input_tokens + output_tokens,

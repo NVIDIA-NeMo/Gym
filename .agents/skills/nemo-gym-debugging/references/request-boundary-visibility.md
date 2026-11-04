@@ -24,9 +24,9 @@ This is an escalation ladder. Do not patch agents, resource servers, model adapt
 
 ## What The Existing Flag Covers
 
-When internal HTTP calls use `nemo_gym.server_utils.request()` and `raise_for_status()`, the flag prints:
+When internal HTTP calls use `nemo_gym.client.http_client.request()` and `raise_for_status()`, the flag prints:
 
-- `Request info`: URL, method, and request headers for non-OK responses
+- `Request info`: method and URL (query string stripped) for non-OK responses; request headers are not printed because they carry API keys
 - `Response content`: raw response body from the inner server
 - `Request kwargs`: OpenAI/vLLM adapter request shape for failed provider calls
 - `[rollout_collection] /run failed`: compact Gym task index, rollout index, and agent identity for failed `/run` requests

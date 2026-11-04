@@ -1,0 +1,389 @@
+# Codex Agent
+
+Runs the OpenAI Codex CLI (`codex exec`) as a NeMo Gym agent server.
+
+## Configure and run
+
+[configs/codex_agent.yaml](configs/codex_agent.yaml) is the default harness definition.
+The benchmark owns task data, preparation, verification, and task sandbox settings.
+The harness owns its runtime and model/tool loop. The Environment Server binds the two
+and closes the agent before verification. Codex borrows the task sandbox and runs its CLI
+and shell/file tools inside it.
+
+Run from the Gym repository root with Gym and the benchmark's preparation dependencies
+installed. For SWE-bench Pro, save this composition as `run.yaml`:
+
+```yaml
+config_paths:
+  - resources_servers/swebench_pro/configs/swebench_pro.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: swebench_pro_resources_server
+      agent_server:
+        name: codex_agent
+      resources_tool_transports: []
+```
+
+Supply the `policy_model` Gym Model Server, `policy_model_name`, and `sandbox` provider in
+`model-provider.yaml`. The agent's `model` defaults to `${policy_model_name}` and remains
+overridable. The sandbox must be able to reach the Model Server. Keep model sampling and
+per-call output limits on the Model Server.
+
+```bash
+python benchmarks/swebench/pro/prepare.py
+
+gym env start --config run.yaml --config model-provider.yaml
+
+gym eval run --no-serve \
+  --config run.yaml --config model-provider.yaml \
+  --agent codex_agent \
+  -i benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  -o rollouts.jsonl --limit 3 --concurrency 3
+```
+
+Environment Server is the default entry point for rollout execution. With the single-agent
+session-based configuration, the collector calls Environment Server `/run`: seed Resources,
+seed the agent, call its rollout-prefixed `/v1/responses`, close the agent, verify, then close Resources. Prepared
+flat rows use `single_agent_turn_legacy`, an input/output adapter over `single_agent_turn`.
+This composition is benchmark-independent: Environment Server owns the episode sequence.
+For tasks with a Resources-owned sandbox, the harness borrows that sandbox.
+The adapter converts row formats; execution uses Resources/Agent session APIs. Collection
+does not call the agent's compatibility `/run`. No additional materializer is needed.
+Pass the same configuration to startup and `--no-serve` collection; collection does not
+inherit routing settings from the running servers.
+
+### Switch harness or benchmark
+
+To change a compatible harness, replace its config import, harness-specific settings,
+the Environment Server's `agent_server.name`, and the collection command's `--agent`.
+Keep benchmark data, preparation, and verifier settings unchanged. To change a compatible
+benchmark, replace its Resources config/reference and prepared input, keeping the harness
+definition unchanged. Check tool grants, task-image/runtime support, model API, and the
+benchmark's declared `allowed_agents` before running a new pairing.
+
+Use this explicit composition for now. `--agent` selects a configured agent; it does not
+install or rebind one. The existing `--agent-type` swap and automatic benchmark-data lookup
+still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
+A new pairing does not need another combined preset.
+
+## Runtime and model requirements
+
+Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
+and an absolute task workdir disjoint from the adapter directories under `/tmp` (`/` is accepted: a task
+image without `WORKDIR` runs there, as Harbor starts it). Codex supplies its own shell and
+file tools. Sessions also accept MCP tool grants (see [Gym MCP tools](#gym-mcp-tools)); required
+direct HTTP grants are rejected. The task sandbox supplies isolation, so `sandbox_mode` must be
+`danger-full-access`. No Codex CLI is required on the agent-server host.
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
+
+The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
+POSIX sh installs missing Python and Bash using apt-get or apk when running as root,
+before invoking the Bash runtime installer; otherwise the image must provide them.
+The pinned Node 22.19.0 build has no arm64 musl binary.
+Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
+under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
+`/tmp/nemo-gym-codex-sessions/*`. Task HOME, XDG directories, Python, Node, libraries,
+and PATH are preserved.
+By default Codex gets only `PATH`, `LANG`, `LC_ALL`, `HOME` and the XDG directories from the
+sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole environment,
+as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
+`OMP_NUM_THREADS`), keeping only `CODEX_HOME` private. Use it only with remote providers,
+where that environment is the task's own.
+Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
+must still be checked on actual task images; a mocked installer test is not image validation.
+
+Codex 0.144.4 uses the streaming **Responses API**. Use a sandbox-reachable Gym Model Server;
+Gym adapts Responses to Chat Completions where supported. Requests retain the rollout capture
+key, reasoning, and tool history. Codex sends `prompt_cache_key`, which some hosted NIM Chat
+endpoints reject. A deployment that removes that option is a separate compatibility bridge,
+not evidence of direct endpoint compatibility.
+
+For custom models, set `model_context_window` to the served limit and optionally
+`model_auto_compact_token_limit` below it. Both must be positive integers; an explicit
+compaction threshold must not exceed 90% of the explicit window. The pinned CLI also clamps
+unknown-model metadata to a 272,000-token context and 90% compaction threshold. These are
+context-management controls, not generation budgets.
+
+## Requests, results, and lifecycle
+
+Input is a string or one text user message, optionally preceded by a system/developer message.
+Configured `system_prompt`, request `instructions`, and that preceding message become Codex
+developer instructions in that order. Unsupported conversation/multimodal input, required
+direct HTTP tools, provider overrides, and extra host config are rejected before activation.
+
+Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
+policies are rejected rather than ignored. Codex cannot enforce these request-level controls
+for a custom Gym provider. Set per-call generation settings on the Model Server and inspect
+captured requests to verify the effective values. A configured `reasoning_effort` is likewise
+rejected in sandbox sessions unless `model_server_forwards_reasoning_effort: true` records the
+operator's check that the Model Server forwards Codex's `reasoning` field unchanged to a
+backend that honors it, for example a Model Server that relays Codex's Responses requests
+unchanged to an OpenAI Responses endpoint. Confirm `reasoning.effort` in captured model calls.
+An explicit request model must match the configured model.
+
+Session identity, immutable seed binding, seed/close locking, and close receipts use Gym's
+shared agent-session implementation. Setup returns a session cookie only after installation
+succeeds. Failed setup with failed cleanup retains cleanup-only state through
+`AgentSessionSetupError`: activation/reseeding are rejected, and close can retry.
+
+Each session supports one logical activation. Identical requests join the running invocation
+or replay its result/error; changed requests are rejected. A disconnected HTTP waiter does
+not cancel the invocation. Session close owns cancellation. Shared successful close receipts
+last `session_close_retry_window_seconds` (default 300 seconds) without renewal on retries.
+Stale cookies never fall back to host execution. State is process-local; Resources/provider
+own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
+
+Harness execution uses `nemo_gym.agents.utils.sandbox_session.SandboxSession`, shared with Hermes.
+The adapter stages its worker input and collects its own output. The shared session
+uploads the supervisor at activation and owns its control files and log access; the common lifecycle
+confirms process cleanup, captures artifacts, then releases the provider connection or
+owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
+and interrupted activations keep captured observations after session files are removed.
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.sh`
+runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
+Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
+`worker_exit_code_unavailable` observation gaps. When Codex fails before it starts a turn, the end
+of its stderr (MCP grant headers redacted) is added to the error and kept as an `agent_startup_failed`
+gap. Positive cleanup confirmation remains
+required; the adapter validates the captured terminal events without inventing an exit code.
+
+One shared Linux supervisor per activation fences delayed launches.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
+Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
+Services must use task-owned files rather than the temporary agent session directory.
+Close confirms the receipt before cancelling provider execution,
+then removes adapter-owned files and disconnects. Missing/negative termination evidence
+blocks verification. Missing evidence stays retryable; a final negative receipt releases
+the borrowed connection without making the failed activation gradable. The borrowing
+agent never destroys the sandbox.
+Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
+The supervisor is a bash script, and the runner above Codex runs as `gym-runner` (a link to the
+sandbox's `python3`) from a file without a `.py` suffix, so a task agent's `pkill -f python3`,
+`pkill python3` or `killall python3` does not end Codex, as it would not under Harbor.
+
+Responses and close observations preserve text, reasoning, tool events, partial output,
+CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
+model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
+
+`verify_after_agent_error: true` grades a failed run the way Harbor grades after any agent
+exit: a nonzero or signalled Codex exit, a failed turn, or a missing `turn.completed` returns a
+`failed` response (`incomplete` if the run also hit its time limit; the error is in
+`metadata.graded_agent_error`) with no classified cause instead of an execution error, so the
+Environment Server still verifies it. It applies only when Codex started a turn, the supervisor
+confirmed cleanup, the Codex error that ended the run names no model-endpoint transport or
+429/5xx failure, and the sandbox still reports running and answers a probe command. A lost or
+unresponsive sandbox, an unconfirmed cleanup, and an endpoint outage stay execution errors, so
+the episode is retried. A reported provider failure keeps its classified cause, so the
+Environment Server's outcome policy decides it as before, and a run that failed before its first
+turn stays an execution error that carries Codex's stderr.
+
+The endpoint check reads only the failure that ended the run, after its last model output:
+`turn.failed` and the last error event before it, or the last event when Codex was killed while
+it still retried or waited for the network. A retry followed by model output was recovered, so
+a later unrelated failure (an OOM kill, say) is still graded. It knows Codex 0.154.0's messages:
+`unexpected status` 429, 500, 502, 503 or 504, its `high demand` message for a 500, `exceeded
+retry limit, last status: 429`, `Reconnecting... waiting for network`, and a stream disconnect
+from a transport error, a closed stream, a failed send or the SSE idle timeout. The output
+cap's `stream disconnected before completion: Incomplete response returned, reason:
+max_output_tokens` is not an endpoint failure. A run that completed or hit its time limit is not
+a failed run, so the check never applies to it.
+
+`raise_oom_score_adj: true` raises the score of Codex and everything it starts to 1000 (to 0
+when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent work rather
+than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
+container's memory cgroup. The runner records the change in the supervisor's `output.log`.
+
+Native session transcripts supply tool-call IDs and outcomes. The sandbox forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
+Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
+
+`sandbox_install_timeout_seconds` defaults to 600 and `session_close_timeout_seconds` to 60;
+both must be finite and positive. Measure setup time, supervisor process/memory cost, and close
+latency before scaling. Inference support does not establish training token-ID/logprob support.
+
+## Legacy direct-agent quick start
+
+### env.yaml
+
+For the OpenAI API:
+
+```yaml
+openai_api_key: sk-...
+```
+
+For any endpoint that serves the OpenAI Responses API over SSE:
+
+```yaml
+openai_api_key: EMPTY
+```
+
+and set `openai_base_url` (must include `/v1`; Codex appends `/responses` itself).
+
+### Launch
+
+For a quick eval against OpenAI (or any Responses endpoint set via `openai_base_url`), pass the resources server config, which includes the agent server config:
+
+```bash
+gym env start --resources-server reasoning_gym/reasoning_gym_codex_agent
+```
+
+#### Against a Gym model server
+
+Every Gym model server serves the streaming Responses dialect Codex speaks on `POST /v1/responses` (`SimpleResponsesAPIModel` sanitizes the request and synthesizes the SSE stream), so Codex can run against any backend Gym serves — vLLM, OpenAI, an inference provider. Set the agent's `model_server` ref to that server (it takes precedence over `openai_base_url`); the harness resolves the provider `base_url` to it.
+
+`reasoning_gym_codex_agent_model_server.yaml` wires the agent's `model_server` ref to `policy_model`. Compose it with any model server (here a vLLM serving `policy_model`):
+
+```bash
+gym env start \
+  --resources-server reasoning_gym/reasoning_gym_codex_agent_model_server \
+  --model-type vllm_model
+```
+
+This path needs only the model server's `policy_base_url`, `policy_api_key`, and `policy_model_name` (in `env.yaml` or as `+` overrides) — no `openai_*` vars.
+
+### Run the agent
+
+```bash
+gym eval run --no-serve \
+    --agent reasoning_gym_codex_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output codex_rollout.jsonl \
+    --limit 1
+```
+
+For the model-server config above, use `--agent reasoning_gym_codex_agent_model_server`.
+
+### Smoke test
+
+Check the streaming `/v1/responses` dialect and the real-CLI seam without a full rollout. Launch a model server, then take its URL from the `gym env start` log (`'url': 'http://127.0.0.1:<port>'`):
+
+```bash
+gym env start --model-type vllm_model \
+  +policy_base_url=https://integrate.api.nvidia.com/v1 \
+  '+policy_api_key=${oc.env:NVIDIA_API_KEY}' +policy_model_name=meta/llama-3.1-8b-instruct
+
+# 1. the endpoint speaks the streaming Responses dialect:
+curl -N $URL/v1/responses -H 'content-type: application/json' \
+  -d '{"model":"x","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"2+2?"}]}]}'
+
+# 2. the real Codex CLI runs against it:
+mkdir -p /tmp/codex_home && cat > /tmp/codex_home/config.toml <<EOF
+model_provider = "gym"
+[model_providers.gym]
+name = "gym"
+base_url = "$URL/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+EOF
+CODEX_HOME=/tmp/codex_home OPENAI_API_KEY=local \
+  codex exec --json --ephemeral --skip-git-repo-check "What is 2+2?" < /dev/null
+```
+
+## Description
+
+The agent runs `codex exec --json` as an async subprocess for each request. Codex handles all tool execution (shell commands, file edits, MCP tool calls) internally in a per-rollout scratch working directory. The agent parses the JSONL event stream into NeMoGym output items and forwards the response to a resources server for verification.
+
+Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/models/responses_streaming.py`).
+
+Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool (`features`). Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
+
+For legacy callers, Codex is auto-installed lazily on the first local invocation via npm or a local Node.js binary if not already on PATH.
+
+## Configuration
+
+```yaml
+codex_agent:
+  responses_api_agents:
+    codex_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: my_verifier
+      concurrency: 32
+      model: null
+      openai_api_key: ${openai_api_key}
+      openai_base_url: null
+      sandbox_mode: danger-full-access
+      timeout: 600
+      system_prompt: null
+      reasoning_effort: null
+      codex_version: 0.144.4
+      cwd: null
+      stream_idle_timeout_ms: null
+      request_max_retries: null
+      stream_max_retries: null
+      extra_config: {}
+      features:
+        multi_agent: false
+        code_mode: false
+```
+
+- `concurrency`: max simultaneous `run()` calls
+- `model`: model name written into the generated config. `null` uses the Codex CLI's own default; Gym model servers substitute their configured model anyway, so this mainly matters for direct endpoints
+- `openai_api_key`: API key for the endpoint, or any non-empty string for local endpoints
+- `openai_base_url`: if set, used as the provider `base_url` (include `/v1`; Codex appends `/responses`). Leave null for the real OpenAI API
+- `sandbox_mode`: Codex sandbox policy for model-generated shell commands (`read-only`, `workspace-write`, `danger-full-access`). The default is `danger-full-access` because Gym environments are expected to provide their own isolation (mirroring the Claude Code agent's skip-permissions default); OS-level sandboxing (Landlock/seccomp) is unavailable in many containers
+- `timeout`: per-request wall-clock seconds
+- `model_context_window`: optional served context window for Codex's context accounting
+- `model_auto_compact_token_limit`: optional compaction threshold, at most 90% of an explicit context window
+- `system_prompt`: inserted as a `developer` role message via Codex's `developer_instructions` config. The data's system message (if any) is appended after this
+- `reasoning_effort`: passed as `model_reasoning_effort` (e.g. `low`, `medium`, `high`)
+- `codex_version`: **required** — npm version pinned on auto-install. Every config must pin an explicit version so runs are reproducible and cannot silently drift as new Codex releases land; version bumps become explicit, tested changes
+- `cwd`: working root handed to `codex exec --cd`. `null` creates a fresh temp dir per request and removes it afterwards
+- `stream_idle_timeout_ms`: provider stream idle budget. Gym model servers emit the synthesized SSE only once the full response is computed, so this must cover an entire generation; `null` defaults it to `timeout * 1000`
+- `request_max_retries`, `stream_max_retries`: the provider's resends of a request that fails before its stream starts, and reconnects after a stream drops. `null` (the default) leaves Codex's own defaults. Unlike `extra_config`, they also apply to sandbox sessions
+- `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
+- `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Unlike `extra_config`, it also applies to sandbox sessions
+- `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied)
+- `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. At most `timeout`. `null` leaves the pinned CLI's default of 300 seconds
+
+For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
+
+## Gym MCP tools
+
+When the resources server exposes Gym-owned MCP tools (an `MCPResourcesServer` returning MCP metadata from `/seed_session`), the agent writes a per-rollout `mcp_servers` entry into the generated config.toml: a streamable HTTP server pointing at the resources server's `/mcp` endpoint, with the per-rollout session token carried on a custom header via `http_headers`. Codex advertises these tools to the model as a `namespace` tool spec named `mcp__<server>` (Codex writes `-` in a server name as `_`); the Gym model server flattens them to plain `mcp__<server>__<tool>` functions on the way in and splits the names back on the way out, so third-party models can call them. Codex also adds its MCP resource helper tools (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) whenever an MCP server is configured. Responses record an MCP call by its bare tool name, such as `finish`, so `/verify` sees the same names as over `direct_http`.
+
+Sessions use the same entries for each MCP tool grant. To pass one, set `expose_tools_over_mcp: true` on the Resources Server and `resources_tool_transports: [mcp]` on the Environment Server. A required grant is written with `required = true`: if its server does not connect, Codex stops before the first model call. The activation then fails with the cause in an `agent_startup_failed` observation gap (see above). An optional grant that does not connect is left out of the tool list without a gap; only Codex's stderr shows it. Codex starts only MCP servers whose names use letters, digits, `-` and `_`: a required grant with another name is rejected at seed time, and an optional one is left out and recorded as an `mcp_server_skipped` observation gap. The sandbox must reach the granted URL, usually the Resources Server's `/mcp` endpoint. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
+
+Set `mcp_tool_timeout_seconds` above the slowest call the Resources Server can make. Codex runs no other tool, its shell included, while an MCP call is in flight. A call that times out keeps running on the server, and Codex does not send the next call to that server until the earlier one returns, so a later call (such as a benchmark's `finish`) can time out behind it. Codex's 30-second limit for connecting to an MCP server is not configurable here.
+
+## Skills evaluation
+
+Skills are evaluated as a run-level variable, not a dataset field — point `skills.path` at a directory of [Agent Skills standard](https://agentskills.io/specification) skill directories on `gym eval run`, and the agent stages them into each request's `CODEX_HOME/skills/`, where Codex's built-in skill discovery picks them up:
+
+```bash
+gym eval run --agent reasoning_gym_codex_agent \
+    --input resources_servers/reasoning_gym/data/example.jsonl \
+    --output rollouts_variant_a.jsonl \
+    +skills.path=skills/variant_a/
+```
+
+Each rollout result is stamped with a `skills_ref` for provenance and grouping during reward profiling, exactly as for the Claude Code agent (see its README for the full workflow).
+
+## Legacy direct-agent limitations
+
+- Eval only for now. Token IDs and logprobs are not wired up yet.
+- Token counts come from Codex's own usage reporting (`turn.completed`).
+- `turns_used` counts assistant messages right now, not tool calls.
+- Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.
+- Multi-turn dataset inputs are collapsed to a single prompt: only the first `system` message (as `developer_instructions`) and the last `user` message are passed to `codex exec`; any earlier user/assistant/tool turns in `responses_create_params.input` are dropped. This matches the Claude Code agent and is fine for single-turn datasets like reasoning_gym, but datasets that encode prior conversation turns in `input` will not see that history.
+
+Without `sandbox_access`, configure `sandbox_provider` and `sandbox_config`
+(`SandboxSpec` fields such as `image`, `workdir`, and `ttl_s`) on the agent.
+It creates a sandbox, runs there, and destroys it on close; the default workdir is
+`/app`. A supplied access always wins, including its workdir; connection failure
+never triggers a replacement or host execution. With neither access nor a usable
+provider, setup fails. Verifiers that inspect task files must keep using a
+Resources-owned sandbox, since agent-owned sandboxes are gone before verification.

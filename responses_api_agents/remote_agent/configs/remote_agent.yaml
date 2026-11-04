@@ -1,0 +1,12 @@
+remote_agent:
+  responses_api_agents:
+    remote_agent:
+      entrypoint: app.py
+      agent_base_url: ???
+      resources_server:
+        type: resources_servers
+        name: ???
+      concurrency: 32
+      remote_responses_timeout_secs: 1800.0
+      run_timeout_secs: 2100.0
+      max_steps: null

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from responses_api_models.sglang_model.app import SGLangModel, SGLangModelConfig
 
 

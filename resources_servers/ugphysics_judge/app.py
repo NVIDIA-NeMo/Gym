@@ -53,19 +53,19 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
 )
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
-from nemo_gym.reward_profile import (
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.verification import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -308,12 +308,13 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 temperature=responses_create_params.temperature or 0.0,
                 top_p=responses_create_params.top_p or 1.0,
             )
-            response = await self.server_client.post(
+            chat_response = await call_judge(
+                self.server_client,
                 server_name=self.config.judge_model_server.name,
                 url_path="/v1/chat/completions",
                 json=chat_params,
+                response_model=NeMoGymChatCompletion,
             )
-            chat_response = NeMoGymChatCompletion.model_validate(await get_response_json(response))
             content = chat_response.choices[0].message.content if chat_response.choices else None
             synthesized_response = NeMoGymResponse.model_validate(
                 {
@@ -347,12 +348,13 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 return False, judge_evaluation, self.JUDGE_FALSE_LABEL
             return False, judge_evaluation, None
 
-        response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Extract assistant text. CoT is filtered at the vLLM layer via

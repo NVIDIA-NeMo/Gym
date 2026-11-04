@@ -14,9 +14,11 @@
 # limitations under the License.
 import argparse
 import importlib
+import json
 import logging
 import os
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -24,7 +26,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym.cli.utils import did_you_mean
+from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.utils.text import did_you_mean
+from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
 
 logger = logging.getLogger(__name__)
@@ -78,14 +83,25 @@ def dispatch(target: str, overrides: list[str]) -> None:
 
 
 def _value_flag(
-    name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = (), choices: tuple[str, ...] | None = None
+    name: str,
+    hydra_key: str,
+    flag_help: str,
+    *,
+    aliases: tuple[str, ...] = (),
+    choices: tuple[str, ...] | None = None,
+    quote: bool = False,
 ) -> Flag:
-    """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
+    """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset).
+
+    `quote=True` passes VALUE as a literal string (see `_hydra_quote`), for filenames and free text.
+    """
     dest = name.replace("-", "_")
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
-            [f"+{hydra_key}={getattr(args, dest)}"] if getattr(args, dest) is not None else []
+            [f"+{hydra_key}={_hydra_quote(getattr(args, dest)) if quote else getattr(args, dest)}"]
+            if getattr(args, dest) is not None
+            else []
         ),
     )
 
@@ -96,6 +112,62 @@ def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", action="store_true", help=flag_help),
         translate_to_hydra=lambda args: [f"+{hydra_key}=true"] if getattr(args, dest) else [],
+    )
+
+
+def _split_comma_separated(value: str) -> list[str]:
+    values = [item.strip() for item in value.split(",")]
+    if not all(values):
+        raise argparse.ArgumentTypeError("check IDs must be a comma-separated list without empty entries")
+    return values
+
+
+def _limit_fraction_or_none(value: str) -> float | None:
+    """A run-health limit: a fraction in [0, 1], or ``none`` (any case) for no limit."""
+    if value.strip().lower() == "none":
+        return None
+    try:
+        fraction = float(value)
+    except ValueError:
+        fraction = float("nan")
+    if not 0 <= fraction <= 1:
+        raise argparse.ArgumentTypeError(f"expected a fraction in [0, 1] or none, got {value!r}")
+    return fraction
+
+
+def _csv_list_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
+    """A comma-separated CLI value translated to a Hydra list override."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(
+            f"--{name}",
+            dest=dest,
+            type=_split_comma_separated,
+            metavar="CHECK[,CHECK...]",
+            help=flag_help,
+        ),
+        translate_to_hydra=lambda args: (
+            [f"+{hydra_key}={json.dumps(getattr(args, dest), separators=(',', ':'))}"]
+            if getattr(args, dest) is not None
+            else []
+        ),
+    )
+
+
+def _comma_list_flag(name: str, hydra_key: str, flag_help: str, *, metavar: str) -> Flag:
+    """A `--name "A,B"` flag that maps to the Hydra override `+<hydra_key>=["A","B"]`"""
+    dest = name.replace("-", "_")
+
+    def to_hydra(args: argparse.Namespace) -> list[str]:
+        raw = getattr(args, dest)
+        if raw is None:
+            return []
+        items = [item.strip() for item in raw.split(",") if item.strip()]
+        return [f"+{hydra_key}=[{','.join(json.dumps(item) for item in items)}]"]
+
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", dest=dest, metavar=metavar, help=flag_help),
+        translate_to_hydra=to_hydra,
     )
 
 
@@ -141,7 +213,13 @@ RESOURCES_SERVER = Flag(
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
 # env status). Each command reads the reserved `json` config key ad hoc via
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
-JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
+# SUPPRESS so an absent trailing `--json` can't overwrite one given before the subcommand (see build_parser).
+JSON = Flag(
+    register=lambda p: p.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Output as machine-readable JSON."
+    ),
+    translate_to_hydra=lambda args: ["+json=true"] if getattr(args, "json", False) else [],
+)
 
 # `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
 # component (surfaced as the reserved `component_name` config key) instead of listing all.
@@ -154,7 +232,7 @@ NAME = Flag(
 
 # `gym search [<type>] <query>`: an optional component type plus the query. The query is surfaced to the
 # chosen listing command as the reserved `query` config key; the type only picks which command to run
-# (see `_search`). A lone positional is the query, defaulting to benchmarks — backward compatible.
+# (see `_search`). A lone positional is the query, defaulting to the unified environment catalog.
 _SEARCHABLE_TYPES = {
     "benchmarks": "nemo_gym.cli.eval:list_benchmarks",
     "environments": "nemo_gym.cli.env:list_environments",
@@ -169,7 +247,7 @@ SEARCH_TERMS = Flag(
             "component_type",
             nargs="?",
             choices=list(_SEARCHABLE_TYPES),
-            help="Component type to search (default: benchmarks).",
+            help="Component type to search (default: environments).",
         ),
         p.add_argument(
             "query",
@@ -177,14 +255,103 @@ SEARCH_TERMS = Flag(
             help="Text matched (substring or fuzzy) against a component's name, description, and key metadata.",
         ),
     ),
-    translate_to_hydra=lambda args: [f'+query="{args.query}"'] if getattr(args, "query", None) else [],
+    translate_to_hydra=lambda args: [f"+query={_hydra_quote(args.query)}"] if getattr(args, "query", None) else [],
 )
 
 
 def _search(args: argparse.Namespace, overrides: list[str]) -> None:
-    """`gym search [<type>] <query>`: dispatch to the chosen type's listing command (default benchmarks),
+    """`gym search [<type>] <query>`: dispatch to the chosen type's listing command (default environments),
     which filters itself to the `query` config key already in `overrides`."""
-    dispatch(_SEARCHABLE_TYPES[getattr(args, "component_type", None) or "benchmarks"], overrides)
+    component_type = getattr(args, "component_type", None)
+    if component_type in {"environments", "benchmarks"}:
+        kind = component_type.removesuffix("s")
+        dispatch("nemo_gym.cli.env:list_environments", [f"+catalog_kind={kind}", *overrides])
+        return
+    dispatch(_SEARCHABLE_TYPES[component_type or "environments"], overrides)
+
+
+def _list_benchmarks(_args: argparse.Namespace, overrides: list[str]) -> None:
+    """List the benchmark view of the unified workload catalog."""
+    dispatch("nemo_gym.cli.env:list_environments", ["+catalog_kind=benchmark", *overrides])
+
+
+def _parsed_onboarding_name(args: argparse.Namespace) -> str | None:
+    value = getattr(args, "onboarding_name", None)
+    return value if value and "=" not in value else None
+
+
+ONBOARDING_NAME = Flag(
+    register=lambda p: p.add_argument("onboarding_name", nargs="?", metavar="NAME", help="Workload name."),
+    translate_to_hydra=lambda args: (
+        [f"+onboarding_name={json.dumps(name)}"]
+        if (name := _parsed_onboarding_name(args))
+        else ([args.onboarding_name] if getattr(args, "onboarding_name", None) else [])
+    ),
+)
+
+CATALOG_KIND = _value_flag(
+    "kind",
+    "catalog_kind",
+    "Workload kind.",
+    choices=("environment", "benchmark"),
+)
+
+
+def _register_init_target(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--resources-server", metavar="NAME", help="Name of the resources server.")
+    group.add_argument("--environment", dest="scaffold_environment", metavar="NAME", help="Environment name.")
+    group.add_argument("--benchmark", dest="scaffold_benchmark", metavar="NAME", help="Benchmark name.")
+
+
+def _translate_init_target(args: argparse.Namespace) -> list[str]:
+    if args.scaffold_environment:
+        return ["+scaffold_kind=environment", f"+scaffold_name={json.dumps(args.scaffold_environment)}"]
+    if args.scaffold_benchmark:
+        return ["+scaffold_kind=benchmark", f"+scaffold_name={json.dumps(args.scaffold_benchmark)}"]
+    return [f"+entrypoint=resources_servers/{args.resources_server}"] if args.resources_server else []
+
+
+INIT_TARGET = Flag(register=_register_init_target, translate_to_hydra=_translate_init_target)
+
+REWARD_RANGE = Flag(
+    register=lambda p: p.add_argument(
+        "--reward-range",
+        nargs=2,
+        type=float,
+        metavar=("LOW", "HIGH"),
+        help="Declared inclusive reward range.",
+    ),
+    translate_to_hydra=lambda args: (
+        [f"+reward_range=[{args.reward_range[0]},{args.reward_range[1]}]"] if args.reward_range else []
+    ),
+)
+
+
+def _register_reward_direction(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--higher-is-better",
+        dest="higher_is_better",
+        action="store_const",
+        const=True,
+        help="Declare that larger rewards are better.",
+    )
+    group.add_argument(
+        "--lower-is-better",
+        dest="higher_is_better",
+        action="store_const",
+        const=False,
+        help="Declare that smaller rewards are better.",
+    )
+
+
+REWARD_DIRECTION = Flag(
+    register=_register_reward_direction,
+    translate_to_hydra=lambda args: (
+        [f"+higher_is_better={str(args.higher_is_better).lower()}"] if args.higher_is_better is not None else []
+    ),
+)
 
 
 # Asset selector flag -> (parent dir, configs subdir, default config flavor). All accept `name` or `name/flavor`,
@@ -194,13 +361,14 @@ _ASSETS = {
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
+    "agent-type": ("responses_api_agents", "configs", None),
 }
 
 
 def _asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches the roots from :func:`~nemo_gym.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
+    Searches the roots from :func:`~nemo_gym.environment.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
     cwd + install root), the same helper that backs `gym list`/`gym search`, so config resolution and
     discovery agree on where components live. On a name collision across roots the highest-priority root wins
     (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
@@ -215,6 +383,22 @@ def _asset_config_path(flag: str, value: str) -> str:
 
     roots = component_search_roots()
     matches: list[Path] = []
+
+    if "/" in value and flag in {"benchmark", "environment"}:
+        nested_matches: list[Path] = []
+        for root in roots:
+            candidate = root / parent / value / "config.yaml"
+            resolved = candidate.resolve()
+            if candidate.is_file() and resolved not in nested_matches:
+                nested_matches.append(resolved)
+        if nested_matches:
+            if len(nested_matches) > 1:
+                shadowed = ", ".join(f"`{path}`" for path in nested_matches[1:])
+                logger.warning(
+                    f"`--{flag} {value}` matches multiple configs; using `{nested_matches[0]}` from the "
+                    f"highest-priority root and ignoring {shadowed}. Pass `--config <path>` to select a different one."
+                )
+            return str(nested_matches[0])
 
     for root in roots:
         candidate = root / path
@@ -237,7 +421,7 @@ def _asset_config_path(flag: str, value: str) -> str:
         # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
         # the generic one-level flavor/sibling search below can't see them.
         # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
-        from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
+        from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
 
         config_names = {
             _benchmark_config_name(p.relative_to(root / parent))
@@ -268,6 +452,10 @@ def _asset_config_path(flag: str, value: str) -> str:
                 for child in (root / parent).iterdir()
                 if child.is_dir()
             ]
+            if server_name in candidates:
+                # The folder exists but has no YAML configs, so the problem is the missing config,
+                # not the name. Suggesting a different server here would point the user elsewhere.
+                candidates = []
 
         hint = did_you_mean(typo, candidates)
 
@@ -277,21 +465,67 @@ def _asset_config_path(flag: str, value: str) -> str:
     )
 
 
-def _asset_selector(flag: str) -> Flag:
-    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths."""
+def _asset_selector(flag: str, *, repeatable: bool = False) -> Flag:
+    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths.
+
+    Repeatable selectors accumulate, composing several components the way `--config` does.
+    """
     dest = flag.replace("-", "_")
+
+    def translate_to_hydra(args: argparse.Namespace) -> list[str]:
+        selected = getattr(args, dest)
+        if not selected:
+            return []
+        names = selected if isinstance(selected, list) else [selected]
+        return [f"+config_paths=[{','.join(_asset_config_path(flag, name) for name in names)}]"]
+
     return Flag(
-        register=lambda p: p.add_argument(f"--{flag}", metavar="NAME", help=f"Load the named {flag} config."),
-        translate_to_hydra=lambda args: (
-            [f"+config_paths=[{_asset_config_path(flag, getattr(args, dest))}]"] if getattr(args, dest) else []
+        register=lambda p: p.add_argument(
+            f"--{flag}",
+            metavar="NAME",
+            action="append" if repeatable else "store",
+            help=f"Load the named {flag} config." + (" Repeatable." if repeatable else ""),
         ),
+        translate_to_hydra=translate_to_hydra,
     )
 
 
-BENCHMARK = _asset_selector("benchmark")
-ENVIRONMENT = _asset_selector("environment")
-RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
+# Selecting several environments or benchmarks composes their configs, so these accumulate. A model type
+# names the one policy model a run serves, so it does not.
+BENCHMARK = _asset_selector("benchmark", repeatable=True)
+ENVIRONMENT = _asset_selector("environment", repeatable=True)
+RESOURCES_SERVER_CONFIG = _asset_selector("resources-server", repeatable=True)
 MODEL_TYPE = _asset_selector("model-type")
+
+# Override for verifier-side agent/model compatibility guards. Offered wherever runtime configs compose.
+ALLOW_UNSUPPORTED_PAIRING = _bool_flag(
+    "allow-unsupported-pairing",
+    "allow_unsupported_pairing",
+    "Run even if the environment's resources server does not declare support for the selected agent or model type.",
+)
+
+AGENT_TYPE = Flag(
+    register=lambda p: p.add_argument(
+        "--agent-type",
+        metavar="NAME",
+        help="Agent (NAME or NAME/FLAVOR) to run the selected environment or benchmark.",
+    ),
+    translate_to_hydra=lambda args: _translate_agent_type(args),
+)
+
+
+def _translate_agent_type(args: argparse.Namespace) -> list[str]:
+    """`--agent-type` picks the harness to compose, which is already fixed once the servers are up."""
+    name = getattr(args, "agent_type", None)
+    if not name:
+        return []
+    if getattr(args, "no_serve", False):
+        raise ValueError(
+            "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
+            "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
+        )
+    return [f"+config_paths=[{_asset_config_path('agent-type', name)}]"]
+
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
 # var before dispatch (see there), so a single register-only flag suffices for every command — the roots
@@ -319,17 +553,316 @@ def _merge_config_paths(overrides: list[str]) -> list[str]:
     return ([f"+config_paths=[{','.join(paths)}]"] if paths else []) + rest
 
 
+# Root-level keys prefixed with `_` are scratch namespaces: not part of SubmitConfig's schema, only
+# present so other parts of the config can interpolate into them (e.g. `${_image_tags.vllm}`). They must
+# be fully defined in the config file itself — `+`/`++` overrides are rejected here so a typo'd scratch
+# field (e.g. `+_image_tags.vllmm=...`) fails loudly instead of silently creating an unused field that
+# nothing interpolates against. Overriding an *existing* scratch leaf with a bare `key=value` still works,
+# and Hydra itself already rejects bare overrides of nonexistent keys, so typos there are caught for free.
+def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
+    for token in overrides:
+        prefix = "++" if token.startswith("++") else "+" if token.startswith("+") else ""
+        if not prefix:
+            continue
+        key = token[len(prefix) :].split("=", 1)[0]
+        root = key.split(".", 1)[0]
+        if root.startswith("_"):
+            raise ValueError(
+                f"Refusing override {token!r}: scratch namespace {root!r} must be fully defined in the "
+                "config file. Only pre-existing fields may be overridden — use a bare 'key=value' override "
+                "instead of '+'/'++' so a typo is rejected rather than silently adding an unused field."
+            )
+
+
+@exit_cleanly_on_config_error
+def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
+    import rich
+    import yaml
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+    from omegaconf import OmegaConf
+    from pydantic import ValidationError
+    from rich.markup import escape
+
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
+    from nemo_gym.orchestration.submit import submit
+
+    _reject_scratch_namespace_additions(overrides)
+    config_path = Path(args.config).resolve()
+    # Hydra composes by stem, so a missing path would surface from `compose` as a `MissingConfigException`
+    # traceback whose search-path dump never names the offending path. Check up front instead.
+    if not config_path.is_file():
+        what = "is a directory, not a file" if config_path.is_dir() else "was not found"
+        raise ConfigError(
+            f"Submit config '{config_path}' {what}. "
+            "Check the path is spelled correctly and is relative to your working directory."
+        )
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(config_path.parent), version_base=None):
+        composed = compose(config_name=config_path.stem, overrides=overrides)
+    # Resolve interpolations (e.g. `${_scratch.value}`) before dropping scratch namespaces (root keys
+    # prefixed with `_`) — any other unrecognized root key is a real typo and must reach SubmitConfig's
+    # strict validation so it fails loudly instead of being silently dropped.
+    resolved = OmegaConf.to_container(composed, resolve=True)
+    scratch_keys = {key for key in resolved if key.startswith("_")}
+    # Malformed driver/benchmarks shapes are left for SubmitConfig validation to report.
+    driver = resolved.get("driver")
+    available = driver.get("benchmarks") if isinstance(driver, dict) else None
+    if (
+        args.select is not None
+        and isinstance(available, dict)
+        and available
+        and all(isinstance(name, str) for name in available)
+    ):
+        selected = [name.strip() for name in args.select.split(",") if name.strip()]
+        if not selected:
+            raise ConfigError(
+                f"--select was given no benchmark names. Available: {', '.join(available)}. "
+                "Omit --select to submit all of them."
+            )
+        unknown = [name for name in selected if name not in available]
+        if unknown:
+            raise ConfigError(
+                f"--select named {', '.join(unknown)}, which {'is' if len(unknown) == 1 else 'are'} not under "
+                f"driver.benchmarks in '{config_path}'. Available: {', '.join(available)}."
+            )
+        resolved["driver"]["benchmarks"] = {name: available[name] for name in selected}
+    # SubmitConfig is an orchestration model: report schema errors against its YAML file
+    # rather than using the generic CLI handler's +key=<value> hint.
+    try:
+        config = SubmitConfig.model_validate(
+            {key: value for key, value in resolved.items() if key not in scratch_keys}
+        )
+    except ValidationError as e:
+        missing, invalid = _describe_validation_errors(e)
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing required configuration: {', '.join(missing)}")
+        if invalid:
+            parts.append(f"invalid configuration: {'; '.join(invalid)}")
+        raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
+
+    if args.resolve_only:
+        # Same form persist() writes as the run's record, so the two diff and hash alike.
+        if args.json:
+            print(config.model_dump_json(indent=2, context={HOST_ENV_REFS: True}))
+        else:
+            print(yaml.safe_dump(config.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False))
+        return
+
+    record = submit(config, dry_run=args.dry_run)
+    if record is None:
+        return
+
+    if args.json:
+        # The record alone, so the output parses.
+        print(record.model_dump_json(indent=2))
+    else:
+        rich.print(f"Run directory: [bold]{record.run_dir}[/bold]")
+        for benchmark in record.benchmarks:
+            if benchmark.job_id is None:
+                # sbatch's message is not ours to format: `escape` disables markup
+                # for it, so an error carrying square brackets is printed as
+                # written instead of being swallowed or raising MarkupError.
+                rich.print(f"[red]failed[/red] {benchmark.benchmark}: {escape(benchmark.error or '')}")
+            else:
+                executor_label = {"slurm": "Slurm job", "kubernetes": "Kubernetes Job"}.get(
+                    record.executor, f"{record.executor} job"
+                )
+                rich.print(
+                    f"[green]submitted[/green] {benchmark.benchmark} → {executor_label} "
+                    f"[bold]{benchmark.job_id}[/bold]"
+                )
+
+    if record.failed:
+        names = ", ".join(b.benchmark for b in record.failed)
+        print(f"Error: {len(record.failed)} benchmark(s) failed to submit: {names}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error("resubmit does not accept Hydra overrides")
+    from nemo_gym.orchestration.submit import resubmit
+
+    try:
+        print(resubmit(args.gym_job_id, args.benchmark).job_id)
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
+    target = getattr(args, "target", None)
+    if target:
+        # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
+        from nemo_gym.cli.eval import run_target
+
+        run_target(args, overrides)
+        return
+    if getattr(args, "only_tasks", None) or getattr(args, "exclude_tasks", None):
+        # Register-only flags: without a TARGET nothing consumes them, and a silently ignored selection
+        # would run every task.
+        args._parser.error(
+            "--only-tasks and --exclude-tasks apply to a task TARGET; pass a Harbor task folder or harbor: reference"
+        )
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
 
 
+# `gym eval export <exporter>`: which exporter handles the run. Register-only: `_eval_export` consumes it.
+EXPORTER = Flag(
+    register=lambda p: p.add_argument(
+        "exporter",
+        nargs="?",
+        metavar="EXPORTER",
+        help=f"Exporter to run: {', '.join(RUN_EXPORTERS)} (default: {DEFAULT_RUN_EXPORTER}). "
+        "Exporter settings are `+key=value` overrides, e.g. `+rollouts_jsonl_fpath=results/rollouts.jsonl`.",
+    ),
+)
+
+
+def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
+    exporter = args.exporter
+    if args.format is not None:
+        logger.warning("`--format` is deprecated; pass the exporter name instead: `gym eval export <exporter>`.")
+        if exporter and exporter != args.format:
+            args._parser.error(f"conflicting exporter: {exporter!r} and --format {args.format!r}")
+        exporter = exporter or args.format
+    exporter = exporter or DEFAULT_RUN_EXPORTER
+    if exporter not in RUN_EXPORTERS:
+        args._parser.error(f"unknown exporter {exporter!r}; choose from: {', '.join(RUN_EXPORTERS)}")
+    dispatch("nemo_gym.cli.eval:export_run", [f"+exporter={exporter}", *overrides])
+
+
+# `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
+# Register-only: the target is consumed by `_eval_run`, not translated to a Hydra override.
+TASK_TARGET = Flag(
+    register=lambda p: p.add_argument(
+        "target",
+        nargs="?",
+        metavar="TARGET",
+        help=(
+            "Harbor task folder, folder of task folders, `harbor:<dataset>[@<version>]` hub reference, or the "
+            "name of a committed entry under environments/harbor/ (e.g. terminal_bench_4) after `gym dataset pull`. "
+            "Existing folders (including expanded ~user paths) and explicit ./, ../, /, or ~/ paths "
+            "take precedence over Hydra overrides. Prefix an ambiguous relative path with ./; "
+            "otherwise key=value and ~key are configuration overrides."
+        ),
+    ),
+)
+
+# `--sandbox <provider>`: load the named sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs).
+SANDBOX = Flag(
+    register=lambda p: p.add_argument(
+        "--sandbox",
+        metavar="PROVIDER",
+        help="Sandbox provider for task containers (e.g. opensandbox, docker). Used with a task TARGET.",
+    ),
+)
+
+EXCLUDE_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--exclude-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs to leave out of a task TARGET (e.g. `fp8-*,jax-speedrun-gpu`).",
+    ),
+)
+
+ONLY_TASKS = Flag(
+    register=lambda p: p.add_argument(
+        "--only-tasks",
+        metavar="PATTERNS",
+        help="Comma-separated task names or globs; only matching tasks of a task TARGET run.",
+    ),
+)
+
+
+def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if args.json:
+        expected_overrides.append("+json=true")
+    if overrides != expected_overrides:
+        args._parser.error("health-check does not accept Hydra overrides")
+    from nemo_gym.cli.eval import health_check_rollouts
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.rollouts.health.types import RunHealthLimits
+
+    # A limit flag that is not given is absent from args, so the limit stays unset and keeps the run's persisted
+    # value; `none` sets it to None, which removes it.
+    given_limits = {
+        field: getattr(args, flag)
+        for field, flag in (
+            ("max_not_final_failure_fraction", "health_max_not_final_failure_fraction"),
+            ("max_final_failure_fraction", "health_max_final_failure_fraction"),
+        )
+        if hasattr(args, flag)
+    }
+    try:
+        health_check_rollouts(
+            args.run_dir,
+            rollout_file=args.rollout_file,
+            workers=args.workers,
+            ignored_checks=args.ignore_checks or (),
+            limits=RunHealthLimits(**given_limits),
+            json_output=args.json,
+            model_call_capture_dir=args.model_call_capture_dir,
+        )
+    except (FileNotFoundError, ValueError, ConfigError) as exc:
+        args._parser.error(str(exc))
+
+
+def _has_override(overrides: list[str], key: str) -> bool:
+    return any(override.lstrip("+").split("=", 1)[0] == key for override in overrides)
+
+
+def _env_init(args: argparse.Namespace, overrides: list[str]) -> None:
+    scaffold_selected = bool(
+        args.scaffold_environment or args.scaffold_benchmark or _has_override(overrides, "scaffold_kind")
+    )
+    legacy_selected = _has_override(overrides, "entrypoint")
+    scaffold_options = any(
+        _has_override(overrides, key) for key in ("profile", "reuse_verifier", "reward_range", "higher_is_better")
+    )
+    if scaffold_selected and legacy_selected:
+        args._parser.error("select a resources server or a manifest-backed workload, not both")
+    if scaffold_options and not scaffold_selected:
+        args._parser.error("--profile, --reuse-verifier, and reward options require --environment or --benchmark")
+    print(
+        "`gym env init` is deprecated for new datasets: use `gym dataset init <name>` for a Harbor-shaped dataset. "
+        "It remains for custom resources servers until tasksets can ship their own tools; it will then be removed.",
+        file=sys.stderr,
+    )
+    target = "nemo_gym.cli.env:init_environment" if scaffold_selected else "nemo_gym.cli.env:init_resources_server"
+    dispatch(target, overrides)
+
+
 def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
+    manifest_selected = bool(_parsed_onboarding_name(args) or _has_override(overrides, "onboarding_name"))
+    legacy_selected = _has_override(overrides, "entrypoint")
+    manifest_options = any(_has_override(overrides, key) for key in ("catalog_kind", "update_expected", "json"))
+    if manifest_selected and legacy_selected:
+        args._parser.error("select a workload name or --resources-server, not both")
+    if args.all and (manifest_selected or legacy_selected):
+        args._parser.error("--all tests every resources server, so it cannot be combined with a named target")
+    if manifest_options and not manifest_selected:
+        args._parser.error("--kind, --update-expected, and --json require a workload name")
+    if manifest_selected:
+        dispatch("nemo_gym.cli.env:test_environment_manifest", overrides)
+        return
+
     # Run a single server's tests if +entrypoint was passed. No need to check for
     # --resources-server because it is translated to +entrypoint in the flag definition.
+    if _has_override(overrides, "entrypoint"):
+        dispatch("nemo_gym.cli.env:test", overrides)
+        return
 
-    has_entrypoint = any(override.lstrip("+").split("=", 1)[0] == "entrypoint" for override in overrides)
-    dispatch("nemo_gym.cli.env:test" if has_entrypoint else "nemo_gym.cli.env:test_all", overrides)
+    if not args.all:
+        args._parser.error(
+            "requires a target: a workload name, --resources-server NAME, or --all to test every resources server."
+        )
+    dispatch("nemo_gym.cli.env:test_all", overrides)
 
 
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -348,6 +881,67 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(targets[args.storage], overrides)
 
 
+def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.data.tasks.harbor.scaffold import init_dataset
+
+    try:
+        folder = init_dataset(Path(args.root), args.name, image=args.image, parameterized=args.parameterized)
+    except (FileExistsError, ValueError) as exc:
+        args._parser.error(str(exc))
+    print(f"Wrote {folder}")
+    # Copy-paste commands: a root with a space in it was accepted above, so the path is shell-quoted here.
+    quoted = shlex.quote(str(folder))
+    print(f"Next: gym dataset validate {quoted}  # the reference solution must score 1")
+    print(f"      gym eval run {quoted} --agent <harness> --model-type openai_model --model <model> --model-url <url>")
+
+
+def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.cli.eval import validate_target
+
+    validate_target(args, overrides)
+
+
+def _dataset_pull(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dataset pull TARGET`: fetch a Harbor dataset into environments/harbor/ without preparing or running it."""
+    from nemo_gym.data.tasks.harbor.prepare import pull_target
+
+    pull_target(args, overrides)
+
+
+def _dataset_publish(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dataset publish --harbor TARGET --output DIR`: plain Harbor task folders, checked by Harbor's own loader."""
+    from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+    from nemo_gym.data.tasks.harbor.publish import publish_harbor
+
+    if not args.harbor:
+        args._parser.error("`gym dataset publish` writes Harbor task folders: pass --harbor")
+    try:
+        report = publish_harbor(Path(args.target), Path(args.output))
+    except (HarborTaskError, OSError) as exc:
+        args._parser.error(str(exc))
+    print(report.text())
+    if not report.ok:
+        sys.exit(1)
+
+
+def _dev_compare(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dev compare OLD NEW`: the paths and quoted options reach the command verbatim (as `gym eval run` passes
+    its TARGET) rather than through Hydra's override grammar, which mangles non-ASCII and backslashes. The root
+    `gym --json` toggle switches stdout to the JSON summary; `--json PATH` after the subcommand writes it to a file."""
+    from nemo_gym.cli.dev import dev_compare
+
+    # The remaining tokens (e.g. `+tail=3`, `+verbose=true`) are Hydra overrides, handed over as dispatch() does.
+    sys.argv = [sys.argv[0], *overrides]
+    dev_compare(
+        json_stdout=getattr(args, "json", False),
+        old_rollouts=args.old_rollouts,
+        new_rollouts=args.new_rollouts,
+        key=args.key,
+        logs_root=args.logs_root,
+        json_output=args.json_output,
+    )
+
+
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
     "list": "List available components (benchmarks, environments, agents, models, resources-servers).",
@@ -361,14 +955,29 @@ GROUPS = {
 # NOTE: none of the flags are argparse-required (every value can also be supplied as a Hydra `+key=value` override).
 COMMANDS = {
     "list benchmarks": Command(
-        target="nemo_gym.cli.eval:list_benchmarks",
+        target=_list_benchmarks,
         summary="List or inspect available benchmarks.",
         flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list environments": Command(
         target="nemo_gym.cli.env:list_environments",
-        summary="List or inspect available environments.",
-        flags=(NAME, JSON, SEARCH_DIR),
+        summary="List or inspect the environment and benchmark catalog.",
+        flags=(
+            NAME,
+            _value_flag("domain", "domain", "Filter by domain."),
+            CATALOG_KIND,
+            _value_flag("modality", "modality", "Filter by modality.", quote=True),
+            _value_flag("licensing", "licensing", "Filter by licensing.", quote=True),
+            _value_flag(
+                "status",
+                "status",
+                "Filter by manifest status.",
+                choices=("experimental", "no-manifest"),
+            ),
+            _value_flag("lifecycle", "lifecycle", "Filter by lifecycle.", choices=("active", "deprecated")),
+            JSON,
+            SEARCH_DIR,
+        ),
     ),
     "list agents": Command(
         target="nemo_gym.cli.agents:list_agents",
@@ -387,7 +996,7 @@ COMMANDS = {
     ),
     "search": Command(
         target=_search,
-        summary="Search a component type (default benchmarks) by name; like `list` filtered to a query.",
+        summary="Search a component type (default environments) by name; like `list` filtered to a query.",
         flags=(SEARCH_TERMS, JSON, SEARCH_DIR),
     ),
     "dataset upload": Command(
@@ -457,6 +1066,108 @@ COMMANDS = {
             SEARCH_DIR,
         ),
     ),
+    "dataset init": Command(
+        target=_dataset_init,
+        summary="Scaffold a Harbor-shaped dataset: dataset.toml and one task, ready to validate and run.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "name", metavar="NAME", help="Dataset name, `org/name`; a bare name becomes `local/<name>`."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--root",
+                    default=".",
+                    metavar="DIR",
+                    help="Where to create the folder (default: current directory).",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--image", default="python:3.12-slim", metavar="IMAGE", help="The task's prebuilt image."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--parameterized",
+                    action="store_true",
+                    help="Scaffold a template folder (task.toml, instruction.template.md, tasks.jsonl, task_data.py, "
+                    "a Python verifier, solution/answer.template.md) that prepare renders into one task per row.",
+                )
+            ),
+        ),
+    ),
+    "dataset publish": Command(
+        target=_dataset_publish,
+        summary="Write a Gym-authored dataset as plain Harbor task folders and run Harbor's format check.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="A dataset folder, a task folder, or a parameterized template folder (tasks.jsonl beside task.toml).",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--harbor",
+                    action="store_true",
+                    help="Publish in Harbor's task format: rows expanded, Python verifiers wrapped in tests/test.sh, "
+                    "answer.md wrapped in solution/solve.sh.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--output",
+                    required=True,
+                    metavar="DIR",
+                    help="Where to write the task folders (new or empty). Harbor's format check runs over them when "
+                    "the `harbor` package is importable.",
+                )
+            ),
+        ),
+    ),
+    "dataset pull": Command(
+        target=_dataset_pull,
+        summary="Fetch a Harbor dataset into environments/harbor/ and report its folder, task count and digest.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="`harbor:<org>/<name>[@<tag> | @sha256:<digest>]` (package store), "
+                    "`harbor:<dataset>[@<version>]` (registry), or the name of a committed entry under "
+                    "environments/harbor/ whose dataset.toml declares `[gym] source` (e.g. terminal_bench_4). "
+                    "A reference an entry declares lands in that entry's folder.",
+                )
+            ),
+        ),
+    ),
+    "dataset validate": Command(
+        target=_dataset_validate,
+        summary="Run each Harbor task's reference solution through the verifier and report the rewards.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="Harbor task folder, folder of task folders, `harbor:<dataset>[@<version>]`, or the name "
+                    "of a committed entry under environments/harbor/ (e.g. terminal_bench_4) after `gym dataset pull`.",
+                )
+            ),
+            SANDBOX,
+            CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
+            _value_flag("limit", "limit", "Maximum number of tasks to validate."),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
+            # Quoted: a file name with parentheses or commas is not a Hydra expression.
+            _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",), quote=True),
+        ),
+    ),
     "dataset collate": Command(
         target="nemo_gym.cli.dataset:prepare_data",
         summary="Validate and collate the dataset.",
@@ -471,24 +1182,53 @@ COMMANDS = {
         ),
     ),
     "env init": Command(
-        target="nemo_gym.cli.env:init_resources_server",
-        summary="Scaffold config for a new server, benchmark, or agent.",
-        flags=(RESOURCES_SERVER,),
+        target=_env_init,
+        summary="Scaffold a resources server, environment, or benchmark.",
+        flags=(
+            INIT_TARGET,
+            _value_flag(
+                "profile",
+                "profile",
+                "Integration profile for a manifest-backed scaffold.",
+                choices=(
+                    "custom-gym-verifier",
+                    "custom-gym-agent-loop",
+                    "external-agent-loop",
+                    "external-rollout-driver",
+                ),
+            ),
+            _value_flag("reuse-verifier", "reuse_verifier", "Existing verifier to reuse.", quote=True),
+            REWARD_RANGE,
+            REWARD_DIRECTION,
+        ),
     ),
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
         summary="Resolve the final config from configs, flags, and overrides.",
         flags=(CONFIG, SEARCH_DIR),
     ),
+    "env schema": Command(
+        target="nemo_gym.cli.env:show_schema",
+        summary="Print a resources server's task-data schema as JSON Schema.",
+        flags=(RESOURCES_SERVER, SEARCH_DIR),
+    ),
     "env validate": Command(
         target="nemo_gym.cli.env:validate",
-        summary="Validate a config (paths, cross-refs, ??? values, servers) fast — no Ray, no servers.",
+        summary="Validate a manifest-backed workload or config without starting services.",
         flags=(
+            ONBOARDING_NAME,
+            CATALOG_KIND,
+            _value_flag("manifest", "manifest_path", "Manifest path to validate.", quote=True),
+            _bool_flag("sync", "sync", "Synchronize composition mirrors after validation."),
+            _bool_flag("strict", "strict", "Fail instead of warning when model values are left undefined."),
+            JSON,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -504,16 +1244,35 @@ COMMANDS = {
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--json", action="store_true", help="Output the package list as JSON."
+                    "--json", action="store_true", default=argparse.SUPPRESS, help="Output the package list as JSON."
                 ),
-                translate_to_hydra=lambda args: ["+format=json"] if args.json else [],
+                translate_to_hydra=lambda args: ["+format=json"] if getattr(args, "json", False) else [],
             ),
         ),
     ),
     "env test": Command(
         target=_env_test,
-        summary="Test the resources server(s); runs all if no resources server is given.",
-        flags=(RESOURCES_SERVER, SEARCH_DIR),
+        summary="Test a manifest-backed workload or resources server.",
+        flags=(
+            ONBOARDING_NAME,
+            CATALOG_KIND,
+            _bool_flag("update-expected", "update_expected", "Update verifier fixture expectations."),
+            JSON,
+            RESOURCES_SERVER,
+            SEARCH_DIR,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--all",
+                    action="store_true",
+                    help="Test every resources server. Slow: builds one venv per server.",
+                )
+            ),
+        ),
+    ),
+    "env publish": Command(
+        target="nemo_gym.cli.env:publish_environment_manifest",
+        summary="Run local publication checks and confirm catalog discovery.",
+        flags=(ONBOARDING_NAME, CATALOG_KIND, JSON, SEARCH_DIR),
     ),
     "env start": Command(
         target="nemo_gym.cli.env:run",
@@ -524,10 +1283,26 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
             MODEL_API_KEY,
+        ),
+    ),
+    "env prefetch": Command(
+        target="nemo_gym.cli.env:prefetch",
+        summary="Pre-warm per-server venvs without starting servers.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
+            SEARCH_DIR,
         ),
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
@@ -536,10 +1311,33 @@ COMMANDS = {
         summary="Prepare benchmark data and dump it to disk.",
         flags=(CONFIG, BENCHMARK, SEARCH_DIR),
     ),
+    "eval plan": Command(
+        target="nemo_gym.cli.eval:plan_benchmark",
+        summary="Prepare one benchmark and write its task list (stable ids, digests) to a plan file.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            SEARCH_DIR,
+            _value_flag("out", "plan_output_fpath", "Plan file to write.", quote=True),
+            _comma_list_flag(
+                "task-ids", "plan_task_ids", "Only plan these task ids (comma-separated).", metavar="ID[,ID...]"
+            ),
+            _bool_flag("schema", "print_plan_schema", "Print the plan file's JSON Schema and exit."),
+        ),
+    ),
     "eval run": Command(
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
         flags=(
+            TASK_TARGET,
+            SANDBOX,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--skip-unloadable",
+                    action="store_true",
+                    help="Run the loadable subset of a Harbor TARGET; record omitted tasks in skipped.json.",
+                )
+            ),
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -554,11 +1352,20 @@ COMMANDS = {
                 )
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
+            EXCLUDE_TASKS,
+            ONLY_TASKS,
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
+            _bool_flag(
+                "interleave-repeats",
+                "interleave_repeats",
+                "Dispatch repeats round by round rather than each task's back to back.",
+            ),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
@@ -568,6 +1375,28 @@ COMMANDS = {
             _value_flag("temperature", "responses_create_params.temperature", "Sampling temperature."),
             _value_flag("top-p", "responses_create_params.top_p", "Nucleus sampling top-p."),
             _value_flag("max-output-tokens", "responses_create_params.max_output_tokens", "Maximum output tokens."),
+            _bool_flag(
+                "disable-aggregation",
+                "disable_aggregation",
+                "Skip post-run aggregate-metrics computation. Use with gym eval aggregate for sharded jobs.",
+            ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-run rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
+            _value_flag(
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
+            ),
         ),
     ),
     "eval aggregate": Command(
@@ -580,12 +1409,169 @@ COMMANDS = {
                 "input_glob",
                 "Glob (or comma-separated globs) matching the rollout shards to aggregate.",
                 aliases=("-i",),
+                quote=True,
             ),
             _value_flag(
                 "output",
                 "output_jsonl_fpath",
                 "Path for the merged rollouts and aggregate-metrics file.",
                 aliases=("-o",),
+            ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-aggregation rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
+            _value_flag(
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
+            ),
+        ),
+    ),
+    "eval health-check": Command(
+        target=_eval_health_check,
+        summary="Verify rollout quality for an existing run directory.",
+        flags=(
+            Flag(register=lambda p: p.add_argument("run_dir", metavar="RUN_DIR")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--rollouts-file",
+                    dest="rollout_file",
+                    type=Path,
+                    metavar="PATH",
+                    help=(
+                        "Rollout JSONL path, checked alone; relative paths resolve under RUN_DIR (default: "
+                        "rollouts.jsonl, or the shards `gym eval aggregate` merged into it)."
+                    ),
+                )
+            ),
+            Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--model-call-capture-dir",
+                    type=Path,
+                    metavar="DIR",
+                    help=(
+                        "The run's model_call_capture_dir. With it, the captured calls of rollouts that failed "
+                        "without a row (an episode deadline, say) count in run.stats.timeouts' time split."
+                    ),
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--ignore-checks",
+                    "--ignore",
+                    type=_split_comma_separated,
+                    metavar="CHECK[,CHECK...]",
+                    help="Comma-separated check IDs to exclude from verdict derivation.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-not-final-failure-fraction",
+                    type=_limit_fraction_or_none,
+                    default=argparse.SUPPRESS,
+                    metavar="FRACTION|none",
+                    help=(
+                        "Override the run's persisted limit for not final (retryable) failures, as a share of expected "
+                        "rollouts; none removes the limit. Overrides only this limit; a limit whose flag is not given "
+                        "keeps its persisted value."
+                    ),
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-final-failure-fraction",
+                    type=_limit_fraction_or_none,
+                    default=argparse.SUPPRESS,
+                    metavar="FRACTION|none",
+                    help=(
+                        "Override the run's persisted limit for final (not retried) failures, as a share of "
+                        "expected rollouts; none removes the limit. Overrides only this limit; a limit whose flag is "
+                        "not given keeps its persisted value."
+                    ),
+                )
+            ),
+            JSON,
+        ),
+    ),
+    "eval export": Command(
+        target=_eval_export,
+        summary="Export a finished run with an exporter (default: atif).",
+        flags=(
+            EXPORTER,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--format", choices=tuple(RUN_EXPORTERS), help="Deprecated: pass the exporter name instead."
+                )
+            ),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Gym rollouts JSONL to export.", quote=True),
+            _value_flag("output-dir", "output_dirpath", "New directory for exported trajectories.", quote=True),
+            _value_flag("session-id", "session_id", "Stable identifier for the source evaluation run.", quote=True),
+            _value_flag(
+                "agent-version", "agent_version", "Version of the agent that produced the rollouts.", quote=True
+            ),
+        ),
+    ),
+    "eval reverify": Command(
+        target="nemo_gym.cli.eval:reverify_rollouts",
+        summary="Re-verify existing rollouts to recompute rewards with an updated resources server",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag(
+                "input-format",
+                "input_format",
+                "Reverification input format.",
+                choices=("gym", "atif"),
+            ),
+            _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
+            _value_flag(
+                "atif-manifest",
+                "atif_manifest_jsonl_fpath",
+                "Manifest joining ATIF trajectories to materialized Gym inputs.",
+            ),
+            _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
+            _value_flag("limit", "limit", "Maximum number of examples to re-verify."),
+            _bool_flag("force", "force", "Override UNSUPPORTED reverify_mode guard (output prefixed with unsafe_)."),
+            _bool_flag(
+                "overwrite", "overwrite", "Delete existing output file before writing, instead of raising an error."
+            ),
+            _bool_flag(
+                "resume",
+                "resume_from_cache",
+                "Resume from a partially-completed output file: skip rows already done and re-verify only the rest.",
+            ),
+            _bool_flag(
+                "disable-aggregation",
+                "disable_aggregation",
+                "Skip the post-reverification aggregate-metrics computation and file write.",
+            ),
+            _bool_flag(
+                "judge-failed-only",
+                "judge_failed_only",
+                "Failure-recovery: carry successful rollouts through unchanged and re-verify only the run's "
+                "previously judge-failed rollouts (auto-read from <rollouts_stem>_failures.jsonl).",
+            ),
+            _bool_flag(
+                "append",
+                "append",
+                "With --judge-failed-only: append recovered results to an existing --output (never cleared) "
+                "instead of seeding successes into a fresh file.",
             ),
         ),
     ),
@@ -601,15 +1587,173 @@ COMMANDS = {
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
         ),
     ),
+    "eval submit": Command(
+        target=_eval_submit,
+        summary="Submit a job.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--select",
+                    metavar="NAME[,NAME...]",
+                    help="Submit only the named entries under driver.benchmarks (comma-separated). "
+                    "Default: submit all of them.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--resolve-only",
+                    action="store_true",
+                    help="Compose, resolve, and validate the submit config, print it (YAML, or JSON with --json), "
+                    "and stop before any job script is rendered or anything is submitted.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json",
+                    action="store_true",
+                    help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
+                ),
+            ),
+        ),
+    ),
+    "eval resubmit": Command(
+        target=_eval_resubmit,
+        summary="Queue one benchmark of a submitted run again, in place.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="GYM_JOB_ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
+        ),
+    ),
+    "eval compare": Command(
+        target="nemo_gym.cli.eval:compare",
+        summary="Compare a baseline eval run against candidate runs.",
+        flags=(
+            _value_flag(
+                "baseline",
+                "baseline_rollouts_jsonl_fpath",
+                "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates",
+                "candidate_rollouts_jsonl_fpaths",
+                "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag(
+                "baseline-agg-metrics",
+                "baseline_aggregate_metrics_fpath",
+                "Baseline's aggregate-metrics JSON, when it is not the sibling of --baseline.",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates-agg-metrics",
+                "candidate_aggregate_metrics_fpaths",
+                "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
+                "Baseline/candidate intervals remain the recorded 95%% intervals.",
+            ),
+            _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
+            _comma_list_flag(
+                "candidate-agents",
+                "candidate_agent_names",
+                "Agent to read from each candidate's metrics, in --candidates order.",
+                metavar="NAME[,NAME...]",
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the report (default: the candidate run's own directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+        ),
+    ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
+    # Temporary migration aid: the parity gate before an old resources server is deleted for its Harbor path.
+    # Register-only flags (no Hydra translation) are consumed by `_dev_compare`, like `gym eval run`'s TARGET.
+    "dev compare": Command(
+        target=_dev_compare,
+        summary="Compare two rollout JSONL files task by task and show the losing verifier output for every flip.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "old_rollouts", metavar="OLD_ROLLOUTS", help="Rollouts JSONL from the old (reference) side."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "new_rollouts", metavar="NEW_ROLLOUTS", help="Rollouts JSONL from the new (candidate) side."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--key",
+                    metavar="FIELD",
+                    help="Dotted field holding the task id on both sides (default: detected, e.g. _ng_task_id or "
+                    "task_name).",
+                ),
+            ),
+            _value_flag("tail", "tail", "Lines of the losing side's verifier output to print per flip (default 15)."),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--logs-root",
+                    dest="logs_root",
+                    metavar="DIR",
+                    help="Directory against which a relative verifier_logs_dir is resolved (e.g. "
+                    "environment_servers/harbor).",
+                ),
+            ),
+            # `--json PATH` after the subcommand writes a file. The root `gym --json` toggle (before the subcommand)
+            # is still honoured: it prints the same summary on stdout instead of the report.
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json", dest="json_output", metavar="PATH", help="Also write a machine-readable summary here."
+                ),
+            ),
+        ),
+    ),
 }
+
+
+def _accepts_json(parser: argparse.ArgumentParser) -> bool:
+    return any("--json" in action.option_strings for action in parser._actions)
 
 
 def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Command) -> None:
     leaf = subparsers.add_parser(name, help=command.summary, description=command.summary)
     # `_parser=leaf` so error reporting (and flag "did you mean?" hints) uses this command's own options/prog.
     leaf.set_defaults(_command=command, _parser=leaf)
-    leaf.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
+    # SUPPRESS so an absent trailing `-v` can't overwrite one given before the subcommand (see build_parser).
+    leaf.add_argument(
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="Set logging level to DEBUG."
+    )
     for flag in command.flags:
         flag.register(leaf)
 
@@ -618,7 +1762,12 @@ def build_parser() -> argparse.ArgumentParser:
     # _GymArgumentParser propagates to every subparser (argparse defaults parser_class to type(self)).
     parser = _GymArgumentParser(prog="gym", add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
-    parser.add_argument("--json", action="store_true", help="With --version, output as JSON.")
+    # Also registered on every command that emits JSON, so `--json` is accepted before or after the subcommand.
+    parser.add_argument(
+        "--json", action="store_true", help="Output as machine-readable JSON (--version and reporting commands)."
+    )
+    # Also registered on every leaf, so `-v` is accepted before or after the subcommand.
+    parser.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
     parser.set_defaults(_parser=parser)
 
     subparsers = parser.add_subparsers()
@@ -642,11 +1791,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _describe_validation_errors(exc) -> tuple[list[str], list[str]]:
+    """Split a pydantic `ValidationError` into dotted paths of missing fields and `path (reason)` strings for
+    every other failure, so each CLI error path renders schema mistakes the same way."""
+    missing: list[str] = []
+    invalid: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"]) or "<config>"
+        if error["type"] == "missing":
+            missing.append(location)
+        else:
+            invalid.append(f"{location} ({error['msg']})")
+    return missing, invalid
+
+
 def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> None:
     # ckeck if the error is coming from a BaseNeMoGymCLIConfig subclass
     # pydantic sets ValidationError.title to the validated
     # model's name, so we match it against the CLI config classes.
-    from nemo_gym.config_types import BaseNeMoGymCLIConfig
+    from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
     config_names = {BaseNeMoGymCLIConfig.__name__}
     stack = [BaseNeMoGymCLIConfig]
@@ -661,14 +1824,7 @@ def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> N
         raise
 
     # For user's config validation, raise a descriptive error message
-    missing: list[str] = []
-    invalid: list[str] = []
-    for error in exc.errors():
-        location = ".".join(str(part) for part in error["loc"]) or "<config>"
-        if error["type"] == "missing":
-            missing.append(location)
-        else:
-            invalid.append(f"{location} ({error['msg']})")
+    missing, invalid = _describe_validation_errors(exc)
 
     parts: list[str] = []
     if missing:
@@ -709,6 +1865,32 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
             logger.debug(f"Restored {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={original}")
 
 
+def _is_positional_hydra_override(token: str) -> bool:
+    # Explicit paths and existing folders win, even when '=' or '~' also fits Hydra's grammar.
+    # Do not treat '/' inside an override value or a deletion's config-group name as a path prefix.
+    if token == "~" or token.startswith(("./", "../", "/", "~/", "harbor:")):
+        return False
+    try:
+        if Path(token).is_dir() or Path(token).expanduser().is_dir():
+            return False
+    except (OSError, RuntimeError):
+        # Probing an override as a path can fail (e.g. a long value or unknown ~user).
+        # A failed probe does not rule out a valid Hydra override.
+        pass
+    if "=" in token:
+        return True
+    if not token.startswith("~"):
+        return False
+    # Only syntactically valid, otherwise unclaimed deletions belong to Hydra.
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from hydra.errors import HydraException
+
+    try:
+        return OverridesParser.create().parse_override(token).is_delete()
+    except HydraException:
+        return False
+
+
 def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
@@ -722,7 +1904,9 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        hints = "".join(did_you_mean(flag.split("=", 1)[0], known_options) for flag in unknown_flags)
+        hints = "".join(
+            did_you_mean(name, known_options) for name in (flag.split("=", 1)[0] for flag in unknown_flags)
+        )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
     # set NEMO_GYM_EXTRA_ROOTS from --search-dir for the duration of the command
@@ -736,10 +1920,30 @@ def main() -> None:
             args._parser.print_help()
             sys.exit(1)
 
+        # A pre-subcommand `--json` reaches commands that emit no JSON, where it would otherwise be dropped
+        # without a word. Reject it instead of pretending it applied.
+        if getattr(args, "json", False) and not _accepts_json(args._parser):
+            args._parser.error(
+                "--json is not supported by this command; it applies to --version and to reporting commands "
+                "such as `gym list benchmarks`, `gym search`, and `gym env status`"
+            )
+
         try:
             translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
         except ValueError as exc:
             getattr(args, "_parser", parser).error(str(exc))
+
+        # argparse can capture a bare Hydra override in eval run's optional TARGET slot.
+        # Restore it before coalescing, keeping translated flags before raw overrides.
+        if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
+            overrides = [args.target, *overrides]
+            args.target = None
+
+        # Likewise for eval export's optional EXPORTER slot: restore the captured override ahead of the raw
+        # overrides but after the translated flags, so a flag and a raw override of one key keep their order.
+        if command.target is _eval_export and args.exporter and _is_positional_hydra_override(args.exporter):
+            overrides = [args.exporter, *overrides]
+            args.exporter = None
 
         # --config and the asset selectors all emit +config_paths; coalesce them into one token.
         overrides = _merge_config_paths(translated + overrides)

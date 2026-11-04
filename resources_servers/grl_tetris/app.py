@@ -21,8 +21,8 @@ import numpy as np
 from fastapi import HTTPException
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.grl_tetris.tetris_env import TetrisEnv
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
@@ -62,7 +62,7 @@ class GrlTetrisResourcesServer(GymnasiumServer):
         if session_id is None:
             raise HTTPException(status_code=400, detail="Missing session id.")
 
-        self._close_env(session_id)
+        self._cleanup_session(session_id)
 
         env = TetrisEnv(self._env_config_from_metadata(metadata))
         observation = env.reset(seed=metadata.get("seed"))
@@ -127,8 +127,9 @@ class GrlTetrisResourcesServer(GymnasiumServer):
                 env_config[key] = metadata[key]
         return env_config
 
-    def _close_env(self, session_id: str) -> None:
+    def _cleanup_session(self, session_id: Optional[str]) -> None:
         session_state = self.session_id_to_state.pop(session_id, None)
+        super()._cleanup_session(session_id)
         if session_state is None:
             return
         try:

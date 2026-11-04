@@ -16,22 +16,23 @@ import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 from pytest import approx, fixture
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _DUMMY_EXCLUDE_DOMAINS_FILE = os.path.join(os.path.dirname(_TEST_DIR), "tests", "dummy_exclude_domains_file.json")
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     BrowseRequest,
     TavilySearchRequest,
@@ -236,6 +237,7 @@ class TestApp:
         post_mock.json = AsyncMock(
             return_value=self._create_judge_response("extracted_final_answer: Paris\ncorrect: yes")
         )
+        post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
         server_client.post = AsyncMock(return_value=post_mock)
 
         req = TavilySearchVerifyRequest(
@@ -257,6 +259,7 @@ class TestApp:
         post_mock.json = AsyncMock(
             return_value=self._create_judge_response("extracted_final_answer: London\ncorrect: no")
         )
+        post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
         server_client.post = AsyncMock(return_value=post_mock)
 
         req = TavilySearchVerifyRequest(

@@ -13,39 +13,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Answer Scorer -- Nemo-Gym Resources Server
+Litmus Answer Scorer -- NeMo Gym Resources Server
 
-Domain-agnostic verifier that scores a model's *answer* against a known
-``expected_answer``. It is the generic generalization of the
-``rdkit_chemistry`` verifier: the scoring path never depended on chemistry, so
-this server keeps only that path and drops everything RDKit-specific.
+Domain-agnostic verifier that scores a model's final answer against a known
+``expected_answer``. Domain context is accepted as pass-through metadata and is
+never interpreted by the scorer.
 
 What it does
 ------------
 1. Extracts the model's final answer text from the rollout trajectory.
 2. Pulls a value out of that text using the row's ``output_regex`` when present,
-   otherwise the requested ``answer_format`` regex (the ``fmt_XX`` family) -- the
-   same wrapper-syntax extraction the chemistry server used, which was already
-   domain-independent.
+   otherwise the requested ``answer_format`` regex (the ``fmt_XX`` family).
 3. Scores it against ``expected_answer`` using a small ``answer_type`` taxonomy
    that selects the comparison rule.
 
 What it deliberately is NOT
 ---------------------------
-* It is **not** tied to any domain: there is no ``chembl_id``, ``smiles``, or
-  RDKit property enum. Domain context fields ride along as *pass-through*
-  fields (``model_config = ConfigDict(extra="allow")``) -- accepted, preserved,
-  echoed back, but never required or interpreted by the scorer.
+* It is **not** tied to any domain. Domain context fields ride along as
+  *pass-through* fields (``model_config = ConfigDict(extra="allow")``) --
+  accepted, preserved, echoed back, but never required or interpreted.
 * It executes tools **only when configured to**. By default it is a pure
   verifier, and scoring a tool-using rollout is identical to scoring a direct
   one (extract value -> compare). When ``sandbox_provider`` is set, the server
   additionally hosts a single stateful code-execution tool (default name
   ``stateful_python_code_exec``) backed by the provider-neutral
-  ``nemo_gym.sandbox`` facade, so tool-using rows can run code without pairing a
-  separate tool server (the ``ns_tools`` + ``sandbox_launcher`` pairing that
-  ``rdkit_chemistry`` used). The sandbox runs commands, not a live kernel, so
+  ``nemo_gym.sandbox`` facade. The sandbox runs commands, not a live kernel, so
   statefulness across calls within a session is emulated by replaying prior
-  (known-good) cells with their output suppressed before each new cell.
+  known-good cells with their output suppressed before each new cell.
 * It does **not** read the question. The question lives in
   ``responses_create_params.input`` and is the model's concern; the scorer only
   sees the model's response and ``expected_answer``.
@@ -80,6 +74,7 @@ integer (``exact``) in another, and within a tolerance window in a third. Custom
 rules are added by registering a new entry in ``REWARD_RULES``.
 
 Reward is 0.0 for an unextractable (None) or NaN prediction.
+
 """
 
 from __future__ import annotations
@@ -99,15 +94,17 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.verification import judge_failsafe
 
 
 # ---------------------------------------------------------------------------
@@ -119,27 +116,12 @@ BOOL = "bool"
 STRING = "string"
 _SUPPORTED_ANSWER_TYPES = {FLOAT, BOOL, STRING}
 
-# Back-compat: map litmus-bench's chemistry ``property_type`` onto an
-# ``answer_type`` so rows exported before the export switches to ``answer_type``
-# still score. Remove once the export emits ``answer_type`` directly. Integer
-# kinds (count/fragment) map to ``float`` -- the int-vs-float distinction is a
-# scoring concern (reward rule), not a parsing one.
-_PROPERTY_TYPE_TO_ANSWER_TYPE = {
-    "float": FLOAT,
-    "count": FLOAT,
-    "fragment": FLOAT,
-    "bool": BOOL,
-    "presence": BOOL,
-}
-
 _TRUE_TOKENS = {"1", "1.0", "true", "yes", "present", "t", "y"}
 _FALSE_TOKENS = {"0", "0.0", "false", "no", "absent", "f", "n"}
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
 
-# Answer-format wrapper regexes. Lifted verbatim from rdkit_chemistry: the
-# capture syntax is domain-independent (it just locates the answer in arbitrary
-# wrapper text), so it is reused unchanged.
+# Answer-format wrapper regexes locate the answer in arbitrary wrapper text.
 _ANSWER_FORMAT_REGEXES: dict[str, re.Pattern[str]] = {
     "fmt_00": re.compile(r"\(\((.*?)\)\)", re.S),
     "fmt_01": re.compile(r"\(Answer:\s*(.+?)\)", re.S),
@@ -182,9 +164,8 @@ _ANSWER_FORMAT_REGEXES: dict[str, re.Pattern[str]] = {
 # The sandbox runs one-shot commands, not a live Python kernel, so per-session
 # statefulness is emulated by replaying every prior (known-good) cell with its
 # output suppressed before running the newest cell. Only the newest cell's
-# stdout/stderr is returned. This is faithful for pure, deterministic code (the
-# litmus domain): the one cost -- prior cells re-run their side effects each
-# call -- does not apply when cells only compute and print.
+# stdout/stderr is returned. This is faithful for pure, deterministic code; the
+# tradeoff is that prior cells repeat their side effects on every call.
 
 # Where the driver is uploaded inside the sandbox and the env var carrying the
 # base64-encoded JSON list of cells for a single invocation.
@@ -300,15 +281,13 @@ class LitmusAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     expected_answer: Union[str, float, int]
-    # Selects how the answer is parsed. Optional so legacy rows carrying only
-    # ``property_type`` still resolve via _PROPERTY_TYPE_TO_ANSWER_TYPE.
-    answer_type: Optional[str] = None
+    # Selects how the captured answer is parsed.
+    answer_type: str
     # Preferred parser: a regex string carried directly on the row (exactly one
     # capture group). When present it wins over ``answer_format``; see
     # extract_predicted_value for the full resolution order.
     output_regex: Optional[str] = None
     answer_format: Optional[str] = None
-    use_box_format: bool = False
     # Per-row reward-rule override: {"rule": <name>, **params}. When absent, the
     # default rule for the resolved answer_type (_DEFAULT_RULE) applies.
     match: Optional[Dict[str, Any]] = None
@@ -325,14 +304,15 @@ class LitmusAgentVerifyResponse(BaseVerifyResponse):
     correct: bool = False
     resolved_answer_type: str = ""
     resolved_reward_rule: str = ""
+    # |predicted - expected| for float answers with a parseable prediction.
+    abs_error: Optional[float] = None
 
 
 # Fields verify() sets explicitly; passthrough dataset fields sharing these names
 # are dropped before the splat so they can't collide (see verify()).
 _RESERVED_RESPONSE_FIELDS = frozenset(
-    {"reward", "predicted_value", "correct", "resolved_answer_type", "resolved_reward_rule"}
+    {"reward", "predicted_value", "correct", "resolved_answer_type", "resolved_reward_rule", "abs_error"}
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers: response text extraction
@@ -360,25 +340,11 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 # ---------------------------------------------------------------------------
 
 
-def resolve_answer_type(answer_type: Optional[str], extra: Dict[str, Any]) -> str:
-    """Resolve the effective answer_type, falling back to legacy property_type.
-
-    Raises ValueError if neither yields a supported type, so misconfigured rows
-    fail loudly rather than scoring as 0.0 silently.
-    """
-    if answer_type:
-        if answer_type not in _SUPPORTED_ANSWER_TYPES:
-            raise ValueError(f"Unsupported answer_type={answer_type!r}")
-        return answer_type
-
-    legacy = extra.get("property_type")
-    mapped = _PROPERTY_TYPE_TO_ANSWER_TYPE.get(legacy) if isinstance(legacy, str) else None
-    if mapped is None:
-        raise ValueError(
-            f"No answer_type given and property_type={legacy!r} is not mappable; "
-            f"set one of {sorted(_SUPPORTED_ANSWER_TYPES)}"
-        )
-    return mapped
+def resolve_answer_type(answer_type: str) -> str:
+    """Validate the row's explicit answer type before scoring."""
+    if answer_type not in _SUPPORTED_ANSWER_TYPES:
+        raise ValueError(f"Unsupported answer_type={answer_type!r}")
+    return answer_type
 
 
 def _capture_with_pattern(text: str, pattern: re.Pattern[str]) -> Optional[str]:
@@ -455,7 +421,6 @@ def extract_predicted_value(
     *,
     output_regex: Optional[str] = None,
     answer_format: Optional[str] = None,
-    use_box_format: bool = False,
 ) -> Optional[Union[float, str]]:
     """Extract the model's predicted value from its response text.
 
@@ -469,8 +434,7 @@ def extract_predicted_value(
     2. ``answer_format``: look up a regex by ``fmt_XX`` name in the registry
        kept for rows exported without an ``output_regex``. Unknown names raise
        ``ValueError`` so bad data fails loudly.
-    3. ``use_box_format``: very-legacy fallback -- boxed when true, double
-       parentheses when false.
+    3. Double parentheses (``fmt_00``) when neither extractor is specified.
 
     Returns None when nothing can be extracted.
     """
@@ -481,7 +445,7 @@ def extract_predicted_value(
     if output_regex is not None:
         raw = _capture_with_pattern(text, _compile_output_regex(output_regex))
     else:
-        fmt = answer_format or ("fmt_07" if use_box_format else "fmt_00")
+        fmt = answer_format or "fmt_00"
         raw = _raw_capture(text, fmt)
     if raw is None:
         return None
@@ -557,6 +521,22 @@ def _normalize_str(value: object) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _compute_abs_error(predicted: Any, expected: Any, answer_type: str) -> Optional[float]:
+    """|predicted - expected| for continuous rows, else None.
+
+    None also covers an unparseable prediction or a non-numeric expected value,
+    so a rollout that produced no answer is excluded from the mean rather than
+    scoring an error of 0.
+    """
+    if answer_type != FLOAT or predicted is None:
+        return None
+    try:
+        error = abs(float(predicted) - float(expected))
+    except (TypeError, ValueError):
+        return None
+    return error if math.isfinite(error) else None
+
+
 def resolve_reward_rule(answer_type: str, match: Optional[Dict[str, Any]]) -> tuple[str, Dict[str, Any]]:
     """Resolve (rule_name, params) from a per-row ``match`` or the type default.
 
@@ -628,7 +608,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         # Swap the base ``/verify`` route for a session-aware wrapper so a
         # finished rollout's sandbox is reaped. verify() itself is untouched.
         app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) != "/verify"]
-        app.post("/verify")(self._verify_and_cleanup)
+        # Re-apply judge_failsafe: replacing the base route would otherwise drop the
+        # JudgeError -> failures-sidecar guarantee SimpleResourcesServer makes globally.
+        app.post("/verify")(judge_failsafe(self._verify_and_cleanup))
 
         # Tear down any sessions still open when the server stops, so a normal
         # shutdown does not leak sandboxes.
@@ -752,13 +734,13 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         End of a rollout is the natural point to drop the session's sandbox so
         it does not leak; scoring is delegated unchanged to ``verify``.
         """
-        response = await self.verify(body)
-        await self._cleanup_session(request.session.get(SESSION_ID_KEY))
-        return response
+        try:
+            return await self.verify(body)
+        finally:
+            await self._cleanup_session(request.session.get(SESSION_ID_KEY))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
-        extra = body.model_extra or {}
-        answer_type = resolve_answer_type(body.answer_type, extra)
+        answer_type = resolve_answer_type(body.answer_type)
 
         text = _extract_last_assistant_text(body)
         predicted = extract_predicted_value(
@@ -766,7 +748,6 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             answer_type,
             output_regex=body.output_regex,
             answer_format=body.answer_format,
-            use_box_format=body.use_box_format,
         )
         rule_name, _ = resolve_reward_rule(answer_type, body.match)
         reward = compute_reward(
@@ -792,13 +773,19 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             correct=reward == 1.0,
             resolved_answer_type=answer_type,
             resolved_reward_rule=rule_name,
+            abs_error=_compute_abs_error(predicted, body.expected_answer, answer_type),
         )
+
+    @staticmethod
+    def _score_fn(r: Dict[str, Any]) -> Dict[str, float]:
+        return {"accuracy": float(r.get("correct", False))}
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Aggregate reward/accuracy, grouped by method x answer_type.
 
         ``method`` is a pass-through field (set by the dataset, e.g.
         direct/mcp-python); it is read here only for grouping, never required.
+        Shared pass@k / majority@k / variance metrics are merged in alongside it.
         """
         rollouts = [r for task in tasks for r in task]
 
@@ -817,16 +804,38 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
                 "mean_reward": statistics.mean(rewards),
             }
 
+        def _mae_stats(group: list) -> Dict[str, Any]:
+            # `mae_count` < `count` means rollouts were skipped (non-continuous
+            # property type, or no parseable answer); read MAE alongside it.
+            errors = [r["abs_error"] for r in group if isinstance(r.get("abs_error"), (int, float))]
+            if not errors:
+                return {"mae": None, "mae_count": 0}
+            return {"mae": statistics.mean(errors), "mae_count": len(errors)}
+
         result: Dict[str, Any] = {}
         for method in sorted(grouped):
             method_rollouts = [r for g in grouped[method].values() for r in g]
             by_atype = {atype: _stats(g) for atype, g in sorted(grouped[method].items())}
             result[method] = {**_stats(method_rollouts), "by_answer_type": by_atype}
+
+        by_property: Dict[str, list] = defaultdict(list)
+        for r in rollouts:
+            by_property[r.get("property", "unknown") or "unknown"].append(r)
+
+        result["by_property"] = {
+            prop: {**_stats(group), **_mae_stats(group)} for prop, group in sorted(by_property.items())
+        }
+
+        result.update(compute_pass_majority_metrics(tasks, score_fn=self._score_fn, answer_key="predicted_value")[0])
         return result
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
-        keys = {"mean/reward", "mean/correct"}
-        return {k: v for k, v in agent_metrics.items() if k in keys}
+        keys = {"mean/reward", "mean/correct", "mean/abs_error", "mean/input_tokens", "mean/output_tokens"}
+        key = {k: v for k, v in agent_metrics.items() if k in keys}
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "majority@{k}", score_names=["accuracy"]))
+        return key
 
 
 if __name__ == "__main__":

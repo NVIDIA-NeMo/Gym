@@ -26,3 +26,11 @@ anyterminal_claude_code:
         - name: example
           type: example
           jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl
+
+anyterminal_claude_code_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: anyterminal_claude_code

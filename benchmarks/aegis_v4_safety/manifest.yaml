@@ -1,0 +1,30 @@
+name: aegis_v4_safety
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: safety
+description: Evaluate target-model prompts and responses with NVIDIA Nemotron 3 Content Safety (Aegis v4)
+modality: text
+licensing: Apache-2.0
+authors:
+- muskank7
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: aegis_v4_safety
+agent_server: simple_agent
+datasets:
+- name: aegis_v4_safety
+  type: benchmark
+  jsonl_fpath: benchmarks/aegis_v4_safety/data/aegis_v4_safety_benchmark.jsonl
+  prepare_script: benchmarks/aegis_v4_safety/prepare.py
+  prompt_config: benchmarks/aegis_v4_safety/prompt.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/aegis_v4_safety/prompt.yaml
+lifecycle: active

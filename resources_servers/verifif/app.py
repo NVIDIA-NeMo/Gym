@@ -26,6 +26,7 @@ import json
 import logging
 import re
 import sys
+from contextvars import ContextVar
 from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
@@ -33,14 +34,21 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import NeMoGymAsyncOpenAI
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.verification import JudgeError
+
+
+# Per-request collector for judge failures. A ContextVar is shared by reference
+# across the asyncio.gather child tasks a verify() spawns, so failures raised in
+# any child task are recorded here rather than silently scored via the fallback string.
+_JUDGE_ERRORS: ContextVar[Optional[List[str]]] = ContextVar("verifif_judge_errors", default=None)
 
 
 # Handle imports for both direct execution and module import
@@ -326,7 +334,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             api_key = self.config.judge_api_key or getattr(self.config, "policy_api_key", "")
 
             if self.config.judge_server_name:
-                from nemo_gym.server_utils import get_server_url
+                from nemo_gym.client import get_server_url
 
                 base_url = get_server_url(self.config.judge_server_name) + "/v1"
             else:
@@ -436,6 +444,9 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             return out
         except Exception as e:
             logger.warning("Judge LLM call failed: %s", type(e).__name__, exc_info=False)
+            errs = _JUDGE_ERRORS.get()
+            if errs is not None:
+                errs.append(f"{type(e).__name__}: {e}")
             return fallback
 
     async def _validate_custom_llm_judge_async(self, response: str, question_text: str) -> Tuple[bool, str]:
@@ -745,6 +756,9 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             TuringVIFVerifyResponse with reward and validation details
         """
         final_response_text = _extract_text_from_response(body.response)
+        # Collect judge failures raised during this request (see _JUDGE_ERRORS).
+        judge_errors: List[str] = []
+        _JUDGE_ERRORS.set(judge_errors)
 
         is_following_list: List[bool] = []
         validation_results: List[ValidationResult] = []
@@ -910,13 +924,17 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
         scores = [1.0 if v else 0.0 for v in is_following_list]
         reward = self._aggregate_scores(scores)
 
-        return TuringVIFVerifyResponse(
+        response = TuringVIFVerifyResponse(
             **body.model_dump(),
             reward=reward,
             follow_all_instructions=follow_all_instructions,
             follow_instruction_list=is_following_list,
             validation_results=validation_results,
         )
+        # A judge failure means an instruction couldn't be scored; don't trust a fallback-verdict reward.
+        if judge_errors:
+            raise JudgeError("; ".join(judge_errors))
+        return response
 
 
 if __name__ == "__main__":

@@ -1,0 +1,30 @@
+name: mobench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: Lean4 formal proof verification environment
+modality: text
+licensing: unknown
+authors:
+- stephencge
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: math_formal_lean
+agent_server: simple_agent
+datasets:
+- name: mobench
+  type: benchmark
+  jsonl_fpath: benchmarks/mobench/data/mobench_benchmark.jsonl
+  prepare_script: benchmarks/mobench/prepare.py
+  prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
+  num_repeats: 32
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
+lifecycle: active

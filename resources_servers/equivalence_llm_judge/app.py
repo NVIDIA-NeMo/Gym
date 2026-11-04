@@ -23,26 +23,138 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import Counter
 from contextlib import nullcontext
-from typing import Any, Optional
+from pathlib import Path
+from statistics import fmean
+from typing import Any, ClassVar, Optional
+from urllib.parse import quote
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ReverifyMode,
+    SimpleResourcesServer,
+    observe_llm_judge_grading,
+)
+from nemo_gym.verification import VerifierFixture, call_judge, record_parsed_judge_verdict
+from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
+
+
+# Aggregate parsing metric, also included in key_metrics.
+JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
+# Prefix of the per-label accuracy slices emitted for `report_slice_fields`.
+SLICES_PREFIX = "slices/"
+
+
+def _match_verdict_labels(
+    text: str, equal_label: str, not_equal_label: str, case_insensitive: bool = False
+) -> list[str]:
+    """Return non-overlapping verdict labels in text order.
+
+    Consume each match so INCORRECT does not also count as CORRECT. With ``case_insensitive`` the
+    search runs on the ``str.casefold`` forms of the text and the labels, so "Judgement: Yes" matches
+    the configured "Judgement: yes"; the returned entries are always the configured labels as written.
+    """
+    labels = (equal_label, not_equal_label)
+    if case_insensitive:
+        text = text.casefold()
+        needles = tuple(label.casefold() for label in labels)
+    else:
+        needles = labels
+    eq_needle, neq_needle = needles
+    matches = []
+    i = 0
+    # Search by match position to avoid scanning each character in Python.
+    while i < len(text):
+        eq_at = text.find(eq_needle, i) if eq_needle else -1
+        neq_at = text.find(neq_needle, i) if neq_needle else -1
+        if eq_at < 0 and neq_at < 0:
+            break
+        if eq_at == neq_at:
+            # Prefer the longer label when both start here.
+            which = 0 if len(eq_needle) > len(neq_needle) else 1
+            pos = eq_at
+        elif neq_at < 0 or (eq_at >= 0 and eq_at < neq_at):
+            which, pos = 0, eq_at
+        else:
+            which, pos = 1, neq_at
+        matches.append(labels[which])
+        i = pos + len(needles[which])
+    return matches
+
+
+def _parse_judge_verdict(
+    text: Optional[str],
+    equal_label: str,
+    not_equal_label: str,
+    truncated: bool = False,
+    case_insensitive: bool = False,
+) -> tuple[Optional[str], list[str]]:
+    """Return the last verdict and any parsing issues."""
+    if text is None:
+        issues = ["unparseable_judge_output"]
+        if truncated:
+            issues.insert(0, "truncated_judge_output")
+        return None, issues
+
+    matches = _match_verdict_labels(text, equal_label, not_equal_label, case_insensitive=case_insensitive)
+    counts = Counter(matches)
+    eq_count, neq_count = counts[equal_label], counts[not_equal_label]
+    issues = []
+    if eq_count == 0 and neq_count == 0:
+        if truncated:
+            issues.append("truncated_judge_output")
+        issues.append("no_verdict")
+    else:
+        if eq_count > 0 and neq_count > 0:
+            issues.append("conflicting_verdicts")
+        if eq_count > 1 or neq_count > 1:
+            issues.append("repeated_verdict")
+
+    return matches[-1] if matches else None, issues
+
+
+def _compute_slice_metrics(tasks: list[list[dict[str, Any]]], fields: list[str]) -> dict[str, Any]:
+    """Accuracy per label of each configured row field, e.g. HLE-Diamond's reasoning/knowledge partition.
+
+    Emits ``slices/<field>/<label>/{question_count,rollout_count,mean/reward}`` plus the number of
+    rollouts whose label is missing. Masked rollouts never reach here, so slices share the headline's
+    denominator semantics. Empty ``fields`` emits nothing, and a run in which no rollout was judged
+    emits no metrics at all (``compute_metrics`` returns early, as it did before this hook).
+    """
+    metrics: dict[str, Any] = {}
+    for field in fields:
+        rows_by_label: dict[str, list[dict[str, Any]]] = {}
+        questions_by_label: Counter[str] = Counter()
+        missing = 0
+        for task in tasks:
+            labels_in_task: set[str] = set()
+            for rollout in task:
+                label = rollout.get(field)
+                if label is None or (isinstance(label, str) and not label.strip()):
+                    missing += 1
+                    continue
+                rows_by_label.setdefault(str(label), []).append(rollout)
+                labels_in_task.add(str(label))
+            questions_by_label.update(labels_in_task)
+        metrics[f"{SLICES_PREFIX}{field}/missing_label_rollouts"] = missing
+        for label, rows in sorted(rows_by_label.items()):
+            prefix = f"{SLICES_PREFIX}{field}/{quote(label, safe='')}/"
+            metrics[prefix + "question_count"] = questions_by_label[label]
+            metrics[prefix + "rollout_count"] = len(rows)
+            metrics[prefix + "mean/reward"] = fmean(float(rollout.get("reward") or 0.0) for rollout in rows)
+    return metrics
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -56,6 +168,8 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     - judge_equal_label / judge_not_equal_label: labels the judge must output.
     """
 
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     # Default logical name for this resources server
     name: str = "equivalence_llm_judge"
     judge_model_server: ModelServerRef
@@ -68,6 +182,11 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
+    # Match the two labels case-insensitively (str.casefold) when parsing the verdict. Off by default,
+    # which keeps the byte-exact match every existing config was measured with. HLE-Diamond turns it on:
+    # upstream's judge reads a structured `correct: yes|no` field whose case cannot vary, whereas here a
+    # judge that writes "Judgement: Yes" would otherwise yield no_verdict and a reward of 0.
+    judge_labels_case_insensitive: bool = False
     # Optional regex to extract the question from the last user message.
     # If provided and a match is found, the first non-empty capture group is used;
     # otherwise the full match is used.
@@ -77,11 +196,21 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # returned; otherwise, the entire last match is used.
     response_extract_regex: Optional[str] = None
     msg_extraction_failure: str = "[NO VALID ANSWER EXTRACTED]"
+    max_answer_chars: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Score longer final assistant answers zero without calling the judge. Thinking is excluded.",
+    )
 
     # Swap check: Run second judge pass with swapped expected/generated to detect positional bias
     check_twice_swap: bool = False
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
+
+    # Row fields to slice accuracy by (e.g. ["partition"] for HLE-Diamond). Each configured field adds
+    # slices/<field>/<label>/{question_count,rollout_count,mean/reward} to agent_metrics and promotes the
+    # slice means to key_metrics. Empty by default: metrics are unchanged.
+    report_slice_fields: list[str] = Field(default_factory=list)
 
     # ========================================================================
     # Per-Record Regex Features (OpenQA support)
@@ -109,6 +238,19 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # Default is 0.5 (partial credit).
     reward_if_full_generation_succeeds: float = 0.5
 
+    @model_validator(mode="after")
+    def _labels_stay_distinct_when_case_is_ignored(self) -> LLMJudgeResourcesServerConfig:
+        if (
+            self.judge_labels_case_insensitive
+            and self.judge_equal_label != self.judge_not_equal_label
+            and self.judge_equal_label.casefold() == self.judge_not_equal_label.casefold()
+        ):
+            raise ValueError(
+                "judge_equal_label and judge_not_equal_label differ only in case, so "
+                "judge_labels_case_insensitive=true could never tell the verdicts apart"
+            )
+        return self
+
 
 class LLMJudgeRunRequest(BaseRunRequest):
     """Run/verify request payload.
@@ -129,14 +271,36 @@ class LLMJudgeVerifyRequest(LLMJudgeRunRequest, BaseVerifyRequest):
     pass
 
 
+# Legacy in-band service failures remain readable when aggregating old runs.
+# New failures go through the shared judge_failed sidecar instead.
+JUDGE_ERROR_LABEL = "JUDGE_ERROR"
+
+
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    response: NeMoGymResponse
-    # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]".
+    # None on legacy rows whose judge call failed.
+    response: Optional[NeMoGymResponse] = None
+    # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]",
+    # or JUDGE_ERROR_LABEL when the judge itself failed.
     verdict_label: Optional[str] = None
+    # Per-evaluation parsing issues; empty when none were detected.
+    judgement_parsing_issues: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_judgement_parsing_issues(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Omit empty parsing issues; older rollouts may also lack this field."""
+        data = handler(self)
+        if not data.get("judgement_parsing_issues"):
+            data.pop("judgement_parsing_issues", None)
+        return data
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
+    """Verify response; echoes the request's extra row fields (``uuid``, dataset labels such as
+    ``partition``) so saved rollouts keep them for ``report_slice_fields`` and other metric hooks."""
+
+    model_config = ConfigDict(extra="allow")
+
     expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
 
@@ -231,6 +395,18 @@ def _extract_question_text(
             c = getattr(m, "content", None)
             if isinstance(c, str):
                 last_text = c
+            elif isinstance(c, list):
+                # Multimodal user turns (e.g. vision rows) carry a content list;
+                # join the text blocks so the judge still sees the question.
+                texts: list[str] = []
+                for block in c:
+                    t = getattr(block, "text", None)
+                    if t is None and isinstance(block, dict):
+                        t = block.get("text")
+                    if isinstance(t, str):
+                        texts.append(t)
+                if texts:
+                    last_text = "\n".join(texts)
     text = (last_text or "").strip()
     if not text:
         return text
@@ -256,6 +432,11 @@ def _extract_question_text(
 class LLMJudgeResourcesServer(SimpleResourcesServer):
     """Judge-only verifier using an LLM to compare answers."""
 
+    # Each verification is one judge call: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+
     config: LLMJudgeResourcesServerConfig
 
     def __init__(self, *args, **kwargs):
@@ -268,10 +449,6 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         with open(self.config.judge_prompt_template_fpath, "r") as f:
             self._judge_prompt_template = f.read().strip()
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        return app
 
     def _should_skip_for_length(self, body: LLMJudgeVerifyRequest, expected: str) -> bool:
         """Check if length threshold should skip second evaluation (rescue or swap).
@@ -403,15 +580,26 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         """Verify model response by comparing with expected answer using LLM judge.
 
         Flow:
-        1. Extract question and expected answer
+        1. Extract expected answer; reject empty or over-limit final text; extract question
         2. Determine extraction regex (per-record override, length threshold)
         3. Extract answer to judge (could be regex-extracted OR full generation)
         4. Run first judge evaluation on extracted answer
         5. Handle failure → rescue with full generation or immediate fail
         6. Handle success → swap check or immediate success
         """
-        # Step 1: Extract question and expected answer
+        # Step 1: Check the raw final answer before applying extraction or calling the judge.
         expected = _extract_expected_answer(body) or ""
+        answer = _extract_last_assistant_text(body, extract_regex=None)
+        if not answer:
+            result = self._make_response(body, expected, reward=0.0, evaluations=[])
+            result.failure_reason = "empty_final_answer"
+            return result
+        if self.config.max_answer_chars is not None and len(answer) > self.config.max_answer_chars:
+            result = self._make_response(body, expected, reward=0.0, evaluations=[])
+            result.failure_reason = (
+                f"final_answer_too_long: {len(answer)} characters exceeds {self.config.max_answer_chars}"
+            )
+            return result
         question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
 
         # Step 2: Determine extraction regex (None if long answer triggers threshold)
@@ -424,16 +612,19 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             body, extract_regex, extraction_failure_message=self.config.msg_extraction_failure
         )
 
-        # Step 4: Run first judge evaluation
-        first_equal, first_eval = await self._generate_judge_evaluation(
-            question=question, expected_answer=expected, generated_answer=generated
-        )
+        async def grade() -> LLMJudgeVerifyResponse:
+            # Step 4: Run first judge evaluation
+            first_equal, first_eval = await self._generate_judge_evaluation(
+                question=question, expected_answer=expected, generated_answer=generated
+            )
 
-        # Step 5 & 6: Handle result based on first evaluation
-        if not first_equal:
-            return await self._handle_first_pass_failed(body, expected, question, first_eval)
-        else:
+            # Step 5 & 6: Handle result based on first evaluation
+            if not first_equal:
+                return await self._handle_first_pass_failed(body, expected, question, first_eval)
             return await self._handle_first_pass_succeeded(body, expected, question, generated, first_eval)
+
+        # Every judge pass (rescue and swap included) is a dependency of the returned grade.
+        return await observe_llm_judge_grading(grade)
 
     async def _generate_judge_evaluation(
         self, *, question: str, expected_answer: str, generated_answer: str
@@ -457,19 +648,15 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         responses_create_params.input = msgs
 
         async with self._judge_endpoint_max_concurrency:
-            try:
-                response = await self.server_client.post(
-                    server_name=cfg.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=responses_create_params,
-                )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as e:
-                print(
-                    f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",
-                    flush=True,
-                )
-                raise e
+            # Let the shared verify-endpoint failsafe preserve exhausted judge
+            # failures for `gym eval reverify --judge-failed-only`.
+            judge_response = await call_judge(
+                self.server_client,
+                server_name=cfg.judge_model_server.name,
+                url_path="/v1/responses",
+                json=responses_create_params,
+                response_model=NeMoGymResponse,
+            )
 
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
@@ -480,23 +667,99 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         # Parse the last output; fall back to not-equal if unexpected.
         try:
             last_output = judge_response.output[-1]
-            if getattr(last_output, "type", None) != "message":
-                return False, eval_record
-            last_content = last_output.content[-1]
-            text = getattr(last_content, "text", "")
+            is_message = getattr(last_output, "type", None) == "message"
+            text = getattr(last_output.content[-1], "text", "") if is_message else None
         except Exception:
-            return False, eval_record
+            text = None
 
-        eq_pos = text.find(equal_label)
-        neq_pos = text.find(not_equal_label)
-        if eq_pos < 0 and neq_pos < 0:
-            eval_record.verdict_label = None
-            return False, eval_record
-        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
-            eval_record.verdict_label = equal_label
-            return True, eval_record
-        eval_record.verdict_label = not_equal_label
-        return False, eval_record
+        eval_record.verdict_label, eval_record.judgement_parsing_issues = _parse_judge_verdict(
+            text,
+            equal_label,
+            not_equal_label,
+            truncated=judge_response.status == "incomplete",
+            case_insensitive=cfg.judge_labels_case_insensitive,
+        )
+        if (
+            equal_label != not_equal_label
+            and eval_record.verdict_label is not None
+            and judge_response.status != "incomplete"
+            and not {"conflicting_verdicts", "truncated_judge_output"} & set(eval_record.judgement_parsing_issues)
+        ):
+            # Only an unambiguous, complete verdict is a parsed grade; the not-equal fallback stays unknown.
+            record_parsed_judge_verdict()
+        return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Aggregate parsing issues, recovering missing diagnostics from saved responses.
+
+        Exclude service failures and records without diagnostics or a saved response.
+        Count each rollout once, including runs with multiple judge passes.
+        """
+        kind_counts: Counter[str] = Counter()
+        judged = 0
+        rollouts_with_issues = 0
+        for task in tasks:
+            for rollout in task:
+                issues: set[str] = set()
+                measured = False
+                for evaluation in rollout.get("judge_evaluations") or []:
+                    if not evaluation or evaluation.get("verdict_label") == JUDGE_ERROR_LABEL:
+                        continue
+                    parsing_issues = evaluation.get("judgement_parsing_issues")
+                    if parsing_issues is None:
+                        response = evaluation.get("response")
+                        if not isinstance(response, dict):
+                            continue
+                        # Preserve the verifier's last-output, last-content-block extraction.
+                        try:
+                            last_output = response["output"][-1]
+                            text = (
+                                last_output["content"][-1].get("text", "")
+                                if last_output.get("type") == "message"
+                                else None
+                            )
+                        except (KeyError, IndexError, TypeError, AttributeError):
+                            text = None
+                        _, parsing_issues = _parse_judge_verdict(
+                            text,
+                            self.config.judge_equal_label,
+                            self.config.judge_not_equal_label,
+                            truncated=response.get("status") == "incomplete",
+                            case_insensitive=self.config.judge_labels_case_insensitive,
+                        )
+                    measured = True
+                    issues.update(parsing_issues)
+
+                if measured:
+                    judged += 1
+                    rollouts_with_issues += bool(issues)
+                    kind_counts.update(issues)
+
+        if not judged:
+            return {}
+        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / judged}
+        for kind, count in sorted(kind_counts.items()):
+            metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
+        metrics.update(_compute_slice_metrics(tasks, self.config.report_slice_fields))
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        """Add the parsing-issue rate and any per-label slice accuracies to the default mean metrics."""
+        key = super().get_key_metrics(agent_metrics)
+        if JUDGEMENT_PARSING_ISSUE_RATE in agent_metrics:
+            key[JUDGEMENT_PARSING_ISSUE_RATE] = agent_metrics[JUDGEMENT_PARSING_ISSUE_RATE]
+        key.update(
+            {k: v for k, v in agent_metrics.items() if k.startswith(SLICES_PREFIX) and k.endswith("/mean/reward")}
+        )
+        return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_hle_verified_server,
+    request_model=LLMJudgeVerifyRequest,
+    cases_path=Path(__file__).parent / "tests/hle_verified_verifier_cases.jsonl",
+    invoke=invoke_hle_verified,
+)
 
 
 if __name__ == "__main__":

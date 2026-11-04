@@ -1,0 +1,25 @@
+config_paths:
+- benchmarks/hle/pi.yaml
+tavily:
+  resources_servers:
+    tavily_search:
+      entrypoint: app.py
+      domain: agent
+      description: Tavily search and page tools
+      expose_tools_over_mcp: true
+      tavily_api_key: ${oc.env:TAVILY_API_KEY}
+      exclude_domains_file_path: benchmarks/hle/search_exclusions.json
+      use_judge: false
+      max_cached_page_chars: 200000
+      max_scroll_words: 2000
+      verified: false
+hle_pi_agent:
+  responses_api_agents:
+    pi_sandboxed_agent:
+      network_access: model_and_tools
+      system_prompt: |
+        Direct internet access is disabled on this machine. Tavily search and browsing tools are available if useful for the task.
+        Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+      tool_servers:
+      - type: resources_servers
+        name: tavily

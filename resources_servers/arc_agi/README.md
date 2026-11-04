@@ -30,20 +30,18 @@ policy_model_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 ```
 cd Gym/
 
-# ARC-AGI-1
+# Clone ARC-AGI-1 and ARC-AGI-2 into the Gym root
 git clone https://github.com/fchollet/ARC-AGI
+git clone https://github.com/arcprize/ARC-AGI-2
+
 cd resources_servers/arc_agi
 python3 create_dataset.py
-
-# ARC-AGI-2
-git clone https://github.com/arcprize/ARC-AGI-2
-cd resources_servers/arc_agi
 python3 create_dataset.py --version 2
+cd ../..
 ```
 
 ### Install Gym:
 ```
-cd Gym/ 
 uv venv 
 source .venv/bin/activate
 uv sync 

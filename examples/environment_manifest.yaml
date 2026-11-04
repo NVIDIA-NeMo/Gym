@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: example_environment
+version: 1.0.0
+kind: environment
+integration_profile: custom-gym-verifier
+domain: math
+description: Minimal example of the environment manifest contract.
+modality: text
+licensing: Apache-2.0
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: seeded
+resources_server: example_resources_server
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: validation
+    type: validation
+    jsonl_fpath: data/validation.jsonl

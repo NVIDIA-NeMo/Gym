@@ -84,6 +84,11 @@ def _entry_point_loaders() -> dict[str, ProviderLoader]:
     return _ENTRY_POINT_LOADERS
 
 
+def plugin_distributions() -> list[str]:
+    """Names of the installed distributions that publish providers as entry points."""
+    return sorted({ep.dist.name for ep in entry_points(group=ENTRY_POINT_GROUP) if getattr(ep, "dist", None)})
+
+
 def register_provider(name: str, provider_class: ProviderClass, *, override: bool = False) -> None:
     """Register a sandbox provider class."""
     if not name:
@@ -120,6 +125,16 @@ def create_provider(config: Mapping[str, Any]) -> SandboxProvider:
     return provider_class(**dict(provider_kwargs))
 
 
+def provider_service_option_fields(name: str) -> frozenset[str]:
+    """The Compose service options (``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``) provider ``name`` can apply.
+
+    Read from the provider class's ``SERVICE_OPTION_FIELDS`` (see ``SupportsSandboxServiceOptions``), so
+    prepare can check a task against the deployment's provider without instantiating it. A provider
+    without the attribute applies none of them.
+    """
+    return frozenset(getattr(get_provider_class(name), "SERVICE_OPTION_FIELDS", frozenset()))
+
+
 def list_providers() -> list[str]:
     """List available provider names from all sources."""
     return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS, *_entry_point_loaders()})
@@ -143,6 +158,12 @@ def _load_apptainer_provider() -> ProviderClass:
     return ApptainerProvider
 
 
+def _load_enroot_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.enroot import EnrootProvider
+
+    return EnrootProvider
+
+
 def _load_docker_provider() -> ProviderClass:
     from nemo_gym.sandbox.providers.docker import DockerProvider
 
@@ -155,8 +176,30 @@ def _load_ecs_fargate_provider() -> ProviderClass:
     return EcsFargateProvider
 
 
+def _load_e2b_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.e2b import E2BProvider
+
+    return E2BProvider
+
+
+def _load_local_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.local import LocalProvider
+
+    return LocalProvider
+
+
+def _load_openshell_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.openshell import OpenShellProvider
+
+    return OpenShellProvider
+
+
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
+_BUILTIN_PROVIDER_LOADERS["e2b"] = _load_e2b_provider
 _BUILTIN_PROVIDER_LOADERS["ecs_fargate"] = _load_ecs_fargate_provider
+_BUILTIN_PROVIDER_LOADERS["enroot"] = _load_enroot_provider
+_BUILTIN_PROVIDER_LOADERS["local"] = _load_local_provider
 _BUILTIN_PROVIDER_LOADERS["opensandbox"] = _load_opensandbox_provider
+_BUILTIN_PROVIDER_LOADERS["openshell"] = _load_openshell_provider

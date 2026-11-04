@@ -1,24 +1,339 @@
 ---
-title: "Model-call capture"
+title: "Model-Call Capture"
 description: "Optional per-rollout model-call evidence for evaluation and debugging"
 position: 5
 ---
 
 Model-call capture records requests, responses, token usage, tool calls, reasoning, latency, and
-errors at a Gym model server. It does not assemble an agent trajectory or define a training data
-representation.
+errors at a Gym model server. Capture does not modify model responses, agent responses,
+or rollout rewards.
 
-Capture is opt-in and off by default. It does not modify the model response, the agent response, or
-the rollout reward.
+`gym eval submit` enables capture by default under each benchmark's job directory at `model-calls/`.
+Set `driver.benchmarks.<name>.run.observability_enabled: false` to opt out, or set
+`driver.benchmarks.<name>.run.model_call_capture_dir` to an absolute path to customize the directory.
+Other entry points, including local evaluations and training, remain opt-in.
 
-## Enable capture
+## Run an evaluation with capture
 
-Configure capture once at the top level of Gym's global config. The setting applies to every
-`SimpleResponsesAPIModel` in the run:
+This example extends the [quickstart](/main/get-started/quickstart) MCQA evaluation. It assumes that your
+model credentials are already configured in `env.yaml`.
+
+In the first terminal, choose an absolute capture directory and start the servers with capture
+enabled:
+
+```bash
+mkdir -p results/model-calls
+capture_dir="$(pwd)/results/model-calls"
+
+gym env start \
+    --resources-server mcqa \
+    --model-type openai_model \
+    ++observability_enabled=true \
+    ++model_call_capture_dir="${capture_dir}"
+```
+
+In a second terminal, activate the same environment and pass the same capture settings to rollout
+collection:
+
+```bash
+source .venv/bin/activate
+capture_dir="$(pwd)/results/model-calls"
+
+gym eval run --no-serve \
+    --agent mcqa_simple_agent \
+    --input resources_servers/mcqa/data/example.jsonl \
+    --output results/mcqa_rollouts.jsonl \
+    --limit 1 \
+    --num-repeats 1 \
+    ++observability_enabled=true \
+    ++model_call_capture_dir="${capture_dir}"
+```
+
+Inspect the attachment on the first rollout and list the raw capture files:
+
+```bash
+head -n 1 results/mcqa_rollouts.jsonl | jq '.ng_model_call_capture'
+ls -1 "${capture_dir}"
+```
+
+The rollout record is the usual starting point for analysis. Use its `ng_model_call_capture` field
+for normalized calls and aggregate metrics; use the matching file in `CaptureStore` when you need the
+original request and response payloads.
+
+## What capture contains
+
+### Buffered SSE with external token staging
+
+With `token_id_capture.external_staging: true` and `parent_resolution: fingerprint`, captured requests can use `stream: true`
+on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
+Gym requests a complete, non-streaming answer from the inference worker. The worker stages
+training tokens before returning commit coordinates. Gym removes internal token fields,
+converts the answer to the client-visible API format, and serializes the SSE events before
+recording a successful capture and replaying the answer. Capture fingerprints preserve
+namespaced tool identity across the backend and client representations. Conversion or
+serialization failures leave no successful capture record, and capture failures are recorded
+before a terminal `response.failed` event is sent, including when observability is disabled.
+No content is delivered during generation, so buffered SSE does not reduce time to first content.
+
+Worker streaming with external capture remains unsupported. Training reconstruction reads
+the external staged tokens, not the SSE text.
+
+The staging ledger's wire models (`nemo_gym/models/token_capture/staging/records.py`) forbid unknown
+fields, so the model server that stages a call and the framework that rebuilds the rollout from
+the staged rows must run the same Gym version. A framework whose Gym predates a column the model
+server writes, such as `source_capture_key` or `finish_reason`, rejects every manifest row as
+`invalid_manifest_row` and masks the rollout.
+
+### Source-history continuity and context compaction
+
+A compatible training framework can own exact-token prefix reuse and training-row reconstruction.
+Set `token_id_capture.parent_resolution: source_history` to match source history and effective render
+options. Gym sends a root when they do not match or no unique parent can be identified. The default
+`fingerprint` mode continues to match assistant content against captured calls.
+For a candidate parent, the inference worker verifies the converted-message boundary and any
+required null/empty tool-content equivalence before restoring exact tokens. The harness sends its chosen
+message history, including any compaction. It does not send tokens, segment IDs, or a parent header.
+
+Source-history candidates carry an explicit source-match proof. Deploy compatible Gym and RL worker
+revisions together: a missing proof is an error, not permission to assume an exact match.
+Direct roots retain replay evidence and framework safety checks so later calls can continue them.
+
+Staging admissions, snapshots, commit coordinates, manifests and receipts identify the current capture
+attempt with `capture_key`. A carried-over `CallRecord.source_capture_key` identifies the earlier
+attempt that staged that call; when absent, the receipt's own capture key applies. Logical rollout IDs,
+staging-key strings and binary digest encoding are unchanged by these field names.
+
+The staging wire schema is version 3. Gym and every external-staging worker must upgrade together,
+including deployments using ordinary capture with fingerprint parent resolution. Version 2 admissions,
+staged rows, receipts and checkpoints are incompatible and require a separate migration; this change
+does not provide one. Finish or retire existing attempts before upgrading, and do not resume their
+persisted data with the new schema.
+
+Source-history capture rows include output fingerprints, a bounded completion status and minimal original
+text for output validation. Ordinary capture keeps its existing fingerprints and finish reason without
+these additional selection/validation fields. The status is `completed`, `incomplete`, `failed` or
+`unknown`; cancellation and abort mean `failed`, while missing or unrecognized completion information
+means `unknown`. NeMo RL masks a rollout containing a selected failed or unknown completion.
+
+Source-history roots record `root_reason`: `first_call` (no committed history), `no_prefix_match`,
+`non_user_suffix` (an otherwise matching prefix followed by a non-observation item),
+`render_options_changed`, `worker_rooted` (the worker declined a source-compatible candidate),
+or `ambiguous_candidate` (several equally long prefixes match without unique identity).
+These are diagnostic observations, not proof that the harness performed compaction. Ordinary roots
+and continuations leave the field unset. An ambiguous source match starts a new root with no parent
+or staging chain; it does not choose which earlier generation the harness accepted. The trainer must
+still validate training selection independently and reject ambiguous returned-history attribution.
+
+The framework must configure the worker, shared capture ledger and control bearer token as well as
+these run-wide settings:
+
+```yaml
+token_id_capture:
+  enabled: true
+  external_staging: true
+  external_staging_backend: vllm_worker
+  rebuild_response: false
+  parent_resolution: source_history
+```
+
+This requires a framework worker implementing Gym's capture protocol; stock vLLM alone is insufficient.
+Keep the usual per-agent capture opt-in or `all_agents: true`. `rebuild_response: false` preserves
+ordinary rollout output for framework reconstruction instead of Gym's single-chain rebuilding.
+
+| Request | Source-history behavior |
+|---|---|
+| Responses with explicit history | Supported, including buffered SSE. |
+| Responses history item kinds | `message`, `reasoning`, `function_call`, and `function_call_output`. |
+| Other Responses history items, including `web_search_call`, `custom_tool_call`, `custom_tool_call_output`, and opaque `compaction` | Refused with HTTP 422 before capture intent. |
+| Chat Completions with explicit history | Supported, including buffered SSE; one choice. Omitted or null `n` means one. |
+| `/v1/messages` | Refused with HTTP 422. |
+| Responses `previous_response_id` or `conversation` | Refused with HTTP 422; full input must be visible. |
+| Chat `n` other than null or 1 | Refused with HTTP 422. |
+
+Prompt truncation and assistant prefill are unsupported in this mode. Incompatible server settings
+are rejected at startup; unsupported options in request `metadata.extra_body` return HTTP 422 before
+capture intent is recorded, so a corrected request can reuse the attempt.
+
+The policy checkpoint gate supports source-history capture. It publishes the staged call's ledger
+record immediately before forwarding the first answer chunk. Restore carries captured history into
+the new attempt without inheriting the previous attempt's closed-admission state.
+
+Independent calls may overlap. Each registers an intent before inference. Failed or pending capture
+does not block later calls; the manifest retains those outcomes for the trainer. After the harness returns, the
+framework calls the bearer-protected `POST /training-token-capture/control/rollouts/{capture_key}/close-admission`
+then drains already-admitted calls through the manifest endpoint. Closure refuses new generation but
+allows admitted calls to finish. Missing acknowledgements remain pending; failure is not permission
+to delete data that a worker may still be writing. NeMo RL masks an incomplete attempt.
+Closed admission returns HTTP 409 with a reason before generation.
+The same refusal applies to a ledger missing source replay evidence, or a selected storage chain
+with a cycle or missing ancestor. The existing ledger is preserved for diagnosis.
+Use a fresh attempt ID when restarting a rollout.
+Some SDKs automatically retry HTTP 409. External harness clients should disable those automatic
+retries for generation requests; a retry cannot reopen closed admission or repair an unusable ledger.
+
+Framework-owned capture forwards recognized context-length refusals as HTTP 400, even when
+`propagate_context_overflow_errors` is false. The harness decides whether to compact and retry.
+To keep that retry usable, the worker must acknowledge the refused call before generation or
+staging using the internal `x-ng-capture-refused` response header. A ledger implementing
+`refuse_call` settles that intent and retains its audit row, excluding it from the training
+manifest. This header is between the worker and Gym; harnesses neither send nor receive it.
+An error without a matching acknowledgement still leaves capture incomplete.
+
+The model server also exposes `POST /ng-rollout/{rollout_id}/training-token-capture/context/measure`.
+This is a rollout-scoped model route, not a bearer-protected control endpoint.
+Call it with a non-streaming Responses request containing
+explicit history. It returns `{"prompt_token_count": N}` using the same candidate and rendering
+path and rollout-based backend routing as generation, without registering an intent, writing capture
+records, or creating ledger files for an unused rollout. This is a count of
+that request, not a reservation against concurrent changes. Idempotent worker tokenization retains
+ordinary retries. Captured generation retries only failed connection setup, within the configured
+connection limit (three attempts by default); it never resends after uncertain delivery or an HTTP
+error response. Permanent authentication and quota errors still stop further calls to that endpoint.
+
+Framework callers should use `run_examples(retry_requests=False)` to avoid automatically replaying
+an entire `/run` after transport failure. This does not prevent a harness from explicitly making a
+new call after a definite, successfully captured response.
+
+### Rollout-record attachment
+
+`rollout_collection` attaches available model-call data to each rollout. This representative example
+includes a gap to show the complete shape. The `gaps` field is omitted when there are no gaps.
+
+```json
+{
+  "ng_model_call_capture": {
+    "rollout_id": "0-0",
+    "metrics": {
+      "tokens_in": 94,
+      "tokens_out": 28,
+      "tokens_reasoning": 12,
+      "tokens_total": 122,
+      "cached_tokens": 0,
+      "latency_total_ms": 842.7,
+      "num_calls": 1
+    },
+    "calls": [
+      {
+        "model_call_id": "863410a8d52e4be6a31efc5c6e9d4629",
+        "response_id": "resp_123",
+        "call_index": 0,
+        "model_ref": {
+          "type": "responses_api_models",
+          "name": "policy_model"
+        },
+        "model": "gpt-4.1-2025-04-14",
+        "dialect": "responses",
+        "status_code": 200,
+        "response_status": "completed",
+        "tokens_in": 94,
+        "tokens_out": 28,
+        "tokens_reasoning": 12,
+        "tokens_total": 122,
+        "latency_total_ms": 842.7
+      }
+    ],
+    "gaps": [
+      {
+        "code": "model_call_capture_incomplete"
+      }
+    ]
+  }
+}
+```
+
+`metrics.num_calls` is the number of captured calls. Token and latency totals include only values
+reported by the provider; a `null` value means unknown, not zero. For example, Anthropic does not
+report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
+
+After successful [`ng_trajectory`](/main/observability/rollout-evidence#which-artifact-to-read) projection, attached calls
+omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
+remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
+`multimodal_history_redacted` gap omit payload copies from `ng_trajectory`.
+
+A capture write started by a cancelled call runs detached, so a rollout's outstanding writes are
+waited for before its record is snapshotted. If one has not landed by the drain timeout, `gaps`
+includes `model_call_capture_pending`.
+
+The attachment is additive: it does not replace or rewrite the existing response, reward,
+`NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B
+rollout tables omit `ng_trajectory` and model-call request and response payloads.
+
+### Raw `CaptureStore` record
+
+Each rollout has an append-only file named `<rollout_id>.capture.jsonl`. Each line contains one raw
+model-server exchange, including its request and response.
+The following synthetic record shows the exact persisted field shape. It is formatted across lines
+for readability but stored as one JSONL line.
+
+```json
+{
+  "model_call_id": "863410a8d52e4be6a31efc5c6e9d4629",
+  "dialect": "responses",
+  "model_ref": {
+    "type": "responses_api_models",
+    "name": "policy_model"
+  },
+  "started_at": 1786032154.12,
+  "completed_at": 1786032154.96,
+  "latency_ms": 842.7,
+  "latency_ttft_ms": 213.4,
+  "status_code": 200,
+  "error_category": null,
+  "request": {
+    "model": "gpt-4.1-2025-04-14",
+    "input": [{"role": "user", "content": "Which option is correct?"}]
+  },
+  "response": {
+    "id": "resp_123",
+    "status": "completed",
+    "usage": {
+      "input_tokens": 94,
+      "output_tokens": 28,
+      "total_tokens": 122
+    }
+  }
+}
+```
+
+Writes are flushed and fsynced. Capture failures are logged without failing model requests. Resume
+attempts use an `-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch,
+the collector clears any existing capture for the exact rollout-attempt id.
+
+Read raw records programmatically when you need more than the rollout attachment:
+
+```python
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import aggregate_model_call_metrics, read_model_call_records
+
+store = CaptureStore("/absolute/path/to/results/model-calls")
+calls = read_model_call_records(store, rollout_id)
+totals = aggregate_model_call_metrics(store, rollout_id)
+```
+
+`ModelCallRecord` includes the server-generated `model_call_id`, protocol `response_id`, typed
+`model_ref`, UTC `started_at` and `completed_at` timestamps, durable `call_index`, API dialect, token
+and cache usage, status, finish reason, latency, error details, tool calls, reasoning, and captured
+payloads. `call_index` and timestamps do not establish causal ordering between concurrent calls.
+
+Streaming Responses, Chat Completions, and Anthropic Messages are reassembled for capture on a
+best-effort basis. If reassembly fails, request, status, correlation, and latency data remain
+available. A successful-status stream that closes without its dialect's terminal event retains any
+partial reconstruction and is marked `stream_truncated`.
+
+## Configure capture
+
+The CLI workflow above sets these top-level fields in Gym's [global config](/main/reference/configuration):
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
+| `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
+
+You can put the same settings in a YAML config instead:
 
 ```yaml
 observability_enabled: true
-model_call_capture_dir: /data/model-calls
+model_call_capture_dir: /absolute/path/to/model-calls
 
 policy_model:
   responses_api_models:
@@ -26,96 +341,128 @@ policy_model:
       entrypoint: app.py
 ```
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
-| `model_call_capture_dir` | `str` | required when enabled | Absolute shared capture directory used by model servers and rollout collection. |
+Model servers and `rollout_collection` must resolve `model_call_capture_dir` to the same location.
+For separate pods or nodes, mount that absolute path in every producer and the collector. Multiple
+model servers can append to one rollout file when the shared filesystem supports POSIX advisory file
+locking.
 
-Each rollout id has an append-only JSONL file named `<rollout_id>.capture.jsonl`. Writes are flushed
-and fsynced. Capture failures are logged and do not fail model requests.
+Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id. Use a
+separate capture directory for concurrent collection jobs whose indices can overlap.
 
-## Correlate calls with a rollout
+## If you build a custom agent
 
-Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append their standard
-`/v1/responses`, `/v1/chat/completions`, or `/v1/messages` path after it, and the model server removes
-the rollout prefix before routing.
+Capture requires a caller-supplied rollout correlation id. Gym's built-in compatible agents handle
+this routing; custom agent authors must preserve it on model calls.
 
-Correlation is caller-supplied. An unprefixed call is forwarded normally but is not captured.
+Use `/ng-rollout/<rollout_id>` as the model-server URL prefix. SDKs append `/v1/responses`,
+`/v1/chat/completions`, or `/v1/messages`, and the model server removes the rollout prefix before
+routing. An unprefixed call is forwarded normally but is not captured. Calls sent directly to an
+external provider instead of through a Gym model server are also not captured.
 
-Agents built on `SimpleResponsesAPIAgent` can use these helpers: `url_path_for_run(url_path, body)`
-prefixes a downstream call from the run request's task/rollout indices (only when
-`observability_enabled` is true — otherwise URLs stay unprefixed), and
-`url_path_for_request(url_path, request)` carries an inbound prefixed self-call through to the
-model call. The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on
-every agent by default. SDK-based harnesses that configure a client once use
-`base_url_for_run(base_url, body)`, the base-URL counterpart with the same gating; harnesses that
-must thread the id through layers use `rollout_id_from_run(body)` +
-`resolve_model_base_url(name, rollout_id)` instead.
+Agents based on `SimpleResponsesAPIAgent` can add the prefix with these helpers:
 
-The model servers and `rollout_collection` read the same path from the global config. If
-`gym env start` and `gym eval run --no-serve` are separate invocations, pass the same top-level
-capture settings to both. For separate pods or nodes, that absolute path must refer to a volume
-mounted in every producer and the collector. Multiple model servers may append to the same rollout
-file; records retain their typed `model_ref`, and POSIX advisory file locking serializes writers
-when the shared filesystem supports it.
+| Helper | Use it when |
+|---|---|
+| `url_path_for_run(url_path, body)` | The agent makes a downstream call while handling a run request, such as the self-call to its own `/v1/responses`. The prefix comes from the request's task and rollout indices. |
+| `url_path_for_request(url_path, request)` | The agent handles a prefixed self-call and carries its prefix through to the model call. |
+| `base_url_for_run(base_url, body)` | An SDK harness configures its client once per run. Append the API-version suffix, such as `/v1`, to the result. |
+| `rollout_id_from_run(body)` with `resolve_model_base_url(name, rollout_id)` | The harness must thread the rollout id through several layers before it builds the model-server URL. |
 
-Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id.
-Concurrent collection jobs with overlapping indices must use separate capture directories.
+The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on every agent by
+default.
 
-## Read captured calls
+## Add agent-side evidence
 
-```python
-from nemo_gym.base_responses_api_model import (
-    CaptureStore,
-    aggregate_model_call_metrics,
-    read_model_call_records,
-)
+Model-call capture is one input to Gym's broader rollout-evidence pipeline. Supported harnesses can
+also emit `ng_agent_observations`; `rollout_collection` exact-joins the available sources into
+`ng_trajectory` and derives `ng_perf` when sufficient evidence exists.
 
-store = CaptureStore("/data/model-calls")
-calls = read_model_call_records(store, rollout_id)
-totals = aggregate_model_call_metrics(store, rollout_id)
+See [Rollout evidence](/main/observability/rollout-evidence) for the full pipeline, exact correlation
+rules, payload retention, agent observations, gaps, and performance summaries. Agent-side coverage
+varies by producer and execution path; the
+[harness conformance results](/main/observability/harness-conformance#results) show measured harness checks.
+
+## Framework-owned media staging
+
+Training frameworks using `nemo_gym.models.token_capture.staging` can hand a framework's
+processed media (for example an inference worker's pixel tensors) to
+`RolloutTokenCapture.complete_call` or `complete_call_from_response` through the
+keyword-only `attachments` mapping. Gym forwards the mapping unchanged to
+`StagingSink.stage(record, attachments=...)` so the media lands in the same durable
+write as the token record, and `staged` coordinates are returned only after that
+combined write succeeds. Attachments are opaque to Gym: they never enter
+`StagedCallRecord`, `extras`, or any digest, so `digest`, `extras_digest`, and
+`CommitCoords` are identical with or without them.
+
+The keyword is passed only when the caller supplies a mapping. A legacy `stage(record)`
+sink therefore keeps working for text-only calls; if it is given attachments it raises
+`TypeError`, which the capture boundary reports as `capture_failed`. Gym never retries a
+write with the attachments dropped. A sink that accepts the keyword must store every
+supplied attachment before returning success or reject the call. Validation of the
+attached tensors, their storage layout, and read-back belong to the framework.
+
+`VLLMCaptureAdapter` preserves optional `routed_experts` extras and passes through
+`media_spans`, small metadata that the RL vLLM worker uses to remap image/video
+placeholders when reusing a captured prefix. vLLM uses expanded token IDs and does not
+emit a separate compact token delta.
+
+This replaces both the experimental tensor-attachment sink extension and the
+digest-covered `media` summary. Deploy the paired RL changes with this adapter; rows and
+checkpoints written in either older format need a separate migration. Supported
+processors and modalities are enforced by the framework's inference worker.
+
+## Retire capture ledgers
+
+With external staging, the model server keeps a capture ledger for each rollout: one `<rollout_id>.lineage.jsonl` file in the lineage store's directory, recording the model calls the rollout made without their token arrays.
+The training framework reads it once, through the manifest route, when the rollout ends.
+Gym can't tell when the framework is done with a rollout, so the framework removes each ledger itself, using the same two operations the complete-record token store has: retire and delete.
+
+### Retire a rollout the framework is done with
+
+Retiring deletes the rollout's ledger and leaves an empty `<rollout_id>.lineage.retired` file in its place.
+That file acts as a fence: if a model call for the rollout finishes later, Gym discards its row instead of starting a new ledger.
+Late calls are more common than they sound, because an agent the framework gave up on can keep running, and a client retry can run a finished rollout a second time.
+`TokenSource.drop` leaves the same kind of fence in the complete-record token store.
+After a rollout is retired, its manifest route returns HTTP 410 instead of an empty manifest, so a framework that reads it too late finds out rather than building an empty receipt.
+
+A call that starts after its rollout was retired is not admitted for capture, so it stages nothing.
+A call that was already in flight, however, may have staged its tokens before Gym discarded its row, and no manifest names those tokens.
+Gym logs a warning with the call's staging key, and the framework that staged the tokens has to remove them, for example by sweeping staged rows that no receipt references.
+
+Retire every rollout the framework is done with, whether it finished or was abandoned.
+A finished rollout can be retired once its manifest has been read and its receipt built, unless a crash before the receipt is saved would make the framework rerun it under the same ID; in that case, wait until the receipt is saved.
+An abandoned rollout should be retired as soon as the framework gives up on it.
+
+### Delete fences once nothing can still write
+
+Deleting removes a rollout's ledger together with its fence, which is only safe once no call from that rollout can still arrive.
+In practice that means the end of the run, or a point where every Gym server sharing the lineage directory has restarted.
+Until then, the fences accumulate at one empty file per retired rollout.
+Also delete a rollout ID before reusing it, so that the new run starts from an empty ledger, as `TokenCaptureStore.delete` does for the complete-record store.
+
+### Send the requests
+
+Send each request to a model server whose lineage directory holds the rollout's ledger, either the server that served the rollout or any other server configured with the same directory.
+A model server only sees the ledgers in its own lineage directory and reports any other rollout as `absent`.
+
+```http
+POST /training-token-capture/control/rollouts/retire
+POST /training-token-capture/control/rollouts/delete
+Authorization: Bearer <control auth token>
+
+{"rollout_ids": ["<rollout_id>", ...]}
 ```
 
-`ModelCallRecord` is an observability serialization model derived from captured HTTP exchanges. It
-contains a unique server-generated `model_call_id`, typed `model_ref`, wall-clock `started_at` and
-`completed_at`, a `call_index`, API dialect, token and cache usage, latency, error details, tool
-calls, reasoning content, and the captured request and response. `started_at` is recorded immediately
-before invoking the downstream ASGI application; `completed_at` is recorded when that invocation
-returns or raises, before capture parsing and persistence. Both are UTC Unix seconds for external
-trace correlation; durations use the monotonic latency fields. `call_index` reflects durable append
-order; neither it nor the timestamps provide causal or semantic ordering for concurrent calls. The
-request and response payloads remain the model-call evidence. Malformed or non-object request bodies
-are retained in raw JSONL as `request_raw`; the derived record has `request: null`.
+Each request takes at most 4096 rollout IDs, and `RolloutControlClient.retire` and `RolloutControlClient.delete` split longer lists into batches for you.
+The reply lists the rollouts whose ledger was removed under `removed` and the rest under `absent`.
+Because repeating either operation changes nothing, a failed batch can simply be sent again.
 
-Streaming responses are forwarded unchanged and reassembled for capture on a best-effort basis.
-Responses, Chat Completions, and Anthropic Messages are supported. If reassembly fails, request,
-status, correlation, and latency data remain available. A successful-status stream that closes
-without its dialect's terminal event retains any partial reconstruction and is marked
-`stream_truncated`.
-
-## Rollout-record attachment
-
-`rollout_collection` attaches available model-call data under:
-
-```text
-ng_model_call_capture = {
-  rollout_id,
-  metrics,
-  calls,
-}
-```
-
-`metrics.num_calls` is the number of captured model calls. Attached calls omit raw request and
-response payloads; those remain in `CaptureStore`. Resume attempts use an `-a<n>` suffix so their
-data does not mix with an earlier attempt. Before dispatch, the collector clears any existing capture
-for that exact rollout-attempt id, including a kill-shaped attempt being redispatched.
-
-The attachment is additive: it does not replace or rewrite the existing response, reward,
-`NeMoGymResponse`, token-id, or log-prob fields. Downstream consumers can choose whether to read it.
+Neither operation touches staged token data.
+The framework that staged the data removes it, and it must keep any staged data that a checkpoint it may restore still refers to.
 
 ## Limitations
 
 The model-server boundary observes model HTTP requests and responses. It can record tool calls,
-reasoning, and tool results present in those payloads, but it does not observe the actual tool
-execution boundary, environment events, context compaction, semantic turns, or subagent structure.
-Those require instrumentation at the agent, tool, environment, or rollout layer.
+reasoning, and tool results present in those payloads, but it does not observe tool execution,
+environment events, context compaction, semantic turns, or subagent structure. Those require
+instrumentation at the agent, tool, environment, or rollout layer.

@@ -36,19 +36,20 @@ from typing import List, Optional, Union
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.verification import JudgeError, call_judge
 
 
 # ---------------------------------------------------------------------------
@@ -293,11 +294,31 @@ class AbstentionVerifyResponse(BaseVerifyResponse):
 
 
 class AbstentionServer(SimpleResourcesServer):
+    # Each verification matches the abstention phrase or makes one judge call: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: AbstentionConfig
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
+
+    async def _call_judge(self, judge_prompt: str) -> str:
+        msgs: List[NeMoGymEasyInputMessage] = [
+            NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+        ]
+        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
+        request_params.input = msgs
+
+        judge_response = await call_judge(
+            self.server_client,
+            server_name=self.config.judge_model_server.name,
+            url_path="/v1/responses",
+            json=request_params,
+            response_model=NeMoGymResponse,
+        )
+        return extract_text_from_response(judge_response)
 
     async def verify(self, body: AbstentionVerifyRequest) -> AbstentionVerifyResponse:
         policy_output = extract_text_from_response(body.response)
@@ -321,19 +342,9 @@ class AbstentionServer(SimpleResourcesServer):
                 predicted_answer=extracted,
             )
 
-            msgs: List[NeMoGymEasyInputMessage] = [
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
-            ]
-            request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-            request_params.input = msgs
-
-            response_obj = await self.server_client.post(
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=request_params,
-            )
-            judge_response = NeMoGymResponse.model_validate(await response_obj.json())
-            judge_text = extract_text_from_response(judge_response)
+            judge_text = await self._call_judge(judge_prompt)
+            if not judge_text:
+                raise JudgeError("empty judge response")
 
             grade = parse_judge_grade(judge_text)
             if grade == "A":

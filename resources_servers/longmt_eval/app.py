@@ -25,7 +25,7 @@ import ray
 from fastapi import FastAPI
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -138,6 +138,7 @@ class LongmtEvalVerifyResponse(LongmtEvalVerifyRequest, BaseVerifyResponse):
 
 
 class LongmtEvalServer(SimpleResourcesServer):
+    ray_enabled = True
     config: LongmtEvalConfig
 
     _segale_actors: List[Any] = PrivateAttr(default_factory=list)

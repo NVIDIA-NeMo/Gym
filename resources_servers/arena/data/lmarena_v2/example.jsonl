@@ -1,0 +1,1 @@
+{"category":"lmarena_v2","responses_create_params":{"input":[{"role":"user","content":"Name one benefit of regular exercise."}]},"question_id":"synthetic-example-v2","question":"Name one benefit of regular exercise.","baseline_answer":"Regular exercise can improve cardiovascular health.","baseline_model":"synthetic-baseline-model","metadata":{}}

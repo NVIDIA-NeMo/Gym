@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -113,6 +113,7 @@ class Spider2LiteVerifyResponse(BaseVerifyResponse):
 
 
 class Spider2LiteResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: Spider2LiteResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

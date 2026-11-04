@@ -54,13 +54,16 @@ small NVIDIA integration patch:
 | `sandbox_spec` | the per-task sandbox: `image` (`${sandbox_image}` — a `.sif` path or `docker://` ref built from `Dockerfile.benchmark`), `resources`, `ready_timeout_s`, … |
 | `sandbox_work_base` | writable, per-sandbox-isolated working mount (default `/sandbox`); run_task.sh puts the skill copy, `$HOME`, `$TMPDIR` and the benchmark run-root here |
 | `task_timeout_s` | per-task exec timeout |
+| `openclaw_provider_timeout_seconds` | optional OpenClaw model idle/request timeout in seconds; written to both the provider timeout and agent timeout ceiling so values above OpenClaw's 120s default are effective |
 | `model_base_url` / `model_api_key` / `model_name` | policy model OpenClaw runs against |
+| `model_server` | optional Gym Model Server reference for correlated policy calls; otherwise `model_base_url` is used directly |
 | `judge_model` / `judge_base_url` / `judge_api_key` | judge for hybrid / `llm_judge` tasks |
+| `judge_model_server` | optional Gym Model Server reference for correlated judge calls; otherwise `judge_base_url` is used directly |
 | `max_tokens`, `context_window`, `max_concurrent`, `timeout_multiplier` | run tuning |
 
-> **Model wiring:** OpenClaw must point at a **streaming-capable** endpoint directly — *not* a Gym
-> model server, which is non-streaming (`stream: Literal[False]`) and would 422 OpenClaw's streamed
-> requests. So the policy/judge endpoints are passed straight through to OpenClaw.
+> **Model wiring:** Set `model_server` and `judge_model_server` to route calls through correlated Gym
+> Model Servers. Gym supplies the streaming SSE envelope OpenClaw expects. Leave either reference unset
+> to use its configured direct endpoint instead.
 
 ## Setup
 
@@ -96,6 +99,28 @@ ng_collect_rollouts +agent_name=pinchbench_agent \
 
 Each rollout returns `reward` (continuous `[0,1]`), `grading_type`, `grading_breakdown`,
 `grading_notes`, and `raw_rollout` (the full OpenClaw transcript, also archived to `transcripts_dir`).
+
+## OpenClaw LLM idle timeout
+
+OpenClaw aborts a model request if the endpoint produces no tokens inside its stream-idle watchdog
+window. The default stays at OpenClaw's original 120s. For slow or highly concurrent endpoints, raise
+the provider timeout with `openclaw_provider_timeout_seconds`; the agent passes it as
+`PINCHBENCH_PROVIDER_TIMEOUT_SECONDS`, and the direct-exec wrapper plus baked PinchBench patch write it
+to OpenClaw's `models.providers.custom.timeoutSeconds` and `agents.defaults.timeoutSeconds`. Both are
+needed: a provider timeout lower than the default shortens the watchdog, but a provider timeout above
+120s is still capped unless the agent timeout ceiling is raised too.
+
+```yaml
+pinchbench_agent:
+  responses_api_agents:
+    pinchbench:
+      # ... model / sandbox / judge config ...
+      openclaw_provider_timeout_seconds: 14400  # 4h
+      task_timeout_s: 14400                     # outer per-task sandbox exec bound
+```
+
+`task_timeout_s` is separate from OpenClaw's provider timeout. Keep it at least as large as the
+provider timeout when long idle waits are expected.
 
 ## Validation (parity vs vanilla standalone)
 

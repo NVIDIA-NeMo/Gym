@@ -33,20 +33,20 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,6 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
             include_reference_passage=is_protocol,
             reference_passage=reference_passage,
         )
-
         reward = 1.0 if is_equal else 0.0
         return LabbenchVLMVerifyResponse(
             **body.model_dump(),
@@ -212,14 +211,17 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
 
         async with self._judge_sem:
             try:
-                raw = await self.server_client.post(
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=cfg.judge_model_server.name,
                     url_path="/v1/responses",
                     json=params,
+                    response_model=NeMoGymResponse,
                 )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(raw))
-            except Exception as e:
-                print(f"[labbench2_vlm] judge HTTP error: {type(e).__name__}: {e}", flush=True)
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
+                print(f"[labbench2_vlm] judge HTTP error: {e}", flush=True)
                 raise
 
         eval_record = JudgeEvaluation(

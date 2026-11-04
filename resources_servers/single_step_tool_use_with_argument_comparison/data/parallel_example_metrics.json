@@ -1,0 +1,39 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 1.2,
+        "Min": 1.0,
+        "Max": 2.0,
+        "Standard deviation": 0.447
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 119.2,
+        "Min": 109.0,
+        "Max": 151.0,
+        "Standard deviation": 17.95
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    }
+}

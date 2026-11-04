@@ -17,6 +17,13 @@
 This is a copied example from a concrete data pipeline. It may contain
 dataset-specific imports, assumptions, and config defaults, and should be
 adapted before reuse.
+
+NOTE: this script imports ``filter_training_data.utils``, which is not part of this
+repository, so it cannot be run as-is -- it is kept for its reward-based selection
+and sorting logic. Expected-action construction happens inside that absent helper,
+so the parallel tool-call contract cannot be fixed here. For a runnable converter
+that implements the current contract end to end, see
+``responses_output_to_pivot_dataset_reference.py``.
 """
 
 import argparse

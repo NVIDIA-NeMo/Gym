@@ -12,20 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 import os
 import sys
 import types
+from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
+from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
-import nemo_gym.global_config as gc
+import nemo_gym.config.global_config as gc
+import nemo_gym.orchestration.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +73,7 @@ CONFIG_COMMANDS = [
     (["eval", "prepare"], "nemo_gym.cli.eval:prepare_benchmark"),
     (["eval", "aggregate"], "nemo_gym.cli.eval:aggregate_rollouts"),
     (["eval", "run"], "nemo_gym.cli.eval:e2e_rollout_collection"),
+    (["eval", "reverify"], "nemo_gym.cli.eval:reverify_rollouts"),
     (["dataset", "collate"], "nemo_gym.cli.dataset:prepare_data"),
 ]
 
@@ -140,14 +146,14 @@ class TestEvalRunFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [
-            (["--agent", "my_agent"], "+agent_name=my_agent"),
-            (["-a", "my_agent"], "+agent_name=my_agent"),
+            # --agent is mode-dependent, so it is covered in TestAgentSelector rather than here.
             (["--input", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
             (["-i", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
             (["--num-repeats", "4"], "+num_repeats=4"),
+            (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
             (["--prompt-config", "p.yaml"], "+prompt_config=p.yaml"),
             (["--split", "benchmark"], "+split=benchmark"),
@@ -159,6 +165,20 @@ class TestEvalRunFlags:
             (["--top-p", "1.0"], "+responses_create_params.top_p=1.0"),
             (["--max-output-tokens", "4096"], "+responses_create_params.max_output_tokens=4096"),
             (["--resume"], "+resume_from_cache=true"),
+            (["--no-health-check"], "+disable_health_check=true"),
+            (["--health-check-workers", "4"], "+health_check_workers=4"),
+            (
+                ["--health-check-ignore", "model_call_missing_token_counts,model_call_zero_completion_tokens"],
+                '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
+            ),
+            (
+                ["--health-max-not-final-failure-fraction", "0.05"],
+                "+health_check_max_not_final_failure_fraction=0.05",
+            ),
+            (
+                ["--health-max-final-failure-fraction", "0.01"],
+                "+health_check_max_final_failure_fraction=0.01",
+            ),
         ],
     )
     def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
@@ -166,7 +186,7 @@ class TestEvalRunFlags:
         assert overrides == [expected_override]
 
     def test_unset_flags_contribute_nothing(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--agent", "x"])
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "--agent", "x"])
         assert overrides == ["+agent_name=x"]
 
     def test_default_dispatches_e2e(self, monkeypatch: MonkeyPatch) -> None:
@@ -255,11 +275,103 @@ class TestEvalRunFlags:
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
 
 
+class TestEvalExportFlags:
+    def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "export",
+                "--format",
+                "atif",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output-dir",
+                "atif",
+                "--session-id",
+                "evaluation-42",
+                "--agent-version",
+                "2.3.1",
+            ],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_run"
+        assert set(overrides) == {
+            "+exporter=atif",
+            "+rollouts_jsonl_fpath='rollouts.jsonl'",
+            "+output_dirpath='atif'",
+            "+session_id='evaluation-42'",
+            "+agent_version='2.3.1'",
+        }
+
+
+class TestEvalExportExporterArgument:
+    def test_defaults_to_atif_and_passes_overrides_through_unchanged(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "+rollouts_jsonl_fpath=r.jsonl", "+meta.k=v", "++a=1", "hydra.run.dir=/tmp/log", "~b"],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_run"
+        assert overrides == [
+            "+exporter=atif",
+            "+rollouts_jsonl_fpath=r.jsonl",
+            "+meta.k=v",
+            "++a=1",
+            "hydra.run.dir=/tmp/log",
+            "~b",
+        ]
+
+    def test_a_captured_override_follows_the_translated_flags_for_the_default_exporter(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "++session_id=override", "--session-id", "original", "--rollouts", "r.jsonl"],
+        )
+
+        assert overrides.index("+session_id='original'") < overrides.index("++session_id=override")
+        assert overrides[0] == "+exporter=atif"
+
+    def test_positional_exporter_is_passed_as_an_override(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "atif", "+rollouts_jsonl_fpath=r.jsonl"])
+
+        assert overrides == ["+exporter=atif", "+rollouts_jsonl_fpath=r.jsonl"]
+
+    def test_deprecated_format_flag_still_selects_the_exporter(
+        self, monkeypatch: MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "--format", "atif"])
+
+        assert overrides == ["+exporter=atif"]
+        assert "`--format` is deprecated" in caplog.text
+
+    def test_unknown_exporter_is_rejected_with_the_choices(
+        self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["eval", "export", "nope", "+rollouts_jsonl_fpath=r.jsonl"])
+
+        assert "unknown exporter 'nope'; choose from: atif" in capsys.readouterr().err
+
+
 class TestEnvTestResourceServerFlag:
-    def test_no_resource_server_runs_all(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(monkeypatch, ["env", "test"])
+    def test_no_target_refuses_instead_of_testing_every_server(self, monkeypatch: MonkeyPatch) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            _dispatch_for(monkeypatch, ["env", "test"])
+        assert exc_info.value.code == 2
+
+    def test_all_flag_runs_every_server(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "--all"])
         assert target == "nemo_gym.cli.env:test_all"
         assert overrides == []
+
+    @pytest.mark.parametrize("argv", [["--all", "--resources-server", "gpqa"], ["--all", "gpqa"]])
+    def test_all_flag_conflicts_with_a_named_target(self, monkeypatch: MonkeyPatch, capsys, argv) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            _dispatch_for(monkeypatch, ["env", "test", *argv])
+        assert exc_info.value.code == 2
+        assert "cannot be combined with a named target" in capsys.readouterr().err
 
     def test_resource_server_name_translates_to_entrypoint(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["env", "test", "--resources-server", "gpqa"])
@@ -270,6 +382,43 @@ class TestEnvTestResourceServerFlag:
         target, overrides = _dispatch_for(monkeypatch, ["env", "test", "+entrypoint=resources_servers/gpqa"])
         assert target == "nemo_gym.cli.env:test"
         assert overrides == ["+entrypoint=resources_servers/gpqa"]
+
+    def test_workload_name_runs_manifest_fixture(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "gpqa"])
+        assert target == "nemo_gym.cli.env:test_environment_manifest"
+        assert overrides == ['+onboarding_name="gpqa"']
+
+    def test_direct_onboarding_name_override_runs_manifest_fixture(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "+onboarding_name=gpqa"])
+        assert target == "nemo_gym.cli.env:test_environment_manifest"
+        assert overrides == ["+onboarding_name=gpqa"]
+
+    def test_manifest_fixture_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "test", "gpqa", "--kind", "benchmark", "--update-expected", "--json"],
+        )
+        assert target == "nemo_gym.cli.env:test_environment_manifest"
+        assert set(overrides) == {
+            '+onboarding_name="gpqa"',
+            "+catalog_kind=benchmark",
+            "+update_expected=true",
+            "+json=true",
+        }
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["gpqa", "--resources-server", "mcqa"],
+            ["--kind", "benchmark"],
+            ["--update-expected"],
+            ["--json"],
+        ],
+    )
+    def test_manifest_options_do_not_leak_into_legacy_tests(self, monkeypatch: MonkeyPatch, argv: list[str]) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "test", *argv])
+        with pytest.raises(SystemExit):
+            main()
 
 
 class TestDatasetFlags:
@@ -429,10 +578,38 @@ class TestDatasetFlags:
 class TestEvalAggregateFlags:
     def test_aggregate_flags(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
-            monkeypatch, ["eval", "aggregate", "-i", "results/rollouts-*.jsonl", "-o", "out.jsonl"]
+            monkeypatch,
+            [
+                "eval",
+                "aggregate",
+                "-i",
+                "results/rollouts-*.jsonl",
+                "-o",
+                "out.jsonl",
+                "--no-health-check",
+                "--health-check-workers",
+                "3",
+                "--health-check-ignore",
+                "model_call_missing_token_counts,model_call_zero_completion_tokens",
+            ],
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
-        assert set(overrides) == {"+input_glob=results/rollouts-*.jsonl", "+output_jsonl_fpath=out.jsonl"}
+        assert set(overrides) == {
+            "+input_glob='results/rollouts-*.jsonl'",
+            "+output_jsonl_fpath=out.jsonl",
+            "+disable_health_check=true",
+            "+health_check_workers=3",
+            '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
+        }
+
+    def test_comma_separated_input_glob_is_one_string_override(self, monkeypatch: MonkeyPatch) -> None:
+        # The flag help offers comma-separated globs. Left unquoted, Hydra reads `a,b` as a sweep and
+        # `gym eval aggregate` fails with "Ambiguous value for argument" before reading any shard.
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "aggregate", "-i", "a/*.jsonl,b/*.jsonl"])
+        assert overrides == ["+input_glob='a/*.jsonl,b/*.jsonl'"]
+        parsed = OverridesParser.create().parse_override(overrides[0])
+        assert not parsed.is_sweep_override()
+        assert parsed.value() == "a/*.jsonl,b/*.jsonl"
 
 
 class TestFriendlyValidationError:
@@ -444,7 +621,7 @@ class TestFriendlyValidationError:
         from pydantic import ValidationError
 
         from nemo_gym.cli.main import _handle_pydantic_validation_error
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (so it passes the scoping check) with one missing and one invalid field.
         class _Model(BaseNeMoGymCLIConfig):
@@ -468,7 +645,7 @@ class TestFriendlyValidationError:
         assert "invalid configuration: count" in recorder.message
 
     def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
         class _Config(BaseNeMoGymCLIConfig):
@@ -505,6 +682,134 @@ class TestFriendlyValidationError:
 
         with pytest.raises(ValidationError):
             main()
+
+    # #2686: BaseServerConfig is not a CLI config, so the router keeps re-raising its ValidationError (test above).
+    # The parser therefore reports a bad head_server value as a ConfigError at the source, which every command
+    # turns into a single `Error:` line and exit 1 before any server (or Ray) starts.
+
+    def _run_real_cli_with_a_malformed_head_server(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, argv: list[str]
+    ) -> str:
+        """Drive the real router + config parse for `gym <argv> ++head_server.port=notanint`; return stdout."""
+        monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the message
+        # env.yaml is read from cwd before the install root, so an empty one shadows a developer's own.
+        (tmp_path / "env.yaml").write_text("")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(sys, "argv", ["gym", *argv, "++head_server.port=notanint"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.out
+        assert "head_server.port" in captured.out
+        assert "Traceback" not in captured.out + captured.err
+        return captured.out
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["env", "validate"],  # printed "Config is valid." before the fix
+            ["env", "resolve"],  # dumped `port: notanint` and exited 0 before the fix
+            ["eval", "run", "--no-serve", "--agent", "simple_agent", "-i", "in.jsonl", "-o", "out"],  # raw traceback
+        ],
+        ids=["env-validate", "env-resolve", "eval-run-no-serve"],
+    )
+    def test_malformed_head_server_override_is_a_config_error_not_a_traceback(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, argv: list[str]
+    ) -> None:
+        # A real row, so that without the fix `eval run` gets past its input checks to the head-server lookup.
+        (tmp_path / "in.jsonl").write_text(
+            json.dumps({"responses_create_params": {"input": [{"role": "user", "content": "hi"}]}}) + "\n"
+        )
+
+        out = self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, argv)
+
+        assert "Config is valid" not in out
+
+    def test_malformed_head_server_is_rejected_before_any_server_starts(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
+    ) -> None:
+        # The issue's headline: `gym env start` used to initialise Ray and spawn the head server, then die on the
+        # bad value inside HeadServer.run_webserver. `run` now fails in its config parse, before RunHelper exists.
+        import nemo_gym.cli.env as cli_env
+
+        class _NoServerMayStart:
+            def __init__(self, *args, **kwargs) -> None:
+                raise AssertionError("RunHelper must not be built for a malformed head_server")
+
+        monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
+
+        self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
+
+    # #4710: the `gym dataset` entrypoints wear @exit_cleanly_on_config_error and the prompt loader raises
+    # ConfigErrors, so a mistyped path or a broken prompt file is one `Error:` line and exit 1, not a traceback.
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            (
+                ["dataset", "collate", "--config", "missing_config.yaml", "--output-dir", "out"],
+                "config_paths entry 'missing_config.yaml' was not found",
+            ),
+            (
+                ["dataset", "render", "-i", "in.jsonl", "--prompt-config", "missing_prompt.yaml", "-o", "out.jsonl"],
+                "Prompt config 'missing_prompt.yaml' was not found",
+            ),
+            (
+                ["dataset", "render", "-i", "in.jsonl", "--prompt-config", "no_user.yaml", "-o", "out.jsonl"],
+                "and an optional `system` string (user: Field required)",
+            ),
+            (
+                ["dataset", "render", "-i", "in.jsonl", "--prompt-config", "bad.yaml", "-o", "out.jsonl"],
+                "is not valid YAML",
+            ),
+            (
+                ["dataset", "render", "-i", "missing.jsonl", "--prompt-config", "good.yaml", "-o", "out.jsonl"],
+                "Input file not found: 'missing.jsonl' (--input)",
+            ),
+        ],
+        ids=[
+            "collate-missing-config",
+            "render-missing-prompt-config",
+            "render-prompt-without-user",
+            "render-invalid-yaml",
+            "render-missing-input",
+        ],
+    )
+    def test_dataset_config_mistake_is_a_clean_error_not_a_traceback(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, request, argv: list[str], expected: str
+    ) -> None:
+        from nemo_gym.data.prompt import load_prompt_config
+
+        # The loader caches by the path string, and these relative names would otherwise outlive this tmp_path.
+        load_prompt_config.cache_clear()
+        request.addfinalizer(load_prompt_config.cache_clear)
+        monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the message
+        (tmp_path / "env.yaml").write_text("")  # shadows a developer's own env.yaml, which is read from cwd first
+        (tmp_path / "in.jsonl").write_text(json.dumps({"question": "1+1?"}) + "\n")
+        (tmp_path / "good.yaml").write_text('user: "{question}"\n')
+        (tmp_path / "no_user.yaml").write_text("system: hi\n")
+        (tmp_path / "bad.yaml").write_text("user: [unclosed\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(sys, "argv", ["gym", *argv])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.out
+        assert expected in captured.out
+        assert "Traceback" not in captured.out + captured.err
+        assert not (tmp_path / "out.jsonl").exists()
 
 
 class TestDispatch:
@@ -588,6 +893,106 @@ class TestEvalProfileFlags:
             main()
 
 
+class TestDatasetValidateFlags:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "current(1).jsonl",
+            "current,failed.jsonl",
+            "plain.jsonl",
+            "résumé.jsonl",
+            "日本語.jsonl",
+            r"dir\name.jsonl",
+            r"C:\Users\me\out.jsonl",
+            "it's.jsonl",
+            r"a\'b.jsonl",
+            r"trail\\",
+        ],
+    )
+    def test_output_reaches_the_validation_run_quoted(self, monkeypatch: MonkeyPatch, name: str) -> None:
+        # The file name is not a Hydra expression: unquoted, `(` is a parse error and `,` is ambiguous. It is
+        # also not JSON: Hydra keeps `\uXXXX` and a doubled backslash literally, so the override must parse
+        # back to the exact name the user typed, Unicode and backslashes included.
+
+        captured: list = []
+        monkeypatch.setattr(cli_eval, "validate_target", lambda args, overrides: captured.append(overrides))
+        monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", "tasks", "--output", name])
+        main()
+        assert len(captured) == 1 and len(captured[0]) == 1
+        assert captured[0][0].startswith("+output_jsonl_fpath='")
+        parsed = OverridesParser.create().parse_overrides(captured[0])[0]
+        assert (parsed.key_or_group, parsed.value()) == ("output_jsonl_fpath", name)
+
+
+class TestEvalReverifyFlags:
+    @pytest.mark.parametrize(
+        "flag_argv, expected_override",
+        [
+            (["--input-format", "atif"], "+input_format=atif"),
+            (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
+            (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--atif-manifest", "manifest.jsonl"], "+atif_manifest_jsonl_fpath=manifest.jsonl"),
+            (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["--concurrency", "10"], "+num_samples_in_parallel=10"),
+            (["--limit", "50"], "+limit=50"),
+            (["--force"], "+force=true"),
+            (["--overwrite"], "+overwrite=true"),
+            (["--resume"], "+resume_from_cache=true"),
+            (["--disable-aggregation"], "+disable_aggregation=true"),
+            (["--judge-failed-only"], "+judge_failed_only=true"),
+            (["--append"], "+append=true"),
+        ],
+    )
+    def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "reverify", *flag_argv])
+        assert overrides == [expected_override]
+
+    def test_unset_flags_contribute_nothing(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "reverify"])
+        assert overrides == []
+
+    def test_dispatches_to_reverify_rollouts(self, monkeypatch: MonkeyPatch) -> None:
+        target, _ = _dispatch_for(monkeypatch, ["eval", "reverify"])
+        assert target == "nemo_gym.cli.eval:reverify_rollouts"
+
+    def test_all_flags_compose(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "reverify",
+                "--inputs",
+                "inputs.jsonl",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output",
+                "out.jsonl",
+                "--concurrency",
+                "10",
+                "--limit",
+                "50",
+                "--force",
+                "--overwrite",
+                "--resume",
+                "--disable-aggregation",
+                "--judge-failed-only",
+            ],
+        )
+        assert set(overrides) == {
+            "+materialized_inputs_jsonl_fpath=inputs.jsonl",
+            "+rollouts_jsonl_fpath=rollouts.jsonl",
+            "+output_jsonl_fpath=out.jsonl",
+            "+num_samples_in_parallel=10",
+            "+limit=50",
+            "+force=true",
+            "+overwrite=true",
+            "+resume_from_cache=true",
+            "+disable_aggregation=true",
+            "+judge_failed_only=true",
+        }
+
+
 class TestEnvRunFlags:
     def test_model_flags(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
@@ -638,6 +1043,113 @@ class TestEnvInitFlags:
         assert target == "nemo_gym.cli.env:init_resources_server"
         assert overrides == ["+entrypoint=resources_servers/my_server"]
 
+    @pytest.mark.parametrize("flag, kind", [("--environment", "environment"), ("--benchmark", "benchmark")])
+    def test_workload_target_dispatches_to_new_scaffold(self, monkeypatch: MonkeyPatch, flag: str, kind: str) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "init", flag, "sample"])
+        assert target == "nemo_gym.cli.env:init_environment"
+        assert overrides == [f"+scaffold_kind={kind}", '+scaffold_name="sample"']
+
+    def test_direct_scaffold_kind_override_dispatches_to_new_scaffold(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "init", "+scaffold_kind=environment", "+scaffold_name=sample"],
+        )
+        assert target == "nemo_gym.cli.env:init_environment"
+        assert overrides == ["+scaffold_kind=environment", "+scaffold_name=sample"]
+
+    def test_workload_scaffold_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "env",
+                "init",
+                "--benchmark",
+                "sample",
+                "--profile",
+                "custom-gym-verifier",
+                "--reuse-verifier",
+                "shared",
+                "--reward-range",
+                "-1",
+                "1",
+                "--lower-is-better",
+            ],
+        )
+        assert target == "nemo_gym.cli.env:init_environment"
+        assert set(overrides) == {
+            "+scaffold_kind=benchmark",
+            '+scaffold_name="sample"',
+            "+profile=custom-gym-verifier",
+            "+reuse_verifier='shared'",
+            "+reward_range=[-1.0,1.0]",
+            "+higher_is_better=false",
+        }
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--environment", "one", "--benchmark", "two"],
+            ["--higher-is-better", "--lower-is-better"],
+            ["--environment", "one", "--resources-server", "two"],
+        ],
+    )
+    def test_mutually_exclusive_flags_are_rejected(self, monkeypatch: MonkeyPatch, argv: list[str]) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "init", *argv])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_profile_is_closed(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "init", "--environment", "sample", "--profile", "other"])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_yaml_scalar_like_name_stays_a_string(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "init", "--environment", "true"])
+        parsed = OverridesParser.create().parse_overrides(overrides)[1]
+        assert parsed.value() == "true"
+
+    def test_scaffold_options_are_rejected_for_legacy_init(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["gym", "env", "init", "--resources-server", "sample", "--profile", "custom-gym-verifier"],
+        )
+        with pytest.raises(SystemExit):
+            main()
+
+
+class TestEnvValidateOnboardingFlags:
+    def test_name_selects_manifest_backed_workload(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "validate", "gpqa", "--kind", "benchmark"])
+        assert target == "nemo_gym.cli.env:validate"
+        assert set(overrides) == {'+onboarding_name="gpqa"', "+catalog_kind=benchmark"}
+
+    def test_manifest_sync_and_json_flags(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "validate", "--manifest", "benchmarks/gpqa/manifest.yaml", "--sync", "--json"],
+        )
+        assert target == "nemo_gym.cli.env:validate"
+        assert set(overrides) == {
+            "+manifest_path='benchmarks/gpqa/manifest.yaml'",
+            "+sync=true",
+            "+json=true",
+        }
+
+
+class TestEnvPublishFlags:
+    def test_name_kind_and_json(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "publish", "gpqa", "--kind", "benchmark", "--json"],
+        )
+        assert target == "nemo_gym.cli.env:publish_environment_manifest"
+        assert set(overrides) == {
+            '+onboarding_name="gpqa"',
+            "+catalog_kind=benchmark",
+            "+json=true",
+        }
+
 
 class TestEnvPackagesFlags:
     def test_flags(self, monkeypatch: MonkeyPatch) -> None:
@@ -653,7 +1165,7 @@ class TestJsonFlag:
     @pytest.mark.parametrize(
         "argv, expected_target",
         [
-            (["list", "benchmarks", "--json"], "nemo_gym.cli.eval:list_benchmarks"),
+            (["list", "benchmarks", "--json"], "nemo_gym.cli.env:list_environments"),
             (["list", "agents", "--json"], "nemo_gym.cli.agents:list_agents"),
             (["list", "models", "--json"], "nemo_gym.cli.models:list_models"),
             (["env", "status", "--json"], "nemo_gym.cli.env:status"),
@@ -663,47 +1175,82 @@ class TestJsonFlag:
         # Reporting commands surface --json as the reserved `json` config key, read centrally by cli.output.emit.
         target, overrides = _dispatch_for(monkeypatch, argv)
         assert target == expected_target
-        assert overrides == ["+json=true"]
+        expected = ["+catalog_kind=benchmark", "+json=true"] if argv[:2] == ["list", "benchmarks"] else ["+json=true"]
+        assert overrides == expected
 
     def test_no_json_no_override(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["list", "benchmarks"])
-        assert overrides == []
+        assert overrides == ["+catalog_kind=benchmark"]
+
+    @pytest.mark.parametrize(
+        "argv, expected_target",
+        [
+            (["--json", "list", "benchmarks"], "nemo_gym.cli.env:list_environments"),
+            (["--json", "list", "agents"], "nemo_gym.cli.agents:list_agents"),
+            (["--json", "env", "status"], "nemo_gym.cli.env:status"),
+            (["--json", "search", "math"], "nemo_gym.cli.env:list_environments"),
+        ],
+    )
+    def test_json_before_subcommand_applies(self, monkeypatch: MonkeyPatch, argv, expected_target) -> None:
+        # `gym --json list benchmarks` must behave like `gym list benchmarks --json`, not drop the flag.
+        target, overrides = _dispatch_for(monkeypatch, argv)
+        assert target == expected_target
+        assert "+json=true" in overrides
+
+    def test_json_before_subcommand_matches_trailing_form(self, monkeypatch: MonkeyPatch) -> None:
+        leading = _dispatch_for(monkeypatch, ["--json", "list", "benchmarks"])
+        trailing = _dispatch_for(monkeypatch, ["list", "benchmarks", "--json"])
+        assert leading == trailing
+
+    def test_json_rejected_for_command_without_json_output(self, monkeypatch: MonkeyPatch) -> None:
+        # Silently dropping it is what made this a bug; a command with no JSON output must say so.
+        with pytest.raises(SystemExit) as exc_info:
+            _dispatch_for(monkeypatch, ["--json", "env", "start", "--resources-server", "mcqa"])
+        assert exc_info.value.code == 2
+
+    def test_json_still_applies_to_version(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["--version", "--json"])
+        assert overrides == ["+json=true"]
 
 
 class TestSearch:
-    def test_search_query_only_defaults_to_benchmarks(self, monkeypatch: MonkeyPatch) -> None:
-        # `gym search <query>` (no type) reuses the benchmarks listing — backward compatible.
+    def test_search_query_only_defaults_to_unified_environment_catalog(self, monkeypatch: MonkeyPatch) -> None:
+        # `gym search <query>` (no type) searches the unified environment catalog.
         target, overrides = _dispatch_for(monkeypatch, ["search", "math"])
-        assert target == "nemo_gym.cli.eval:list_benchmarks"
-        assert overrides == ['+query="math"']
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert overrides == ["+query='math'"]
 
     @pytest.mark.parametrize(
-        "component_type, expected_target",
+        "component_type, expected_target, expected_kind",
         [
-            ("benchmarks", "nemo_gym.cli.eval:list_benchmarks"),
-            ("environments", "nemo_gym.cli.env:list_environments"),
-            ("agents", "nemo_gym.cli.agents:list_agents"),
-            ("models", "nemo_gym.cli.models:list_models"),
-            ("resources-servers", "nemo_gym.cli.resources_servers:list_resources_servers"),
+            ("benchmarks", "nemo_gym.cli.env:list_environments", "benchmark"),
+            ("environments", "nemo_gym.cli.env:list_environments", "environment"),
+            ("agents", "nemo_gym.cli.agents:list_agents", None),
+            ("models", "nemo_gym.cli.models:list_models", None),
+            ("resources-servers", "nemo_gym.cli.resources_servers:list_resources_servers", None),
         ],
     )
-    def test_search_type_routes_to_that_listing(self, monkeypatch, component_type, expected_target) -> None:
+    def test_search_type_routes_to_that_listing(
+        self, monkeypatch, component_type, expected_target, expected_kind
+    ) -> None:
         # `gym search <type> <query>` runs that type's listing, filtered by the query.
         target, overrides = _dispatch_for(monkeypatch, ["search", component_type, "swe"])
         assert target == expected_target
-        assert overrides == ['+query="swe"']
+        assert overrides == ([f"+catalog_kind={expected_kind}"] if expected_kind else []) + ["+query='swe'"]
 
     def test_search_json(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["search", "math", "--json"])
-        assert set(overrides) == {'+query="math"', "+json=true"}
+        assert set(overrides) == {"+query='math'", "+json=true"}
 
-    @pytest.mark.parametrize("query", ["(A)", "a b", "[x]", "A|B"])
+    @pytest.mark.parametrize(
+        "query", ["(A)", "a b", "[x]", "A|B", '"quoted" task', "it's", "résumé", r"back\slash", r"ends\\"]
+    )
     def test_search_query_with_special_chars_is_hydra_safe(self, monkeypatch: MonkeyPatch, query) -> None:
         # The query is quoted so Hydra's override grammar accepts characters that are otherwise syntax,
         # e.g. `gym search agents "(A)"` used to raise an override parse error. The quoted override must
-        # both be valid Hydra and round-trip back to the original query string.
+        # both be valid Hydra and round-trip back to the original query string, Unicode and backslashes too.
         _, overrides = _dispatch_for(monkeypatch, ["search", "agents", query])
-        assert overrides == [f'+query="{query}"']
+        assert len(overrides) == 1 and overrides[0].startswith("+query='")
         parsed = OverridesParser.create().parse_overrides(overrides)[0]
         assert parsed.value() == query
 
@@ -736,7 +1283,7 @@ class TestVerboseFlag:
         assert overrides == []
 
     def test_verbose_prepended_before_other_overrides(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--verbose", "--agent", "a", "+x=1"])
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "--verbose", "--agent", "a", "+x=1"])
         assert "+verbose=true" in overrides
         assert "+agent_name=a" in overrides
         assert "+x=1" in overrides
@@ -805,6 +1352,29 @@ class TestAssetSelectors:
     def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, argv, expected_config) -> None:
         _, overrides = _dispatch_for(monkeypatch, argv)
         assert overrides == [f"+config_paths=[{WORKING_DIR / (expected_config)}]"]
+
+    @pytest.mark.parametrize(
+        "argv, expected_configs",
+        [
+            (
+                # multi-environment-training.mdx: start two training environments together.
+                ["env", "start", "--resources-server", "example_single_tool_call", "--resources-server", "mcqa"],
+                [
+                    "resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml",
+                    "resources_servers/mcqa/configs/mcqa.yaml",
+                ],
+            ),
+            (
+                ["eval", "run", "--benchmark", "gsm8k", "--benchmark", "gpqa"],
+                ["benchmarks/gsm8k/config.yaml", "benchmarks/gpqa/config.yaml"],
+            ),
+        ],
+    )
+    def test_composable_selector_accumulates(self, monkeypatch: MonkeyPatch, argv, expected_configs) -> None:
+        # These feed the same +config_paths list as --config, so repeating one composes rather than replaces.
+        _, overrides = _dispatch_for(monkeypatch, argv)
+        paths, _ = _split_overrides(overrides)
+        assert paths == {str(WORKING_DIR / config) for config in expected_configs}
 
     def test_quickstart_resource_server_plus_model(self, monkeypatch: MonkeyPatch) -> None:
         # README.md / quickstart.mdx:
@@ -935,6 +1505,51 @@ class TestAssetSelectors:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--environment", "circle_count"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'environments/circle_count/config.yaml'}]"]
 
+    def test_nested_manifest_wins_over_legacy_flavor_with_the_same_name(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        suite = tmp_path / "benchmarks" / "suite"
+        nested = suite / "example"
+        nested.mkdir(parents=True)
+        (suite / "example.yaml").write_text("dataset:\n  type: benchmark\n", encoding="utf-8")
+        (nested / "config.yaml").write_text("dataset:\n  type: benchmark\n", encoding="utf-8")
+        (nested / "manifest.yaml").write_text(
+            json.dumps(
+                {
+                    "name": "suite/example",
+                    "version": "0.1.0",
+                    "kind": "benchmark",
+                    "integration_profile": "custom-gym-verifier",
+                    "domain": "other",
+                    "description": "Nested benchmark",
+                    "modality": "text",
+                    "authors": ["Test"],
+                    "reward": {"range": [0, 1], "higher_is_better": True},
+                    "resources_server": "scorer",
+                    "agent_server": "simple_agent",
+                    "model_server": "policy_model",
+                    "datasets": [
+                        {
+                            "name": "validation",
+                            "type": "benchmark",
+                            "jsonl_fpath": "data.jsonl",
+                            "prepare_script": "prepare.py",
+                        }
+                    ],
+                    "canonical_split": "validation",
+                    "standard_prompt_config": "prompt.yaml",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "start", "--benchmark", "suite/example", "--search-dir", str(tmp_path)],
+        )
+
+        assert overrides == [f"+config_paths=[{(nested / 'config.yaml').resolve()}]"]
+
     def test_selectors_merge_into_single_config_paths(self, monkeypatch: MonkeyPatch) -> None:
         # --config and multiple asset selectors all feed one +config_paths list (Hydra rejects duplicates).
         # _split_overrides asserts they coalesce into a single token.
@@ -971,18 +1586,151 @@ class TestAssetSelectors:
         assert "resources_servers/mcqa/configs/" in err
 
 
+class TestAgentSelector:
+    """`--agent-type NAME[/FLAVOR]` resolves a named harness to its config and adds it to `+config_paths`."""
+
+    HERMES = "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            ["env", "start"],
+            ["env", "validate"],
+            ["env", "prefetch"],
+            ["eval", "run"],
+        ],
+    )
+    def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, command) -> None:
+        _, overrides = _dispatch_for(monkeypatch, [*command, "--agent-type", "hermes_agent"])
+        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+
+    def test_agent_is_interchangeable_with_config(self, monkeypatch: MonkeyPatch) -> None:
+        COMMAND = ["env", "start"]
+        by_name = _dispatch_for(monkeypatch, [*COMMAND, "--agent-type", "hermes_agent"])
+        by_path = _dispatch_for(monkeypatch, [*COMMAND, "--config", str(WORKING_DIR / self.HERMES)])
+        assert by_name == by_path
+
+    def test_flavor_resolves_to_flavor_file(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch, ["env", "start", "--agent-type", "cvdp_agent/cvdp_agent_generic_hermes"]
+        )
+        expected = WORKING_DIR / "responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml"
+        assert overrides == [f"+config_paths=[{expected}]"]
+
+    def test_composes_with_benchmark_into_one_config_paths_token(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "run", "--agent-type", "hermes_agent", "--benchmark", "gpqa", "--model-type", "vllm_model"],
+        )
+        paths, others = _split_overrides(overrides)
+        assert paths == {
+            str(WORKING_DIR / self.HERMES),
+            str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
+            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+        }
+        assert others == set()
+
+    def test_composes_with_explicit_config(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch, ["env", "start", "--config", "mine.yaml", "--agent-type", "hermes_agent"]
+        )
+        paths, others = _split_overrides(overrides)
+        assert paths == {"mine.yaml", str(WORKING_DIR / self.HERMES)}
+        assert others == set()
+
+    def test_unset_flag_contributes_nothing(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--benchmark", "gpqa"])
+        assert overrides == [f"+config_paths=[{WORKING_DIR / 'benchmarks/gpqa/config.yaml'}]"]
+
+    def test_agent_type_resolves_to_config_path(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--agent-type", "hermes_agent"])
+        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+
+    def test_agent_still_names_a_running_instance(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "-a", "gpqa_mcqa_simple_agent"])
+        assert target == "nemo_gym.cli.eval:collect_rollouts"
+        assert overrides == ["+agent_name=gpqa_mcqa_simple_agent"]
+
+    def test_agent_and_agent_type_are_independent(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch, ["eval", "run", "--agent-type", "hermes_agent", "--agent", "gpqa_mcqa_simple_agent"]
+        )
+        paths, others = _split_overrides(overrides)
+        assert paths == {str(WORKING_DIR / self.HERMES)}
+        assert others == {"+agent_name=gpqa_mcqa_simple_agent"}
+
+    def test_agent_type_is_rejected_with_no_serve(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "--no-serve", "--agent-type", "hermes_agent"])
+
+        with pytest.raises(SystemExit):
+            cli_main.main()
+
+        assert "cannot be combined with `--no-serve`" in capsys.readouterr().err
+
+    def test_unknown_name_suggests_a_close_one(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "start", "--agent-type", "hermes_agnt"])
+        with pytest.raises(SystemExit):
+            main()
+        assert "Did you mean `hermes_agent`?" in capsys.readouterr().err
+
+
 class TestDidYouMean:
     """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
 
     def test_helper_suggests_close_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
 
     def test_helper_silent_when_nothing_close(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
+
+    def test_helper_does_not_suggest_exact_match(self) -> None:
+        from nemo_gym.utils.text import did_you_mean
+
+        assert did_you_mean("eval", ["list", "eval", "env"]) == ""
+
+    def test_helper_suggests_next_close_match_after_excluding_exact(self) -> None:
+        from nemo_gym.utils.text import did_you_mean
+
+        assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
+
+    def _isolate_roots(self, monkeypatch: MonkeyPatch, root: Path) -> None:
+        monkeypatch.setattr("nemo_gym.PARENT_DIR", root)
+        monkeypatch.setattr("nemo_gym.WORKING_DIR", root)
+        monkeypatch.chdir(root)
+
+    def _make_agents(self, root: Path) -> None:
+        agents = root / "responses_api_agents"
+        (agents / "foo" / "configs").mkdir(parents=True)  # folder exists, but no YAML configs
+        (agents / "fooo" / "configs").mkdir(parents=True)
+        (agents / "fooo" / "configs" / "fooo.yaml").write_text("{}\n")
+
+    def test_existing_folder_without_configs_gets_no_hint(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        # `foo/` exists but has no configs: report the missing config, don't suggest `fooo`.
+        self._make_agents(tmp_path)
+        self._isolate_roots(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            cli_main._asset_config_path("agent-type", "foo")
+
+        message = str(exc_info.value)
+        assert "responses_api_agents/foo/configs/foo.yaml" in message
+        assert "does not exist" in message
+        assert "Did you mean" not in message
+
+    def test_typo_in_folder_name_still_gets_hint(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        self._make_agents(tmp_path)
+        self._isolate_roots(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            cli_main._asset_config_path("agent-type", "foooo")
+
+        assert "Did you mean `fooo`?" in str(exc_info.value)
 
     def _run_expecting_exit(self, monkeypatch: MonkeyPatch, capsys, argv: list[str]) -> str:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
@@ -1169,6 +1917,54 @@ class TestListEnvironmentsRouting:
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+json=true"]
 
+    def test_list_benchmarks_unknown_name_uses_benchmark_noun(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # One end-to-end smoke over the real router and catalog; the kind-scoping rules themselves are
+        # asserted against a synthetic catalog in tests/unit_tests/test_cli.py::TestListEnvironments.
+        # Substring, not equality: rich wraps to the console width and colorizes when FORCE_COLOR is set.
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "benchmarks", "gsm8kk"])
+
+        with pytest.raises(SystemExit) as error:
+            main()
+
+        assert error.value.code == 1
+        assert "Unknown benchmark 'gsm8kk'" in " ".join(capsys.readouterr().out.split())
+
+    @pytest.mark.parametrize("status", ["experimental", "no-manifest"])
+    def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch, status: str) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "list",
+                "environments",
+                "--domain",
+                "math",
+                "--kind",
+                "benchmark",
+                "--modality",
+                "text",
+                "--licensing",
+                "Apache-2.0",
+                "--status",
+                status,
+                "--lifecycle",
+                "active",
+            ],
+        )
+        assert target == "nemo_gym.cli.env:list_environments"
+        assert set(overrides) == {
+            "+domain=math",
+            "+catalog_kind=benchmark",
+            "+modality='text'",
+            "+licensing='Apache-2.0'",
+            f"+status={status}",
+            "+lifecycle=active",
+        }
+
+    def test_catalog_status_is_closed(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "environments", "--status", "unknown"])
+        with pytest.raises(SystemExit):
+            main()
+
     def test_search_dir_populates_extra_roots_env_during_command_then_restores(self, monkeypatch: MonkeyPatch) -> None:
         # `--search-dir` (repeatable) is folded into NEMO_GYM_EXTRA_ROOTS for the duration of the command (no
         # Hydra override) so the roots reach every resolver, then restored so main() leaves no global state.
@@ -1208,3 +2004,140 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "calendar"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+component_name=calendar"]
+
+
+@pytest.mark.parametrize("extra", [[], ["--no-serve"]])
+def test_eval_run_restores_positional_override_before_config_merge(monkeypatch, extra):
+    target, overrides = _dispatch_for(
+        monkeypatch, ["eval", "run", "+config_paths=[a.yaml]", "--config", "b.yaml", *extra]
+    )
+    assert target.endswith("collect_rollouts" if extra else "e2e_rollout_collection")
+    assert overrides == ["+config_paths=[b.yaml,a.yaml]"]
+
+
+@pytest.mark.parametrize("serve", [False, True])
+@pytest.mark.parametrize("deletion", ["~unused_server", "~unused_server@pkg", "~unused_group/option"])
+def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, deletion):
+    target, overrides = _dispatch_for(
+        monkeypatch,
+        ["eval", "run", *([] if serve else ["--no-serve"]), deletion, "+limit=3", "~second_server"],
+    )
+    assert target.endswith("e2e_rollout_collection" if serve else "collect_rollouts")
+    assert overrides == [deletion, "+limit=3", "~second_server"]
+
+
+def test_eval_run_keeps_home_relative_target(monkeypatch):
+    captured = []
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append(args.target))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes_agent"])
+    cli_main.main()
+    assert captured == ["~/tasks"]
+
+
+@pytest.mark.parametrize(
+    "target", ["~", "~/tasks", "~harbor_test_user/tasks", "trial=1", "./trial=1", "../trial=1", "/missing/trial=1"]
+)
+def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch, target):
+    import pwd
+    from types import SimpleNamespace
+
+    home = tmp_path / "home"
+    (home / "tasks").mkdir(parents=True)
+    (tmp_path / "trial=1").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    real_getpwnam = pwd.getpwnam
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(pw_dir=str(home)) if name == "harbor_test_user" else real_getpwnam(name),
+    )
+    captured = []
+    monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes_agent", "+limit=3"])
+    cli_main.main()
+    assert captured == [(target, ["+agent_name=hermes_agent", "+limit=3"])]
+
+
+@pytest.mark.parametrize("override", ["trial=1", "+folder=/tmp/tasks", "~unused_server=value"])
+def test_eval_run_ambiguous_nonfolders_remain_overrides(tmp_path, monkeypatch, override):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "trial=1").write_text("a file, not a task folder")
+    target, overrides = _dispatch_for(monkeypatch, ["eval", "run", override])
+    assert target.endswith("e2e_rollout_collection")
+    assert overrides == [override]
+
+
+@pytest.mark.parametrize("serve", [False, True])
+def test_eval_run_keeps_long_configuration_values(monkeypatch, serve):
+    value = "x" * 300
+    override = f"+policy_api_key={value}"
+    target, overrides = _dispatch_for(
+        monkeypatch, ["eval", "run", *([] if serve else ["--no-serve"]), override, "+limit=3"]
+    )
+    assert target.endswith("e2e_rollout_collection" if serve else "collect_rollouts")
+    assert overrides == [override, "+limit=3"]
+    assert OverridesParser.create().parse_override(overrides[0]).value() == value
+
+
+@pytest.mark.parametrize("serve", [False, True])
+@pytest.mark.parametrize("flag", ["--only-tasks", "--exclude-tasks"])
+def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve, flag):
+    """Register-only flags: without a TARGET nothing consumes them, so they are refused, not dropped."""
+    monkeypatch.setattr(cli_main, "dispatch", lambda *args: pytest.fail("a dropped selection must not dispatch"))
+    monkeypatch.setattr(
+        sys, "argv", ["gym", "eval", "run", *([] if serve else ["--no-serve"]), flag, "alpha", "+limit=3"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    assert "--only-tasks and --exclude-tasks apply to a task TARGET" in capsys.readouterr().err
+
+
+def _resolve_eval_run(monkeypatch: MonkeyPatch, selectors: list[str]) -> DictConfig:
+    """Resolve the config `gym eval run <selectors>` would run: the CLI's config_paths, in its order, then the parser."""
+    _, overrides = _dispatch_for(monkeypatch, ["eval", "run", *selectors])
+    (token,) = [o for o in overrides if o.startswith("+config_paths=[")]
+    config_paths = token[len("+config_paths=[") : -1].split(",")
+    initial = DictConfig(
+        {
+            "config_paths": config_paths,
+            "policy_base_url": "https://example.test/v1",
+            "policy_api_key": "test-key",  # pragma: allowlist secret
+            "policy_model_name": "test-model",
+        }
+    )
+    return gc.GlobalConfigDictParser().parse(
+        gc.GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+        )
+    )
+
+
+class TestModelTypeKeepsBenchmarkPolicySettings:
+    """`--model-type vllm_model` merges after the benchmark config, so it must not reset what the benchmark set."""
+
+    POLICY_SETTINGS = {
+        "extra_body": {"thinking_token_budget": 17408},
+        "chat_template_kwargs": {"enable_thinking": True},
+        "sampling_overrides": {"temperature": 0.6},
+    }
+
+    def test_benchmark_policy_settings_survive_the_model_type_config(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        bench_dir = tmp_path / "benchmarks" / "budget_probe"
+        bench_dir.mkdir(parents=True)
+        (bench_dir / "config.yaml").write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": self.POLICY_SETTINGS}}})
+        )
+        selectors = ["--search-dir", str(tmp_path), "--benchmark", "budget_probe", "--model-type", "vllm_model"]
+
+        resolved = _resolve_eval_run(monkeypatch, selectors)
+
+        # The model-type config is the later sibling, i.e. the one whose values would win.
+        assert resolved["config_paths"][-1].endswith("responses_api_models/vllm_model/configs/vllm_model.yaml")
+        vllm_model = resolved["policy_model"]["responses_api_models"]["vllm_model"]
+        for key, value in self.POLICY_SETTINGS.items():
+            assert vllm_model[key] == value, key
+        assert vllm_model["entrypoint"] == "app.py"  # the model-type config still applied

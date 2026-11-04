@@ -14,16 +14,18 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
+import pytest
 from pytest import approx, fixture
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.omniscience.app import (
     OmniscienceConfig,
     OmniscienceServer,
@@ -187,6 +189,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("1989")
@@ -215,6 +218,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("B"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("1991")
@@ -239,6 +243,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("C"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("About 28 million")
@@ -264,6 +269,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("D"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("I don't have enough information to answer this question.")
@@ -289,6 +295,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("<think>Let me recall...</think>Pancreas")
@@ -310,6 +317,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("Test answer")
@@ -341,6 +349,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("D"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         # Empty model output
@@ -371,6 +380,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("Paris")
@@ -397,6 +407,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("A"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("Paris")
@@ -418,6 +429,7 @@ class TestOmniscienceServer:
 
         response_mock = AsyncMock()
         response_mock.json = AsyncMock(return_value=self._make_judge_response("D"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
         model_response = self._make_model_response("<think>Let me think about this...")
@@ -486,3 +498,27 @@ class TestExtractTextNoStrip:
     def test_strip_true_removes_reasoning(self) -> None:
         response = self._make_response("reasoning here</think>answer")
         assert extract_text_from_response(response, strip_thinking=True) == "answer"
+
+
+@pytest.mark.parametrize(
+    "text, expected, parsed",
+    [
+        ("A", "A", True),
+        ("B", "B", True),
+        ("explanation\nD", "D", True),
+        ("The grade is A based on analysis", "A", False),
+        ("no clear grade", "B", False),
+    ],
+)
+def test_only_explicit_judge_verdict_marks_grading(text, expected, parsed):
+    from nemo_gym.trajectory import ModelCallRef
+    from nemo_gym.verification import JudgeGrading
+    from nemo_gym.verification.judge import _judge_grading
+
+    grading = JudgeGrading(dependencies=[ModelCallRef(model_call_id="judge-response")])
+    token = _judge_grading.set(grading)
+    try:
+        assert parse_judge_grade(text) == expected
+        assert bool(grading.parsed_dependencies) is parsed
+    finally:
+        _judge_grading.reset(token)

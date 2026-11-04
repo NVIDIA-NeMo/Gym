@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Full Verified + Multilingual recipe; SWE-bench Pro is intentionally excluded.
+config_paths:
+  - benchmarks/nemotron_3.5_super/swebench_verified_multilingual.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+num_samples_in_parallel: 1024
+# Prepared inputs already contain three attempts per task.
+num_repeats: 1
+num_repeats_add_seed: false
+route_failures_to_sidecar: true
+uv_pip_set_python: true
+uv_cache_dir: /tmp/gym-batch-uv-${oc.env:SLURM_JOB_ID,local}
+model_endpoint_readiness_timeout_seconds: 1800
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95

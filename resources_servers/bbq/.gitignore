@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.env
+.env.*
+.DS_Store
+results/
+
+# Transient rollout-collection artifacts (regenerable via ng_collect_rollouts
+# + scripts/promote_live_rollouts.py); only the canonical five-row
+# data/example_rollouts.jsonl and its metrics belong in Git.
+data/example_rollouts_live*
+data/example_rollouts_pool*
+data/example_rollouts_previous*
+data/*_failures.jsonl
+data/*_materialized_inputs.jsonl
+
+# Training-scale datasets are distributed separately (Nemotron Safety Blend);
+# only the five-row fixtures ship in this repository.
+data/*train*.jsonl
+data/*validation*.jsonl

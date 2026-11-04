@@ -1,0 +1,106 @@
+# Finance Agent v2 Rubric Judge Prompt Template
+#
+# Judges ONE rubric criterion against ONE candidate answer and returns a binary
+# score (1 = satisfied, 0 = not satisfied) as JSON. /verify renders this template
+# once per criterion and votes over repeated calls, so this prompt never sees the
+# full rubric list.
+#
+# Placeholders: {question}, {generated_answer}, {criterion}
+#
+# Placeholder order matters. The static rules, the question, and the answer are
+# identical across every criterion of a question, so {criterion} comes last to
+# keep the prompt prefix stable and let provider prompt caching absorb the
+# repeated answer tokens across the 3-10 calls each criterion needs.
+#
+# Substituted with str.replace, not str.format: the output-format block below
+# contains literal JSON braces.
+#
+# To override, set rubric_judge_prompt_template as an inline string (takes
+# priority), or point rubric_judge_prompt_template_fpath at a custom file.
+
+rubric_judge_prompt_template: |-
+  You are evaluating whether a candidate answer satisfies a single rubric criterion for a finance / SEC / market-analysis question.
+
+  I will give you one rubric criterion and one model answer.
+  Judge only that rubric. Ignore style, length, formatting, and unrelated content.
+
+  ### Rubric types and bars
+  Identify which type the rubric is, then apply that bar. You do not need to output the type.
+
+  1. **Numeric lookup** — value taken directly from a filing, price feed, or other source.
+     Example: `Shares outstanding were 186,789,367`
+     Bar:
+     - discrete counts / IDs / dates / names / contract prices: exact match
+     - money / rates with units: unit conversion + ordinary presentation rounding only (e.g. thousands ↔ millions with 1–2 decimals). Do not apply the derivation soft %-band here.
+
+  2. **Numeric derivation** — calculated value.
+     Example: `Implied equity value was $42,774.77 million`
+     Bar: same economic value after unit conversion and ordinary rounding to the rubric's displayed precision. A soft relative band of about **1%** may be used here when precision is ambiguous. Ultra-coarse answers still fail.
+
+  3. **Conclusion** — qualitative interpretation, sentiment, comparison, or explanatory claim.
+     Example: `States that there was positive market sentiment based on the 14-Calendar Day returns metrics`
+     Bar: grade **propositional equivalence**. Equivalent paraphrase is okay: same claim, different words. A weaker, broader, opposite, or only-implicated nearby claim is not.
+
+  ### Shared rules
+  - Grade **claim equivalence**, not wording. Entity, metric, period/window, value/sign, and qualifiers must match in meaning.
+  - Extra information beyond the rubric is fine.
+  - Wrong polarity/sign/negation = `0`, even if the topic is mentioned.
+  - **Implication is not satisfaction.** Supporting facts or nearby risks that make the rubric plausible are not enough; the answer must actually assert the rubric claim (or an equivalent paraphrase of it).
+  - Evidence may appear in prose, bullets, tables, or equations.
+  - Use the question only for scope/disambiguation (entity, period, metric definition). Grade only the provided rubric. Do not require the answer to satisfy other parts of the question; other rubrics (not included here) will be checked separately against this same answer.
+  - Binary only: `1` or `0`. If uncertain, choose `0`.
+
+  ### Numeric details
+  Mentally normalize before deciding; do not emit normalized values.
+
+  - Normalize `$` / thousand / million / billion, percents vs decimals, multiples (`x`), and sign.
+  - In **rubrics**, parentheses around a number usually mean negative: `(58.32%)` = `-58.32%`.
+  - In **answers**, judge the signed meaning, not punctuation. `-58.32%`, `(58.32%)`, `down 58.32%`, and prose like `(–58.32%)` are equivalent negatives. Do not treat answer parentheses as a second negation on top of an explicit minus.
+  - Counts, dates, names, and stated contract prices: exact.
+  - Lookup money/rates: ordinary unit conversion / presentation rounding is fine (`$442,139 thousand` ≈ `$442.1 million`). Do **not** use the ~1% soft band for lookups.
+  - Derived values: more precision than the rubric is fine if it rounds to the rubric value; less precision is fine if the rubric rounds to the answer and the gap is not meaningful (about **1% relative** guide). Ultra-coarse answers fail.
+  - Two-period averages: correct average from beginning/ending balances passes even if labeled as one fiscal year's average rather than naming both years.
+
+  ### Conclusion details
+  - Be **lenient on polarity strength**, strict on polarity direction.
+    - Soft/hedged same-direction language still scores `1`: `slightly positive`, `turned positive`, `stabilized into positive territory`, `constructive`, `favorable` can satisfy a "positive" sentiment/conclusion rubric when clearly about the right entity and window.
+    - Opposite or non-committal language scores `0`: `negative`, `mixed`, `unchanged`, or merely describing the numeric return with no same-direction conclusion.
+  - Do not require the exact words "market sentiment" if the answer clearly states the required positive/negative market reaction for that window.
+  - Load-bearing qualifiers are required when present in the rubric: `primary`, `mainly`, `only`, `exactly`, `all`, `most`, `majority`, `most important`, etc. Facts that merely make the qualifier plausible do not count.
+  - If the rubric requires stating "most/majority …", a buried number that merely entails it is not enough unless that implication is used.
+
+  ### Temporal operators
+  Compare the **temporal operator**, not just the year/period label.
+
+  - **Whole-period:** in / during / for / over FY20XX → the claim holds for that period as a whole
+  - **Intra-period trajectory:** as … progressed / later in / over the course of / increasingly through → change within the period
+  - **Point-in-time:** as of / at / effective → a date snapshot
+
+  Score `1` only when operators are equivalent.
+  Score `0` if the rubric has trajectory or point-in-time force and the answer only makes a whole-period claim (or vice versa), even when the year matches.
+  Example: "increased in FY2024" ≈ "rose during fiscal 2024" → `1`; "increased as FY2024 progressed" ≠ "accelerated during FY2024" → `0`.
+
+  ### Output format
+  Return valid JSON only. `score` must be the integer `1` or `0` (not strings like "pass"/"fail").
+
+  ```json
+  {
+    "extracted_evidence": "short quote or paraphrase of the relevant answer span",
+    "score": 1,
+    "reason": "1-3 sentences explaining the decision under the rules above"
+  }
+  ```
+
+  ===== Inputs =====
+
+  QUESTION (for scope/disambiguation only — do not grade against it):
+
+  {question}
+
+  ANSWER:
+
+  {generated_answer}
+
+  RUBRIC CRITERION (grade only this):
+
+  {criterion}

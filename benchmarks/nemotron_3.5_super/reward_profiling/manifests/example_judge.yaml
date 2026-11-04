@@ -1,0 +1,61 @@
+# Minimal manifest for a judge-scored environment.
+#
+# The difference from example_basic is the judge binding under gym_env_start. The shipped config
+# names a judge but never an endpoint, so that name must be defined here. Without it the composed
+# config fails to resolve and the run dies at parse, before a single rollout.
+#
+# ${nv_inference_api_key} comes from env.yaml, which the launchers mount into the container.
+
+nickname: example_judge
+
+# Becomes sweep_config.yaml, passed to `gym env start --config`.
+gym_env_start:
+  config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+  # Ordinary Gym config, spliced into the emitted sweep_config.yaml as top-level keys. Inline
+  # rather than a separate file because the container is built from a Gym ref and does not contain
+  # this repo, so a repo-relative extra_config path would not resolve inside it.
+  #
+  # max_concurrent_requests is not optional at scale: the transport retries 429s with a flat sleep
+  # and extends its retry budget on rate limits, so a saturated judge degrades into a retry storm
+  # rather than backpressure.
+  math_judge_model:
+    responses_api_models:
+      openai_model:
+        entrypoint: app.py
+        openai_base_url: https://inference-api.nvidia.com/v1
+        openai_model: nvidia/qwen/qwen-235b
+        openai_api_key: ${nv_inference_api_key}
+        max_concurrent_requests: 64
+
+  # lc_judge.yaml declares that equivalence_llm_judge needs a judge; this says which one.
+  lc_judge:
+    resources_servers:
+      equivalence_llm_judge:
+        judge_model_server:
+          type: responses_api_models
+          name: math_judge_model
+
+# Slurm and container settings, so a run needs only MODEL on the command line.
+# Each sbatch key becomes SBATCH_<KEY>; a launcher's own env var overrides either block.
+# sbatch:
+#   account: nemotron_n3_post
+#   qos: interactive
+#   timelimit: "04:00:00"
+# srun:
+#   container: /path/to/eval.sqsh
+#   sandbox_container: /path/to/nemo-skills-sandbox-0.7.1-arm64.sqsh
+
+# Runtime settings for `gym eval run --no-serve`.
+gym_eval_run:
+  num_repeats: 8
+
+entries:
+
+  - label: long_context
+    agent: lc_judge_simple_agent
+    configs:
+      - resources_servers/equivalence_llm_judge/configs/lc_judge.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/long_context/0123_chengping_qwenlong_v3b_profiled.jsonl
+    owner: fjia

@@ -1,0 +1,21 @@
+# Second OpenAI-compatible model-server instance for ToolSandbox's user
+# simulator, distinct from the model-under-test.
+#
+# The bundled `openai_model.yaml` declares the `policy_model` instance (the
+# agent under test). Load this file *alongside* it to add a separate
+# `user_model` instance wired by the `${user_*}` overrides, then point the
+# resources server's `user_model_server` at `user_model` (see
+# `toolsandbox_serve.yaml`).
+#
+# Note: the openai_model server always sends its configured `openai_model` and
+# ignores any per-request model override, so a distinct user model REQUIRES a
+# distinct server instance like this one — setting only `user_model_name` on
+# the resources server is not enough.
+user_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${user_base_url}
+      openai_api_key: ${user_api_key}
+      openai_model: ${user_model_name}
+      openai_default_headers: {}

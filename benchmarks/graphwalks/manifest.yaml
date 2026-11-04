@@ -1,0 +1,30 @@
+name: graphwalks
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: GraphWalks BFS frontier and parent-node retrieval scored by node-set
+  F1.
+modality: text
+licensing: MIT
+authors:
+- laszkiewiczp
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: graphwalks
+agent_server: simple_agent
+datasets:
+- name: graphwalks
+  type: benchmark
+  jsonl_fpath: benchmarks/graphwalks/data/graphwalks_benchmark.jsonl
+  prepare_script: benchmarks/graphwalks/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

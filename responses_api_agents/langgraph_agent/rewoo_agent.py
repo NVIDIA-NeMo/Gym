@@ -26,16 +26,16 @@ Graph: plan -> worker -> (loop for each step) -> solve -> END
 import re
 from typing import Annotated, List, TypedDict
 
-from app import LangGraphAgentAdapter, LangGraphAgentConfig
+from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
 from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 
 
 ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system"}
@@ -96,6 +96,7 @@ class ReWOOVerifyResponse(BaseVerifyResponse):
 class ReWOOState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     policy_outputs: list
+    policy_usages: list
     cookies: dict
     request_body: NeMoGymResponseCreateParamsNonStreaming
     last_policy_response: NeMoGymResponse
@@ -110,12 +111,17 @@ def _extract_text(outputs):
     return "".join(c.text for o in outputs if o.type == "message" for c in o.content if c.type == "output_text")
 
 
+def _substitute_evidence(text: str, results: dict[str, str]) -> str:
+    """Replace complete references once, preserving inserted evidence and unresolved references."""
+    return re.sub(r"#E\d+", lambda match: results.get(match.group(0), match.group(0)), text)
+
+
 class ReWOOAgent(LangGraphAgentAdapter):
     config: ReWOOAgentConfig
 
     async def _call_model(self, state, prompt):
         input_messages = [NeMoGymEasyInputMessage(role="user", content=prompt)]
-        request_body = state["request_body"].model_copy(update={"input": input_messages + state["policy_outputs"]})
+        request_body = state["request_body"].model_copy(update={"input": input_messages})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
@@ -141,6 +147,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -154,9 +161,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             step_idx = state["current_step"]
             _, step_name, tool, tool_input = state["steps"][step_idx]
 
-            # Variable substitution: replace #E1, #E2, etc. with prior results
-            for k, v in state["results"].items():
-                tool_input = tool_input.replace(k, v)
+            tool_input = _substitute_evidence(tool_input, state["results"])
 
             prompt = tool_input
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=f"Step {step_name}: {prompt}")
@@ -172,6 +177,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
                     AIMessage(content=text),
                 ],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -183,8 +189,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             # Build plan string with evidence substituted
             plan_with_evidence = ""
             for _plan, step_name, tool, tool_input in state["steps"]:
-                for k, v in state["results"].items():
-                    tool_input = tool_input.replace(k, v)
+                tool_input = _substitute_evidence(tool_input, state["results"])
                 plan_with_evidence += f"Plan: {_plan}\n{step_name} = {tool}[{tool_input}]\nEvidence: {state['results'].get(step_name, 'N/A')}\n\n"
 
             prompt = SOLVE_PROMPT.format(plan=plan_with_evidence, task=state["task"])
@@ -196,6 +201,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -210,7 +216,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         graph.add_node("worker", worker)
         graph.add_node("solve", solve)
         graph.set_entry_point("plan")
-        graph.add_edge("plan", "worker")
+        graph.add_conditional_edges("plan", route_worker, {"worker": "worker", "solve": "solve"})
         graph.add_conditional_edges("worker", route_worker, {"worker": "worker", "solve": "solve"})
         graph.add_edge("solve", END)
 
@@ -231,6 +237,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         return {
             "messages": [HumanMessage(content=task)],
             "policy_outputs": [],
+            "policy_usages": [],
             "cookies": cookies,
             "request_body": body,
             "last_policy_response": None,
@@ -242,7 +249,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         }
 
     def extract_outputs(self, final_state: dict) -> list:
-        return final_state["policy_outputs"]
+        return response_output_items(final_state["policy_outputs"])
 
     async def run(self, request: Request, body: ReWOORunRequest) -> ReWOOVerifyResponse:
         cookies = request.cookies

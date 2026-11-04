@@ -24,19 +24,20 @@ from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 from resources_servers.terminus_judge.schemas import TERMINUS_1_SCHEMA, TERMINUS_2_SCHEMA
 
 
@@ -240,6 +241,10 @@ class TerminusJudgeVerifyResponse(BaseVerifyResponse):
 
 
 class TerminusJudgeResourcesServer(SimpleResourcesServer):
+    # Each verification checks schema and similarity and may call a judge: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: TerminusJudgeResourcesServerConfig
 
     def __init__(self, *args, **kwargs):
@@ -484,6 +489,12 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 reward = 1.0
                 failure_reason = FailureCode.NONE
 
+        except JUDGE_FAILURES as error:
+            if is_judge_failure(error):
+                raise
+            else:
+                failure_reason = FailureCode.UNKNOWN_ERROR
+                logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(error).__name__} {error}")
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(e).__name__} {e}")
@@ -520,20 +531,14 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         ctx = self._judge_endpoint_max_concurrency or nullcontext()
         async with ctx:
             try:
-                response = await self.server_client.post(
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=cfg.judge_model_server.name,
                     url_path="/v1/responses",
                     json=responses_create_params,
+                    response_model=NeMoGymResponse,
                 )
 
-                judge_response = NeMoGymResponse.model_validate(await response.json())
-
-            except asyncio.TimeoutError:
-                print(
-                    "DEBUG: TerminusJudgeResourcesServer: Judge model server timeout",
-                    flush=True,
-                )
-                raise RuntimeError("Judge model server timeout")
             except Exception as e:
                 print(
                     f"DEBUG: TerminusJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",

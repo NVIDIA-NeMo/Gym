@@ -15,6 +15,7 @@
 """OpenSandbox provider package."""
 
 from nemo_gym.sandbox.providers.opensandbox.provider import (
+    OpenSandboxAttributionConfig,
     OpenSandboxConnectionConfig,
     OpenSandboxCreateConfig,
     OpenSandboxCreateError,
@@ -27,6 +28,7 @@ from nemo_gym.sandbox.providers.opensandbox.provider import (
 
 
 __all__ = [
+    "OpenSandboxAttributionConfig",
     "OpenSandboxConnectionConfig",
     "OpenSandboxCreateConfig",
     "OpenSandboxCreateError",

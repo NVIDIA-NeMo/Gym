@@ -11,7 +11,7 @@ dependencies = [
     # renders the chat template and tokenizes locally, so a tokenizer or
     # template delta between adapter and server shows up as a rollout
     # contiguity failure rather than an import error.
-    "transformers==5.8.1",
+    "transformers==5.12.1",
 ]
 
 [build-system]
