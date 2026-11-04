@@ -37,25 +37,30 @@ import ray
 from fastapi import Body
 from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
+    failure_report_for,
 )
-from nemo_gym.responses_converter import chat_completion_usage_to_response_usage
+from nemo_gym.core.failure_kinds import INFRASTRUCTURE_ERROR
+from nemo_gym.models import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import (
-    get_first_server_config_dict,
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
 )
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
@@ -1182,6 +1187,8 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
         "agent_contract": result.agent_contract,
+        # Set only by the built-in rollout; a runner's own result type need not have it.
+        "sandbox_start_failure": getattr(result, "sandbox_start_failure", None),
         # Only Gym's model callers see usage. m3_agent and pointer_agent call models through their own clients, so
         # their usage stays unknown (None).
         "usage": usage.model_dump(mode="json") if (usage := policy_usage.reported()) is not None else None,
@@ -1343,7 +1350,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             metadata = body.verifier_metadata or {}
             task_config = metadata.get("osworld_task") or (body.model_extra or {}).get("osworld_task")
             if not task_config:
-                return _empty_response(body, error="No 'osworld_task' provided in verifier_metadata.")
+                # A row without a task spec is a configuration refusal, not an infrastructure failure to retry.
+                return _empty_response(
+                    body,
+                    error="No 'osworld_task' provided in verifier_metadata.",
+                    termination_reason="task_configuration_error",
+                )
 
             try:
                 requires_proxy = task_requires_proxy(task_config)
@@ -1853,7 +1865,135 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
+    response_fields |= _admission_failure_fields(result, runtime_admission)
+    sandbox_start_failure = result.get("sandbox_start_failure")
+    if isinstance(sandbox_start_failure, Mapping):
+        response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+# Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest
+# that never became ready has its own typed fields (``_sandbox_start_failure_fields``); a configuration refusal (a
+# task without a spec, a proxy that is required but disabled or misconfigured) stays an untyped masked row, since a
+# retry would meet the same configuration.
+_INFRASTRUCTURE_ADMISSION_REASONS = frozenset(
+    {
+        "timeout",
+        "task_timeout",
+        "action_timeout",
+        "evaluator_error",
+        "proxy_setup_error",
+        "rollout_error",
+        "rollout_state_incomplete",
+        "evaluation_incomplete",
+    }
+)
+# Runtime-admission reasons a failed policy call caused: the row is a model failure of the kind the call shows.
+_MODEL_ADMISSION_REASONS = frozenset({"model_call_failed", "model_timeout"})
+_HTTP_STATUS_IN_ERROR = re.compile(r"(?:Error code|status(?:_code)?)[:= ]+\s*(\d{3})\b")
+
+
+def _model_failure_kind(reason: str, error: str) -> tuple[str, Optional[int]]:
+    """The failure kind of the policy call the runtime refused a rollout for, and the HTTP status it recorded.
+
+    A call that exceeded the agent's model timeout is the policy's response timeout; a request the server rejected
+    for its length is a context-window limit; any other HTTP reply is a request error with its status; a call that
+    never got a reply is a transport error.
+    """
+    from responses_api_agents.osworld_agent.adapter_agents import classify_model_failure  # noqa: PLC0415
+
+    if reason == "model_timeout":
+        return MODEL_POLICY_RESPONSE_TIMEOUT, None
+    match = _HTTP_STATUS_IN_ERROR.search(error)
+    status = int(match.group(1)) if match is not None and 100 <= int(match.group(1)) <= 599 else None
+    if classify_model_failure(RuntimeError(error), model_call_completed=False) == "context_overflow":
+        return MODEL_CONTEXT_LIMIT, status
+    return (MODEL_REQUEST_ERROR if status is not None else MODEL_TRANSPORT_ERROR), status
+
+
+def _admission_failure_fields(result: Mapping[str, Any], runtime_admission: Mapping[str, Any]) -> Dict[str, Any]:
+    """The typed failure of a rollout that runtime admission refused for an infrastructure or policy-call cause.
+
+    The reason used to live only in ``verifier_metadata``, so the row was a masked result that nothing graded again
+    or retried. An infrastructure cause (a task or action timeout, a failed evaluator, a proxy that did not come up,
+    a crashed or errored rollout, a runner that recorded no terminal state) is an ``infrastructure_error`` with an
+    agent failure event, so the row reaches the failures sidecar and the default retry; a failed policy call is a
+    model failure of the kind the call shows (``_model_failure_kind``). Reward and mask stay as they are, so no score
+    changes. Legacy results and configuration refusals are left as they were.
+    """
+    if (
+        runtime_admission["runtime_eligible"]
+        or runtime_admission["runtime_admission_policy_id"] == LEGACY_RUNTIME_ADMISSION_POLICY_ID
+    ):
+        return {}
+    reason = str(runtime_admission["runtime_admission_reason"])
+    error = str(result.get("error") or "").strip()
+    detail = error.splitlines()[0][:1500] if error else "no error recorded"
+    if reason in _MODEL_ADMISSION_REASONS:
+        kind, http_status = _model_failure_kind(reason, error)
+        event = NgFailureEvent(
+            boundary="agent",
+            failure_kind=kind,
+            failure_reason=f"OSWorld policy call failed ({reason}): {detail}"[:2000],
+            http_status=http_status,
+            operation="agent.policy_request",
+            stage="agent",
+        )
+    elif reason in _INFRASTRUCTURE_ADMISSION_REASONS:
+        event = NgFailureEvent(
+            boundary="agent",
+            failure_kind=INFRASTRUCTURE_ERROR,
+            failure_reason=f"OSWorld runtime admission refused the rollout ({reason}): {detail}"[:2000],
+            operation=f"osworld.{reason}",
+            stage="agent",
+        )
+    else:
+        return {}
+    return {
+        "failure_kind": event.failure_kind,
+        "failure_reason": event.failure_reason,
+        "_ng_failure_class": event.failure_kind,
+        **FailureReportRow.fields(failure_report_for(event)),
+    }
+
+
+def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, Any]) -> Dict[str, Any]:
+    """Report a sandbox guest that never became ready as a retryable ``infrastructure_error``.
+
+    The row goes to the failures sidecar, so recovery runs the task again within the run's retry budget. Its reward
+    stays 0.0 and it stays masked, so no score changes. The event carries the guest's last HTTP status and the
+    sandbox id (its operation id), and the reason names the sandbox provider.
+    """
+    provider = str(failure.get("provider") or "unknown")
+    status = failure.get("http_status")
+    http_status = status if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599 else None
+    message = failure.get("message")
+    lines = (error or "").strip().splitlines()
+    if isinstance(message, str) and message.strip():
+        cause = f"TimeoutError: {message.strip()}"
+    else:
+        cause = lines[0] if lines else "the guest did not become ready"
+    reason = f"OSWorld sandbox start failed on provider={provider}: {cause}"[:2000]
+    sandbox_id = failure.get("sandbox_id") if isinstance(failure.get("sandbox_id"), str) else None
+    event = NgFailureEvent(
+        boundary="agent",
+        failure_kind="infrastructure_error",
+        failure_reason=reason,
+        http_status=http_status,
+        operation="osworld.sandbox_start",
+        operation_id=sandbox_id[:128] if sandbox_id else None,
+        stage="agent",
+    )
+    return {
+        "failure_kind": "infrastructure_error",
+        "failure_reason": reason,
+        "sandbox_provider": provider,
+        "sandbox_http_status": http_status,
+        "sandbox_id": sandbox_id,
+        "_ng_failure_class": "infrastructure_error",
+        **FailureReportRow.fields(failure_report_for(event)),
+    }
 
 
 def _empty_response(
@@ -1908,11 +2048,41 @@ def _empty_response(
         "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
         "mask_sample": outcome.mask_sample,
     }
+    response_fields |= _admission_failure_fields(
+        {"error": error},
+        {
+            "runtime_eligible": outcome.runtime_eligible,
+            "runtime_admission_reason": outcome.runtime_admission_reason,
+            "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
+        },
+    )
     return OSWorldVerifyResponse(**response_fields)
 
 
 if __name__ == "__main__":
-    from responses_api_agents.osworld_agent.runtime_dependencies import require_optional_runtime_dependencies
+    import subprocess
+
+    from responses_api_agents.osworld_agent.runtime_dependencies import (
+        require_optional_runtime_dependencies,
+        validate_optional_runtime_dependencies,
+    )
+
+    # Opt-in: with OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS=1 the agent runs its own
+    # explicit installer once when the optional runtime dependencies are missing, then
+    # re-executes itself so the fresh packages are imported. Without the opt-in the
+    # behaviour is unchanged: a missing dependency fails startup with the remediation
+    # command. The marker env var prevents a loop if the installer leaves a gap.
+    _install_flag = "OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS"
+    _attempt_marker = "_OSWORLD_AGENT_OPTIONAL_RUNTIME_DEPS_ATTEMPTED"
+    if os.environ.get(_install_flag) == "1" and os.environ.get(_attempt_marker) != "1":
+        if validate_optional_runtime_dependencies():
+            installer = Path(__file__).resolve().with_name("install_optional_runtime_deps.sh")
+            print(
+                f"[osworld_agent] optional runtime dependencies missing; running {installer} on {sys.prefix}",
+                flush=True,
+            )
+            subprocess.run(["bash", str(installer), sys.prefix], check=True)
+            os.execve(sys.executable, [sys.executable, *sys.argv], {**os.environ, _attempt_marker: "1"})
 
     require_optional_runtime_dependencies()
     OSWorldAgent.run_webserver()

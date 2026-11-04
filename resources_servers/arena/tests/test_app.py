@@ -25,8 +25,9 @@ from openai.types.responses.response import IncompleteDetails
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -34,7 +35,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.arena.app import (
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
@@ -1687,14 +1687,17 @@ class TestJudgeHttpError:
     _make_verify_request = TestArenaResourcesServer._make_verify_request
 
     async def test_a_judge_500_is_a_judge_failure_with_its_status_and_body_not_a_parse_error(
-        self, server: ArenaResourcesServer
+        self, server: ArenaResourcesServer, monkeypatch
     ):
         import aiohttp
         from aiohttp import web
         from aiohttp.test_utils import TestServer
 
-        from nemo_gym.base_resources_server import judge_failsafe
+        from nemo_gym.verification import judge as judge_module
+        from nemo_gym.verification import judge_failsafe
 
+        monkeypatch.setattr(judge_module, "_judge_retry_wait_s", lambda attempt: 0)
+        attempts = judge_module.JUDGE_CALL_MAX_ATTEMPTS
         body = "Error code: 429 - rate limit exceeded"
         hits = []
 
@@ -1719,4 +1722,6 @@ class TestJudgeHttpError:
         # The judge's real status and body are kept; the 429 in the body text classifies nothing.
         assert "ClientResponseError" in error and "500" in error and "ValidationError" not in error
         assert row["response"] == request.response.model_dump(mode="json")  # the saved answer is kept
-        assert len(hits) == 2  # one call per ordering, no extra request
+        # A 500 is retried up to the bounded attempts of one call; the ordering that exhausts them
+        # first cancels its sibling, so two orderings never make more than twice that bound.
+        assert attempts <= len(hits) <= 2 * attempts

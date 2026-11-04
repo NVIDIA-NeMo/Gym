@@ -22,12 +22,16 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 | Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared |
 | Kilo (`kilocode_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Not declared |
-| OpenCode (`opencode_agent`) | Chat Completions | None | Off by default; the session path is evaluation only | Not declared | Declared |
-| OpenClaw (`openclaw_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Declared |
+| OpenCode (`opencode_agent`) | Chat Completions | MCP only | Off by default; the session path is evaluation only | Not declared | Declared |
+| OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Not declared | Declared |
 
 *Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
 
 The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
+
+<Warning>
+This legacy `/run` path is deprecated and will be removed after the Environment Server migration. Do not build new benchmarks, agents, or configs on `opencode_sandboxed_agent`, `pi_sandboxed_agent`, or `hermes_sandboxed_agent`, or on the `/run` path of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`. Use a harness from the table above instead. Each of these agents logs a deprecation warning when it starts on this path. Episode sessions of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`, which [Harbor Tasks](/main/data/harbor-tasks) use, are not deprecated.
+</Warning>
 
 ### Kilo MCP and sandbox ownership
 
@@ -54,6 +58,30 @@ kilocode_agent:
 The Docker provider needs a local Docker daemon. Configure the Gym host and network so the sandbox can reach both the Gym Model Server and the MCP endpoints; a host loopback URL is not reachable from Docker's default bridge network. The Linux image must meet Kilo's [runtime requirements](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/kilocode_agent/README.md#runtime-and-ownership), including network access for the pinned CLI installation.
 
 Agent-owned sandboxes inherit provider metadata defaults, then `sandbox_config.metadata`, with Gym's agent/session/rollout labels taking precedence. The agent stops its sandbox on close or failed setup. If neither Resources sandbox access nor `sandbox_provider` is available, seed fails with a configuration error.
+
+### Pi and OpenCode prompt and tool controls
+
+Both `pi_agent` and `opencode_agent` accept `system_prompt_mode: append|replace`,
+defaulting to `append`. Replacement uses the harness's custom system prompt for
+the combined configured system prompt, request instructions and input system
+instructions. It keeps the user's task separate. Append mode retains each
+adapter's existing behavior. These controls apply to local calls and sandbox
+sessions; OpenCode continuations retain their established instructions.
+The harness may still add environment context, such as the date or working directory.
+OpenCode replacement selects its `build` agent, overriding a different default
+agent. Remove `--agent` selectors from `extra_args` in replacement mode; use
+append mode to retain custom agent selection.
+Replacement prompt text is passed literally, including `{env:...}` and `{file:...}`
+sequences. Other OpenCode configuration keeps its native substitution behavior.
+
+Pi's `enable_tools` defaults to `true`. Setting it to `false` disables Pi's
+built-in tools through `--no-builtin-tools`; separately configured MCP tools and
+session grants remain available and retain their validation. For a run with no
+tools, also omit MCP configuration and grants. OpenCode continues to select its
+tools through `opencode_config.tools`, for example `{"*": false}`.
+
+Record prompt replacement and tool selection as evaluation treatments: they can
+change results relative to the harness's default coding behavior.
 
 ## Run an integrated agent on a benchmark
 

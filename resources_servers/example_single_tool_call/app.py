@@ -18,7 +18,8 @@ from typing import Any
 from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -31,10 +32,10 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionConflictError,
     ResourcesSessionFence,
     SimpleResourcesServer,
+    observe_programmatic_grading,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture
 
 
 class SimpleWeatherResourcesServerConfig(BaseResourcesServerConfig):
@@ -52,6 +53,9 @@ class GetWeatherResponse(BaseModel):
 
 class SimpleWeatherVerifier:
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        return observe_programmatic_grading(lambda: self._programmatic_score(body))
+
+    def _programmatic_score(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         reward = float(
             any(item.type == "function_call" and item.name == "get_weather" for item in body.response.output)
         )
