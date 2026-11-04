@@ -1599,6 +1599,40 @@ def test_an_unreadable_part_leaves_tool_timing_unknown(tmp_path: Path) -> None:
     assert ("tool_timing_unavailable", "p1") in gaps
 
 
+def test_observations_keep_a_reply_think_block_as_answer_text(tmp_path: Path) -> None:
+    """This adapter keeps a reply's think block in its conversation, so its trajectory turns must keep it too."""
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    reply = "<think>try 2 + 2</think>\n\nthe answer is 4"
+    db_path = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table session (id text, parent_id text, time_created integer)")
+    connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+    connection.execute(
+        "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+    )
+    connection.execute("insert into session values ('root', null, 0)")
+    connection.execute(
+        "insert into message values (?, ?, ?, ?)",
+        ("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1, "completed": 3}}), 1),
+    )
+    for index, part in enumerate([{"type": "step-start"}, {"type": "text", "text": reply}, {"type": "step-finish"}]):
+        connection.execute("insert into part values (?, 'm1', 'root', ?, ?)", (f"p{index}", json.dumps(part), index))
+    connection.commit()
+    connection.close()
+
+    trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0")
+    bundle = parse_opencode_observations(
+        db_path, "fallback", trajectory, model_ref=ModelServerRef(type="responses_api_models", name="policy")
+    )
+
+    [invocation] = [record for record in bundle.records if isinstance(record, AgentInvocation)]
+    assert [(item.type, item.content[0].text) for item in invocation.conversation] == [("message", reply)]
+    [turn] = trajectory.turns
+    assert turn.reasoning_content is None
+    assert [part["text"] for item in turn.answer if item["type"] == "message" for part in item["content"]] == [reply]
+
+
 @mark.parametrize("call_id", ["absent", None, ""], ids=["absent", "null", "empty"])
 def test_a_tool_part_without_a_call_id_leaves_tool_timing_unknown(tmp_path: Path, call_id) -> None:
     """The tool ran but has no observation to time, so the tool history read is not complete."""

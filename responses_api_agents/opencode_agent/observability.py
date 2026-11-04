@@ -98,6 +98,7 @@ def append_opencode_turns(
     part_rows: list[Row],
     *,
     model_ref: ModelServerRef | None = None,
+    gym_reasoning: bool = False,
 ) -> None:
     """Membership comes only from persisted IDs; row order numbers turns within a session.
 
@@ -105,6 +106,8 @@ def append_opencode_turns(
     bookkeeping. Only the model processor writes step-start/step-finish parts.
     A saved user message is not the full provider request, so question stays unset.
     step_count counts persisted step-finish events cumulatively within the session.
+    With ``gym_reasoning``, the reasoning block a Gym Model Server reply's text
+    starts with becomes the turn's reasoning rather than answer text.
     """
     messages = {row["id"]: row for row in message_rows}
     parts = defaultdict(list)
@@ -169,12 +172,12 @@ def append_opencode_turns(
                     unavailable.add(message_id)
                     continue
                 if kind == "text":
-                    gym_reasoning, text = (
-                        split_gym_reasoning(part["text"]) if model_ref is not None else (None, part["text"])
+                    reply_reasoning, text = (
+                        split_gym_reasoning(part["text"]) if gym_reasoning else (None, part["text"])
                     )
-                    if gym_reasoning is not None:
-                        reasoning.append({"id": f"{part_id}-reasoning", "type": "reasoning", "text": gym_reasoning})
-                    if text or gym_reasoning is None:
+                    if reply_reasoning is not None:
+                        reasoning.append({"id": f"{part_id}-reasoning", "type": "reasoning", "text": reply_reasoning})
+                    if text or reply_reasoning is None:
                         text_parts.append({"id": part_id, "type": "output_text", "text": text})
                 else:
                     reasoning.append({"id": part_id, "type": "reasoning", "text": part["text"]})

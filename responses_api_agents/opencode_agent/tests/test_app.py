@@ -47,6 +47,7 @@ from responses_api_agents.opencode_agent.app import (
     _parse_opencode_session,
     parse_opencode_session,
 )
+from responses_api_agents.opencode_agent.artifacts import parse_opencode_export
 from responses_api_agents.opencode_agent.observability import split_gym_reasoning
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 
@@ -166,6 +167,94 @@ def test_only_the_reasoning_block_a_reply_starts_with_is_split(text, expected) -
     assert split_gym_reasoning(text) == expected
 
 
+POLICY_REF = ModelServerRef(type="responses_api_models", name="policy")
+# An earlier answer, then a tool-call turn whose Gym reply was only its reasoning block.
+EARLIER_TURNS = [
+    [{"type": "text", "text": "4"}],
+    [
+        {"type": "text", "text": "<think>check with a tool</think>"},
+        {
+            "type": "tool",
+            "tool": "bash",
+            "callID": "call-1",
+            "state": {"status": "completed", "input": {"command": "echo 5"}, "output": "5"},
+        },
+    ],
+]
+# The final message's parts and the answer it must leave as the last assistant message.
+FINAL_REPLIES = {
+    "reasoning_only": ([{"type": "text", "text": "<think>r</think>"}], ""),
+    "reply_with_answer": ([{"type": "text", "text": "<think>r</think>\n\n5"}], "5"),
+    "reasoning_then_answer": ([{"type": "text", "text": "<think>r</think>"}, {"type": "text", "text": "5"}], "5"),
+    "answer_then_reasoning": ([{"type": "text", "text": "5"}, {"type": "text", "text": "<think>r</think>"}], "5"),
+    "typed_reasoning": ([{"type": "reasoning", "text": "r"}, {"type": "text", "text": "5"}], "5"),
+}
+
+
+async def judge_final_answer(output: list) -> tuple[float, str | None, bool]:
+    """Verify ``output`` with the equivalence judge; return its reward, failure reason and whether it called its model."""
+    from nemo_gym.core import NeMoGymResponse
+    from resources_servers.equivalence_llm_judge.app import (
+        LLMJudgeResourcesServer,
+        LLMJudgeResourcesServerConfig,
+        LLMJudgeVerifyRequest,
+    )
+
+    client = MagicMock(spec=ServerClient)
+    client.post = AsyncMock(side_effect=AssertionError("the judge was called"))
+    server = LLMJudgeResourcesServer(
+        config=LLMJudgeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            judge_prompt_template_fpath=str(
+                Path(__file__).parents[3] / "resources_servers/equivalence_llm_judge/prompt_templates"
+                "/equivalence_llm_judge.txt"
+            ),
+        ),
+        server_client=client,
+    )
+    response = NeMoGymResponse(
+        id="resp",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=output,
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+    request = LLMJudgeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=response,
+        expected_answer="4",
+    )
+    result = await server.verify(request)
+    return result.reward, result.failure_reason, client.post.await_count > 0
+
+
+@pytest.mark.parametrize("shape", FINAL_REPLIES)
+async def test_export_keeps_an_empty_answer_only_for_a_final_reply_without_one(shape) -> None:
+    final_parts, answer = FINAL_REPLIES[shape]
+    export = {
+        "messages": [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "task"}]},
+            *({"info": {"role": "assistant"}, "parts": parts} for parts in [*EARLIER_TURNS, final_parts]),
+        ]
+    }
+    items = parse_opencode_export(export, gym_reasoning=True)
+    assert [item.type for item in items[1:5]] == ["message", "reasoning", "function_call", "function_call_output"]
+    assert [item.content[0].text for item in items if item.type == "message" and item.role == "assistant"] == [
+        "4",
+        answer,
+    ]
+    if not answer:
+        assert items[-1].type == "message" and items[-1].content[0].text == ""
+        assert await judge_final_answer(items[1:]) == (0.0, "empty_final_answer", False)
+
+
 class TestParseOpencodeSession:
     @pytest.mark.parametrize("gym_reasoning", [True, False])
     def test_a_gym_reply_reasoning_block_is_not_the_answer(self, tmp_path, gym_reasoning) -> None:
@@ -198,6 +287,25 @@ class TestParseOpencodeSession:
             assert invocation.conversation[1].content[0].text == "the answer is 4"
             assert [part["text"] for part in turn.reasoning_content] == ["try 2 + 2"]
             assert answers == ["the answer is 4"]
+
+    @pytest.mark.parametrize("shape", FINAL_REPLIES)
+    async def test_a_final_reply_without_answer_text_is_graded_as_empty(self, tmp_path, shape) -> None:
+        # Dropping the final message would leave the earlier answer "4" as the last assistant message.
+        final_parts, answer = FINAL_REPLIES[shape]
+        db = _session_db(tmp_path, [("assistant", parts) for parts in [*EARLIER_TURNS, final_parts]])
+        items, _ = parse_opencode_session(db, gym_reasoning=True)
+        assert [item.type for item in items[:3]] == ["message", "function_call", "function_call_output"]
+        assert [item.content[0].text for item in items if item.type == "message"] == ["4", answer]
+        if not answer:
+            assert await judge_final_answer(items) == (0.0, "empty_final_answer", False)
+        [invocation] = _invocations(_parse_opencode_session(db, "fallback", model_ref=POLICY_REF))
+        observed = [item.content[0].text for item in invocation.conversation if item.type == "message"]
+        assert observed == ["4", answer]
+
+    def test_a_reasoning_only_reply_without_the_gym_split_stays_literal_text(self, tmp_path) -> None:
+        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "<think>r</think>"}])])
+        items, _ = parse_opencode_session(db)
+        assert [item.content[0].text for item in items] == ["<think>r</think>"]
 
     def test_missing_db(self, tmp_path) -> None:
         items, usage = parse_opencode_session(tmp_path / "nope.db")
@@ -907,6 +1015,53 @@ async def test_append_keeps_the_explicit_local_agent_selector(tmp_path) -> None:
     ):
         await agent._run_opencode("user task", None, collect_observations=False)
     assert run.call_args.args[-3:] == ("--agent", "plan", "user task")
+
+
+@pytest.mark.parametrize("model_server", [POLICY_REF, None], ids=["gym_model_server", "direct_endpoint"])
+async def test_local_run_splits_a_reply_only_when_opencode_calls_a_gym_model_server(tmp_path, model_server) -> None:
+    reply = "<think>r</think>\n\n4"
+    prepared = _session_db(
+        tmp_path,
+        [
+            ("user", [{"type": "text", "text": "task"}]),
+            ("assistant", [{"type": "step-start"}, {"type": "text", "text": reply}, {"type": "step-finish"}]),
+        ],
+    )
+    agent = _make_agent(workspace_root=str(tmp_path / "work"), model_server=model_server)
+
+    async def run_opencode(*args, env, **kwargs):
+        # The real CLI persists its session database under XDG_DATA_HOME; both artifact parsers then read it.
+        database = Path(env["XDG_DATA_HOME"]) / "opencode" / "opencode.db"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(prepared.read_bytes())
+        return MagicMock(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+
+    trajectory = TrajectoryRecord(task_id="task", rollout_id="rollout")
+    with (
+        patch.object(agent, "_resolve_model_base_url", return_value="http://policy/v1"),
+        patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=run_opencode),
+    ):
+        output, _, _, observations = await agent._run_opencode(
+            "task", None, rollout_id="rollout", collect_observations=True, trajectory=trajectory
+        )
+
+    root = next(invocation for invocation in _invocations(observations) if invocation.parent_invocation_id is None)
+    [turn] = trajectory.turns
+    answers = [part["text"] for item in turn.answer if item["type"] == "message" for part in item["content"]]
+    if model_server is not None:
+        assert [item.content[0].text for item in output] == ["4"]
+        assert [item.type for item in root.conversation if item.type != "message" or item.role != "user"] == [
+            "reasoning",
+            "message",
+        ]
+        assert root.conversation[-2].summary[0].text == "r"
+        assert root.conversation[-1].content[0].text == "4"
+        assert [part["text"] for part in turn.reasoning_content] == ["r"] and answers == ["4"]
+    else:
+        assert [item.content[0].text for item in output] == [reply]
+        assert all(item.type != "reasoning" for item in root.conversation)
+        assert root.conversation[-1].content[0].text == reply
+        assert turn.reasoning_content is None and answers == [reply]
 
 
 @pytest.mark.parametrize("mode", ["append", "replace"])
