@@ -154,7 +154,7 @@ def test_actionable_summary_counts_scenarios_and_includes_rerun(tmp_path, monkey
     write_probe_result(tmp_path, "codex", 1)
     summary = checks.p0_check(["codex"], artifacts=tmp_path, sha="tested-sha")["output"]["summary"]
     assert "| codex | failed | 1 / 1 | tool_success: tool status differs from the witness |" in summary
-    assert 'python scripts/run_harness_conformance.py --harness codex --output "$(mktemp -d)/probes"' in summary
+    assert 'python -m scripts.run_harness_conformance --harness codex --output "$(mktemp -d)/probes"' in summary
     assert "probes/conformance_report.md" in summary
 
 

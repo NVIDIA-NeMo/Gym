@@ -832,7 +832,7 @@ These receipts coordinate lifecycle behavior. Files that the model can write are
 Use [Harness Conformance](/main/observability/harness-conformance) to validate trajectory evidence. To register a new harness and install its dependencies, follow the [runner guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/harness_conformance/README.md). Run the probes with a new output directory. This example uses Pi:
 
 ```bash
-python scripts/run_harness_conformance.py \
+python -m scripts.run_harness_conformance \
     --harness pi --output results/pi-conformance
 ```
 

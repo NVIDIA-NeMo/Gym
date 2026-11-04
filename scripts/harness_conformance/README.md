@@ -77,7 +77,7 @@ Run predetermined model replies and failures through real Gym harnesses, collect
 their rollouts, and apply the scenario and evidence checks:
 
 ```bash
-python scripts/run_harness_conformance.py \
+python -m scripts.run_harness_conformance \
     --harness codex --harness pi --harness opencode --harness hermes \
     --output results/conformance
 ```
@@ -125,8 +125,8 @@ remote sandbox deployment.
 ## Scenarios
 
 ```bash
-python scripts/run_harness_conformance.py --list-scenarios
-python scripts/run_harness_conformance.py --harness codex \
+python -m scripts.run_harness_conformance --list-scenarios
+python -m scripts.run_harness_conformance --harness codex \
     --scenario tool_failure --timeout 60 --output results/codex-tool-failure
 ```
 

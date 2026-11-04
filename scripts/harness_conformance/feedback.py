@@ -90,7 +90,7 @@ def _first_finding(directory: Path, artifact_report: str | None, keys: list[str]
 
 def rerun_command(harness: str) -> str:
     """Use a new output directory on every invocation, as required by the suite runner."""
-    return f'python scripts/run_harness_conformance.py --harness {harness} --output "$(mktemp -d)/probes"'
+    return f'python -m scripts.run_harness_conformance --harness {harness} --output "$(mktemp -d)/probes"'
 
 
 def reproduction(harnesses: list[str]) -> str:

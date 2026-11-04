@@ -116,7 +116,7 @@ jobs:
         env:
           HARNESS: ${{ matrix.harness }}
         run: |
-          if .venv/bin/python scripts/run_harness_conformance.py \
+          if .venv/bin/python -m scripts.run_harness_conformance \
             --harness "$HARNESS" --output "$PROBE_OUTPUT"; then
             code=0
           else
