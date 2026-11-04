@@ -50,8 +50,8 @@ terminal_bench_4:
               retry_delay_s: 5
               retry_max_delay_s: 60
               request_timeout_s: 300
-              timeout_s: 150
-              connect_attempt_timeout_s: 150
+              timeout_s: 300
+              connect_attempt_timeout_s: 300
               renew_interval_s: 1800
             operations:
               background_exec: true

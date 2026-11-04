@@ -6,8 +6,10 @@ BBH_MCP_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("", 0)); pr
 # shellcheck disable=SC2155
 export BBH_MCP_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 
-nohup \
-python -m bbh_mcp.server \
+# Use the isolated locked MCP environment, including its Jupyter executable.
+BBH_MCP_PYTHON=${BBH_MCP_PYTHON:-python}
+nohup env PATH="$(dirname "${BBH_MCP_PYTHON}"):${PATH}" \
+"${BBH_MCP_PYTHON}" -m bbh_mcp.server \
     -f task.jsonl \
     -d data/ \
     --id 0 \

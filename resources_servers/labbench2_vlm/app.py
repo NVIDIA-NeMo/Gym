@@ -46,7 +46,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +218,9 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
                     json=params,
                     response_model=NeMoGymResponse,
                 )
-            except JudgeError as e:
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
                 print(f"[labbench2_vlm] judge HTTP error: {e}", flush=True)
                 raise
 

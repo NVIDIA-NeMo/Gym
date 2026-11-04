@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import re
 import sys
 from glob import glob
@@ -31,6 +32,13 @@ from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 from docker.models.containers import ExecResult
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -48,6 +56,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.trajectory import SandboxObservation
+from nemo_gym.utils import bounded_text
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
@@ -55,6 +64,10 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_verified_env_vars,
     run_instance,
 )
+
+
+# The longest failure_reason a failure event accepts.
+_MAX_FAILURE_REASON_CHARS = 2000
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -114,6 +127,9 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     instance_id: str
     test_output: str
     model_patch: Optional[str]
+    # sha256 of the patch that was verified (UTF-8), so a later re-verification can prove it grades the same patch;
+    # None when the patch could not be extracted from the agent's sandbox.
+    model_patch_sha256: Optional[str] = None
 
     log_dir: str
 
@@ -396,6 +412,7 @@ Stderr:
         eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
 
         model_patch = ""
+        patch_extraction_failed = False
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
@@ -408,6 +425,7 @@ Stderr:
                 model_patch_result = await original_sandbox.exec(patch_extraction_command(original_workdir, seed_head))
                 model_patch = strip_binary_diffs(model_patch_result.stdout or "")
             except:
+                patch_extraction_failed = True
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
             try:
                 await original_sandbox.stop()
@@ -445,6 +463,35 @@ Stderr:
             verifier_sandbox_observation = None
             print("Failed to build verification sandbox observation", format_exc(), file=sys.stderr)
 
+        evaluation_completed = res["completed"] and mock_container._sandbox_error_type is None
+        # A patch the harness could not apply is the model's own graded result when the patch was collected intact
+        # and no sandbox operation failed. Any other evaluation that did not complete has no verdict: its zero is not
+        # a grade, so the sample is masked and the failure is reported as a verifier error.
+        model_patch_unapplied = (
+            bool(res.get("patch_apply_failed"))
+            and mock_container._sandbox_error_type is None
+            and not patch_extraction_failed
+        )
+        failure_reason = None
+        if not evaluation_completed and not model_patch_unapplied:
+            if patch_extraction_failed:
+                failure_reason = "Failed to extract the model patch from the agent sandbox"
+            elif mock_container._sandbox_error_type is not None:
+                failure_reason = f"Verification sandbox error: {mock_container._sandbox_error_type}"
+            else:
+                failure_reason = res.get("error") or "SWE-bench evaluation did not complete"
+            failure_reason = bounded_text(failure_reason, _MAX_FAILURE_REASON_CHARS)
+            observe_failure(
+                NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason=failure_reason,
+                    operation="verify",
+                    operation_id=current_verifier_invocation_id() or run_id,
+                    stage="verification",
+                )
+            )
+
         log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
 
         test_output_fpaths = glob(str(log_dir / "**" / "test_output.txt"), recursive=True)
@@ -460,12 +507,18 @@ Stderr:
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
-            evaluation_completed=res["completed"] and mock_container._sandbox_error_type is None,
+            evaluation_completed=evaluation_completed,
             resolved=res["resolved"],
             reward=int(res["resolved"]),
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
+            model_patch_sha256=None
+            if patch_extraction_failed
+            else hashlib.sha256(model_patch.encode("utf-8")).hexdigest(),
+            mask_sample=failure_reason is not None,
+            failure_kind=VERIFIER_ERROR if failure_reason is not None else None,
+            failure_reason=failure_reason,
             test_output=test_output,
             log_dir=str(log_dir),
             verifier_sandbox_observation=verifier_sandbox_observation,

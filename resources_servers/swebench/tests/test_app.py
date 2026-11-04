@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,12 +22,13 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle
 from resources_servers.swebench.app import (
     DockerContainer,
     SwebenchResourcesServer,
     SwebenchResourcesServerConfig,
+    SWEBenchVerifyRequest,
     SWEBenchVerifyResponse,
     patch_extraction_command,
     strip_binary_diffs,
@@ -120,6 +122,9 @@ class TestApp:
             "peak_memory_mib": None,
             "resource_usage_source": None,
             "error_type": None,
+            "observed_client_interval_s": None,
+            "teardown_confirmed": None,
+            "cleanup_errors": [],
         }
 
     async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
@@ -310,3 +315,123 @@ class TestPatchExtraction:
         out = strip_binary_diffs(text)
         assert "img.png" not in out and "a/a.py" in out and "b/b.py" in out
         assert strip_binary_diffs("") == ""
+
+
+VERIFY_BODY = {
+    "repo": "astropy/astropy",
+    "instance_id": "my instance_id",
+    "base_commit": "my base_commit",
+    "patch": "my patch",
+    "test_patch": "my test_patch",
+    "problem_statement": "my problem_statement",
+    "hints_text": "",
+    "created_at": "my created_at",
+    "version": "4.3",
+    "FAIL_TO_PASS": "[]",
+    "PASS_TO_PASS": "[]",
+    "environment_setup_commit": "my environment_setup_commit",
+    "difficulty": "my difficulty",
+    "responses_create_params": {"input": []},
+    "response": {
+        "output": [],
+        "id": "",
+        "created_at": 0,
+        "model": "",
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+    "subset": "my subset",
+    "split": "my split",
+}
+
+
+class TestVerdictMasking:
+    """An evaluation that did not complete has no verdict and is masked as a verifier error; a patch the harness
+    could not apply is the model's own graded zero."""
+
+    async def _verify(
+        self, monkeypatch: MonkeyPatch, run_result: dict, *, sandbox_error: str | None = None, golden: bool = True
+    ) -> tuple[SWEBenchVerifyResponse, list]:
+        server = SwebenchResourcesServer(
+            config=SwebenchResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                sandbox_provider="test",
+                sandbox_config=dict(),
+                is_verifying_golden_patch=golden,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        monkeypatch.setattr(
+            "resources_servers.swebench.app.SwebenchResourcesServer._create_sandbox",
+            AsyncMock(
+                return_value=make_sandbox(exec_result=SandboxExecResult(return_code=0, stdout="/testbed\n", stderr=""))
+            ),
+        )
+
+        async def fake_run_instance(*, client, **kwargs):
+            client._sandbox_error_type = sandbox_error
+            return run_result
+
+        monkeypatch.setattr("resources_servers.swebench.app.run_instance", fake_run_instance)
+        observed = []
+        monkeypatch.setattr("resources_servers.swebench.app.observe_failure", observed.append)
+        if not golden:
+            # The agent's sandbox is gone: extracting the patch raises.
+            server._session_id_to_sandbox["sid"] = make_sandbox(exec_error=RuntimeError("sandbox lost"))
+        response = await server.verify(
+            SimpleNamespace(session={SESSION_ID_KEY: "sid"}), SWEBenchVerifyRequest.model_validate(VERIFY_BODY)
+        )
+        return response, observed
+
+    async def test_a_completed_evaluation_is_a_verdict_with_the_patch_digest(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(monkeypatch, {"completed": True, "resolved": True})
+        assert response.evaluation_completed and response.reward == 1 and not response.mask_sample
+        assert response.failure_kind is None and response.failure_reason is None and observed == []
+        assert response.model_patch_sha256 == hashlib.sha256(b"my patch").hexdigest()
+
+    async def test_a_patch_that_does_not_apply_is_the_models_graded_zero(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": False, "resolved": False, "patch_apply_failed": True, "error": "EvaluationError: apply"},
+        )
+        assert response.reward == 0 and not response.mask_sample and response.failure_kind is None
+        assert observed == []
+
+    async def test_an_evaluation_error_is_masked_as_a_verifier_error(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(
+            monkeypatch, {"completed": False, "resolved": False, "patch_apply_failed": False, "error": "ValueError: x"}
+        )
+        assert not response.evaluation_completed and response.reward == 0 and response.mask_sample
+        assert response.failure_kind == "verifier_error" and response.failure_reason == "ValueError: x"
+        assert response.model_patch_sha256 == hashlib.sha256(b"my patch").hexdigest()
+        [event] = observed
+        assert event.failure_kind == "verifier_error" and event.failure_reason == "ValueError: x"
+
+    @pytest.mark.parametrize("apply_failed", [False, True])
+    async def test_a_sandbox_error_is_masked_even_when_the_patch_did_not_apply(
+        self, monkeypatch: MonkeyPatch, apply_failed: bool
+    ) -> None:
+        # A failed sandbox operation can itself make `git apply` or the tests fail, so neither is the model's result.
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": apply_failed is False, "resolved": False, "patch_apply_failed": apply_failed},
+            sandbox_error="TimeoutError",
+        )
+        assert response.mask_sample and response.failure_kind == "verifier_error"
+        assert response.failure_reason == "Verification sandbox error: TimeoutError" and len(observed) == 1
+
+    async def test_a_patch_that_could_not_be_extracted_is_masked(self, monkeypatch: MonkeyPatch) -> None:
+        # The empty patch then fails to apply, but the agent's patch was never collected: no verdict on it.
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": False, "resolved": False, "patch_apply_failed": True, "error": "EvaluationError: apply"},
+            golden=False,
+        )
+        assert response.mask_sample and response.failure_kind == "verifier_error"
+        assert response.failure_reason == "Failed to extract the model patch from the agent sandbox"
+        assert response.model_patch_sha256 is None and response.model_patch is None and len(observed) == 1
