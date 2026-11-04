@@ -278,6 +278,8 @@ The trainer owns capture storage and policy sampling. For NeMo RL, enable
 
 A four-update multimodal RL smoke completed with 32 unmasked answers, policy
 refits and a model/optimizer checkpoint save. Captured tool images reached the
-learner. This qualifies the exercised training path, not checkpoint restore or
-large-scale throughput. Capture failures must remain explicit; do not replace
+learner. [Recorded smoke evidence](data/opencode_evidence.zip) includes the synthetic
+PDF, tool/image transcript, judge verdicts and per-update metrics (Gym `33878bb87`,
+before extraction onto current main). This qualifies the exercised training path,
+not checkpoint restore or large-scale throughput. Capture failures must remain explicit; do not replace
 missing tokens/images with retokenized text or zero rewards.
