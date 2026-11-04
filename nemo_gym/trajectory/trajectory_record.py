@@ -68,6 +68,15 @@ class TrajectoryTokenStats(ObservationModel):
     cached_tokens: Optional[int] = Field(default=None, ge=0)
 
 
+class OutputBudgetRefit(ObservationModel):
+    """A model call the server sent again with its output budget lowered, because the budget it requested exceeded
+    the engine's whole context window."""
+
+    requested_max_tokens: int = Field(ge=1)
+    window: int = Field(ge=1)
+    applied_max_tokens: int = Field(ge=1)
+
+
 class TrajectoryResponseMetadata(ObservationModel):
     response_id: Optional[str] = None
     model_ref: Optional[ModelServerRef] = None
@@ -84,6 +93,10 @@ class TrajectoryResponseMetadata(ObservationModel):
     model_operations: list[ModelOperationObservation] | None = None
     error_category: Optional[str] = None
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
+    # The output budget the call asked for and the one sent after it was lowered to fit the context window.
+    requested_max_tokens: Optional[int] = Field(default=None, ge=1)
+    applied_max_tokens: Optional[int] = Field(default=None, ge=1)
+    output_budget_refit: Optional[OutputBudgetRefit] = None
 
 
 class TrajectoryModelCall(ObservationModel):
@@ -200,6 +213,21 @@ class GradingOperationObservation(ObservationModel):
     dependencies: list[ModelCallRef] | None = None
 
 
+class VerifierGradingRecord(ObservationModel):
+    """The grade a verifier returned without asking any model, recorded by the shared verify path.
+
+    It names the verifier (its resources server), the score and the verifier's verdict on it (``masked`` when the
+    verifier marked the score as no valid measurement), and binds the graded response and score like a grading
+    operation. A verify execution that sent a model request records none: its grading is observed only through
+    its captured calls.
+    """
+
+    verifier: str = Field(min_length=1)
+    score: float
+    verdict: Literal["scored", "masked"]
+    result_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def grading_result_binding(result: object) -> str | None:
     """Bind the actual graded response and numeric reward/components, without exporting their payload."""
     if isinstance(result, BaseModel):
@@ -259,6 +287,10 @@ class VerifierInvocation(ObservationModel):
     failure_kind: Optional[str] = None
     model_calls: list[ModelCallRef] = Field(default_factory=list)
     grading_operations: list[GradingOperationObservation] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    grading_record: VerifierGradingRecord | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import asyncio
 import json
 from pathlib import Path
@@ -26,6 +27,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from nemo_gym.verification.judge import JudgeError, call_judge, judge_failsafe
 
 
@@ -546,3 +548,205 @@ def test_the_registered_verify_route_keeps_a_raised_failure_and_its_cause(tmp_pa
     assert selected.cause_id == resources.event_id
     assert report.events[resources.event_id].cause_id == model.event_id
     assert list(report.events).count(model.event_id) == 1
+
+
+_GRADED = {"response": {"id": "graded-response", "output": []}, "reward": 0.25}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("masked,verdict", [(False, "scored"), (True, "masked")])
+async def test_an_in_process_verify_saves_its_own_grading_record(tmp_path, masked, verdict):
+    result = {**_GRADED, "mask_sample": masked}
+
+    async def verify():
+        return result
+
+    with rollout_context("in-process"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="metric_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert invocation["grading_record"] == {
+        "verifier": "metric_verifier",
+        "score": 0.25,
+        "verdict": verdict,
+        "result_binding_sha256": grading_result_binding(result),
+    }
+    record = collected(tmp_path, "in-process", returned)
+    trajectory = _build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    assert trajectory.verifier_invocations[0].grading_record.verifier == "metric_verifier"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["judge", "direct"])
+async def test_a_verify_that_asks_a_model_saves_no_grading_record(monkeypatch, route):
+    from omegaconf import OmegaConf
+
+    transport = AsyncMock()
+    monkeypatch.setattr("nemo_gym.client.server_client.request", transport)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "observability_enabled": True,
+                "judge": {"responses_api_models": {"openai_model": {"host": "localhost", "port": 9999}}},
+            }
+        ),
+    )
+
+    async def post(**kwargs):
+        response = MagicMock(ok=True, status=200)
+        response.read = AsyncMock(return_value=b'{"grade":1.0}')
+        return response
+
+    async def verify():
+        if route == "judge":
+            await call_judge(
+                MagicMock(post=post), server_name="judge", url_path="/v1/responses", json={}, response_model=Verdict
+            )
+        else:
+            await client.post(server_name="judge", url_path="/v1/responses", json={})
+        return _GRADED
+
+    with rollout_context("judged"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="judge_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert invocation["status"] == "completed"
+    assert "grading_record" not in invocation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [{"reward": 1.0}, {**_GRADED, "_ng_failure_class": "verifier"}, {**_GRADED, "evaluation_completed": False}],
+)
+async def test_an_unbound_or_unfinished_grade_saves_no_grading_record(result):
+    async def verify():
+        return result
+
+    with rollout_context("unbound"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="metric_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert "grading_record" not in invocation
+
+
+def test_the_resources_route_names_its_server_in_the_grading_record():
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True}
+    server = Resources(
+        config=BaseResourcesServerConfig(name="metric_verifier", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/metric/verify",
+        json={
+            "responses_create_params": {"input": "task"},
+            "response": {
+                "id": "response",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    (invocation,) = response.json()["ng_verifier_invocations"]
+    assert invocation["grading_record"]["verifier"] == "metric_verifier"
+    assert invocation["grading_record"]["score"] == 1.0
+    assert invocation["grading_record"]["verdict"] == "scored"
+
+
+@pytest.mark.asyncio
+async def test_a_judge_request_through_nemo_gym_async_openai_saves_no_grading_record(monkeypatch):
+    from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
+
+    sent = AsyncMock()
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "_request_with_retry", sent)
+    judge = NeMoGymAsyncOpenAI(base_url="http://judge.invalid/v1", api_key="test")
+
+    async def verify():
+        await judge._request(method="POST", url="http://judge.invalid/v1/chat/completions", json={})
+        return _GRADED
+
+    with rollout_context("sdk-judged"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="judge_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    sent.assert_awaited_once()
+    assert invocation["status"] == "completed"
+    assert "grading_record" not in invocation
+
+
+def _route_invocation(server_class) -> dict:
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True}
+    server = server_class(
+        config=BaseResourcesServerConfig(name="verifier", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/route/verify",
+        json={
+            "responses_create_params": {"input": "task"},
+            "response": {
+                "id": "response",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    (invocation,) = response.json()["ng_verifier_invocations"]
+    return invocation
+
+
+@pytest.mark.parametrize("uninstrumented", [False, True])
+def test_a_server_whose_grading_may_use_an_uninstrumented_model_saves_no_grading_record(uninstrumented):
+    class Resources(SimpleResourcesServer):
+        grading_may_use_uninstrumented_model = uninstrumented
+
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    invocation = _route_invocation(Resources)
+    # An unlisted programmatic verifier keeps its own grading record; a listed one is observed only otherwise.
+    assert ("grading_record" in invocation) is not uninstrumented
+
+
+def _class_attribute(source: Path, class_name: str, attribute: str) -> object:
+    """The literal a class body assigns to ``attribute``, read from the module source without importing it.
+
+    Importing a resources server's app here would put the whole server, and everything it imports, into this core
+    job's coverage; the server's own tests run in its shard.
+    """
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                targets = item.targets if isinstance(item, ast.Assign) else [getattr(item, "target", None)]
+                if any(isinstance(target, ast.Name) and target.id == attribute for target in targets):
+                    return ast.literal_eval(item.value)
+    return None
+
+
+@pytest.mark.parametrize(
+    "app,name",
+    [
+        ("resources_servers/gdpval/app.py", "GDPValResourcesServer"),
+        ("resources_servers/job_bench/app.py", "JobBenchResourcesServer"),
+        ("resources_servers/proof_judge/app.py", "ProofWithJudgeResourcesServer"),
+        ("resources_servers/proof_verification/app.py", "ProofVerificationResourcesServer"),
+    ],
+)
+def test_the_servers_that_judge_through_an_external_sdk_are_listed(app, name):
+    source = Path(__file__).resolve().parents[3] / app
+    assert _class_attribute(source, name, "grading_may_use_uninstrumented_model") is True

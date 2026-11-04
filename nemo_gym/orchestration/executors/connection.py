@@ -17,7 +17,9 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -44,6 +46,12 @@ class Connection(ABC):
 
 
 class LocalConnection(Connection):
+    # run_with_input_held keeps the shell's stdin open until it exits (see _checked_holding_input).
+    holds_input = True
+
+    def run_with_input_held(self, commands: list[str]) -> str:
+        return _checked_holding_input(["bash", "-s"], input="\n".join(commands) + "\n", context="local commands")
+
     def copy(self, local: Path, remote: Path) -> None:
         if remote.exists():
             shutil.rmtree(remote)
@@ -68,6 +76,8 @@ class SSHConnection(Connection):
 
     _OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"]
     _MASTER_TIMEOUT = 10  # seconds to wait for the control socket to appear
+    # run_with_input_held keeps the remote shell's stdin open until it exits (see _checked_holding_input).
+    holds_input = True
 
     def __init__(self, hostname: str) -> None:
         self._hostname = hostname
@@ -92,7 +102,12 @@ class SSHConnection(Connection):
             ],
             stderr=subprocess.PIPE,
         )
-        self._wait_for_socket()
+        try:
+            self._wait_for_socket()
+        except BaseException:
+            # __exit__ does not run for a failed or interrupted __enter__; nothing else would close this master.
+            self.close()
+            raise
         return self
 
     def _wait_for_socket(self) -> None:
@@ -141,6 +156,13 @@ class SSHConnection(Connection):
             context=f"ssh commands on {self._hostname}",
         )
 
+    def run_with_input_held(self, commands: list[str]) -> str:
+        return _checked_holding_input(
+            ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
+            input="\n".join(commands) + "\n",
+            context=f"ssh commands on {self._hostname}",
+        )
+
     def write_text(self, remote: Path, content: str, *, private: bool = False) -> None:
         # A quoted heredoc delimiter: the payload reaches the file byte for byte,
         # with no parameter or command substitution applied to it on the way.
@@ -164,6 +186,10 @@ class SSHConnection(Connection):
         )
         self._socket.unlink(missing_ok=True)
         if self._master:
+            # The master detaches into the background once it is up; a foreground ssh still running was stopped
+            # before that, and would detach later with nothing left to close it.
+            if self._master.poll() is None:
+                self._master.terminate()
             self._master.wait()
 
 
@@ -175,6 +201,56 @@ def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> 
             f"Command failed{label} with exit code {result.returncode}:\n  {' '.join(cmd)}\n{result.stderr.strip()}"
         )
     return result.stdout
+
+
+# A line the login-host reader's wrapper prints on stderr while the reader runs; forwarded to this process's stderr.
+READER_PROGRESS_PREFIX = "gym-reader progress:"
+
+
+def _read_stderr_forwarding_progress(stream, output: dict[str, str]) -> None:
+    """Keep all of stderr for the error message, and pass each progress line on as it arrives."""
+    lines = []
+    for line in stream:
+        lines.append(line)
+        if line.startswith(READER_PROGRESS_PREFIX):
+            sys.stderr.write(line)
+            sys.stderr.flush()
+    output["stderr"] = "".join(lines)
+
+
+def _checked_holding_input(cmd: list[str], *, input: str, context: str = "") -> str:
+    """Like ``_checked``, but stdin stays open until the command exits, so its EOF on the far end means that this
+    process or its connection is gone. The commands must end the remote shell themselves (``exit``).
+
+    Progress lines on the command's stderr (``READER_PROGRESS_PREFIX``) reach this process's stderr while it runs;
+    stdout is returned whole, as before."""
+    with subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as process:
+        output: dict[str, str] = {}
+        readers = [
+            threading.Thread(target=lambda: output.__setitem__("stdout", process.stdout.read()), daemon=True),
+            threading.Thread(target=_read_stderr_forwarding_progress, args=(process.stderr, output), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+        try:
+            process.stdin.write(input)
+            process.stdin.flush()
+            for reader in readers:
+                reader.join()
+            returncode = process.wait()
+        except BaseException:
+            process.kill()
+            raise
+        finally:
+            process.stdin.close()
+    if returncode != 0:
+        label = f" ({context})" if context else ""
+        raise RuntimeError(
+            f"Command failed{label} with exit code {returncode}:\n  {' '.join(cmd)}\n{output.get('stderr', '').strip()}"
+        )
+    return output.get("stdout", "")
 
 
 def get_connection(hostname: str | None) -> Connection:
