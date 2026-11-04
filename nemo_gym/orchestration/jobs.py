@@ -303,6 +303,10 @@ class JobState(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+# Nothing is left to stop for a job in one of these states.
+FINISHED_STATES = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED})
+
+
 class FailureCategory(StrEnum):
     """Which kind of thing went wrong, so a reader knows how far to trust a `Failure`."""
 

@@ -34,6 +34,7 @@ from nemo_gym.orchestration.executors.capabilities import Inspectable, LogReadab
 from nemo_gym.orchestration.jobs import (
     CHAIN_INCOMPLETE_FILE,
     EVAL_EXIT_FILE,
+    FINISHED_STATES,
     RESOLVED_CONFIG_NAME,
     BenchmarkInfo,
     BenchmarkJob,
@@ -55,9 +56,6 @@ logger = logging.getLogger(__name__)
 
 # At most this many connections are asked at once; a status over many hosts would otherwise open them all.
 _MAX_CONCURRENT_CONNECTIONS = 8
-
-# Nothing is left to stop for a job in one of these states.
-_FINISHED = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}
 
 # A job in one of these states has finished, or the executor could not tell, so what the job wrote decides.
 _DECIDED_BY_FILES = {JobState.FAILED, JobState.SUCCEEDED, JobState.UNKNOWN}
@@ -155,7 +153,7 @@ def cancel(executor: Terminable, record: SubmissionRecord, benchmark: str) -> Jo
     job = record.benchmark_job(benchmark)  # an unknown benchmark names the known ones before anything is asked
     (before,) = status(executor, [record], [benchmark])
     current = before.jobs[0]
-    if current.state in _FINISHED:
+    if current.state in FINISHED_STATES:
         return current
     executor.terminate(record, job)
     (after,) = status(executor, [record], [benchmark])
@@ -176,7 +174,7 @@ def cancel_submission(executor: Terminable, record: SubmissionRecord, *, confirm
     (before,) = status(executor, [record])
     refused: dict[str, Failure] = {}
     for current in before.jobs:
-        if current.state in _FINISHED:
+        if current.state in FINISHED_STATES:
             continue
         try:
             executor.terminate(record, record.benchmark_job(current.benchmark))
@@ -215,7 +213,9 @@ def logs(
     job = record.benchmark_job(benchmark)
     chosen = _resolve_log_source(job, source, instance)
     observed = executor.query_states([JobRef(record, job)]).get((record.gym_job_id, benchmark))
-    job_id = (observed.job_id if observed else None) or job.job_id
+    job_id = job.job_id
+    if observed is not None:
+        job_id = observed.job_id or (observed.job_ids[-1] if observed.job_ids else job_id)
     if job_id is None:
         raise ValueError(f"No job was queued for {benchmark} of {record.gym_job_id}, so it has no logs.")
     resolved = chosen.model_copy(update={"location": chosen.location.replace("{job_id}", job_id)})

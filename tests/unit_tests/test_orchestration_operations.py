@@ -684,6 +684,19 @@ def test_logs_fall_back_to_the_recorded_job_id_when_the_scheduler_reports_none()
     assert controller.streamed[0]["source"].location == "logs/vllm-12345.log"
 
 
+def test_logs_read_the_newest_job_of_the_chain_when_none_is_current_and_the_current_one_when_there_is_one():
+    record = _logged()
+    key = (record.gym_job_id, "gsm8k")
+
+    controller = _Controller({key: _state(JobState.UNKNOWN, job_ids=["12345", "12400"])})
+    list(operations.logs(controller, record, "gsm8k"))
+    assert controller.streamed[0]["source"].location == "logs/driver-12400.log"
+
+    controller = _Controller({key: _state(JobState.RUNNING, job_id="12345", job_ids=["12345", "12400"])})
+    list(operations.logs(controller, record, "gsm8k"))
+    assert controller.streamed[0]["source"].location == "logs/driver-12345.log"
+
+
 def test_logs_of_a_benchmark_that_was_never_queued_say_so():
     record = _submission("a", error="sbatch: error: bad account")
     record = record.model_copy(
