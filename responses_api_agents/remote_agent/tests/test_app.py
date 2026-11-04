@@ -1137,6 +1137,32 @@ class TestDeadlineEvidence:
             configured_s=1800.0,
         )
 
+    async def test_a_remote_body_read_past_its_deadline_names_the_request_limit(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        response = FakeRemoteResponse(200, b"", read_exc=asyncio.TimeoutError())
+        agent, _, server_client = make_wired_agent(monkeypatch, AsyncMock(return_value=response))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "reading the response body failed" in result["error"] and result["reward"] == 0.0
+        assert "/verify" not in [c["url_path"] for c in server_client.calls]
+        self._deadline(
+            result,
+            observed,
+            limit="remote_responses_timeout_secs",
+            kind="remote_agent:request_deadline",
+            operation="remote_agent.agent",
+            stage="agent",
+            configured_s=1800.0,
+        )
+
+    async def test_a_body_read_disconnect_leaves_no_deadline(self, monkeypatch) -> None:
+        observed = self._observed(monkeypatch)
+        response = FakeRemoteResponse(200, b"", read_exc=ClientPayloadError("Response payload is not completed"))
+        agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(return_value=response))
+        result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))).model_dump()
+        assert "reading the response body failed" in result["error"]
+        assert "timeouts" not in result and observed == []
+        assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS and NG_TERMINAL_KEY not in result
+
     async def test_a_run_past_its_deadline_while_waiting_on_the_model_names_that_wait(self, monkeypatch) -> None:
         observed = self._observed(monkeypatch)
 

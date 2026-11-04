@@ -368,7 +368,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         except Exception as e:
             if is_global_aiohttp_client_request_debug_enabled():
                 print_exc()
-            raise RemoteAgentError(f"reading the response body failed: {type(e).__name__}: {e}") from e
+            # A timeout here is the same request deadline as one before the headers arrived.
+            error_class = RemoteAgentDeadlineError if isinstance(e, asyncio.TimeoutError) else RemoteAgentError
+            raise error_class(f"reading the response body failed: {type(e).__name__}: {e}") from e
         # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
         if not response.ok or response.status >= 300:
             if is_global_aiohttp_client_request_debug_enabled():
