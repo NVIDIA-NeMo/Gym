@@ -144,29 +144,5 @@ uv.lock @nvidia-nemo/automation
 # suggest: /codecov.yml @nvidia-nemo/automation
 # suggest: /.pre-commit-config.yaml @nvidia-nemo/automation
 
-# Package test and CLI overrides.
+# CLI setup follows server orchestration.
 # suggest: /nemo_gym/cli/setup_command.py @nvidia-nemo/gym_reviewers_orchestration
-# suggest: /tests/*/config/ @nvidia-nemo/gym_reviewers_cli_config
-# suggest: /tests/*/utils/ @nvidia-nemo/gym_architects
-# suggest: /tests/*/core/ @nvidia-nemo/gym_architects
-# suggest: /tests/*/telemetry/ @nvidia-nemo/gym_reviewers_telemetry
-# suggest: /tests/*/client/ @nvidia-nemo/gym_reviewers_server_runtime
-# suggest: /tests/*/sandbox/ @nvidia-nemo/gym_reviewers_sandbox
-# suggest: /tests/*/trajectory/ @nvidia-nemo/gym_reviewers_rollouts
-# suggest: /tests/*/verification/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /tests/*/metrics/ @nvidia-nemo/gym_reviewers_eval
-# suggest: /tests/*/artifacts/ @nvidia-nemo/gym_reviewers_eval
-# suggest: /tests/*/server_runtime/ @nvidia-nemo/gym_reviewers_server_runtime
-# suggest: /tests/*/models/ @nvidia-nemo/gym_reviewers_model
-# suggest: /tests/*/model/ @nvidia-nemo/gym_reviewers_model
-# suggest: /tests/*/agents/ @nvidia-nemo/gym_reviewers_agents
-# suggest: /tests/*/data/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /tests/*/rollouts/ @nvidia-nemo/gym_reviewers_rollouts
-# suggest: /tests/*/rollouts/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
-# suggest: /tests/*/orchestration/ @nvidia-nemo/gym_reviewers_orchestration
-# suggest: /tests/*/eval/ @nvidia-nemo/gym_reviewers_eval
-# suggest: /tests/*/environment/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /tests/*/testing/ @nvidia-nemo/gym_reviewers_server_runtime
-# suggest: /tests/*/testing/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
-# suggest: /tests/*/harness_capabilities/ @nvidia-nemo/gym_reviewers_agents
-# suggest: /tests/*/cli/ @nvidia-nemo/gym_reviewers_cli_config

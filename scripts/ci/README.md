@@ -2,81 +2,24 @@
 
 ## Package approvals
 
-`check-review-approvals.sh` evaluates `.github/CODEOWNERS` on GitHub and GitLab. GitHub Teams
-are the membership source. GitLab groups and GitLab CODEOWNERS sections are not used. The shell
-entry point delegates matching and API calls to a Python standard-library helper; Gym is not installed.
+`check-review-approvals.sh` checks GitHub Teams from `.github/CODEOWNERS` using Bash, curl, jq,
+and Git. Each touched team needs one approval; teams containing only Ananth and Yuya are optional.
+Standard ownership overrides `# suggest:` entries. Run it from a trusted target-branch checkout:
 
 ```bash
-bash scripts/ci/check-review-approvals.sh github --repository NVIDIA-NeMo/Gym --number 123
-bash scripts/ci/check-review-approvals.sh gitlab --project-id "$CI_PROJECT_ID" --number "$CI_MERGE_REQUEST_IID"
+bash scripts/ci/check-review-approvals.sh github PR_NUMBER
+bash scripts/ci/check-review-approvals.sh gitlab
 ```
 
-Both modes require `GH_TOKEN` or `GITHUB_TOKEN` with organization-members read access. GitLab
-also requires `GITLAB_TOKEN`, `CI_API_V4_URL`, and `REVIEWER_IDENTITIES_JSON`. Exit codes are 0 for satisfied ownership, 1 for
-missing approvals, and 2 for API, configuration, or evidence errors. `--output FILE` saves the
-structured verdict and its head SHA.
-
-Package mappings use `# suggest:` entries consumed by the existing Suggest Reviewers workflow.
-The portable checker reads both standard rules and suggestion entries. The last matching standard
-rule takes precedence; when none matches, the last matching suggestion applies. GitHub itself
-ignores the suggestion comments.
-One member of an owner team on that line must approve. Different packages require approval from
-their assigned teams; a reviewer belonging to several teams can satisfy each of their rules.
-During rollout, an owner group is automatically satisfied while its live membership is
-exactly Ananth (`ananthsub`, account ID `2382532`) and Yuya (`yaoyu-33`, account ID `54727607`).
-The checker reports `OPTIONAL` and records `optional_owners` without inventing an approval.
-Adding a third specialist member activates the normal approval requirement on the next check;
-approval from a member of that specialist team then satisfies it. Empty groups, one-person
-groups, and other two-person groups do not receive the exemption.
-Existing suggestions outside packages retain their assigned teams and the architects fallback.
-CI infrastructure and BioNeMo retain their standard ownership rules regardless of later suggestions.
-Seeded teams remain suggested even when their portable approval requirement is optional.
-The suggestion workflow only requests reviewers; the shared check determines approval requirements.
-Renames check old and new paths. The checker rejects
-truncated file lists, author approvals, and GitHub approvals for an older head. GitLab must reset
-approvals on push, which is verified through its API. A changing evidence snapshot fails the check.
-
-Policy comes from the immutable target commit; account links come from protected CI configuration. The
-checker itself must execute from trusted target-branch code. GitHub uses `pull_request_target`, plus
-a secret-free review-event workflow followed by `workflow_run`. It posts the `Package approvals`
-commit status against the actual PR head. Use its `workflow_dispatch` input to reevaluate a specific
-PR after a team membership change, including filling a specialist team or removing an eligible approver.
-
-The protected `REVIEWER_IDENTITIES_JSON` GitLab CI variable links stable GitLab and GitHub numeric
-account IDs. Its value is a JSON array such as `[{"gitlab_user_id": 100, "github_user_id": 10}]`.
-Keep verified account links in this variable rather than in the repository; they do not duplicate groups.
-A new team member without a verified identity link can approve on GitHub; GitLab ignores that
-person's approval until the link is added. Display names and usernames are not authorization keys.
-
-The GitLab adapter executes on a webhook-triggered pipeline of protected `nv-internal-main`. It
-appends `Package approvals` to the exact MR head pipeline using `pipeline_id`. The existing
-"pipelines must succeed" setting then enforces the verdict. Approval removal reruns the checker
-and changes the job to failed. The trigger job needs protected, masked `GH_TOKEN` (members read)
-and `GITLAB_TOKEN` (project API) variables, plus protected `REVIEWER_IDENTITIES_JSON`.
-Missing or malformed account-link configuration fails the check. No organization-management PAT
-is needed by this check.
-
-Deployment order:
-
-1. Merge and mirror the policy, checker, and trusted CI configuration; configure the protected
-   GitLab `REVIEWER_IDENTITIES_JSON` variable with verified account links.
-2. Register a GitLab merge-request webhook for the pipeline-trigger API on protected
-   `nv-internal-main`, including approval, unapproval, and source-update events. Its payload is
-   supplied through GitLab's `TRIGGER_PAYLOAD` file. Keep the trigger token outside the repository.
-   Retry this trusted pipeline to refresh the verdict after a GitHub team membership change.
-3. Verify missing approval, specialist approval, approval removal, and a
-   source push on test PRs/MRs. Include fork PRs and renames.
-4. Require the GitHub `Package approvals` commit status, restricted to the configured bot App.
-   Keep GitLab's successful-pipeline requirement enabled. Disable native code-owner approval
-   requirements only after both provider checks have been verified.
-
-Local validation without the Gym runtime:
-
-```bash
-python tests/unit_tests/test_review_approvals.py
-shellcheck scripts/ci/check-review-approvals.sh
-actionlint .github/workflows/review-approval-event.yml .github/workflows/review-approvals.yml
-```
+GitHub uses `BOT_ID`/`BOT_KEY`; one workflow runs on PR updates and same-repository reviews.
+Fork reviews refresh every twenty minutes because their review events cannot access secrets.
+Use workflow dispatch after team membership changes or to refresh sooner.
+GitLab uses one protected-branch job triggered by MR approval, unapproval, and push webhooks.
+Set protected `GH_TOKEN`, `GITLAB_TOKEN`, and `REVIEWER_IDENTITIES_JSON` (verified numeric account
+links, e.g. `[{"gitlab_user_id":100,"github_user_id":10}]`). Enable approval reset on push. Both modes
+publish `Package approvals` on the request head; GitLab attaches it to the existing MR pipeline.
+Require that GitHub status and GitLab's successful pipeline after merging/mirroring and verifying
+both integrations. Existing branch protection is unchanged.
 
 ## CPU CI contract
 

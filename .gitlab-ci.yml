@@ -21,10 +21,12 @@ variables:
 
 gym-package-approvals:
   stage: test
-  image: python:3.13-slim
+  image: alpine:3.22
   resource_group: gym-package-approvals
+  before_script:
+    - apk add --no-cache bash curl git jq
   script:
-    - python3 -I .gitlab/ci/check_review_approvals.py
+    - bash scripts/ci/check-review-approvals.sh gitlab
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger" && $CI_COMMIT_BRANCH == "nv-internal-main"'
   allow_failure: false
