@@ -11,7 +11,9 @@ finance_agent_v2_environment_server:
     _delete_key: legacy_agent
     single_agent_turn_legacy:
       entrypoint: app.py
-      # resources_server is unset, so the server binds the one the agent names.
+      resources_server:
+        type: resources_servers
+        name: finance_agent_v2_resources_server
       agent_server:
         type: responses_api_agents
         name: finance_agent_v2
