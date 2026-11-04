@@ -20,7 +20,7 @@ import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.base import UnsupportedOperationError
-from nemo_gym.orchestration.executors.capabilities import LogReadable, Terminable
+from nemo_gym.orchestration.executors.capabilities import Inspectable, LogReadable, Resubmittable, Terminable
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME, render_resume_prologue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_control import FOLLOWUP_CLAIM_PREFIX, render_terminate_script
@@ -241,3 +241,4 @@ def test_slurm_can_stop_jobs_and_read_logs():
 
     assert isinstance(executor, Terminable)
     assert isinstance(executor, LogReadable)
+    assert {Resubmittable, Inspectable, Terminable, LogReadable} <= set(SlurmExecutor.__bases__)
