@@ -3,14 +3,7 @@
 
 """Run scripted requests through real Gym harnesses and inspect the resulting rollouts."""
 
-import sys
-from pathlib import Path
-
-
-# Run as a script, only scripts/ is on sys.path; `scripts.check_suites` needs the repository root.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from harness_conformance.runner import main  # noqa: E402
+from scripts.harness_conformance.runner import main
 
 
 if __name__ == "__main__":
