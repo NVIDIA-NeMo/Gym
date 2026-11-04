@@ -25,6 +25,7 @@ from nemo_gym.verification import VerifierFixture
 from resources_servers.decision_index.verifier import (
     ENGINE_ENVELOPE_KEY,
     OK,
+    calibration_metrics,
     engine_answers,
     flatten_scores,
     llm_answers,
@@ -111,19 +112,29 @@ class DecisionIndexResourcesServer(DecisionIndexVerifier, SimpleResourcesServer)
     config: DecisionIndexResourcesServerConfig
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        """Gym's reward statistics, plus the Decision Index scored by the kit over every rollout.
+        """Gym's reward statistics, plus the Decision Index scored by the kit over every rollout and, in decision
+        mode, the calibration of the engine's option probabilities (Brier score, log loss, ECE).
 
         The index is computed here rather than in ``compute_metrics`` because that hook sees only unmasked rollouts,
         and the kit counts a request whose engine call failed as answered wrong (coverage), not as absent.
         """
         result = await super().aggregate_metrics(body)
         index = flatten_scores(score_index(body.verify_responses, engine=f"gym-{self.config.answer_mode}"))
+        index.update(calibration_metrics(body.verify_responses))
         result.agent_metrics.update(index)
         result.key_metrics.update(self.get_key_metrics(index))
         return result
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        keys = ("decision_index", "decision_index_raw", "decision_index_requests", "decision_index_full_suite")
+        keys = (
+            "decision_index",
+            "decision_index_raw",
+            "decision_index_requests",
+            "decision_index_full_suite",
+            "decision_index_brier",
+            "decision_index_log_loss",
+            "decision_index_ece",
+        )
         out = {k: agent_metrics[k] for k in keys if k in agent_metrics}
         out.update({k: v for k, v in agent_metrics.items() if k.startswith("decision_index_area/")})
         if "mean/reward" in agent_metrics:
