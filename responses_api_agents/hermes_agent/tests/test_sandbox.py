@@ -1554,6 +1554,33 @@ async def test_network_access_with_borrowed_sandbox_is_rejected_before_connectin
     factory.connect.assert_not_awaited()
 
 
+async def test_unenforceable_network_access_is_a_terminal_seed_refusal(agent, state, monkeypatch):
+    import responses_api_agents.hermes_agent.app as module
+
+    agent.config.sandbox_provider = "runtime"
+    agent.config.sandbox_config = {
+        "image": "test-image",
+        "workdir": "/workspace",
+        "provider_options": {"network_policy": {}},
+    }
+    agent.config.network_access = "model_only"
+    factory = MagicMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    monkeypatch.setattr(module, "create_provider", lambda config: provider)
+
+    with pytest.raises(HTTPException) as refused:
+        await agent.seed_agent_session(SimpleNamespace(session={}), _owned_seed_with_search_grant(state))
+
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.value.status_code == 422
+    assert "not both" in str(refused.value.detail)
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+
+
 async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monkeypatch, caplog):
     import responses_api_agents.hermes_agent.app as module
 
