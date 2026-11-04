@@ -340,8 +340,46 @@ async def test_rescore_decodes_only_requested_selected_answers(tmp_path, monkeyp
     results = await reverify.RolloutReverificationHelper().run_from_config(
         _config(output, tmp_path / "rescored" / "rollouts.jsonl", limit=limit)
     )
-    # The loop may fetch one extra record before checking its post-predicate limit.
-    assert decoded == ([0, 1] if limit == 1 else list(range(6)))
-    expected = ["0"] if limit == 1 else [str(i) for i in range(6)]
+    expected_indices = list(range(6 if limit is None else limit))
+    assert decoded == expected_indices
+    expected = [str(i) for i in expected_indices]
     assert seen == expected and len(results) == len(expected)
+    assert snapshot(output) == before
+
+
+@pytest.mark.parametrize("limit", [1, None])
+@pytest.mark.parametrize("alias", [False, True])
+async def test_rescore_limit_does_not_interpret_unrequested_completion(prepared_run, monkeypatch, limit, alias):
+    from nemo_gym.config.config_types import ConfigError
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first, second = store.pending()
+        store.record_dispatches([first, second])
+        store.record_outcome(first | {"response": {}, "reward": 1.0})
+        # An arbitrary completion is valid in a saved run, even when it has no answer /verify can grade.
+        store.record_outcome(second | {"reward": 1.0})
+    source = output
+    if alias:
+        source = output.with_name("shortcut.jsonl")
+        source.symlink_to(output)
+    before = snapshot(output)
+    seen = []
+    monkeypatch.setattr(reverify, "_guard_reverify_mode", AsyncMock(return_value=None))
+    monkeypatch.setattr(reverify, "get_exporters", list)
+
+    async def judge(row):
+        seen.append(row["_ng_task_index"])
+        return row, {"response": row["response"], "reward": 1.0}
+
+    monkeypatch.setattr(reverify, "_run_verification_payloads", lambda rows, **_: [judge(row) for row in rows])
+    config = _config(output, output.parent / "rescored" / "rollouts.jsonl", limit=limit)
+    config.rollouts_jsonl_fpath = str(source)
+    if limit == 1:
+        [result] = await reverify.RolloutReverificationHelper().run_from_config(config)
+        assert seen == [0] and result["response"] == {} and result["reward"] == 1.0
+    else:
+        with pytest.raises(ConfigError, match="has no `response`"):
+            await reverify.RolloutReverificationHelper().run_from_config(config)
+        assert seen == []
     assert snapshot(output) == before

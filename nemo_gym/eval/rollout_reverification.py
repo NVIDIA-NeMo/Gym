@@ -671,8 +671,11 @@ def _yield_inputs_and_rollouts_paired(
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
     with nullcontext(selected_rollouts) if selected_rollouts is not None else open(rollouts_jsonl_fpath) as r_f:
-        for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
-            if limit is not None and n_yielded >= limit:
+        rows = iter(tqdm(r_f, desc="Reading rollouts"))
+        while limit is None or n_yielded < limit:
+            try:
+                line = next(rows)
+            except StopIteration:
                 break
             rollout_row = line if selected_rollouts is not None else orjson.loads(line)
             if rollout_predicate is not None and not rollout_predicate(rollout_row):
