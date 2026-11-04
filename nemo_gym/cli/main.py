@@ -969,7 +969,11 @@ COMMANDS = {
     "build-containers": Command(
         target="nemo_gym.orchestration.build_containers:main",
         summary="Build container images using configured Slurm stages.",
-        flags=(CONFIG, _bool_flag("run", "run_only", "Submit the YAML's run configuration using the existing image.")),
+        flags=(
+            CONFIG,
+            _bool_flag("run", "run_after_build", "Build the image, then submit the YAML's run configuration."),
+            _bool_flag("run-only", "run_only", "Submit the YAML's run configuration using the existing image."),
+        ),
     ),
     "list benchmarks": Command(
         target=_list_benchmarks,

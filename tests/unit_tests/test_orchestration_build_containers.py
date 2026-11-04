@@ -766,7 +766,8 @@ def test_warmup_example_uses_shared_slurm_config(monkeypatch):
 
 
 @pytest.mark.parametrize("entrypoint", ["gym", "module"])
-def test_run_cli_uses_yaml_without_building(entrypoint, tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", [None, "--run", "--run-only"])
+def test_run_cli_uses_yaml(entrypoint, mode, tmp_path, monkeypatch):
     config = tmp_path / "build.yaml"
     config.write_text(
         "input_container_fpath: missing.sqsh\noutput_container_fpath: output.sqsh\n"
@@ -780,25 +781,76 @@ def test_run_cli_uses_yaml_without_building(entrypoint, tmp_path, monkeypatch):
         lambda: GlobalConfigDictParser().parse(GlobalConfigDictParserConfig(skip_load_from_dotenv=True)),
     )
     captured = []
+    stages = []
 
     async def capture(self):
+        stages.append("run")
         captured.append(self.config)
 
-    build = AsyncMock(side_effect=AssertionError("Must not rebuild"))
+    async def capture_build():
+        stages.append("build")
+
+    build = AsyncMock(side_effect=capture_build)
     monkeypatch.setattr(BuildContainerHelper, "run", build)
     monkeypatch.setattr(BuildContainerHelper, "_run_container", capture)
-    args = ["--run", "--config", str(config), "++run.env.SBATCH_TIMELIMIT=02:00:00"]
+    args = ["--config", str(config), "++run.env.SBATCH_TIMELIMIT=02:00:00"]
+    if mode:
+        args.insert(0, mode)
     if entrypoint == "gym":
         monkeypatch.setattr(sys, "argv", ["gym", "build-containers", *args])
         cli_main()
     else:
         monkeypatch.setattr(sys, "argv", [build_containers.__file__, *args])
         runpy.run_path(build_containers.__file__, run_name="__main__")
-    build.assert_not_called()
+    assert stages == {None: ["build"], "--run": ["build", "run"], "--run-only": ["run"]}[mode]
+    if mode is None:
+        assert not captured
+        return
     assert len(captured) == 1
     assert captured[0].run.env == {"MODEL": "/models/test", "SBATCH_TIMELIMIT": "02:00:00"}
     assert captured[0].warmup.env == {"MODEL": "/models/test"}
     assert captured[0].run.args == ["--config", "evaluation.yaml", "++num_samples_in_parallel=1024"]
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        (
+            {"run_after_build": True, "run_only": True, "run": {"env": {}, "args": ["--config", "eval.yaml"]}},
+            "mutually exclusive",
+        ),
+        ({"run_after_build": True}, "Define run.env"),
+        ({"run_only": True}, "Define run.env"),
+    ],
+)
+def test_run_modes_validate_before_building(tmp_path, options, message):
+    with pytest.raises(ValidationError, match=message):
+        BuildContainerConfig(
+            input_container_fpath=tmp_path / "input.sqsh",
+            output_container_fpath=tmp_path / "output.sqsh",
+            **options,
+        )
+
+
+def test_build_failure_does_not_submit_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        build_containers,
+        "get_global_config_dict",
+        lambda: {
+            "input_container_fpath": tmp_path / "input.sqsh",
+            "output_container_fpath": tmp_path / "output.sqsh",
+            "run_after_build": True,
+            "run": {"env": {}, "args": ["--config", "eval.yaml"]},
+        },
+    )
+    build = AsyncMock(side_effect=RuntimeError("Build failed"))
+    run = AsyncMock()
+    monkeypatch.setattr(BuildContainerHelper, "run", build)
+    monkeypatch.setattr(BuildContainerHelper, "_run_container", run)
+    with pytest.raises(RuntimeError, match="Build failed"):
+        build_containers.main()
+    build.assert_awaited_once()
+    run.assert_not_called()
 
 
 @pytest.mark.parametrize("status", [0, 37])

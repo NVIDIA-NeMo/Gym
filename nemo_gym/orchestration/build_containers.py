@@ -123,10 +123,16 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     mooncake: Optional[MooncakeConfig] = None
     warmup: Optional[WarmupConfig] = None
     run: Optional[RunConfig] = None
+    run_after_build: bool = False
     run_only: bool = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+
+        if self.run_after_build and self.run_only:
+            raise ValueError("--run and --run-only are mutually exclusive")
+        if (self.run_after_build or self.run_only) and self.run is None:
+            raise ValueError("Define run.env and run.args in the container config before using --run or --run-only")
 
         self.input_container_fpath = self.input_container_fpath.resolve()
         self.output_container_fpath = self.output_container_fpath.resolve()
@@ -742,7 +748,7 @@ class BuildContainerHelper(BaseModel):
         """Submit the YAML's run configuration without rebuilding or modifying the image."""
         config = self.config.run
         if config is None:
-            raise ValueError("Define run.env and run.args in the container config before using --run")
+            raise ValueError("Define run.env and run.args in the container config before using --run or --run-only")
         launcher = Path("benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh").resolve()
         if not launcher.is_file():
             raise FileNotFoundError(f"Launcher not found: {launcher}. Run from the Gym checkout.")
@@ -828,7 +834,14 @@ def main() -> None:
     """Run container build stages using Gym's resolved configuration."""
     global_config_dict = get_global_config_dict()
     bch = BuildContainerHelper(config=BuildContainerConfig.model_validate(global_config_dict))
-    asyncio.run(bch._run_container() if bch.config.run_only else bch.run())
+
+    async def execute() -> None:
+        if not bch.config.run_only:
+            await bch.run()
+        if bch.config.run_only or bch.config.run_after_build:
+            await bch._run_container()
+
+    asyncio.run(execute())
 
 
 if __name__ == "__main__":
