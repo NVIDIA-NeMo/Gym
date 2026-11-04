@@ -98,6 +98,13 @@ class AviaryResourcesServer(SimpleResourcesServer, Generic[TEnv, TDataset], ABC)
     env_id_to_env: dict[str, TEnv] = Field(default_factory=dict)
     env_id_to_total_reward: dict[str, float] = Field(default_factory=lambda: defaultdict(float))
 
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        return (
+            "environments are kept in this process's memory by the env_id in the request body, "
+            "and the aviary agent sends its step, verify and close calls without the session cookie, "
+            "so they can reach a worker that does not hold the environment"
+        )
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/step")(self.step)

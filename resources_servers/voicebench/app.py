@@ -10,7 +10,7 @@ import os
 import random
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import ClassVar, Optional, cast
 
 from pydantic import (
     ConfigDict,
@@ -31,6 +31,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.voicebench.legacy import replay_rule_rows
 from resources_servers.voicebench.metrics import MetricValue, compute_voicebench_metrics
 from resources_servers.voicebench.scorers.base import ScoringResult
@@ -56,8 +57,6 @@ class VoiceBenchConfig(BaseResourcesServerConfig, JudgeSettings):
             raise ValueError(f"subset {self.subset} requires scoring_type={SUBSET_SCORERS[self.subset]}")
         if self.scoring_version != "legacy_v1":
             raise ValueError("supported scoring_version is legacy_v1")
-        if self.num_workers not in (None, 1):
-            raise ValueError("legacy scoring requires one worker for the shared random stream")
         if self.scoring_type in ("open", "reference_qa"):
             if self.judge_model_server is None or self.judge_prompt_file is None:
                 raise ValueError("judge scoring requires judge_model_server and judge_prompt_file")
@@ -169,7 +168,13 @@ class VoiceBenchServer(SimpleResourcesServer):
     _expected_sample_ids: set[str] | None = PrivateAttr(default=None)
     _rule_rng: random.Random = PrivateAttr(default_factory=random.Random)
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return "legacy scoring draws every rule-scored row from one random stream shared by the whole server"
+
     def model_post_init(self, context: object) -> None:
+        # Refuse several workers before downloading the IFEval NLTK data,
+        # so the worker-count error is the one reported.
+        refuse_unsupported_num_workers(self)
         self._rule_rng = random.Random(self.config.seed)
         if self.config.expected_sample_ids_file:
             self._expected_sample_ids = _expected_ids(self.config.expected_sample_ids_file, self.config.subset)
