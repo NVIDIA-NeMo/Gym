@@ -5585,9 +5585,20 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 for row in examples
             ]
             if record_output_dir is not None:
-                # A recorded shard names its rollouts within its run, so its capture keys are its own.
-                for row, copy in zip(examples, dispatched):
-                    copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
+                # A recorded shard names its rollouts within its run, so its capture keys are its own. Two rows that
+                # come to the same id (a row fed back as `<earlier run>.0` beside a new `0`) would share capture files
+                # and one manifest identity: refused before dispatch and before the shard is replaced.
+                sources: Dict[str, Tuple[int, str]] = {}
+                for index, (row, copy) in enumerate(zip(examples, dispatched)):
+                    scoped = copy[ROLLOUT_ID_KEY_NAME] = _shard_rollout_id(row, run_id)
+                    if scoped in sources:
+                        first, source = sources[scoped]
+                        raise ValueError(
+                            f"Recording rows {first} and {index} (rollout ids {source!r} and "
+                            f"{logical_rollout_id(dict(row))!r}) would share one rollout in this shard; give each row "
+                            "its own _ng_rollout_id, or its own task and rollout indices"
+                        )
+                    sources[scoped] = (index, logical_rollout_id(dict(row)))
         completions = self._run_examples_with_metadata(
             dispatched,
             head_server_config=head_server_config,

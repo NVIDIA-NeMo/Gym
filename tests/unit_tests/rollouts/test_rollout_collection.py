@@ -15113,6 +15113,40 @@ class TestRunRecordWriter:
         assert [failed[NG_FAILURE_CLASS_KEY] for failed in store.failures()] == ["agent_request_failed"]
         assert row[RUN_ID_KEY] == "an-earlier-run"  # the caller's row is untouched
 
+    @pytest.mark.parametrize("other", ["0", "1"], ids=["same rollout", "distinct rollout"])
+    def test_rows_that_would_share_a_rollout_in_the_shard_are_refused_before_dispatch(
+        self, tmp_path: Path, other: str
+    ) -> None:
+        from nemo_gym.rollouts.rollout_collection import RUN_ID_KEY
+
+        earlier = "a" * 32
+        # A row an earlier shard returned, fed back beside a new row: `<earlier run>.0` and `0` both become
+        # `<this run>.0`.
+        fed_back = {**TestEnrichRunResult._row(f"{earlier}.0"), RUN_ID_KEY: earlier}
+        new = {**TestEnrichRunResult._row(other), TASK_INDEX_KEY_NAME: 9}
+        dispatched: list[dict] = []
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        existing = run_dir / "rollouts-step_2.jsonl"
+        existing.write_bytes(b'{"reward": 1.0}\n')
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched.extend(examples)
+                return iter([])
+
+        if other == "0":
+            with pytest.raises(ValueError, match=rf"rows 0 and 1 \(rollout ids '{earlier}\.0' and '0'\)"):
+                Helper().run_examples([fed_back, new], record_output_dir=run_dir, record_shard="step_2")
+            assert dispatched == [] and existing.read_bytes() == b'{"reward": 1.0}\n'
+        else:
+            Helper().run_examples([fed_back, new], record_output_dir=run_dir, record_shard="step_2")
+            run_id = dispatched[0][RUN_ID_KEY]
+            assert [row[ROLLOUT_ID_KEY_NAME] for row in dispatched] == [f"{run_id}.0", f"{run_id}.1"]
+
     def test_a_superseded_writer_leaves_the_newer_shard_status_alone(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
 
