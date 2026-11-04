@@ -61,6 +61,10 @@ checksum before use. Gym uploads it through the sandbox file API and installs it
 alongside OpenCode before execution; no sandbox internet access or root package
 installation is needed. The default is `null`, preserving existing behavior.
 
+When the agent's sandbox has no network access (`network_access` other than `inherit`, or
+`enforce_agent_no_network` on the resources server) and the path is unset, the agent logs a warning at
+startup: OpenCode's `grep` and `glob` calls fail there.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
