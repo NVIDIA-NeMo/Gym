@@ -238,7 +238,7 @@ To see which agent harness a benchmark composes with, inspect it with `gym list 
 | Option | Description |
 | --- | --- |
 | `[<name>]` | Inspect a single benchmark (config path, manifest status, agent, datasets) instead of listing all. |
-| `--json` | Output the benchmark list as JSON. |
+| `--json` | Output the benchmark list as JSON, including the [catalog path fields](#gym-list-environments). |
 
 ```bash
 gym list benchmarks
@@ -259,7 +259,7 @@ List the manifest-first catalog unioned with legacy environment and benchmark co
 | `--domain`, `--modality`, `--licensing` | Filter by catalog metadata. |
 | `--status experimental\|no-manifest` | Filter by the experimental annotation or missing manifest. |
 | `--lifecycle active\|deprecated` | Filter by lifecycle. |
-| `--json` | Output catalog entries as JSON, including each entry's absolute `path`, `config_path` and `manifest_path` (`null` without a manifest). |
+| `--json` | Output catalog entries as JSON, including the path fields described below. |
 
 ```bash
 gym list environments
@@ -267,6 +267,15 @@ gym list environments calendar        # inspect one environment
 gym list environments --kind benchmark --domain math
 gym list environments --json | jq '.[].name'
 ```
+
+The JSON output includes three path fields:
+
+- `path`: the entry's directory. Multiple entries can share this directory, so it is not a unique identifier.
+- `config_path`: the entry's config file. Use this field to locate the config; it is not necessarily inside `path`.
+- `manifest_path`: the entry's `manifest.yaml`, or `null` when the entry has no manifest.
+
+All non-null paths are absolute with symlinks resolved. A path reached through a symlink therefore uses its target's location in the output.
+For example, the config for `aalcr/config_v1_1` is `benchmarks/aalcr/config_v1_1.yaml`, beside its entry directory `benchmarks/aalcr/config_v1_1/`.
 
 ### `gym list agents`
 
@@ -324,7 +333,7 @@ Without a type, the command searches the unified environment and benchmark catal
 | --- | --- |
 | `[<type>]` | Optional component type: `benchmarks`, `environments`, `agents`, `models`, or `resources-servers`. |
 | `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
-| `--json` | Output matches as JSON. |
+| `--json` | Output matches as JSON. Environment and benchmark matches include the [catalog path fields](#gym-list-environments). |
 
 ```bash
 gym search math                       # environments and benchmarks matching "math"
