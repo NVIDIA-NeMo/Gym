@@ -331,7 +331,8 @@ ACKNOWLEDGE_JUDGE_JOBS_FLAGS = "--acknowledge-failed-judge-jobs --acknowledge-re
 
 
 def _judge_job_unsettled(entry: Mapping[str, Any]) -> bool:
-    return entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
+    # A failed job that settled a saved answer before it failed made progress, as a completed one does.
+    return entry.get("state") in ("failed", "completed") and not entry.get("settled")
 
 
 def failed_judge_jobs_blocking(

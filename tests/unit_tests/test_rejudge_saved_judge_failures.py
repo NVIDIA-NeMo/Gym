@@ -326,6 +326,64 @@ async def test_a_regrade_that_answered_is_settled_when_a_later_one_disconnects(t
     assert decision.action == RecoveryAction.REVERIFY, decision.reason
 
 
+async def test_a_failed_pass_records_what_it_settled_and_is_not_counted_as_settling_nothing(tmp_path, monkeypatch):
+    import asyncio
+
+    from aiohttp import ServerDisconnectedError
+
+    from nemo_gym.eval.rollout_reverification import (
+        RolloutReverificationConfig,
+        RolloutReverificationHelper,
+        write_settle_receipt,
+    )
+    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
+
+    _, output, (answered, lost) = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        if task == 1:
+            await asyncio.sleep(0.05)  # the first re-grade has answered by then
+            raise ServerDisconnectedError()
+        return json | {"reward": 1.0}
+
+    _verifier(monkeypatch, reply)
+    helper = RolloutReverificationHelper()
+    config = RolloutReverificationConfig.model_validate(
+        {
+            "rollouts_jsonl_fpath": str(output),
+            "materialized_inputs_jsonl_fpath": str(materialized_path_for(output)),
+            "output_jsonl_fpath": str(output.parent / "reverification" / "failed-pass" / output.name),
+            "judge_failed_only": True,
+            "settle_into_source": True,
+            "skip_spent_judge_failures": True,
+            "disable_aggregation": True,
+        }
+    )
+    with pytest.raises(ServerDisconnectedError):
+        await helper.run_from_config(config)
+
+    # The failed receipt counts the grade the pass settled and the admission it withdrew.
+    receipt = write_settle_receipt(
+        tmp_path / "receipt.json",
+        state="failed",
+        source=str(output),
+        job_id="1",
+        settlement=helper.settlement,
+        started_at="2026-01-01T00:00:00Z",
+    )
+    assert {name: receipt[name] for name in ("selected", "judged", "settled", "withdrawn")} == {
+        "selected": 2,
+        "judged": 1,
+        "settled": 1,
+        "withdrawn": 1,
+    }
+    # Two failed jobs that each settled a saved answer made progress: recovery is not stopped for settling nothing.
+    failed = {"state": "failed", "settled": receipt["settled"]}
+    assert failed_judge_jobs_blocking([failed | {"job_id": "1"}, failed | {"job_id": "2"}]) is None
+    nothing = {"state": "failed", "settled": 0}
+    assert failed_judge_jobs_blocking([nothing | {"job_id": "1"}, nothing | {"job_id": "2"}]) == ["1", "2"]
+
+
 @pytest.mark.parametrize(
     "masked",
     [

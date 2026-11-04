@@ -1504,22 +1504,28 @@ def _ungraded_reverification(result: Dict[str, Any]) -> bool:
 
 
 def _settle_what_a_failed_pass_judged(
-    source: Path, identities: List[str], judged: List[Dict], binding: Dict[str, Any]
+    source: Path,
+    identities: List[str],
+    judged: List[Dict],
+    binding: Dict[str, Any],
+    record: Callable[[Dict[str, int]], None],
 ) -> Callable[..., bool]:
     """An exit callback for a pass that raised in-process after admitting its re-judgments, run under the run lock.
 
     The outcomes the pass already received are settled as usual, then each admission still without a saved outcome
     is withdrawn: its row stays selected, so a later pass grades it again and recovery decides REVERIFY instead of
     stopping on an outcome it cannot know. At worst a /verify call that did reach its server is made again for the
-    same saved answer. An interrupted or killed pass leaves its admissions for recovery as before.
+    same saved answer. An interrupted or killed pass leaves its admissions for recovery as before. ``record`` gets
+    the pass's settlement counts, so its failed receipt says what it settled and withdrew.
     """
 
     def settle(exc_type, exc, traceback) -> bool:
         if exc_type is None or not issubclass(exc_type, Exception):
             return False
+        settled = 0
         if judged:
             try:
-                settle_rejudgments(source, judged, binding)
+                settled = settle_rejudgments(source, judged, binding)
             except Exception as error:  # what cannot be settled is withdrawn below; a settled row is never touched
                 print(f"Re-judged results of a failed pass were not settled: {type(error).__name__}: {error}")
         withdrawn = 0
@@ -1538,6 +1544,16 @@ def _settle_what_a_failed_pass_judged(
             print(f"Re-judgment admissions were not withdrawn: {type(error).__name__}: {error}", flush=True)
         if withdrawn:
             print(f"Withdrew {withdrawn} re-judgment admission(s) with no outcome; their rows stay as they were")
+        unsupported = binding.get("unsupported", [])
+        record(
+            {
+                "selected": len(binding["failures"]) + len(unsupported),
+                "unsupported": len(unsupported),
+                "judged": len(judged),
+                "settled": settled,
+                "withdrawn": len(binding.get("withdrawn", [])) + withdrawn,
+            }
+        )
         return False
 
     return settle
@@ -1774,7 +1790,13 @@ class RolloutReverificationHelper(BaseModel):
             # Runs before the run lock is released, so a pass that raises from here on settles what it judged and
             # withdraws what it admitted with no outcome.
             settle_lock.push(
-                _settle_what_a_failed_pass_judged(rollouts_jsonl_fpath, identities, judged_results, settle_binding)
+                _settle_what_a_failed_pass_judged(
+                    rollouts_jsonl_fpath,
+                    identities,
+                    judged_results,
+                    settle_binding,
+                    lambda counts: setattr(self, "settlement", counts),
+                )
             )
             admit_store = RolloutStore.open_for_rejudgment(rollouts_jsonl_fpath)
             settle_binding["admitted"] = {
