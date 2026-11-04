@@ -36,6 +36,7 @@ from environment_servers.harbor.verifier import _verifier_image, _verifier_key, 
 from nemo_gym.agents import sandbox_server_url
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import FailureBoundary, NgFailureEvent, observe_failure
 from nemo_gym.data.tasks.harbor import (
     MAIN_SERVICE,
     RECORD_VERSION,
@@ -848,10 +849,13 @@ class HarborSandboxMixin:
                     async with self._pull_retry_gate:
                         await start(sandbox)
                 return sandbox
-            except (SandboxCreateError, RuntimeError, OSError, ExceptionGroup) as exc:
+            except (NgFailureEvent, SandboxCreateError, RuntimeError, OSError, ExceptionGroup) as exc:
                 # A Compose group whose cleanup failed too raises an ExceptionGroup over the pull failure.
+                if isinstance(exc, NgFailureEvent) and exc.boundary != FailureBoundary.SANDBOX:
+                    raise
                 if attempt >= attempts or not _is_image_pull_failure(exc):
                     raise
+                observe_failure(exc)
                 LOGGER.warning(
                     f"{task.task_id}: image pull failed starting {what} (attempt {attempt}/{attempts}): {exc}"
                 )

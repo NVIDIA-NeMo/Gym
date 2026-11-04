@@ -72,7 +72,8 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import failure_kinds
+from nemo_gym.core import NgFailureEvent, failure_kinds
+from nemo_gym.core.failure_transport import RequestFailureLog
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
@@ -4579,7 +4580,8 @@ class TestGeneralization:
             async def start(self, spec):
                 starts.append(spec.image)
                 if len(starts) <= len(failures):
-                    raise SandboxCreateError(failures[len(starts) - 1])
+                    failure = failures[len(starts) - 1]
+                    raise failure if isinstance(failure, BaseException) else SandboxCreateError(failure)
 
             def __getattr__(self, name):
                 return getattr(sandbox, name)
@@ -4600,6 +4602,30 @@ class TestGeneralization:
         response = await run_episode(server, task)
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 3
+        assert not server._sandboxes
+
+    @pytest.mark.parametrize("message, failures", [("ErrImagePull", 1), ("ErrImagePull", 3), ("quota exceeded", 1)])
+    async def test_shared_sandbox_failure_preserves_pull_retry_policy(self, tmp_path, monkeypatch, message, failures):
+        cause = RuntimeError(message)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_request_failed",
+            operation="create",
+            failure_reason="Sandbox create failed",
+        )
+        error.__cause__ = cause
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, [error] * failures)
+        with RequestFailureLog.capture() as log:
+            response = await run_episode(server, task)
+        if message == "ErrImagePull" and failures == 1:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0
+            assert starts == ["ubuntu:24.04"] * 2
+            assert log.report.events[error.event_id].foreign_error.exception_type == "RuntimeError"
+        else:
+            assert response.failure is not None
+            assert len(starts) == failures
+        assert error.__cause__ is cause
         assert not server._sandboxes
 
     async def test_seed_time_is_not_charged_against_the_task_deadline(self, tmp_path, monkeypatch):
