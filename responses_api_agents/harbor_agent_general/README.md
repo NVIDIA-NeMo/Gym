@@ -50,6 +50,8 @@ To configure OpenSandbox with TLS verification disabled, use
 `job.environment.import_path` and sets `job.environment.kwargs.tls_verify: false`. Set
 `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` in the Harbor worker environment. Only disable verification
 for clusters whose certificates you trust; otherwise leave `tls_verify: true` (the class default).
+This requires OpenSandbox SDK 1.2 or later. Disabling TLS verification also disables SDK sandbox-creation
+metrics because their separate HTTP client does not use the configured SSL context.
 
 Gym runs one Harbor trial for each input row. These constraints are checked when the configuration loads:
 

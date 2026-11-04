@@ -2040,7 +2040,7 @@ requires-dist = [
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
     { name = "openhands-sdk", specifier = "==1.54.0" },
     { name = "openhands-tools", specifier = "==1.54.0" },
-    { name = "opensandbox", specifier = ">=1.1" },
+    { name = "opensandbox", specifier = ">=1.2" },
 ]
 provides-extras = ["telemetry"]
 

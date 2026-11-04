@@ -13,17 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import ssl
 from typing import Any
 
 from harbor.environments.opensandbox import OpenSandboxEnvironment as HarborOpenSandboxEnvironment
 
 
+logger = logging.getLogger(__name__)
+
+
 class OpenSandboxEnvironment(HarborOpenSandboxEnvironment):
     """
     Harbor environment backed by the OpenSandbox Python SDK.
 
-    Allows turning off TLS verification, while preserving all other behavior.
+    Disabling TLS verification also disables SDK creation metrics, whose client
+    does not use the configured SSL context.
     """
 
     def __init__(self, *args: Any, tls_verify: bool = True, **kwargs: Any) -> None:
@@ -37,4 +42,7 @@ class OpenSandboxEnvironment(HarborOpenSandboxEnvironment):
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             config._ssl_context = context
+            # SDK creation metrics use a separate client that ignores this context.
+            config.disable_metrics = True
+            logger.warning("OpenSandbox TLS certificate verification and SDK creation metrics are disabled")
         return config
