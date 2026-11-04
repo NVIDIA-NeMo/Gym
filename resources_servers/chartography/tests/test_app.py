@@ -51,7 +51,9 @@ from resources_servers.chartography.app import (
 SERVER_DIR = Path(__file__).resolve().parents[1]
 JUDGE_PROMPT_FPATH = SERVER_DIR / "prompt_templates/judge.txt"
 # sha256 of upstream JUDGE_PROMPT_TEMPLATE (surge-ai/chartography src/chartography/scorer.py @ 3f1bf837).
-UPSTREAM_JUDGE_PROMPT_SHA256 = "fecef1ea1ef988cfd125573d41494a27c61fe6125bb740064bed47084ead537a"
+UPSTREAM_JUDGE_PROMPT_SHA256 = (
+    "fecef1ea1ef988cfd125573d41494a27c61fe6125bb740064bed47084ead537a"  # pragma: allowlist secret
+)
 QUESTION = "At a flow of 35 L/s, what head does the 225 mm impeller deliver? Give the value in m."
 GOLDEN = "Head: 34.5 m (acceptable range 33.5 to 35.5 m)"
 
