@@ -122,6 +122,12 @@ gym eval run --no-serve \
     --limit 5
 ```
 
+Session allocation, release, and live-state lookup use the shared `SimpleResourcesServer` hooks, and close and
+checkpoint retirement are inherited. Newton keeps a typed seed adapter to check that a repeated seed still has
+metadata: the idle sweep and `/end_session` can remove it before the episode closes. Ownership conflicts are
+checked before reporting that state as expired or lost. Cookie seeds use the shared lifecycle; a failed cookie reseed keeps
+the previous verification receipt, which is discarded only after the replacement metadata is ready.
+
 The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
 `task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
 ID for another episode, or arrives after the session was verified or closed, is refused with 409. `/verify` releases

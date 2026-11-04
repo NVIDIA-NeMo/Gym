@@ -29,6 +29,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSessionLostError,
     check_resources_session_contract,
+    maybe_auto_expose,
 )
 from resources_servers.newton_bench.app import (
     BaseSeedSessionResponse,
@@ -1408,6 +1409,9 @@ class TestResourcesSessions:
                 server._cleanup_sessions()
             else:
                 assert client.post("/end_session", json={}).status_code == 200
+            other_episode = _typed_seed()
+            other_episode["episode_id"]["rollout_id"] = "other"
+            assert client.post("/seed_session", json=other_episode).status_code == 409
             response = client.post("/seed_session", json=_typed_seed())
 
         assert response.status_code == 404
@@ -1468,10 +1472,14 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
         assert server.session_metadata == before
 
 
-def test_malformed_typed_seed_does_not_fall_back_to_legacy() -> None:
+@mark.parametrize("expose_tools_over_mcp", [False, True])
+def test_malformed_typed_seed_does_not_fall_back_to_legacy(expose_tools_over_mcp: bool) -> None:
     server = _session_server()
+    server.config.expose_tools_over_mcp = expose_tools_over_mcp
     malformed = dict(TASK_DATA) | {"resources_session_id": "incomplete-typed"}
-    with TestClient(server.setup_webserver()) as client:
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
         assert client.post("/seed_session", json=malformed).status_code == 422
     assert server.session_metadata == {}
     assert server._session_episodes == {}
@@ -1619,3 +1627,35 @@ def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
         assert client.post("/seed_session", json=_typed_seed(sid)).status_code == 409
         assert server.session_metadata[sid] is original
         assert server._session_episodes == {}
+
+
+def test_failed_cookie_reseed_preserves_the_completed_evaluation() -> None:
+    server = _session_server()
+    body = _final_law_verify_body()
+    evaluator = MagicMock()
+    evaluator.evaluate_law.side_effect = [
+        {"symbolic_equivalent": True, "rmsle": 0.0},
+        {"symbolic_equivalent": False, "rmsle": 10.0},
+    ]
+    with (
+        TestClient(server.setup_webserver()) as client,
+        patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
+    ):
+        assert client.post("/seed_session", json=TASK_DATA).status_code == 200
+        [session_id] = server.session_metadata
+        assert client.post("/verify", json=body).json()["reward"] == 1.0
+        receipt = server._verified_sessions.get(session_id)
+        with patch.object(NewtonBenchResourcesServer, "_session_metadata", side_effect=RuntimeError("setup failed")):
+            with raises(RuntimeError, match="setup failed"):
+                client.post("/seed_session", json=TASK_DATA)
+        assert server._verified_sessions.get(session_id) is receipt
+        assert server.session_metadata == {} and server._sessions == {}
+        assert client.post("/verify", json=body).json()["reward"] == 1.0
+        assert evaluator.evaluate_law.call_count == 1
+
+        assert client.post("/seed_session", json=TASK_DATA).status_code == 200
+        assert list(server.session_metadata) == [session_id]
+        assert session_id not in server._verified_sessions
+        assert client.post("/verify", json=body).json()["reward"] < 1.0
+        assert evaluator.evaluate_law.call_count == 2
+        assert server.session_metadata == {}
