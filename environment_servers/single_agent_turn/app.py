@@ -10,7 +10,7 @@ from warnings import warn
 
 from aiohttp import ClientConnectorError
 from fastapi import Body
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from nemo_gym.agents import (
@@ -143,11 +143,29 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        # Fail at startup, not on the first episode, when there is no resources server to bind.
-        self.resources_server_name
+        # Fail at startup, not on the first episode, when there is no resources server to bind or a tool server
+        # cannot serve its tools.
+        resources_server_name = self.resources_server_name
         for name in self.tool_server_names:
-            if name not in self.server_client.global_config_dict:
-                raise ValueError(f"Environment Server {self.config.name!r} grants tools of an unknown server {name!r}")
+            self._check_tool_server(name, resources_server_name)
+
+    def _check_tool_server(self, name: str, resources_server_name: str) -> None:
+        server = f"Environment Server {self.config.name!r}"
+        instance = self.server_client.global_config_dict.get(name)
+        if instance is None:
+            raise ValueError(f"{server} grants tools of an unknown server {name!r}")
+        if not isinstance(instance, (dict, DictConfig)) or "resources_servers" not in instance:
+            raise ValueError(f"{server} grants tools of {name!r}, which is not a Resources server")
+        if name == resources_server_name:
+            raise ValueError(
+                f"{server} lists its Resources server {name!r} as a tool server; "
+                "grant its tools with resources_tool_transports: [mcp] instead"
+            )
+        if not get_first_server_config_dict(self.server_client.global_config_dict, name).get("expose_tools_over_mcp"):
+            raise ValueError(
+                f"{server} grants the MCP tools of {name!r}, which does not serve them; "
+                "set expose_tools_over_mcp: true on that server"
+            )
 
     @property
     def tool_server_names(self) -> list[str]:

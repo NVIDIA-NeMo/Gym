@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import re
 import runpy
 import time
 from copy import deepcopy
@@ -152,7 +153,9 @@ def _search_environment_server(
     """An environment server whose episodes may also seed a `search` tool server, granted as `tavily`."""
     configured, client = _environment_server()
     client.global_config_dict["search"] = {
-        "resources_servers": {"tavily_search": {"host": "search", "port": 8000, "entrypoint": "app.py"}}
+        "resources_servers": {
+            "tavily_search": {"host": "search", "port": 8000, "entrypoint": "app.py", "expose_tools_over_mcp": True}
+        }
     }
     if agent_tool_servers is not None:
         client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": agent_tool_servers})
@@ -259,6 +262,57 @@ def test_a_server_that_grants_an_unknown_tool_server_does_not_start() -> None:
 
     with pytest.raises(ValueError, match="unknown server 'search'"):
         SingleAgentTurnEnvironmentServer(config=configured.config, server_client=client)
+
+
+@pytest.mark.parametrize("listed_by", ["environment", "agent"])
+@pytest.mark.parametrize(
+    ("name", "block", "error"),
+    [
+        (
+            "policy_model",
+            {"responses_api_models": {"vllm_model": {"host": "model", "port": 8000}}},
+            "'policy_model', which is not a Resources server",
+        ),
+        (
+            "other_agent",
+            {"responses_api_agents": {"simple_agent": {"host": "agent", "port": 8000}}},
+            "'other_agent', which is not a Resources server",
+        ),
+        (
+            "search",
+            {"resources_servers": {"tavily_search": {"host": "search", "port": 8000}}},
+            "'search', which does not serve them; set expose_tools_over_mcp: true",
+        ),
+        ("resources", None, "lists its Resources server 'resources' as a tool server"),
+    ],
+)
+def test_a_server_that_grants_tools_no_resources_server_serves_does_not_start(
+    listed_by: str, name: str, block: dict | None, error: str
+) -> None:
+    configured, client = _environment_server()
+    if block is not None:
+        client.global_config_dict[name] = block
+    ref = {"type": "resources_servers", "name": name}
+    config = configured.config
+    if listed_by == "environment":
+        config = SingleAgentTurnEnvironmentServerConfig.model_validate({**config.model_dump(), "tool_servers": [ref]})
+    else:
+        client.global_config_dict.agent.responses_api_agents.test.update({"tool_servers": [ref]})
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        SingleAgentTurnEnvironmentServer(config=config, server_client=client)
+
+
+@pytest.mark.parametrize("listed_by", ["environment", "agent"])
+def test_a_server_that_grants_an_mcp_resources_servers_tools_starts(listed_by: str) -> None:
+    own_tool_servers = [_SEARCH] if listed_by == "environment" else None
+    agent_tool_servers = [_SEARCH] if listed_by == "agent" else None
+
+    environment_server, _ = _search_environment_server(
+        own_tool_servers=own_tool_servers, agent_tool_servers=agent_tool_servers
+    )
+
+    assert environment_server.tool_server_names == ["search"]
 
 
 async def test_token_capture_keeps_prefixed_twin_route() -> None:
