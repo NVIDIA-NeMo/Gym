@@ -1737,6 +1737,7 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
         await provider.exec(handle, "allocate memory", timeout_s=30)
 
     assert exc_info.value.details.sandbox_id == "sandbox-oom"
+    assert exc_info.value.details.container == "agent"
     message = str(exc_info.value)
     assert "OOM-killed" in message
     assert "SandboxResources.memory_mib" not in message
@@ -2438,6 +2439,7 @@ async def test_exec_and_pty_require_explicit_oom_evidence(reason, message, expec
     failure = await provider._pty_failure(handle, ConnectionError("socket lost"))
     assert failure.failure_kind == (PROVIDER_OOM_KILLED if expected == "oom" else PROVIDER_COMMAND_OUTCOME_UNKNOWN)
     assert failure.details.provider_status_reason == reason
+    assert failure.details.container == ("agent" if expected == "oom" else None)
     assert "lifecycle status" in failure.failure_reason
 
 

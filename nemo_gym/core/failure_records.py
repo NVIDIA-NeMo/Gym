@@ -20,6 +20,7 @@ Failure kinds live in ``nemo_gym.core.failure_kinds``; ``nemo_gym.core.failure_t
 import uuid
 from collections.abc import Mapping
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -85,6 +86,9 @@ class SandboxFailureDetails(BaseModel):
     execution_id: str | None = Field(default=None, max_length=256)
     provider: str | None = Field(default=None, max_length=256)
     provider_status_reason: str | None = Field(default=None, max_length=2000)
+    # Which container the provider reported as ended, when it names one: ``agent`` for the sandbox's own (user)
+    # container, else ``init`` or ``sidecar``. A diagnostic fact; it decides no policy.
+    container: Literal["agent", "init", "sidecar"] | None = None
     exit_code: int | None = None
 
 

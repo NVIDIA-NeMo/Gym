@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Sandbox runtime failures: facts for caller policies, without grading decisions."""
 
+from nemo_gym.core.failure_kinds import FailureStage
 from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
 from nemo_gym.utils.exception_inspection import bounded_text
@@ -19,6 +20,8 @@ def sandbox_failure(
     provider_status_reason: str | None = None,
     exit_code: int | None = None,
     http_status: int | None = None,
+    container: str | None = None,
+    stage: FailureStage | None = None,
 ) -> NgFailureEvent:
     """Construct an event from provider-selected facts; callers raise it ``from cause``.
 
@@ -40,6 +43,7 @@ def sandbox_failure(
         # When wrapping an already typed failure, the child retains its HTTP facts.
         http_status=http_status,
         foreign_error=foreign_error,
+        stage=stage,
         details=SandboxFailureDetails(
             sandbox_id=sandbox_id,
             execution_id=execution_id,
@@ -48,8 +52,12 @@ def sandbox_failure(
             if provider_status_reason is not None
             else None,
             exit_code=exit_code,
+            container=container,
         )
-        if any(value is not None for value in (sandbox_id, execution_id, provider, provider_status_reason, exit_code))
+        if any(
+            value is not None
+            for value in (sandbox_id, execution_id, provider, provider_status_reason, exit_code, container)
+        )
         else None,
     )
     failure.__cause__ = cause

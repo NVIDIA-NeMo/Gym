@@ -684,3 +684,16 @@ def test_retry_cap_does_not_replace_polling_fallback(header):
     failure = opensandbox_failure(operation="status", cause=error)
     assert module._retry_delay(failure, fallback=2, max_delay_s=0) == 2
     assert module._retry_delay(None, fallback=2, max_delay_s=0) == 2
+
+
+def test_container_and_stage_are_recorded_as_reported():
+    from nemo_gym.sandbox.failures import sandbox_failure
+
+    failure = sandbox_failure(
+        operation="exec", failure_kind="provider_unavailable", sandbox_id="s-1", container="sidecar", stage="agent"
+    )
+    assert failure.details.container == "sidecar"
+    assert failure.stage == "agent"
+    # Without them nothing changes: no container is inferred and no stage is set.
+    bare = sandbox_failure(operation="exec", failure_kind="provider_unavailable", sandbox_id="s-1")
+    assert bare.details.container is None and bare.stage is None

@@ -27,6 +27,7 @@ def opensandbox_failure(
     provider_status_reason: str | None = None,
     exit_code: int | None = None,
     http_status: int | None = None,
+    container: str | None = None,
 ) -> NgFailureEvent:
     """Classify this operation's evidence, then construct its sandbox event.
 
@@ -92,4 +93,5 @@ def opensandbox_failure(
         provider_status_reason=provider_status_reason,
         exit_code=exit_code,
         http_status=status,
+        container=container,
     )

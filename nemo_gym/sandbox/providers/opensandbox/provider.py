@@ -2269,6 +2269,7 @@ class OpenSandboxProvider:
                     failure_kind=PROVIDER_OOM_KILLED,
                     reason=evidence.message,
                     provider_status_reason=evidence.provider_status_reason,
+                    container="agent",
                 ) from error
             if isinstance(error, NgFailureEvent):
                 raise
@@ -2374,6 +2375,7 @@ class OpenSandboxProvider:
             else PROVIDER_COMMAND_OUTCOME_UNKNOWN,
             reason=evidence.message if evidence is not None else "PTY connection lost; command outcome is unknown",
             provider_status_reason=evidence.provider_status_reason if evidence is not None else None,
+            container="agent" if evidence is not None and evidence.outcome == "oom" else None,
         )
 
     async def _exec_background(
@@ -2484,6 +2486,7 @@ class OpenSandboxProvider:
                         cause=failure,
                         reason=evidence.message,
                         provider_status_reason=evidence.provider_status_reason,
+                        container="agent",
                     ) from failure
                 if failure_outcome_policy(failure, config=self._operations.outcome_policy) != OutcomeAction.RETRY:
                     if failure is error:
