@@ -83,6 +83,14 @@ because server dependencies and external resources are not fully pinned. Engine
 and dependency caches persist between runs. Do not claim selective test pruning
 or cross-run test-result savings from these measurements.
 
+The uv cache mirrors main's policy: one immutable OS/`uv.lock` key shared across
+jobs, with an OS-level restore prefix. Baseline and Pants use separate namespaces
+so one arm cannot warm the other. The `pants-full-v2-uv-` namespace starts cold
+for both arms and excludes earlier experiment caches. Pants engine caches remain separate per job and
+shard; their keys include the implementation/dependency contract and sampled
+source commit, allowing repeated measurements of that source to reuse an exact
+cache entry without uploading it again.
+
 ## Evidence
 
 Require matching job selections, command success, testcase identities and outcomes,
@@ -92,6 +100,12 @@ required job, execution span, and total runner-minutes. Feedback includes shared
 preparation, initial queue delay, setup and cache transfers. Compare fresh workflow
 dispatches only; rerun attempts are rejected because they retain the original
 creation timestamp. Preserve slower results and failures alongside faster runs.
+
+The initial full-wrapper run ([41828904388](https://github.com/NVIDIA-NeMo/Gym/actions/runs/41828904388))
+used per-job, per-run cache keys that forced cache uploads on every measurement.
+Those uploads differ from main's shared immutable uv-cache policy. That run proves
+test and coverage parity; its elapsed times are not production CI timing evidence.
+Use fresh runs with the corrected cache policy for timing comparisons.
 
 The historical six-file/103-test benchmark is documented in [SUBSET.md](SUBSET.md).
 Its workflow is manual only and its measurements do not establish production CI
