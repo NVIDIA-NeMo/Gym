@@ -79,6 +79,8 @@ async def test_scaffolded_verifier_journey_reaches_published_catalog_entry(
         kind="environment",
         name="sample",
     ).asset_dir
+    # This journey exercises the verifier in-process, without resolving or installing dependencies.
+    (tmp_path / "resources_servers/sample/uv.lock").touch()
     manifest_path = asset / "manifest.yaml"
     manifest = load_manifest(manifest_path).model_copy(
         update={
