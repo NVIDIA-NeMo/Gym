@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -419,6 +420,24 @@ def test_apply_spec_overrides_maps_resources_and_ttl():
     assert _apply_spec_overrides(cfg, SandboxSpec(image="img")) is cfg
 
 
+@pytest.mark.parametrize("configured_storage", [None, 100])
+def test_apply_spec_overrides_uses_implicit_storage_for_requests_up_to_20_gib(configured_storage: int | None) -> None:
+    cfg = engine.EcsFargateConfig(region="us-east-1", ephemeral_storage_gib=configured_storage)
+
+    for requested in (0, 1, 10, 20):
+        out = _apply_spec_overrides(cfg, SandboxSpec(image="img", resources={"disk_gib": requested}))
+        assert out.ephemeral_storage_gib == configured_storage
+
+
+@pytest.mark.parametrize("configured_storage", [None, 100])
+def test_apply_spec_overrides_rejects_negative_storage(configured_storage: int | None) -> None:
+    from nemo_gym.sandbox.providers import SandboxCreateError
+
+    cfg = engine.EcsFargateConfig(region="us-east-1", ephemeral_storage_gib=configured_storage)
+    with pytest.raises(SandboxCreateError, match="disk_gib must be non-negative"):
+        _apply_spec_overrides(cfg, SandboxSpec(image="img", resources={"disk_gib": -1}))
+
+
 def test_apply_spec_overrides_rejects_gpu():
     from nemo_gym.sandbox.providers import SandboxCreateError
 
@@ -510,3 +529,94 @@ def test_build_efs_volumes_requires_a_filesystem_id():
     sandbox = engine.EcsFargateSandbox(spec, ecs_config=cfg)
     with pytest.raises(ValueError, match="no filesystem id"):
         sandbox._build_efs_volumes()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_reuses_owner_tunnel_and_disconnect_keeps_task_alive(tmp_path: Path) -> None:
+    import json
+
+    config = _provider_config()["ecs_fargate"]
+    owner = AsyncSandbox(EcsFargateProvider(**config), SandboxSpec(image="python:3.12"))
+    receiver = EcsFargateProvider(**config)
+    ecs = MagicMock()
+    borrower_client = MagicMock(spec=engine.ExecClient)
+    borrower_client.exec.return_value = engine.ExecResult("borrower alive", "", 0)
+
+    def init_aws_clients(sandbox: engine.EcsFargateSandbox) -> None:
+        sandbox._ecs = ecs
+
+    with _mock_engine_start(engine.ExecResult("owner alive", "", 0)) as (owner_client, tunnel_class):
+        with (
+            patch.object(engine.EcsFargateSandbox, "_init_aws_clients", init_aws_clients),
+            patch(f"{_ENG}.ExecClient", side_effect=[owner_client, borrower_client]),
+            patch(f"{_ENG}.download_secret_to_file", return_value=str(tmp_path / "ssh-key")),
+        ):
+            await owner.start()
+            descriptor = json.loads(json.dumps(await owner.serialize()))
+            assert "private_key" not in json.dumps(descriptor)
+            borrowed = await AsyncSandbox.connect(descriptor, provider=receiver)
+
+        assert tunnel_class.call_count == 1
+        result = await borrowed.exec("echo borrower alive")
+        assert result.return_code == 0 and result.stdout == "borrower alive"
+        await borrowed.disconnect()
+
+        borrower_client.close.assert_awaited_once()
+        owner_client.close.assert_not_awaited()
+        ecs.stop_task.assert_not_called()
+        tunnel_class.return_value.close.assert_not_called()
+        result = await owner.exec("echo owner alive")
+        assert result.return_code == 0 and result.stdout == "owner alive"
+
+        await owner.stop()
+        ecs.stop_task.assert_called_once_with(
+            cluster=config["cluster"], task=descriptor["sandbox_id"], reason="sandbox cleanup"
+        )
+        tunnel_class.return_value.close.assert_called_once()
+        owner_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "replacement, message",
+    [
+        pytest.param({"provider": "other"}, "same host and UID", id="provider"),
+        pytest.param({"hostname": "foreign"}, "same host and UID", id="host"),
+        pytest.param({"uid": -1}, "same host and UID", id="uid"),
+        pytest.param({"cluster": "other"}, "cluster and region", id="cluster"),
+        pytest.param({"region": "other"}, "cluster and region", id="region"),
+        pytest.param({"exec_port": True}, "Invalid ECS exec-server port", id="boolean-port"),
+        pytest.param({"exec_port": 0}, "Invalid ECS exec-server port", id="zero-port"),
+        pytest.param({"exec_port": 65536}, "Invalid ECS exec-server port", id="out-of-range-port"),
+        pytest.param({"sandbox_id": ""}, "Missing ECS task identity", id="empty-task"),
+        pytest.param({"sandbox_id": 123}, "Missing ECS task identity", id="non-string-task"),
+    ],
+)
+async def test_reconnect_rejects_invalid_descriptor_before_attaching(
+    replacement: dict[str, object], message: str, tmp_path: Path
+) -> None:
+    config = _provider_config()["ecs_fargate"]
+    owner, receiver = EcsFargateProvider(**config), EcsFargateProvider(**config)
+    with (
+        _mock_engine_start(),
+        patch(f"{_ENG}.download_secret_to_file", return_value=str(tmp_path / "ssh-key")),
+    ):
+        handle = await owner.create(SandboxSpec(image="python:3.12"))
+        try:
+            descriptor = await owner.serialize_handle(handle)
+            with patch.object(engine.EcsFargateSandbox, "attach_exec_server", new_callable=AsyncMock) as attach:
+                with pytest.raises(ValueError, match=message):
+                    await receiver.connect({**descriptor, **replacement})
+                attach.assert_not_awaited()
+        finally:
+            await owner.close(handle)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_requires_exec_server_mode():
+    owner = EcsFargateProvider(**_provider_config()["ecs_fargate"])
+    from nemo_gym.sandbox.providers.base import SandboxHandle
+
+    sandbox = engine.EcsFargateSandbox(engine.SandboxSpec(image="python:3.12"), ecs_config=owner._cfg)
+    with pytest.raises(ValueError, match="exec-server"):
+        await owner.serialize_handle(SandboxHandle(sandbox_id="task", provider_name="ecs_fargate", raw=sandbox))

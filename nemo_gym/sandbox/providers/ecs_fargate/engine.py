@@ -1590,6 +1590,35 @@ class EcsFargateSandbox:
             await asyncio.to_thread(self._cleanup)
             raise
 
+    @classmethod
+    async def attach_exec_server(
+        cls,
+        spec: SandboxSpec,
+        *,
+        ecs_config: EcsFargateConfig,
+        task_arn: str,
+        port: int,
+    ) -> EcsFargateSandbox:
+        """Borrow the owner's same-host SSH forward; do not launch a task or another tunnel."""
+        sandbox = cls(spec, ecs_config=ecs_config)
+        await asyncio.to_thread(sandbox._init_aws_clients)
+        sandbox._task_arn = task_arn
+        sandbox._exec_client = ExecClient(port=port)
+        sandbox._started = True
+        return sandbox
+
+    async def disconnect_exec_server(self) -> None:
+        """Release a borrowed exec client without stopping the owner's ECS task or tunnel."""
+        if self._exec_client is not None:
+            await self._exec_client.close()
+            self._exec_client = None
+        # Borrowed uploads own their staging objects, but not the task or tunnel.
+        # Do not use _cleanup(), which also tears down the owner's ECS task.
+        for key in list(self._s3_artifacts):
+            await asyncio.to_thread(_delete_s3_object, self._cfg, key)
+            self._s3_artifacts.remove(key)
+        self._stopped = True
+
     async def stop(self) -> None:
         if self._stopped:
             return

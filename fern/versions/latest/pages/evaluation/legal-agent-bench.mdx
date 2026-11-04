@@ -32,6 +32,29 @@ is left untouched. Preparation fetches only missing tasks and required shared
 corpora, with atomic replacement and cross-process cache locking. Cache markers
 include the source revision, so old caches cannot silently serve the new pin.
 
+## Sandbox sessions
+
+Gym's sandbox providers support borrowing an existing sandbox through
+`AsyncSandbox.serialize()` and `AsyncSandbox.connect()`. LAB integration that
+lets session harnesses borrow a Resources-owned sandbox follows separately;
+the Harbor path described above remains the available LAB execution path here.
+
+Docker and OpenSandbox use their existing connection support. Apptainer and
+Enroot require the same host and UID; Enroot also requires matching data/runtime directories and a live
+init process with its original identity. OpenShell reconnects through the same
+gateway and workspace and verifies the sandbox identity.
+
+ECS Fargate sharing requires exec-server mode and a live owner SSH forward on
+the same host and UID. Borrowers open independent HTTP clients through that
+forward. Disconnecting a borrower releases its client and attempts to delete
+its temporary S3 upload objects, including objects left after extraction fails.
+The owner retains its task, tunnel, and separately tracked upload objects. This
+does not provide a portable ECS connection for workers on different hosts.
+
+Descriptors do not add provider authentication keys. Enroot and OpenShell
+descriptors include the sandbox environment, which can itself contain secrets;
+treat descriptors as trusted connection metadata and do not publish them.
+
 ## Judge profiles and score comparability
 
 Set a nonempty `lab_judges` list in the gitignored root `env.yaml`. One entry
