@@ -1589,7 +1589,7 @@ async def test_incomplete_capture_policy_preserves_recovery_accounting(
 
     async def post(**kwargs):
         entry = TokenEntry(
-            rollout_id="0-0",
+            capture_key="0-0",
             model_call_id="kept-answer",
             model="m",
             prompt_token_ids=[1, 2, 3],
