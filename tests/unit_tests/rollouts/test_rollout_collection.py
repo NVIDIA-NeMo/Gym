@@ -15565,3 +15565,51 @@ async def test_a_recorded_shard_resumes_through_the_eval_entry_point(
         logical_rollout_id(row)
         for row in TestRunRecordWriter._lines(run_dir / "rollouts-step_1_materialized_inputs.jsonl")
     )
+
+
+@pytest.mark.parametrize("path", ["gym eval run", "run_examples with enrich_results"])
+async def test_a_run_that_is_not_a_shard_keeps_its_rollout_ids_and_capture_keys(
+    tmp_path: Path, empty_global_config: MagicMock, path: str
+) -> None:
+    """Only a recorded shard scopes its rollout ids: a plain run dispatches every row under its own id and key."""
+    rows = [
+        {AGENT_REF_KEY_NAME: {"name": "a"}, "responses_create_params": {"input": []}, "x": 0},
+        {AGENT_REF_KEY_NAME: {"name": "a"}, "responses_create_params": {"input": []}, ROLLOUT_ID_KEY_NAME: "task-7"},
+    ]
+    dispatched: list[dict] = []
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            dispatched.extend(examples)
+            futures = []
+            for row in examples:
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=row, result={"response": {}, "reward": 1.0}, rollout_latency_ms=1.0)
+                )
+                futures.append(future)
+            return iter(futures)
+
+    if path == "gym eval run":
+        source = tmp_path / "input.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        output = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+        await Helper().run_from_config(config)
+        saved = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+    else:
+        given = [{**row, TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0} for index, row in enumerate(rows)]
+        saved = [
+            result
+            for _, result in [await completion for completion in Helper().run_examples(given, enrich_results=True)]
+        ]
+
+    # The ids and capture keys are the ones Gym derived before shards existed: "<task>-<rollout>" or the row's own id.
+    assert sorted(maybe_rollout_id_from_run_body(row) for row in dispatched) == ["0-0", "task-7"]
+    assert sorted(row.get(ROLLOUT_ID_KEY_NAME) or "" for row in dispatched) == ["", "task-7"]
+    assert sorted(maybe_rollout_id_from_run_body(result) for result in saved) == ["0-0", "task-7"]
