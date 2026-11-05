@@ -27,7 +27,7 @@ ASSETS = {
 def asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches the roots from :func:`~nemo_gym.environment.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
+    Searches the roots from :func:`~nemo_gym.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
     cwd + install root), the same helper that backs `gym list`/`gym search`, so config resolution and
     discovery agree on where components live. On a name collision across roots the highest-priority root wins
     (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
