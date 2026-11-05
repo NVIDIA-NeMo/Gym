@@ -555,3 +555,61 @@ async def test_a_failed_error_body_read_selects_the_attempt_that_returned_it(mon
         assert list(report.events) == [remote.event_id], "no local attempt is added beside it"
     else:
         assert len(report.events) == 1
+
+
+def _vllm_metrics(waiting: float, running: float) -> str:
+    """A vLLM /metrics page as Prometheus text, with one engine."""
+    return (
+        "# HELP vllm:num_requests_waiting Number of requests waiting to be processed.\n"
+        f'vllm:num_requests_waiting{{engine="0",model_name="m"}} {waiting}\n'
+        "# HELP vllm:num_requests_running Number of requests in model execution batches.\n"
+        f'vllm:num_requests_running{{engine="0",model_name="m"}} {running}\n'
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "metrics", "expected"),
+    [
+        pytest.param(True, (62.0, 1.0), (62, 1), id="queued-server"),
+        pytest.param(True, (0.0, 4.0), (0, 4), id="an-empty-queue-is-recorded-too"),
+        pytest.param(True, None, (None, None), id="no-metrics-page"),
+        pytest.param(False, (62.0, 1.0), (None, None), id="not-requested"),
+    ],
+)
+async def test_a_response_timeout_records_the_servers_queue_when_asked(monkeypatch, record, metrics, expected):
+    metrics_reads = 0
+
+    async def responses(request):
+        await asyncio.sleep(0.5)
+        return web.json_response({})
+
+    async def metrics_page(request):
+        nonlocal metrics_reads
+        metrics_reads += 1
+        return web.Response(text=_vllm_metrics(*metrics))
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", responses)
+    if metrics is not None:
+        app.router.add_get("/metrics", metrics_page)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("/v1")),
+            max_num_tries=1,
+            request_timeout_seconds=0.1,
+            record_server_queue=record,
+        )
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(TimeoutError) as caught:
+                await model._request(method="POST", url=str(server.make_url("/v1/responses")), json={"model": "m"})
+            report = log.reply_report(caught.value)
+
+    [attempt] = report.events.values()
+    assert report.failure_id == attempt.event_id
+    assert attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    assert attempt.details.request_upload_complete is True
+    assert (attempt.details.server_requests_waiting, attempt.details.server_requests_running) == expected
+    assert metrics_reads == (1 if record and metrics is not None else 0)

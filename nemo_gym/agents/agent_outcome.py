@@ -154,3 +154,27 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
             for event in attempts
         )
     )
+
+
+def queued_policy_response_timeout(report: FailureReport | None) -> bool:
+    """Whether a confirmed policy response timeout (``confirmed_policy_response_timeout``) waited in the model
+    server's queue: every attempt recorded the server's queue at its timeout, with requests waiting.
+
+    An attempt without a queue reading, or with an empty queue, keeps the timeout the model's.
+    """
+    if not confirmed_policy_response_timeout(report):
+        return False
+    final = report.events[report.failure_id]
+    attempts = [
+        event
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL
+        and event.operation == "model_request"
+        and event.operation_id == final.operation_id
+    ]
+    return all(
+        isinstance(event.details, ModelFailureDetails)
+        and event.details.server_requests_waiting is not None
+        and event.details.server_requests_waiting > 0
+        for event in attempts
+    )
