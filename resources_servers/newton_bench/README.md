@@ -108,7 +108,7 @@ gym eval run --no-serve \
 ### Run under the single-agent-turn Environment Server
 `configs/newton_bench_single_agent_turn.yaml` runs the same rows through the `single_agent_turn_legacy` Environment
 Server. Rollout collection still sends flat rows, but the Environment Server seeds the Resources Server and the
-Simple Agent with typed sessions, grants the agent direct HTTP access to the tools, verifies, and then closes both
+Simple Agent with episode sessions, grants the agent direct HTTP access to the tools, verifies, and then closes both
 sessions:
 ```bash
 gym env start \
@@ -123,9 +123,9 @@ gym eval run --no-serve \
 ```
 
 Session allocation, release, and live-state lookup use the shared `SimpleResourcesServer` hooks, and close and
-checkpoint retirement are inherited. Newton keeps a typed seed adapter to check that a repeated seed still has
+checkpoint retirement are inherited. Newton keeps an episode seed adapter to check that a repeated seed still has
 metadata: the idle sweep can remove it before the episode closes. Ownership conflicts are
-checked before reporting that state as expired or lost. Cookie seeds use the shared lifecycle; a failed cookie reseed keeps
+checked before reporting that state as expired or lost. Agent-run seeds use the shared lifecycle; a failed agent-run seed keeps
 the previous verification receipt, which is discarded only after the replacement metadata is ready.
 
 A session's first `execute_python` call starts its Python worker from a forkserver, a separate process that imports
@@ -134,14 +134,14 @@ worker in a server process waits a few seconds for that import, off the event lo
 `max_execution_time + 5` second response wait; later workers start in milliseconds. The session's other calls reuse
 that worker and its Python variables.
 
-The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
+The episode seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
 `task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
 ID for another episode, or arrives after the session was verified or closed, is refused with 409. `/verify` releases
-metadata and the Python worker for typed and legacy sessions before checkpoint tracking ends. A compact result bound
+metadata and the Python worker for episode and agent-run sessions before checkpoint tracking ends. A compact result bound
 to that verification payload remains for `session_close_retry_window_seconds`; retries return the same evaluation
 without invoking the judge again, and a changed payload is masked. `/close_session` fences this record and releases
 any still-active session. Checkpoint retirement also releases live workers and metadata. A legacy seed cannot
-replace a typed session; a new legacy `/run` reusing a completed legacy cookie keeps its session ID and replaces
+replace an episode session; a new legacy `/run` reusing a completed legacy cookie keeps its session ID and replaces
 the completed run's state, including its retry record.
 The idle sweep (`session_ttl`) also releases state; a later seed retry for that session fails with 404 instead of
 confirming a session that no longer exists. A tool call for a session the server no longer holds fails with 404, and

@@ -36,7 +36,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
+    ExpiringResourcesSessionRecords,
     MCPTool,
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
@@ -154,17 +154,17 @@ class NewtonBenchEndSessionResponse(BaseModel):
 class NewtonBenchResourcesServer(SimpleResourcesServer):
     config: NewtonBenchResourcesServerConfig
     seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = NewtonBenchSeedSessionRequest
-    # Keyed by the session cookie's SESSION_ID_KEY, which a typed seed binds to its resources_session_id.
+    # Keyed by the session cookie's SESSION_ID_KEY, which an episode seed binds to its resources_session_id.
     session_metadata: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     _sessions: Dict[str, SessionHandle] = PrivateAttr(default_factory=dict)
     # Sessions the idle sweep closed after session_ttl, so a late call reports them expired rather than lost.
-    _expired_sessions: ClosedResourcesSessionRecords[None] = PrivateAttr()
+    _expired_sessions: ExpiringResourcesSessionRecords[None] = PrivateAttr()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         # A client idle long enough to be swept can stay away about as long again, often longer than a close retry.
-        self._expired_sessions = ClosedResourcesSessionRecords(
-            max(self.config.session_close_retry_window_seconds, self.config.session_ttl)
+        self._expired_sessions = ExpiringResourcesSessionRecords(
+            lifetime_seconds=max(self.config.session_close_retry_window_seconds, self.config.session_ttl)
         )
 
     def setup_webserver(self) -> FastAPI:
@@ -227,7 +227,7 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         return session_id in self.session_metadata
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Replace a cookie-seeded run only after its task metadata validates."""
+        """Replace an agent-run session only after its task metadata validates."""
         task = NewtonBenchSeedSessionRequest.model_validate(body)
         if task.module_name not in MODULE_REQUEST_CLASSES_MAPPING:
             raise HTTPException(status_code=400, detail=f"Invalid module_name '{task.module_name}'.")
@@ -246,18 +246,18 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[NewtonBenchSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Use the shared seed policy, checking that a repeated typed seed still has live metadata.
+        """Use the shared seed policy, checking that a repeated episode seed still has live metadata.
 
         The idle sweep can release metadata before the episode closes. The shared lifecycle does not revalidate an
         existing binding, so this adapter preserves the expired/lost response for that retry.
-        Cookie seeds use the base lifecycle and keep their session ID when replacing a completed run.
+        Agent-run seeds use the base lifecycle and keep their session ID when replacing a completed run.
         """
         if not isinstance(body, ResourcesSeedSessionRequest):
             return await super().seed_session(body, request=request)
 
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            if self._fence.check_typed_seed(
+        async with self._resources_session_locks.locked(session_id):
+            if self._check_episode_seed(
                 body,
                 identity=self._session_episodes.get(session_id),
                 has_state=self.has_session_state(session_id),
@@ -321,7 +321,7 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                 self._sessions.pop(sid, None)
 
             # One start per session at a time, so concurrent first calls share a worker.
-            async with self._fence.locked(sid):
+            async with self._resources_session_locks.locked(sid):
                 if sid not in self._sessions:
                     # The first start in this process waits for the worker forkserver to import the server.
                     handle = await asyncio.to_thread(SessionHandle, self.config.max_execution_time)
@@ -367,10 +367,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         digest = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
         # Nothing below yields to the event loop (evaluate_law is synchronous), so a seed, close or resent verify for
-        # this session cannot interleave between the checks and the release. Hold self._fence.locked(session_id)
+        # this session cannot interleave between the checks and the release. Hold the session lock
         # across them if evaluation ever awaits.
         verified = self._verified_sessions.get(session_id)
-        if self._fence.closed_episode(session_id) is not None or (verified is not None and verified[1][0] != digest):
+        if session_id in self._resources_session_fences or (verified is not None and verified[1][0] != digest):
             return NewtonBenchVerifyResponse(
                 **(
                     body.model_dump()

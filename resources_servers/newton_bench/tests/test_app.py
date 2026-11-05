@@ -1355,7 +1355,7 @@ def _session_server() -> NewtonBenchResourcesServer:
     return NewtonBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def _typed_seed(resources_session_id: str = "resources-session", task_data: dict | None = None) -> dict:
+def _episode_seed(resources_session_id: str = "resources-session", task_data: dict | None = None) -> dict:
     # The body single_agent_turn sends: task_data holds the row's own fields.
     return ResourcesSeedSessionRequest(
         resources_session_id=resources_session_id,
@@ -1365,7 +1365,7 @@ def _typed_seed(resources_session_id: str = "resources-session", task_data: dict
     ).model_dump(mode="json")
 
 
-def _typed_close(resources_session_id: str = "resources-session") -> dict:
+def _episode_close(resources_session_id: str = "resources-session") -> dict:
     return ResourcesCloseSessionRequest(
         resources_session_id=resources_session_id, episode_id=EpisodeId(rollout_id="rollout", attempt=0)
     ).model_dump(mode="json")
@@ -1377,7 +1377,7 @@ class TestResourcesSessions:
 
         check_resources_session_contract(
             server.setup_webserver(),
-            ResourcesSeedSessionRequest.model_validate(_typed_seed("contract-session")),
+            ResourcesSeedSessionRequest.model_validate(_episode_seed("contract-session")),
             keeps_state=True,
             holds_state=lambda resources_session_id: resources_session_id in server.session_metadata,
             verify_body=VERIFY_BODY,
@@ -1391,21 +1391,21 @@ class TestResourcesSessions:
             ({**TASK_DATA, "module_name": "m99_unknown"}, "Invalid module_name 'm99_unknown'"),
         ],
     )
-    def test_typed_seed_rejects_task_data_no_retry_can_fix(self, task_data: dict, message: str) -> None:
+    def test_episode_seed_rejects_task_data_no_retry_can_fix(self, task_data: dict, message: str) -> None:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            response = client.post("/seed_session", json=_typed_seed(task_data=task_data))
+            response = client.post("/seed_session", json=_episode_seed(task_data=task_data))
 
         assert response.status_code == 422
         assert message in response.text
         assert server.session_metadata == {}
 
-    def test_typed_session_runs_tools_and_close_releases_the_worker(self) -> None:
+    def test_episode_session_runs_tools_and_close_releases_the_worker(self) -> None:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed()).status_code == 200
             assert server.session_metadata["resources-session"]["module_name"] == "m0_gravity"
 
             experiment = client.post("/run_experiment_m0_gravity", json={"mass1": 1.0, "mass2": 1.0, "distance": 1.0})
@@ -1417,11 +1417,11 @@ class TestResourcesSessions:
 
             # A seed retried after its reply was lost arrives without the cookie, and keeps the worker's state.
             client.cookies.clear()
-            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed()).status_code == 200
             assert client.post("/execute_python", json={"code": "x"}).json()["result"] == "41"
 
             client.cookies.clear()
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         assert handle.is_closed
         assert server._sessions == {}
@@ -1432,12 +1432,12 @@ class TestResourcesSessions:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            client.post("/seed_session", json=_typed_seed())
+            client.post("/seed_session", json=_episode_seed())
             verify = client.post("/verify", json=VERIFY_BODY)
             # Verification releases live state while a compact record serves retries.
             assert verify.json()["mask_sample"] is False
             assert server.session_metadata == {}
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         assert server.session_metadata == {}
         assert server._session_episodes == {}
@@ -1446,8 +1446,8 @@ class TestResourcesSessions:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            client.post("/seed_session", json=_typed_seed())
-            client.post("/close_session", json=_typed_close())
+            client.post("/seed_session", json=_episode_seed())
+            client.post("/close_session", json=_episode_close())
             experiment = client.post("/run_experiment_m0_gravity", json={"mass1": 1.0, "mass2": 1.0, "distance": 1.0})
             python = client.post("/execute_python", json={"code": "1"})
 
@@ -1456,11 +1456,11 @@ class TestResourcesSessions:
             assert response.json()["detail"]["failure_kind"] == "session_lost"
         assert server._sessions == {}
 
-    def test_typed_verify_retry_succeeds_after_metadata_cleanup(self) -> None:
+    def test_episode_verify_retry_succeeds_after_metadata_cleanup(self) -> None:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed()).status_code == 200
             for _ in range(2):
                 response = client.post("/verify", json=VERIFY_BODY)
                 assert response.status_code == 200
@@ -1469,7 +1469,7 @@ class TestResourcesSessions:
                     "No law found in response. Expected <final_law>...</final_law> tags."
                 )
             assert server.session_metadata == {}
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         assert server.session_metadata == {}
 
@@ -1477,13 +1477,13 @@ class TestResourcesSessions:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed()).status_code == 200
             server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
             server._cleanup_sessions()
-            other_episode = _typed_seed()
+            other_episode = _episode_seed()
             other_episode["episode_id"]["rollout_id"] = "other"
             assert client.post("/seed_session", json=other_episode).status_code == 409
-            response = client.post("/seed_session", json=_typed_seed())
+            response = client.post("/seed_session", json=_episode_seed())
 
         assert response.status_code == 404
         assert response.json()["detail"]["failure_kind"] == "session_expired"
@@ -1499,7 +1499,7 @@ class TestResourcesSessions:
             TestClient(server.setup_webserver()) as client,
             patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
         ):
-            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed()).status_code == 200
             assert client.post("/execute_python", json={"code": "x = 41\nx + 1"}).json()["result"] == "42"
             handle = server._sessions["resources-session"]
             assert client.post("/end_session", json={}).status_code == 200
@@ -1507,11 +1507,11 @@ class TestResourcesSessions:
 
             # The repeated seed still confirms the session, whose next call runs in a fresh worker.
             client.cookies.clear()
-            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed()).status_code == 200
             fresh = client.post("/execute_python", json={"code": "x"}).json()
             assert "name 'x' is not defined" in fresh["error_message"]
             verify = client.post("/verify", json=_final_law_verify_body()).json()
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         assert verify["mask_sample"] is False
         assert verify["reward"] == 1.0
@@ -1522,14 +1522,14 @@ class TestResourcesSessions:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            client.post("/seed_session", json=_typed_seed())
+            client.post("/seed_session", json=_episode_seed())
             server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
             server._cleanup_sessions()
 
             python = client.post("/execute_python", json={"code": "1"})
             verify = client.post("/verify", json=VERIFY_BODY)
             # The Environment Server still closes the session it seeded.
-            close = client.post("/close_session", json=_typed_close())
+            close = client.post("/close_session", json=_episode_close())
             late_verify = client.post("/verify", json=VERIFY_BODY)
 
         assert python.status_code == 404
@@ -1548,7 +1548,7 @@ class TestResourcesSessions:
             patch("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: now[0]),
             TestClient(server.setup_webserver()) as client,
         ):
-            client.post("/seed_session", json=_typed_seed())
+            client.post("/seed_session", json=_episode_seed())
             server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
             server._cleanup_sessions()
             # The agent's model stalled: its verify arrives well after a close retry would have.
@@ -1558,26 +1558,54 @@ class TestResourcesSessions:
         assert verify.json()["mask_sample"] is True
         assert verify.json()["failure_kind"] == "session_expired"
 
+    @mark.parametrize("session_ttl, close_retry_window", [(1800, 300), (60, 300)])
+    def test_idle_expiry_status_lasts_for_the_larger_window(self, session_ttl: int, close_retry_window: int) -> None:
+        config = NewtonBenchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            session_ttl=session_ttl,
+            session_close_retry_window_seconds=close_retry_window,
+        )
+        server = NewtonBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        now = [1000.0]
+        with (
+            patch("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: now[0]),
+            TestClient(server.setup_webserver()) as client,
+        ):
+            assert client.post("/seed_session", json=_episode_seed()).status_code == 200
+            server.session_metadata["resources-session"]["last_used"] = time.time() - session_ttl - 1
+            server._cleanup_sessions()
+            assert "resources-session" not in server._resources_session_fences
+
+            now[0] += max(session_ttl, close_retry_window) - 1
+            assert client.post("/verify", json=VERIFY_BODY).json()["failure_kind"] == "session_expired"
+            # Reading the status must not extend its lifetime.
+            now[0] += 1
+            assert client.post("/verify", json=VERIFY_BODY).json()["failure_kind"] == "session_lost"
+            assert len(server._expired_sessions) == 0
+
 
 @mark.parametrize("stage", ["active", "verified", "closed"])
-def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+def test_agent_run_seed_cannot_overwrite_episode_or_closed_cookie(stage: str) -> None:
     server = _session_server()
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
         if stage == "verified":
             assert client.post("/verify", json=VERIFY_BODY).status_code == 200
         elif stage == "closed":
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
         before = dict(server.session_metadata)
         assert client.post("/seed_session", json=TASK_DATA).status_code == 409
         assert server.session_metadata == before
 
 
 @mark.parametrize("expose_tools_over_mcp", [False, True])
-def test_malformed_typed_seed_does_not_fall_back_to_legacy(expose_tools_over_mcp: bool) -> None:
+def test_malformed_episode_seed_does_not_fall_back_to_legacy(expose_tools_over_mcp: bool) -> None:
     server = _session_server()
     server.config.expose_tools_over_mcp = expose_tools_over_mcp
-    malformed = dict(TASK_DATA) | {"resources_session_id": "incomplete-typed"}
+    malformed = dict(TASK_DATA) | {"resources_session_id": "incomplete-episode"}
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
     with TestClient(app) as client:
@@ -1597,7 +1625,7 @@ def test_end_session_is_not_an_mcp_tool() -> None:
 
 
 def test_run_seed_keeps_a_row_with_its_own_task_id() -> None:
-    # A dataset row's scalar task_id is a row field, not a typed seed's TaskId.
+    # A dataset row's scalar task_id is a row field, not a episode seed's TaskId.
     server = _session_server()
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=dict(TASK_DATA) | {"task_id": "gravity-0"}).status_code == 200
@@ -1605,8 +1633,8 @@ def test_run_seed_keeps_a_row_with_its_own_task_id() -> None:
     assert server._session_episodes == {}
 
 
-@mark.parametrize("typed", [False, True])
-def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed: bool, monkeypatch) -> None:
+@mark.parametrize("episode", [False, True])
+def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(episode: bool, monkeypatch) -> None:
     from omegaconf import DictConfig
 
     clock = [100.0]
@@ -1617,7 +1645,7 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
     )
     prefix = "/ng-rollout/rollout"
     with TestClient(server.setup_webserver()) as client:
-        assert client.post(prefix + "/seed_session", json=_typed_seed() if typed else TASK_DATA).status_code == 200
+        assert client.post(prefix + "/seed_session", json=_episode_seed() if episode else TASK_DATA).status_code == 200
         sid = next(iter(server.session_metadata))
         assert server._checkpoint.is_open(sid)
         handle = MagicMock()
@@ -1631,8 +1659,8 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         handle.close.assert_called_once()
         retry = client.post(prefix + "/verify", json=VERIFY_BODY).json()
         assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
-        if typed:
-            wrong_owner = _typed_close()
+        if episode:
+            wrong_owner = _episode_close()
             wrong_owner["episode_id"]["rollout_id"] = "other"
             assert client.post(prefix + "/close_session", json=wrong_owner).status_code == 409
         clock[0] += server.config.session_close_retry_window_seconds + 1
@@ -1694,7 +1722,7 @@ def test_verify_retry_reuses_evaluation_and_refuses_a_changed_answer() -> None:
         TestClient(server.setup_webserver()) as client,
         patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
     ):
-        client.post("/seed_session", json=_typed_seed())
+        client.post("/seed_session", json=_episode_seed())
         first = client.post("/verify", json=body).json()
         retry = client.post("/verify", json=body).json()
         assert first["reward"] == retry["reward"] == 1.0
@@ -1702,12 +1730,12 @@ def test_verify_retry_reuses_evaluation_and_refuses_a_changed_answer() -> None:
         changed = deepcopy(body)
         changed["response"]["output"][0]["content"][0]["text"] = "<final_law>def law(): return 2</final_law>"
         assert client.post("/verify", json=changed).json()["mask_sample"] is True
-        assert client.post("/close_session", json=_typed_close()).status_code == 200
+        assert client.post("/close_session", json=_episode_close()).status_code == 200
         assert client.post("/verify", json=body).json()["mask_sample"] is True
 
 
-@mark.parametrize("typed", [False, True])
-def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
+@mark.parametrize("episode", [False, True])
+def test_checkpoint_retire_releases_live_session(episode: bool) -> None:
     from omegaconf import DictConfig
 
     server = _session_server()
@@ -1716,7 +1744,7 @@ def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
     )
     with TestClient(server.setup_webserver()) as client:
         assert (
-            client.post("/ng-rollout/rollout/seed_session", json=_typed_seed() if typed else TASK_DATA).status_code
+            client.post("/ng-rollout/rollout/seed_session", json=_episode_seed() if episode else TASK_DATA).status_code
             == 200
         )
         sid = next(iter(server.session_metadata))
@@ -1729,18 +1757,18 @@ def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
         assert server._sessions == {}
 
 
-def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+def test_episode_seed_cannot_replace_a_live_legacy_session() -> None:
     server = _session_server()
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=TASK_DATA).status_code == 200
         sid = next(iter(server.session_metadata))
         original = server.session_metadata[sid]
-        assert client.post("/seed_session", json=_typed_seed(sid)).status_code == 409
+        assert client.post("/seed_session", json=_episode_seed(sid)).status_code == 409
         assert server.session_metadata[sid] is original
         assert server._session_episodes == {}
 
 
-def test_failed_cookie_reseed_preserves_the_completed_evaluation() -> None:
+def test_failed_agent_run_reseed_preserves_the_completed_evaluation() -> None:
     server = _session_server()
     body = _final_law_verify_body()
     evaluator = MagicMock()
