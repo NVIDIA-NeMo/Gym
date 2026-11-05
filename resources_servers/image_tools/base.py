@@ -27,6 +27,8 @@ from math import ceil, floor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypedDict
 
+from pydantic import BaseModel
+
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -76,6 +78,33 @@ class ImageToolsGymToolConfig(TypedDict, total=False):
     forced_final_prompt: str
     duplicate_iou_threshold: float
     stop_strings: Optional[list[str]]
+
+
+# The response field where the image tools agent lists the crop files a rollout wrote, so the verifier can report them.
+IMAGE_TOOLS_ROLLOUT_KEY = "image_tools_rollout"
+
+
+class ImageToolsSettings(BaseModel):
+    """The settings an agent runs image tools with, and a verifier replays its tool calls with."""
+
+    crop_dir: str = "image_tool_outputs"
+    crop_format: str = "jpeg"
+    crop_jpeg_quality: int = 95
+    crop_min_pixels: int = 262144
+    crop_max_pixels: int = 1048576
+    max_tool_calls: int = 4
+    max_tool_calls_per_turn: int = 1
+    tool_success_reward: float = 0.02
+    tool_success_reward_cap: float = 0.05
+    invalid_tool_call_penalty: float = -0.05
+    duplicate_tool_call_penalty: float = -0.02
+    force_final_after_duplicate: bool = True
+    terminate_on_invalid_tool_call: bool = True
+    duplicate_iou_threshold: float = 0.5
+    stop_strings: list[str] = ["</tool_call>"]
+
+    def tool_config(self) -> ImageToolsGymToolConfig:
+        return {name: getattr(self, name) for name in ImageToolsSettings.model_fields}
 
 
 class ImageToolsGymToolMetadata(TypedDict, total=False):
@@ -218,6 +247,30 @@ def has_malformed_image_tool_raw_generation(text: str) -> bool:
         text = text[: think_close_positions[0]] + text[think_close_positions[0] + len("</think>") :]
 
     return has_malformed_image_tool_markup(text)
+
+
+def extract_image_refs(input_items: Any) -> list[str]:
+    """The image references in a Responses ``input``, in order: data URLs, URLs or paths."""
+    if isinstance(input_items, str):
+        return []
+    image_refs: list[str] = []
+    for item in input_items:
+        if not isinstance(item, dict):
+            item = item.model_dump(exclude_unset=True)
+        content = item.get("content", "")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") not in ("input_image", "image_url", "image"):
+                continue
+            image_url = part.get("image_url", part.get("image", ""))
+            if isinstance(image_url, dict):
+                image_url = image_url.get("url", "")
+            if image_url:
+                image_refs.append(image_url)
+    return image_refs
 
 
 def extract_last_assistant_text(message_log: list[dict[str, Any]]) -> str:
@@ -1022,3 +1075,46 @@ class ImageToolsGymToolLogic:
             None,
             None,
         )
+
+
+class ImageToolsEpisode:
+    """One rollout's image-tool state and auxiliary reward, advanced one assistant turn at a time.
+
+    The agent steps it after each model call. A verifier replays a finished rollout's assistant turns through a new
+    one, with the same settings and source images, to recompute the reward the rollout's tool calls earned.
+    """
+
+    def __init__(self, logic: ImageToolsGymToolLogic, image_paths: list[str], dataset: str = "unknown") -> None:
+        self.logic = logic
+        self.metadata: ImageToolsGymToolMetadata = {
+            "ground_truth": "",
+            "image_paths": list(image_paths),
+            "dataset": dataset,
+            "tool_call_count": 0,
+            "tool_error_count": 0,
+            "crop_paths": [],
+            "seen_tool_sigs": [],
+            "seen_bboxes": {},
+        }
+        self.aux_reward = 0.0
+
+    def step(self, assistant_text: str) -> dict[str, Any] | None:
+        """Run and score one turn's tool calls; return the observation for the next turn, or None when the rollout ends.
+
+        Runs the image tools, so a caller in an event loop runs it in a thread. A turn that returns an image caps the
+        reward so far at ``tool_success_reward_cap``.
+        """
+        tool_calls = parse_image_tool_calls(assistant_text)
+        malformed_tool_attempt = has_malformed_image_tool_markup(assistant_text)
+        observation, reward, done, _, next_metadata, _, _ = self.logic.process_nonterminal_turn(
+            [{"role": "assistant", "content": assistant_text}], self.metadata
+        )
+        self.aux_reward += float(reward)
+        if next_metadata is not None:
+            self.metadata = next_metadata
+        if (not tool_calls and not malformed_tool_attempt) or done or next_metadata is None:
+            return None
+        content = observation.get("content")
+        if isinstance(content, list) and any(part.get("type") == "image" for part in content):
+            self.aux_reward = min(self.aux_reward, float(self.logic.cfg.get("tool_success_reward_cap", math.inf)))
+        return observation

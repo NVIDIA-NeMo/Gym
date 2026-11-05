@@ -4,16 +4,23 @@
 import asyncio
 import base64
 import json
+from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Optional
 
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from PIL import Image
 from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.agents import (
+    ActivationConflictError,
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    OrderedOperationLedger,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -26,34 +33,27 @@ from nemo_gym.core import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from resources_servers.image_tools import (
-    ImageToolsGymToolConfig,
+    IMAGE_TOOLS_ROLLOUT_KEY,
+    ImageToolsEpisode,
     ImageToolsGymToolLogic,
-    has_malformed_image_tool_markup,
-    parse_image_tool_calls,
+    ImageToolsSettings,
+    extract_image_refs,
 )
 
 
-class ImageToolsAgentConfig(BaseResponsesAPIAgentConfig):
+# Bound on stopping a session's tool loop that is still running when the session closes.
+_SESSION_CLOSE_TIMEOUT_SECS = 30.0
+
+
+class ImageToolsAgentConfig(ImageToolsSettings, BaseResponsesAPIAgentConfig):
+    """The image tool settings come from ``ImageToolsSettings``, which the tool reward verifier replays."""
+
     model_server: ModelServerRef
+    # Used by /run only; under an Environment Server the image tools reward server routes verification.
     resource_servers_by_agent: dict[str, ResourcesServerRef]
     max_steps: int = 5
     max_output_tokens: Optional[int] = 4096
-    stop_strings: list[str] = ["</tool_call>"]
     include_stop_str_in_output: bool = True
-    crop_dir: str = "image_tool_outputs"
-    crop_format: str = "jpeg"
-    crop_jpeg_quality: int = 95
-    crop_min_pixels: int = 262144
-    crop_max_pixels: int = 1048576
-    max_tool_calls: int = 4
-    max_tool_calls_per_turn: int = 1
-    tool_success_reward: float = 0.02
-    tool_success_reward_cap: float = 0.05
-    invalid_tool_call_penalty: float = -0.05
-    duplicate_tool_call_penalty: float = -0.02
-    force_final_after_duplicate: bool = True
-    terminate_on_invalid_tool_call: bool = True
-    duplicate_iou_threshold: float = 0.5
 
 
 class ImageToolsAgentRunRequest(BaseRunRequest):
@@ -64,6 +64,11 @@ class ImageToolsAgentRunRequest(BaseRunRequest):
 
 class ImageToolsAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
+
+
+@dataclass
+class _ImageToolsSession(AgentSessionState):
+    operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
 
 
 class ImageToolsAgentVerifyResponse(BaseVerifyResponse):
@@ -105,28 +110,13 @@ def _extract_text_from_response(response: NeMoGymResponse) -> str:
     return "\n".join(texts).strip()
 
 
-def _extract_image_refs(params: NeMoGymResponseCreateParamsNonStreaming) -> list[str]:
-    input_items = params.input
-    if isinstance(input_items, str):
-        return []
-    image_refs: list[str] = []
-    for item in input_items:
-        if not isinstance(item, dict):
-            item = item.model_dump(exclude_unset=True)
-        content = item.get("content", "")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            if part.get("type") not in ("input_image", "image_url", "image"):
-                continue
-            image_url = part.get("image_url", part.get("image", ""))
-            if isinstance(image_url, dict):
-                image_url = image_url.get("url", "")
-            if image_url:
-                image_refs.append(image_url)
-    return image_refs
+def _with_rollout_files(response: NeMoGymResponse, rollout_info: dict[str, Any]) -> NeMoGymResponse:
+    """Carry the crop files this rollout wrote on the response, where the tool reward verifier copies them from."""
+    files = {
+        "image_tools_output_paths": rollout_info["image_tools_output_paths"],
+        "image_tools_generation_image_paths": rollout_info["image_tools_generation_image_paths"],
+    }
+    return response.model_copy(update={IMAGE_TOOLS_ROLLOUT_KEY: files})
 
 
 def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
@@ -142,26 +132,24 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._logic = ImageToolsGymToolLogic(self._logic_config())
+        self._logic = ImageToolsGymToolLogic(self.config.tool_config())
 
-    def _logic_config(self) -> ImageToolsGymToolConfig:
-        return {
-            "crop_dir": self.config.crop_dir,
-            "crop_format": self.config.crop_format,
-            "crop_jpeg_quality": self.config.crop_jpeg_quality,
-            "crop_min_pixels": self.config.crop_min_pixels,
-            "crop_max_pixels": self.config.crop_max_pixels,
-            "max_tool_calls": self.config.max_tool_calls,
-            "max_tool_calls_per_turn": self.config.max_tool_calls_per_turn,
-            "tool_success_reward": self.config.tool_success_reward,
-            "tool_success_reward_cap": self.config.tool_success_reward_cap,
-            "invalid_tool_call_penalty": self.config.invalid_tool_call_penalty,
-            "duplicate_tool_call_penalty": self.config.duplicate_tool_call_penalty,
-            "force_final_after_duplicate": self.config.force_final_after_duplicate,
-            "terminate_on_invalid_tool_call": self.config.terminate_on_invalid_tool_call,
-            "duplicate_iou_threshold": self.config.duplicate_iou_threshold,
-            "stop_strings": self.config.stop_strings,
-        }
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> _ImageToolsSession:
+        # The image tools run in this process, so a session takes no granted tools and no sandbox.
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Image tools agent does not support sandbox access")
+        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required:
+            raise AgentSeedRejectedError(
+                f"Image tools agent does not support required tool access: {', '.join(required)}"
+            )
+        return _ImageToolsSession(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, _ImageToolsSession):
+            raise TypeError("Expected image tools session state")
+        await state.operations.close(timeout=_SESSION_CLOSE_TIMEOUT_SECS)
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
 
     def _resource_name(self, body: ImageToolsAgentRunRequest) -> str:
         base_agent_ref = body.image_tools_base_agent_ref
@@ -219,15 +207,32 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        result, model_cookies, _ = await self._run_image_tools_loop(
-            body=body,
-            row_metadata={},
-            initial_cookies=request.cookies,
-            model_url_path=self.url_path_for_request("/v1/responses", request),
-        )
-        for key, value in model_cookies.items():
-            response.set_cookie(key, value)
-        return result
+        model_url_path = self.url_path_for_request("/v1/responses", request)
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is None:
+            result, model_cookies, rollout_info = await self._run_image_tools_loop(
+                body=body,
+                row_metadata={},
+                initial_cookies=request.cookies,
+                model_url_path=model_url_path,
+            )
+            for key, value in model_cookies.items():
+                response.set_cookie(key, value)
+            return _with_rollout_files(result, rollout_info)
+        state = self._require_agent_session(agent_session_id)
+        if not isinstance(state, _ImageToolsSession):
+            raise TypeError("Expected image tools session state")
+
+        async def activation() -> NeMoGymResponse:
+            result, _, rollout_info = await self._run_image_tools_loop(
+                body=body, row_metadata={}, initial_cookies={}, model_url_path=model_url_path
+            )
+            return _with_rollout_files(result, rollout_info)
+
+        try:
+            return await state.operations.execute(index=1, request=body, operation=activation)
+        except ActivationConflictError as error:
+            raise HTTPException(409, str(error)) from error
 
     async def _run_image_tools_loop(
         self,
@@ -240,22 +245,13 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         if body.max_output_tokens is None and self.config.max_output_tokens is not None:
             body.max_output_tokens = self.config.max_output_tokens
 
-        image_refs = _extract_image_refs(body)
-        metadata = {
-            "ground_truth": "",
-            "image_paths": image_refs,
-            "dataset": str(row_metadata.get("dataset", "unknown")),
-            "tool_call_count": 0,
-            "tool_error_count": 0,
-            "crop_paths": [],
-            "seen_tool_sigs": [],
-            "seen_bboxes": {},
-        }
+        episode = ImageToolsEpisode(
+            self._logic, extract_image_refs(body.input), str(row_metadata.get("dataset", "unknown"))
+        )
 
         new_outputs = []
         usage = None
         model_cookies = initial_cookies
-        aux_reward = 0.0
         generation_image_paths: list[list[str]] = [[]]
         final_response: Optional[NeMoGymResponse] = None
 
@@ -286,46 +282,29 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
             final_response = model_response
 
-            assistant_text = _extract_text_from_response(model_response)
-            tool_calls = parse_image_tool_calls(assistant_text)
-            malformed_tool_attempt = has_malformed_image_tool_markup(assistant_text)
-
-            # process_nonterminal_turn executes the image tool: it decodes images,
-            # runs PIL transforms and writes crops to disk, and for http(s) image
-            # refs _open_image does a blocking requests.get. Calling it directly
-            # from this async loop would stall the event loop for every other
+            # The step executes the image tool: it decodes images, runs PIL
+            # transforms and writes crops to disk, and for http(s) image refs
+            # _open_image does a blocking requests.get. Calling it directly from
+            # this async loop would stall the event loop for every other
             # concurrent rollout, so hand the whole synchronous call to a thread.
-            # Keeping base.py synchronous matters -- the verifier imports it too.
-            observation, reward, done, _, next_metadata, answer, _ = await asyncio.to_thread(
-                self._logic.process_nonterminal_turn,
-                [{"role": "assistant", "content": assistant_text}],
-                metadata,
-            )
-            aux_reward += float(reward)
-            if next_metadata is not None:
-                metadata = next_metadata
-            if not tool_calls and not malformed_tool_attempt:
-                break
-            if done:
-                break
-            if next_metadata is None:
+            # Keeping base.py synchronous matters -- the verifiers import it too.
+            observation = await asyncio.to_thread(episode.step, _extract_text_from_response(model_response))
+            if observation is None:
                 break
 
             user_message, crop_paths = self._tool_user_message(observation)
             new_outputs.append(user_message)
             generation_image_paths.append(crop_paths)
-            if crop_paths:
-                aux_reward = min(aux_reward, self.config.tool_success_reward_cap)
 
         if final_response is None:
             raise RuntimeError("ImageToolsAgent did not receive a model response")
 
         final_response = final_response.model_copy(update={"output": new_outputs, "usage": usage})
         rollout_info = {
-            "image_tools_aux_reward": aux_reward,
-            "image_tools_call_count": int(metadata.get("tool_call_count", 0)),
-            "image_tools_error_count": int(metadata.get("tool_error_count", 0)),
-            "image_tools_output_paths": list(metadata.get("crop_paths", [])),
+            "image_tools_aux_reward": episode.aux_reward,
+            "image_tools_call_count": int(episode.metadata.get("tool_call_count", 0)),
+            "image_tools_error_count": int(episode.metadata.get("tool_error_count", 0)),
+            "image_tools_output_paths": list(episode.metadata.get("crop_paths", [])),
             "image_tools_generation_image_paths": generation_image_paths,
         }
         return final_response, model_cookies, rollout_info

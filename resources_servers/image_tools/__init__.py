@@ -16,21 +16,28 @@
 
 ``base`` holds the ten image tools, the tool-call parser and the bbox helpers.
 ``app`` is the PivotRL resources server that scores one emitted tool call
-against the action demonstrated in the SFT trajectory.
+against the action demonstrated in the SFT trajectory. ``tool_reward_app`` is
+the resources server that scores an image tools agent rollout under an
+Environment Server: it delegates the answer to the task's verifier and adds the
+tool reward it recomputes from the rollout's tool calls.
 
-Only ``base`` is re-exported here. ``app`` is deliberately left out so the
+Only ``base`` is re-exported here. The servers are deliberately left out so the
 image-tools agent can ``from resources_servers.image_tools import ...`` for the
 tool surface without pulling in a verifier it never runs.
 """
 
 from .base import (
     IMAGE_TOOL_NAMES,
+    IMAGE_TOOLS_ROLLOUT_KEY,
+    ImageToolsEpisode,
     ImageToolsGymToolConfig,
     ImageToolsGymToolLogic,
     ImageToolsGymToolMetadata,
+    ImageToolsSettings,
     bbox_iou,
     coerce_bbox,
     execute_image_tool,
+    extract_image_refs,
     extract_last_assistant_text,
     has_malformed_image_tool_markup,
     has_malformed_image_tool_raw_generation,
@@ -40,12 +47,16 @@ from .base import (
 
 __all__ = [
     "IMAGE_TOOL_NAMES",
+    "IMAGE_TOOLS_ROLLOUT_KEY",
+    "ImageToolsEpisode",
     "ImageToolsGymToolConfig",
     "ImageToolsGymToolLogic",
     "ImageToolsGymToolMetadata",
+    "ImageToolsSettings",
     "bbox_iou",
     "coerce_bbox",
     "execute_image_tool",
+    "extract_image_refs",
     "extract_last_assistant_text",
     "has_malformed_image_tool_markup",
     "has_malformed_image_tool_raw_generation",

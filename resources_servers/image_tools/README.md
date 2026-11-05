@@ -117,6 +117,27 @@ The `stop` on `</tool_call>` is what makes the rollout end *at* the decision.
   `[N earlier produced image(s) omitted to bound context]`. Those pivots ask the
   model to decide about an image it can no longer see, which caps achievable reward.
 
+## Tool reward server
+
+`tool_reward_app.py` is a second resources server in this directory. It scores
+`image_tools_agent` rollouts when the agent runs under a `single_agent_turn`
+Environment Server instead of its own `/run`
+(`responses_api_agents/image_tools_agent/configs/image_tools_agent_single_agent_turn.yaml`):
+
+- It sends the final assistant message to the verifier that the row's
+  `image_tools_base_agent_ref` selects from the agent's `resource_servers_by_agent`.
+  Those verifiers keep no session state, so it does not seed them.
+- It recomputes the tool reward by replaying the rollout's assistant turns through
+  the same tool logic, with the agent's image tool settings and the row's source
+  images, in a temporary crop directory. If the replay runs a different number of
+  tools than the agent reports, verification fails instead of scoring another rollout.
+- The reward is the verifier's reward plus the tool reward, at most 1.0, as in the
+  agent's `/run`.
+
+Its config, `configs/image_tools_reward.yaml`, names the agent whose settings and
+verifier map it reads. The replay needs the source images: data URLs, URLs, or
+paths that this server can read.
+
 ## Testing
 
 ```bash
