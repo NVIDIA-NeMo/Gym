@@ -490,6 +490,51 @@ class TestApp:
         assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
         assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
 
+    async def test_a_session_activation_creates_its_episode_with_the_session_state(self) -> None:
+        """Subclasses that keep task context in the session state read it here; the sessionless path skips it."""
+        seen_states = []
+
+        class _StatefulAgent(SimpleAgent):
+            async def _create_session_episode(self, state, body, **kwargs):
+                seen_states.append(state)
+                return await super()._create_session_episode(state, body, **kwargs)
+
+        server, server_client = _make_agent(False, _StatefulAgent)
+        reply = {
+            "id": "resp-1",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "msg-1",
+                    "content": [{"annotations": [], "text": "Done.", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+        }
+        server_client.post = AsyncMock(side_effect=lambda **kwargs: _mock_response(reply))
+        client = TestClient(server.setup_webserver())
+
+        assert client.post("/v1/responses", json={"input": "no session"}).status_code == 200
+        assert seen_states == []
+
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session", episode_id=episode_id, task_id=TaskId(taskset="example", task_id="0")
+        )
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/rollout/v1/responses", json={"input": "question?"}).status_code == 200
+
+        [state] = seen_states
+        assert state is server._session_state("agent-session")
+        assert server_client.post.await_count == 2
+
     async def test_agent_session_can_return_unresolved_tool_calls(self) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
