@@ -78,7 +78,9 @@ Core pytest matches the sampled main's worker count and file-based distribution
 (currently four workers with `--dist=loadfile`), including its numerical-library
 thread limits. Sandbox keeps serial pytest and the existing stable batching
 policy. Test-result reuse remains disabled. The adapter checks dependency parity
-against `uv.lock` and preserves each job's JUnit and raw coverage inputs.
+against `uv.lock` and preserves each job's JUnit and raw coverage inputs. Native
+artifacts also retain Pants end-of-run JSON execution counters; these are
+diagnostic counts, not a detailed timing profile or proof of result reuse.
 
 Server tests, session-routing E2E and lint retain their existing commands through
 Pants workspace processes, preserving nested server environments and external
@@ -107,6 +109,8 @@ for both arms and excludes earlier experiment caches. Pants engine caches are sh
 the implementation/dependency contract and sampled source commit. Every shard
 restores, but only shard zero of each job type saves after a primary-key miss.
 This avoids compressing duplicate archives that would lose the shared-key race.
+The `pants-full-engine-v3-` archive layout includes the pinned launcher's actual
+`~/.cache/nce` bootstrap directory alongside Pants work, named and content stores.
 The saved contents therefore come from shard zero; other shards rebuild any
 missing content-addressed entries. If shard zero fails, that job type does not
 refresh its engine cache. The monitor bounds
