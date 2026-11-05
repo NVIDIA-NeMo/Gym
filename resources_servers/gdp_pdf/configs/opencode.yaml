@@ -1,5 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 config_paths:
 - resources_servers/gdp_pdf/configs/gdp_pdf.yaml
 - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
@@ -11,14 +9,13 @@ gdp_pdf_sandbox:
     gdp_pdf:
       domain: other
       description: GDP.pdf document reasoning with OpenCode and raw PDFs
-      value: Evaluate and train document reasoning with shell, Python and image tools
+      value: Evaluate document reasoning with shell, Python and image tools
       entrypoint: sandbox_app.py
       allowed_agents:
       - opencode_agent
       num_workers: 1
       sandbox_provider: sandbox
       sandbox_image: ${gdp_pdf_sandbox_image}
-      documents_base_dir: resources_servers/gdp_pdf/data
       sandbox_config:
         ttl_s: 14400
         resources:
@@ -31,23 +28,14 @@ gdp_pdf_opencode:
     opencode_agent:
       opencode_version: 1.17.11
       supports_images: true
-      concurrency: 8
-      context_window: 262144
-      max_output_tokens: 16384  # Per model call, not the whole episode.
+      max_output_tokens: 16384
       timeout: 7200
       system_prompt: The source PDF is /workspace/document.pdf. Use the available
-        tools to inspect its text and images and solve the user's task using only this
-        document as evidence. Put your complete
-        answer in the final chat response.
+        tools to inspect its text and images and solve the user's task using only
+        this document as evidence. Put your complete answer in the final chat response.
       opencode_config:
         permission:
           task: deny
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/gdp_pdf/data/example.jsonl
-        num_repeats: 1
-        license: MIT
 gdp_pdf_opencode_environment:
   environment_servers:
     single_agent_turn_legacy:

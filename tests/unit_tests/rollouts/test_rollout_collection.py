@@ -10393,60 +10393,6 @@ class TestFinalizeRolloutTokenCapture:
         assert await retire_rollout_token_capture("0-0", store, built) is True
         assert store.read_entries("0-0") == []
 
-    @pytest.mark.parametrize("replace_image", [False, True])
-    async def test_rebuild_preserves_prompt_and_tool_images(self, tmp_path, replace_image):
-        from nemo_gym.models.token_capture.records import capture_input_images
-
-        initial = {"type": "input_image", "image_url": "data:image/png;base64,initial"}
-        tool_image = {"type": "input_image", "image_url": "data:image/png;base64,tool"}
-        store = TokenCaptureStore(tmp_path)
-        previous = None
-        prompt = [1]
-        for index in range(3):
-            messages = [{"role": "user", "content": [initial]}]
-            if index:
-                messages.append(
-                    {"role": "tool", "content": [{"type": "image_url", "image_url": {"url": tool_image["image_url"]}}]}
-                )
-            images = capture_input_images(messages)
-            if index == 2 and replace_image:
-                images = [tool_image]
-            entry = TokenEntry(
-                capture_key="0-0",
-                model_call_id=f"call-{index}",
-                prompt_token_ids=prompt,
-                generation_token_ids=[10 + index],
-                generation_log_probs=[-0.1],
-                input_images=images,
-                output_items=[{"type": "message", "role": "assistant", "content": []}],
-            )
-            stamp_lineage(
-                entry,
-                previous.model_call_id if previous else None,
-                parent_resolution=ParentResolutionStatus.RESOLVED if previous else ParentResolutionStatus.ROOT,
-            )
-            store.append(entry)
-            previous = entry
-            prompt = prompt + [10 + index, 20 + index]
-        result = self._record()
-        built = await finalize_rollout_token_capture(result, store)
-        try:
-            assert bool(built["mask_sample"]) == replace_image
-            if replace_image:
-                assert "images are not a contiguous extension" in built["error"]
-            else:
-                assert result["reward"] == 1.0
-                assert result["response"]["agent_input"] == [{"role": "user", "content": [initial]}]
-                images = [item for item in result["response"]["output"] if item.get("role") == "user"]
-                assert images == [{"type": "message", "role": "user", "content": [tool_image]}]
-                assert [
-                    item["generation_token_ids"]
-                    for item in result["response"]["output"]
-                    if "generation_token_ids" in item
-                ] == [[10], [11], [12]]
-        finally:
-            await store.close()
-
     async def test_retirement_cannot_delete_a_newer_rollout_attempt(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
         self._capture(store)

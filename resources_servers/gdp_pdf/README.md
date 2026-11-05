@@ -229,13 +229,9 @@ Upstream dataset: MIT. Evaluation only — see the warning above.
 
 ## GDP.pdf with OpenCode
 
-`configs/opencode.yaml` pairs the stock OpenCode agent with a PDF sandbox and
-GDP.pdf's existing rubric grader. The agent receives the original question and
-`/workspace/document.pdf`; rubrics and reference answers stay outside the sandbox.
-It can extract text, inspect page images and calculate with Python. Only the
-final answer is graded, excluding structured and `<think>`-wrapped reasoning.
-
-Build the document-tools image and run from the Gym root:
+OpenCode receives the raw PDF at `/workspace/document.pdf` and the question.
+It can inspect text/images and run Python; the existing grader scores only the
+final answer. Rubrics and reference answers stay outside the sandbox.
 
 ```bash
 docker build -t gdp-pdf-tools resources_servers/gdp_pdf
@@ -245,51 +241,15 @@ gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
   +gdp_pdf_sandbox_image=gdp-pdf-tools \
   ++policy_model.responses_api_models.vllm_model.host=GYM_HOST_IP \
   +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
-  +policy_model_name=MODEL \
-  --num-repeats 3 --output results/gdp-pdf-opencode.jsonl
+  +policy_model_name=MODEL --num-repeats 3 --output results/gdp-pdf-opencode.jsonl
 ```
 
-Set judge credentials in your private `env.yaml`. Replace `GYM_HOST_IP` with a host
-interface address reachable from the Docker container, not `127.0.0.1`: OpenCode
-connects to Gym's model server, which forwards requests to `policy_base_url`.
-The inference endpoint must support images and tool calling and use the model's
-vLLM tool-call and reasoning parsers. Replace the Docker provider config for your
-deployment. The shared adapter installs OpenCode 1.17.11; preinstall that version
-for offline workers. Preparation downloads the PDFs without OCR or rendering.
+Set judge credentials in private `env.yaml`. `GYM_HOST_IP` must be reachable from
+Docker: the sandbox calls Gym, which forwards to the image/tool-capable inference
+endpoint. Swap the provider config for other deployments. OpenCode 1.17.11 installs
+in the sandbox; preinstall it for offline use. Defaults are eight concurrent episodes,
+16,384 output tokens per model call and a two-hour timeout, with no episode turn cap.
+Web tools are disabled; shell networking follows the provider policy.
 
-Defaults: eight concurrent episodes, 16,384 output tokens **per model call**,
-and a two-hour run timeout. There is no whole-episode token or turn cap. Gym owns
-sandbox cleanup; infrastructure failures propagate through its retry contract.
-Web tools and subagents are denied through OpenCode permissions. Shell networking
-still follows the provider's network policy; enforce model-only egress when an
-offline evaluation is required.
-
-### Training
-
-Use `configs/opencode_training.yaml`, set `gdp_pdf_train_jsonl` to your training
-JSONL and replace its `TBD` license. The existing GDP.pdf row format applies:
-`responses_create_params.input` contains the question; `verifier_metadata` holds
-`source_pdf`, `prompt` and `criteria`. PDF paths resolve beneath
-`gdp_pdf_sandbox.resources_servers.gdp_pdf.documents_base_dir`.
-Never train on benchmark questions.
-
-The overlay enables shared token capture and disables history compaction/pruning.
-It pins sampling on Gym's model server to temperature 1.0, top-p 1.0, top-k -1
-(disabled) and the agent's 16,384-token per-call output limit. Set the trainer's
-temperature, top-p and `max_new_tokens` to match; change both together when using
-another recipe. OpenCode accepts matching request controls and rejects mismatches
-before inference, so no trainer-side removal of these fields is needed.
-The trainer owns capture storage. For NeMo RL, enable
-`token_capture.enabled` and `token_capture.forest_training`, select
-`returned_history`, and keep `skip_tokenizer_init: false`. See the
-[shared capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml).
-
-A four-update multimodal RL smoke completed with 32 unmasked answers, policy
-refits and a model/optimizer checkpoint save. Captured tool images reached the
-learner. [Recorded smoke evidence](data/opencode_evidence.zip) includes the synthetic
-PDF, tool/image transcript, judge verdicts and per-update metrics (Gym `33878bb87`,
-before extraction onto current main). The smoke used a development NeMo RL bridge
-that finalizes external-harness token capture; unmodified upstream NeMo RL is not
-yet qualified. Checkpoint restore and large-scale throughput were not tested.
-Capture failures must remain explicit; do not replace
-missing tokens/images with retokenized text or zero rewards.
+For your own tasks, override the agent's dataset with GDP.pdf rows (`source_pdf`,
+`prompt`, `criteria` in `verifier_metadata`); never train on benchmark questions.

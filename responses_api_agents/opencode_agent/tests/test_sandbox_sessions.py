@@ -200,7 +200,7 @@ def setup():
     sandbox = Sandbox()
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = OmegaConf.create(
-        {"policy": {"responses_api_models": {"vllm_model": {"host": "model.example", "port": 9000}}}}
+        {"policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}}
     )
     client._build_server_base_url.return_value = "http://model.example:9000"
     config = OpenCodeAgentConfig(
@@ -313,21 +313,12 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
     agent.config.supports_images = supports_images
-    agent.config.opencode_config["compaction"] = {"auto": False, "prune": False}
-    agent.server_client.global_config_dict.policy.responses_api_models.vllm_model.sampling_overrides = {
-        "temperature": 1.0,
-        "top_p": 1.0,
-        "max_tokens": output_budget,
-    }
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         session_id = created.json()["agent_session_id"]
         assert not sandbox.launch.called
-        result = client.post(
-            "/ng-rollout/opencode-smoke-a2/v1/responses",
-            json={"input": "Fix the code", "temperature": 1.0, "top_p": 1.0, "max_output_tokens": output_budget},
-        )
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert result.status_code == 200, result.text
         body = result.json()
         assert body["status"] == "completed"
@@ -343,11 +334,9 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert config["compaction"] == {"auto": False, "prune": False}
-        assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"] == {
-            "input": ["text", "image"] if supports_images else ["text"],
-            "output": ["text"],
-        }
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"]["input"] == (
+            ["text", "image"] if supports_images else ["text"]
+        )
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
             "input": 32000,
@@ -430,39 +419,6 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task", **override})
         assert result.status_code == 422, result.text
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
-    sandbox.launch.assert_not_awaited()
-
-
-@pytest.mark.parametrize("override", [{"temperature": 0.2}, {"top_p": 0.9}, {"max_output_tokens": 123}, {}])
-def test_request_controls_must_match_model_and_agent_limits(setup, override):
-    agent, sandbox = setup
-    agent.server_client.global_config_dict.policy.responses_api_models.vllm_model.sampling_overrides = {
-        "temperature": 1.0,
-        "top_p": 1.0,
-        "max_tokens": 4096,
-    }
-    if not override:
-        agent.config.max_output_tokens = 2048  # Model pin alone cannot hide a conflicting harness limit.
-    with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        created.raise_for_status()
-        result = client.post(
-            "/ng-rollout/opencode-smoke-a2/v1/responses",
-            json={"input": "task", "temperature": 1.0, "top_p": 1.0, "max_output_tokens": 4096, **override},
-        )
-        assert result.status_code == 422, result.text
-        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
-    sandbox.launch.assert_not_awaited()
-
-
-@pytest.mark.parametrize("source", ["sampling_overrides", "extra_body"])
-def test_conflicting_completion_limit_is_not_ignored(setup, source):
-    agent, sandbox = setup
-    model = agent.server_client.global_config_dict.policy.responses_api_models.vllm_model
-    model.sampling_overrides = {"max_tokens": 4096}
-    model[source] = {**model.get(source, {}), "max_completion_tokens": 8192}
-    with pytest.raises(HTTPException, match="max_completion_tokens"):
-        agent._session_input(NeMoGymResponseCreateParamsNonStreaming(input="task", max_output_tokens=4096))
     sandbox.launch.assert_not_awaited()
 
 

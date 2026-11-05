@@ -90,10 +90,7 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
         source = metadata.get("source_pdf") if isinstance(metadata, dict) else None
         if not isinstance(source, str) or not source:
             raise ResourcesSeedRejectedError("verifier_metadata.source_pdf must name a PDF")
-        root = Path(self.config.documents_base_dir)
-        if not root.is_absolute():
-            root = PARENT_DIR / root
-        root = root.resolve()
+        root = (PARENT_DIR / self.config.documents_base_dir).resolve()
         path = (root / source).resolve()
         if not path.is_relative_to(root) or not path.is_file() or path.suffix.lower() != ".pdf":
             raise ResourcesSeedRejectedError("source_pdf must be an existing PDF within documents_base_dir")

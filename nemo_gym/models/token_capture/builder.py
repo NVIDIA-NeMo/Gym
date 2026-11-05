@@ -586,17 +586,9 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
     """
     items: list[dict] = []
     cumulative = list(chain.root_prompt)
-    images_seen = chain.links[0].entry.input_images or []
     for step, link in enumerate(chain.links):
         cumulative = cumulative + (link.interstitial if step > 0 else [])
         entry = link.entry
-        if step > 0 and entry.input_images is not None:
-            if entry.input_images[: len(images_seen)] != images_seen:
-                raise ValueError("Captured prompt images are not a contiguous extension")
-            new_images = entry.input_images[len(images_seen) :]
-            if new_images:
-                items.append({"type": "message", "role": "user", "content": new_images})
-            images_seen = entry.input_images
         content_items = [dict(item) for item in (entry.output_items or [])]
         index = entry.token_item_index
         if index is not None and 0 <= index < len(content_items):
@@ -741,9 +733,6 @@ def project_main_chain_response(
         "output": output,
         "usage": {"input_tokens": n_in, "output_tokens": n_out},
     }
-    root_images = mains[0].links[0].entry.input_images
-    if root_images is not None:
-        response["agent_input"] = [{"role": "user", "content": root_images}] if root_images else []
     # Only the terminal call decides: an earlier ``length`` stop did not end the delivered
     # chain, because a later call extended it. A complete ending, or an unrecorded finish
     # reason, leaves ``status`` unset unless a context-window refusal continued the terminal call.

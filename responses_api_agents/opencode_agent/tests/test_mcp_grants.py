@@ -174,7 +174,7 @@ def test_configured_and_request_grants_are_both_kept(setup):  # noqa: F811
 
 
 def test_static_mcp_servers_in_opencode_config_are_rejected(setup):  # noqa: F811
-    """Static MCP config cannot replace the session's tool grants."""
+    """Session opencode_config allows only permission and tools, so no static MCP server can be overwritten."""
     agent, sandbox = setup
     agent.config.opencode_config = {"mcp": {"task_tools": {"type": "remote", "url": "http://other"}}}
     body = seed().model_dump(mode="json")
@@ -182,7 +182,7 @@ def test_static_mcp_servers_in_opencode_config_are_rejected(setup):  # noqa: F81
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=body)
     assert response.status_code == 422
-    assert "unsupported: ['mcp']" in response.json()["detail"]
+    assert "permission/tools only" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
 
 

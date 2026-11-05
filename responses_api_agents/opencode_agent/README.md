@@ -72,8 +72,7 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
-Set `supports_images: true` for a vision model so OpenCode retains images read
-from tool outputs. This does not add image attachments to the task's input API.
+Set `supports_images: true` for a vision model to retain images read from tool outputs.
 
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with
@@ -130,12 +129,8 @@ reported as an `mcp_server_skipped` gap. A run that called the model but left no
 also fails, because nothing confirms its required tools; a run that failed for another reason keeps
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Configure
-sampling on the Gym model server. Requests may repeat `temperature`, `top_p` and
-`max_output_tokens` when they match the vLLM model server's `sampling_overrides`
-(`max_tokens` for the output limit); the output limit must also match the agent
-config. Conflicting or unpinned controls are rejected before inference.
-Session `opencode_config` permits `permission`, `tools` and `compaction`, preserving Gym routing.
-Training configs can disable automatic compaction and pruning to retain the sampled history.
+sampling on the Gym model server. Request-level overrides are not silently ignored.
+Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation

@@ -229,13 +229,13 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/opencode_agent/workspaces"
     repo_dir: Optional[str] = None
     thinking: bool = True
-    supports_images: bool = False
     system_prompt: Optional[str] = None
     system_prompt_mode: Literal["append", "replace"] = "append"
     timeout: int = 900
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
+    supports_images: bool = False
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
 
@@ -406,8 +406,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             model = nemo.setdefault("models", {}).get(self.config.model, {})
             model.setdefault("interleaved", {"field": "reasoning_content"})
-            if self.config.supports_images:
-                model.setdefault("modalities", {"input": ["text", "image"], "output": ["text"]})
             self._deep_merge(
                 model,
                 {
@@ -796,11 +794,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "compaction"}
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
         if unsupported:
             raise HTTPException(
-                422,
-                f"OpenCode sandbox config supports permission/tools/compaction only; unsupported: {sorted(unsupported)}",
+                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
@@ -964,7 +961,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         supported = {"input", "instructions", "model"}
-        sampling_fields = {"temperature": "temperature", "top_p": "top_p", "max_output_tokens": "max_tokens"}
         for key, field in type(body).model_fields.items():
             if key in supported:
                 continue
@@ -974,28 +970,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
             if value != field.get_default(call_default_factory=True):
-                if key in sampling_fields:
-                    # Trainers send request controls. Accept them only when the model server enforces them.
-                    models = self.server_client.global_config_dict[self.config.model_server.name][
-                        "responses_api_models"
-                    ]
-                    model = models.get("vllm_model", {})
-                    overrides = model.get("sampling_overrides") or {}
-                    pinned = overrides.get(sampling_fields[key])
-                    if key == "max_output_tokens":
-                        # vLLM chat gives this alias precedence over max_tokens.
-                        alias = overrides.get(
-                            "max_completion_tokens", (model.get("extra_body") or {}).get("max_completion_tokens")
-                        )
-                        if alias is not None and alias != value:
-                            raise HTTPException(422, "OpenCode max_output_tokens conflicts with max_completion_tokens")
-                    if value == pinned and (key != "max_output_tokens" or value == self.config.max_output_tokens):
-                        continue
-                    raise HTTPException(
-                        422,
-                        f"OpenCode request {key}={value} must match the Gym model server sampling_overrides "
-                        f"({sampling_fields[key]}={pinned}); max_output_tokens must also match the agent config",
-                    )
                 raise HTTPException(
                     422,
                     f"OpenCode sandbox execution does not support request field {key}; configure Gym model limits/sampling",
