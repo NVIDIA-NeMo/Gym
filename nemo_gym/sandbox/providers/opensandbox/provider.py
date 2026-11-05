@@ -2573,7 +2573,18 @@ class OpenSandboxProvider:
                 # lifecycle/inspect evidence may arrive after the first lookup.
                 diagnostic_started = loop.time()
                 diagnostic_deadline = min(status_failure_deadline, diagnostic_started + diagnostic_remaining_s)
-                evidence = await self._sandbox_death_evidence(handle, deadline=diagnostic_deadline, poll=False)
+                action = failure_outcome_policy(
+                    failure,
+                    config=self._operations.outcome_policy,
+                    classification=self._operations.outcome_policy.classification,
+                )
+                # A final 410 has no later status retry to discover a delayed lifecycle
+                # update. Spend only the remaining diagnostic budget awaiting that report.
+                evidence = await self._sandbox_death_evidence(
+                    handle,
+                    deadline=diagnostic_deadline,
+                    poll=failure.http_status == 410 and action != OutcomeAction.RETRY,
+                )
                 diagnostic_remaining_s = max(0.0, diagnostic_remaining_s - (loop.time() - diagnostic_started))
                 if evidence is not None:
                     raise opensandbox_failure(
@@ -2586,14 +2597,7 @@ class OpenSandboxProvider:
                         provider_status_reason=evidence.provider_status_reason,
                         exit_code=evidence.exit_code,
                     ) from failure
-                if (
-                    failure_outcome_policy(
-                        failure,
-                        config=self._operations.outcome_policy,
-                        classification=self._operations.outcome_policy.classification,
-                    )
-                    != OutcomeAction.RETRY
-                ):
+                if action != OutcomeAction.RETRY:
                     if failure is error:
                         raise
                     raise failure from error
