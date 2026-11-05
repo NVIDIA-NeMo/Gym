@@ -2806,7 +2806,7 @@ class TestRolloutCollection:
         report["failure_id"] = None if count_as_zero else failure.event_id
         observation = SandboxObservation(
             role="agent",
-            phase="agent_execution",
+            stage="agent",
             outcome="oom",
             failure_id=failure.event_id,
         )
