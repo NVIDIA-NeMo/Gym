@@ -553,7 +553,7 @@ class ResourcesSessionFence:
             raise ResourcesSessionConflictError("resources session has already been verified")
         if identity is None:
             if has_state:
-                raise ResourcesSessionConflictError("A typed seed cannot replace a legacy session")
+                raise ResourcesSessionConflictError("A typed seed cannot replace a cookie-seeded session")
             return True
         if identity != (body.episode_id, body.task_id):
             raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
@@ -653,7 +653,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         return False
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Create state from validated task data, replacing a previous legacy run if needed.
+        """Create state from validated task data, replacing a previous cookie-seeded run if needed.
 
         A typed retry with an existing binding never calls this hook. Publish live state only after construction
         succeeds. Keep partial resources separately, reachable by ``release_session_state``, if cleanup fails.
@@ -707,6 +707,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 if self._manages_session_state()
                 else BaseSeedSessionRequest
             )
+            # A real annotation object, not a string: this module must not use `from __future__ import annotations`,
+            # or FastAPI cannot resolve the local name and reads `body` as a query parameter.
             seed_body = ResourcesSeedSessionRequest | cookie_body
 
             async def seed_endpoint(
@@ -904,6 +906,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         such as ``task_data`` or a ``TaskId`` that does not match the task row, and ``ResourcesSessionConflictError``
         (409) for an ID bound to another episode or task, or a closed session. A failure that a retry may fix, such as
         an unavailable sandbox provider, stays a 5xx.
+
+        An override is registered as the route itself, so it declares ``request: Request`` before ``body`` and calls
+        ``super().seed_session(body, request=request)``; this method's own signature cannot be served.
         """
         if not self._manages_session_state():
             if isinstance(body, ResourcesSeedSessionRequest):
