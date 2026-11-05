@@ -816,9 +816,15 @@ def test_a_policy_key_that_differs_from_the_policy_model_is_refused_with_both_va
     ("url", "shown"),
     [
         ("https://gateway.example/v1?api_key=SECRET", "'https://gateway.example/v1?api_key=****'"),
-        ("https://user:SECRET@gateway.example/v1", "'https://user:****@gateway.example/v1'"),
         (
-            ["https://gateway.example/v1?region=a&token=SECRET", "https://user:SECRET@other.example/v1"],
+            "https://user:SECRET@gateway.example/v1",  # pragma: allowlist secret
+            "'https://user:****@gateway.example/v1'",
+        ),
+        (
+            [
+                "https://gateway.example/v1?region=a&token=SECRET",
+                "https://user:SECRET@other.example/v1",  # pragma: allowlist secret
+            ],
             "['https://gateway.example/v1?region=****&token=****', 'https://user:****@other.example/v1']",
         ),
     ],
