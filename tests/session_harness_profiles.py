@@ -49,9 +49,6 @@ HLE_PAIRING = {
 }
 IMAGE = "registry.example.invalid/sandbox:1"
 RUNTIME_DIR = "/opt/harness-runtime"
-# Profiles that restrict egress to the model server, and those whose harness then needs a runtime in the image.
-MODEL_ONLY_PROFILES = {"pi_agent"}
-RUNTIME_DIR_PROFILES = {"pi_agent"}
 
 # Adapter directory name -> (agent class, its config class).
 HARNESSES = {
@@ -62,6 +59,18 @@ HARNESSES = {
     "hermes_agent": ("HermesAgent", "HermesAgentConfig"),
     "claude_code_agent": ("ClaudeCodeAgent", "ClaudeCodeAgentConfig"),
 }
+
+
+def profile_settings(agent: str) -> dict[str, Any]:
+    """The agent block of the adapter's benchmark profile, as written, with ``???`` kept for a required value."""
+    profile = OmegaConf.load(REPO_ROOT / "responses_api_agents" / agent / "configs" / "profiles" / "benchmark.yaml")
+    return OmegaConf.to_container(profile[agent].responses_api_agents[agent], resolve=False)
+
+
+# Read from each profile, so a harness that restricts its profile changes only its own files.
+MODEL_ONLY_PROFILES = {agent for agent in HARNESSES if profile_settings(agent).get("network_access") == "model_only"}
+# A restricted sandbox cannot download these harnesses, so their profiles require a runtime in the image.
+RUNTIME_DIR_PROFILES = {agent for agent in HARNESSES if profile_settings(agent).get("sandbox_runtime_dir") == "???"}
 
 
 def compose_profile_on_hle(
