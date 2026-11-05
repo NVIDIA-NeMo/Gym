@@ -41,7 +41,7 @@ hle_diamond_opencode_agent:
       # binary (offline_science_image/Dockerfile pins this release and digest).
       network_access: model_only
       sandbox_executable_path: /usr/local/bin/opencode
-      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
       # The environment note the sandboxed profile read from /tmp/nemo-gym-environment.txt, now OpenCode's
       # instructions file for the session.
       system_prompt: |

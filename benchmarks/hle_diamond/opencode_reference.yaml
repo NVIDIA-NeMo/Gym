@@ -52,7 +52,7 @@ hle_diamond_opencode_reference_agent:
         name: tavily
       # The reference image installs the same OpenCode release and checks the same digest (hle_reference_image/Dockerfile).
       sandbox_executable_path: /usr/local/bin/opencode
-      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
       # Only what the reference protocol allows: no SageMath, Lean or /opt/science/README.md.
       system_prompt: |
         Direct internet access is disabled on this machine: no downloads and no package installation. The web search and page-reading tools offered to you are the only way to reach the web; use them if useful for the task.
