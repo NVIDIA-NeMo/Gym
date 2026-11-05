@@ -37,7 +37,7 @@ def collected(monkeypatch):
 
 def test_each_run_summary_key_becomes_a_gauge_under_the_run_id(collected) -> None:
     gym_metrics.record_run_summary(
-        {"coverage/scored": 8, "retries/at_cap": 1, "coverage/failed/judge_error": 2}, run_id="run-1"
+        {"coverage/scored": 8, "retries/at_cap": 1, "coverage/failed/judge_failed": 2}, run_id="run-1"
     )
 
     metrics = collected()
@@ -46,7 +46,7 @@ def test_each_run_summary_key_becomes_a_gauge_under_the_run_id(collected) -> Non
     assert metrics["gym.run.retries.at_cap"] == {frozenset({run}): 1}
     assert metrics["gym.run.info"] == {frozenset({run}): 1}
     assert metrics["gym.run.coverage.failed"] == {
-        frozenset({run, (gym_metrics.RUN_METRIC_BUCKET_ATTRIBUTE, "judge_error")}): 2
+        frozenset({run, (gym_metrics.RUN_METRIC_BUCKET_ATTRIBUTE, "judge_failed")}): 2
     }
 
 
@@ -58,6 +58,21 @@ def test_a_merge_of_several_shards_is_recorded_without_a_run_id(collected) -> No
     assert metrics["gym.run.info"] == {frozenset(): 1}
 
 
-def test_nothing_is_recorded_without_a_metrics_exporter(monkeypatch) -> None:
+def test_unregistered_failure_classes_share_one_bucket(collected) -> None:
+    gym_metrics.record_run_summary(
+        {"coverage/failed/judge_failed": 1, "coverage/failed/task 17 died": 2, "coverage/failed/1234": 3},
+        run_id="run-1",
+    )
+
+    run = (gym_metrics.RUN_ID_ATTRIBUTE, "run-1")
+    assert collected()["gym.run.coverage.failed"] == {
+        frozenset({run, (gym_metrics.RUN_METRIC_BUCKET_ATTRIBUTE, "judge_failed")}): 1,
+        frozenset({run, (gym_metrics.RUN_METRIC_BUCKET_ATTRIBUTE, "unregistered")}): 5,
+    }
+
+
+def test_nothing_is_recorded_without_a_metrics_exporter(collected, monkeypatch) -> None:
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", None)
-    gym_metrics.record_run_summary({"coverage/scored": 8}, run_id="run-1")  # must not raise
+    gym_metrics.record_run_summary({"coverage/scored": 8}, run_id="run-1")
+
+    assert collected() == {}

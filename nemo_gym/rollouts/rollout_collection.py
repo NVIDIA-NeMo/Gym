@@ -6485,7 +6485,9 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
             if get_exporters():
                 export_metrics(metrics)
-            record_run_summary(metrics, run_id=histories[0].manifest.run_id if len(histories) == 1 else None)
+            # Only a single shard with attempt history has a run id of its own; a legacy shard has none.
+            single = len(input_paths) == 1 and len(histories) == 1
+            record_run_summary(metrics, run_id=histories[0].manifest.run_id if single else None)
 
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
