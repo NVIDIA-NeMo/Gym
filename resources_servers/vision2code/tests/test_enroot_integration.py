@@ -4,6 +4,7 @@
 
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -99,3 +100,46 @@ async def test_real_concurrent_workspaces(tmp_path):
             assert im.getpixel((0, 0)) == (index, 0, 0)
 
     await asyncio.gather(*(one(i) for i in range(4)))
+
+
+async def test_real_worker_isolation(tmp_path: Path) -> None:
+    """The renderer must hide host files, credentials, network, and other processes."""
+    host_only = tmp_path / "host-only.txt"
+    host_only.write_text("Must not be visible inside the renderer")
+    forbidden = [str(Path.home()), str(Path.cwd()), str(host_only), "/root/.aws", "/root/.ssh"]
+    code = """
+import json, os, socket
+from PIL import Image, ImageDraw
+allowed = {'PATH','HOME','LANG','TMPDIR','MPLBACKEND','MPLCONFIGDIR','OPENBLAS_NUM_THREADS',
+           'OMP_NUM_THREADS','OUTPUT_PATH','TARGET_WIDTH','TARGET_HEIGHT'}
+unexpected_env = sorted(set(os.environ) - allowed)
+visible_forbidden = [p for p in __FORBIDDEN_PATHS__ if os.path.exists(p)]
+network_blocked = False
+try:
+    with socket.create_connection(('1.1.1.1', 443), timeout=2):
+        pass
+except OSError:
+    network_blocked = True
+routes = open('/proc/net/route').read().splitlines()[1:]
+processes = [name for name in os.listdir('/proc') if name.isdigit()]
+report = dict(network_blocked=network_blocked, routes=routes,
+              unexpected_env=unexpected_env, visible_forbidden=visible_forbidden,
+              processes_visible=len(processes), environment_keys=sorted(os.environ))
+print(json.dumps(report), flush=True)
+assert network_blocked and not routes and not unexpected_env and not visible_forbidden, report
+assert len(processes) == 1, 'Parent/host processes are visible'
+im = Image.new('RGB', (TARGET_WIDTH, TARGET_HEIGHT), 'white')
+ImageDraw.Draw(im).rectangle((10, 10, 50, 50), fill='black')
+im.save(OUTPUT_PATH)
+""".replace("__FORBIDDEN_PATHS__", repr(forbidden))
+    result = await render(
+        code=code,
+        width=80,
+        height=60,
+        image=IMAGE,
+        provider=PROVIDER,
+        artifact_dir=tmp_path / "render",
+        timeout=10,
+    )
+    assert result.status == "ok", result.model_dump()
+    assert result.diagnostics["stopped"]

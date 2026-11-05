@@ -81,8 +81,10 @@ python -m resources_servers.vision2code.prepare /data/manifest.jsonl /data/tasks
 
 Image paths resolve relative to the manifest. Preparation embeds the image in the model
 input and records its path, dimensions, and hash for verification. Keep the source images
-accessible to the resource server. Five synthetic [example tasks](data/example.jsonl) and
-[real rollouts](data/example_rollouts.jsonl) are included.
+accessible to the resource server. Five synthetic [example tasks](../../environments/vision2code/data/example.jsonl) and
+[real rollouts](../../environments/vision2code/data/example_rollouts.jsonl) are included.
+The example images, rollouts, and metrics live in `environments/vision2code/data/`.
+The resource server's `data` symlink preserves compatibility with Gym's resource-server data checks.
 
 ## Run evaluation
 
@@ -109,9 +111,8 @@ gym eval run --no-serve --agent vision2code_simple_agent \
 ```
 
 Start with `--limit 1` to inspect a rollout. For reasoning endpoints, set the model adapter's
-`uses_reasoning_parser` to match its response format. The optional
-[Qwen config](configs/vision2code_qwen.yaml) uses Qwen3.8-27B for both roles and authenticates
-with `NVIDIA_API_KEY`; configure an independent judge for benchmark comparisons.
+`uses_reasoning_parser` and `uses_interleaved_reasoning` to match its response format.
+Configure these on the policy and judge adapters independently.
 
 ## Multi-pass revisions
 
@@ -141,21 +142,6 @@ The agent stops at reward `1.0`, the pass limit, or a masked/structured failure.
 the **last attempt**, even if an earlier attempt scored higher. The rollout's `attempts`
 list records each pass's reward, feedback, and artifact paths. Each extra pass costs a
 policy call and render, plus a judge call for a valid image; token limits apply per call.
-
-### Example: three saved passes
-
-This Qwen3.8-27B rollout uses the `matplotlib` rubric, GPT-6.1-Sol judge, and linear reward.
-The reference and all three renders are reused from the [saved evaluation](#test-mini-results).
-
-| Reference | Pass 1 · 0.78 | Pass 2 · 0.84 | Pass 3 · 0.92 |
-| --- | --- | --- | --- |
-| ![Reference error-bar plot](results/revision-example/reference.png) | ![Pass 1 recreation](results/revision-example/pass1.png) | ![Pass 2 recreation](results/revision-example/pass2.png) | ![Pass 3 recreation](results/revision-example/pass3.png) |
-
-Feedback led to a corrected background, a connected point-to-point line, and removal of
-extra error-bar caps. This is one illustrative improving example; revisions can also
-plateau or regress. [Saved feedback and provenance](results/revision-example/provenance.json).
-Reference: Matplotlib's [error-bar example](https://matplotlib.org/stable/gallery/statistics/errorbar.html),
-under the [Matplotlib license](results/revision-example/LICENSE.matplotlib).
 
 ## Rewards
 
@@ -189,27 +175,6 @@ gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
   +vision2code.resources_servers.vision2code.use_blended_reward=true
 ```
 
-## Test-mini results
-
-Saved Gym evaluations of **Qwen3.8-27B**, judged by **GPT-6.1-Sol**, cover the same
-539 tasks across 15 rubrics in both runs. Settings: temperature 0, 32,768 output tokens
-per policy call, one rollout per task, category-level feedback, and linear reward for
-collection and early stopping.
-
-| Maximum passes | Tasks scored | Successful final renders | Linear | Squared (offline) | Blend A (offline) |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 539 | 503 | 0.7947 | 0.7001 | 0.6622 |
-| 3 | 539 | 528 | 0.8815 | 0.8204 | 0.7267 |
-
-Means weight each task equally, including zero rewards for code/render failures. Neither
-run has masked samples. Squared and Blend A values rescore the same final attempts offline;
-they are not separate runs with those rewards. These saved runs were audited from their
-records, not rerun against the final PR checkout. See the
-[per-task scores](results/test-mini-qwen.csv) and [provenance](results/test-mini-provenance.json).
-
-Kimi K2.5 and Qwen3.5 scores in the upstream report are not Gym reproductions. A comparable
-Kimi baseline still needs the same tasks and judge, starting with a small smoke check.
-
 ## Failures and artifacts
 
 Code errors, execution timeouts, and missing/invalid PNGs receive zero reward. Infrastructure,
@@ -230,14 +195,10 @@ python -m pytest resources_servers/vision2code/tests responses_api_agents/vision
 VISION2CODE_TEST_SQSH=/images/vision2code-render.sqsh \
   python -m pytest resources_servers/vision2code/tests/test_enroot_integration.py
 
-# Optional isolation check for a new worker/image:
-python -m resources_servers.vision2code.smoke \
-  --image /images/vision2code-render.sqsh --artifacts /results/vision2code/isolation \
-  --forbid-path /data/images/chem-001.png
 ```
 
-`--forbid-path` checks that an existing host file is invisible inside the sandbox; it does
-not configure mounts. Live judge quality requires model rollouts. The environment remains
+The Enroot tests check rendering, output validation, cleanup, and worker isolation.
+Live judge quality requires model rollouts. The environment remains
 experimental and `verified: false` pending broader baselining.
 
 Adapted code is Apache-2.0; see [NOTICE](NOTICE), [LICENSE.upstream](LICENSE.upstream), and

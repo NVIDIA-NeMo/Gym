@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Golden scores generated with the user's original image_metrics.py, not this port."""
+"""Golden scores generated from the upstream source pinned in fixtures/provenance.json."""
 
 import json
 from pathlib import Path

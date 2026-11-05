@@ -230,8 +230,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Vendored at | Upstream |
 |-----------|---------|-------------|---------|
-| Vision2Code | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/vision2code/rubrics.py`, `generic_rubric.py`, `prompts.py`, and `image_metrics.py` (adapted scoring, prompts, and image metrics; no upstream package dependency) | https://github.com/image2code/vision2code |
-| Matplotlib gallery image | Matplotlib | `resources_servers/vision2code/results/revision-example/reference.png` (README illustration; license and provenance alongside image) | https://matplotlib.org/stable/gallery/statistics/errorbar.html |
+| Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
@@ -241,7 +240,6 @@ upstream copyright header and adds an NVIDIA modifications block.
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
-- Vision2Code: source base revision `000f2e162dd62fac5637c718e018d7123b3aff1e` with local rubric revisions. The exact source hashes and modifications are recorded in `resources_servers/vision2code/NOTICE` and `tests/fixtures/provenance.json`; the upstream copyright notice is preserved in `LICENSE.upstream` and the ported source files. Dataset licenses remain separate from the code license.
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
 - Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`
 - tau2-bench: original MIT notices preserved in each vendored file; NVIDIA modifications noted in-file and in `resources_servers/indian_banking/README.md`

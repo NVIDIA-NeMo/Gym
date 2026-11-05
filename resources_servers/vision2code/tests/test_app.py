@@ -271,7 +271,7 @@ async def test_reference_changed(setup):
 @pytest.mark.asyncio
 async def test_committed_reference_is_independent_of_server_working_directory(setup, tmp_path, monkeypatch):
     server, body, _, judge = setup
-    example = Path(app.__file__).parent / "data" / "example.jsonl"
+    example = Path(__file__).resolve().parents[3] / "environments" / "vision2code" / "data" / "example.jsonl"
     body.verifier_metadata = app.Reference.model_validate(
         json.loads(example.read_text().splitlines()[0])["verifier_metadata"]
     )
