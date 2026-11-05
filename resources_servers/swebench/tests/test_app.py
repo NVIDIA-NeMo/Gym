@@ -117,25 +117,27 @@ class TestApp:
         )
         assert res.status_code == 200
         observation = res.json()["verifier_sandbox_observation"]
-        assert observation["wall_time_s"] >= 0
-        assert {key: observation[key] for key in ("kind", "role", "provider", "sandbox_id", "outcome")} == {
+        wall_time_s = observation["wall_time_s"]
+        assert wall_time_s >= 0
+        assert observation == {
             "kind": "sandbox",
             "role": "verifier",
             "provider": "test-provider",
             "sandbox_id": "sandbox-123",
             "outcome": "completed",
+            "stage": "verification",
+            "wall_time_s": wall_time_s,
+            "exit_code": None,
+            "cpu_time_s": None,
+            "peak_memory_mib": None,
+            "resource_usage_source": None,
+            "error_type": None,
+            "error_message": None,
+            "failure_id": None,
+            "observed_client_interval_s": None,
+            "teardown_confirmed": None,
+            "cleanup_errors": [],
         }
-        assert observation["stage"] == "verification"
-        assert observation["exit_code"] is None
-        assert observation["cpu_time_s"] is None
-        assert observation["peak_memory_mib"] is None
-        assert observation["resource_usage_source"] is None
-        assert observation["error_type"] is None
-        assert observation["error_message"] is None
-        assert observation["failure_id"] is None
-        assert observation["observed_client_interval_s"] is None
-        assert observation["teardown_confirmed"] is None
-        assert observation["cleanup_errors"] == []
 
     async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
