@@ -63,6 +63,7 @@ from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_s
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
+    AGENT_SANDBOX_OOM,
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
@@ -82,6 +83,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
     NON_POLICY_MODEL_REJECTION,
+    PROVIDER_OOM_KILLED,
     ROLLOUT_ALLOCATION_ENDED,
     SERVER_FAULT_KINDS,
     SERVER_START_FAILED,
@@ -91,7 +93,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
     is_server_status,
 )
-from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.orchestration.collect_evidence import (
     COLLECT_SCRIPT,
@@ -110,6 +112,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
 )
+from nemo_gym.trajectory.trajectory_record import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
 
 
@@ -972,7 +975,11 @@ def decide_recovery(
                 continue
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
-            if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
+            if (
+                not judge
+                and (row.get("mask_sample") is True or row.get("evaluation_completed") is False)
+                and not _agent_sandbox_oom_zero(row)
+            ):
                 if reverification_cause(row) is not None:
                     # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
                     saved_results.add(identity)
@@ -4601,10 +4608,55 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
+def _agent_sandbox_oom_zero(row: Mapping[str, Any]) -> bool:
+    """An admitted agent OOM explicitly scored zero by its owner's outcome policy.
+
+    The saved policy decision establishes attribution; the provider kind alone does not. Require its complete
+    canonical event and matching agent observation, keeping verifier failures and recovered observations separate.
+    Any sandbox-owning server can opt in by persisting this policy result after admitting its evidence.
+    """
+    if (
+        row.get("failure_kind") != PROVIDER_OOM_KILLED
+        or row.get("agent_failure_action") != OutcomeAction.COUNT_AS_ZERO
+        or type(row.get("reward")) not in (int, float)
+        or row["reward"] != 0
+        or row.get("mask_sample") is not False
+        or row.get("evaluation_completed") is not False
+    ):
+        return False
+    response = row.get("response")
+    metadata = response.get("metadata") if isinstance(response, Mapping) else None
+    raw = metadata.get(NG_AGENT_SANDBOX_OBSERVATION_KEY) if isinstance(metadata, Mapping) else None
+    if not isinstance(raw, str) or response.get("output") != []:
+        return False
+    try:
+        observed = SandboxObservation.model_validate_json(raw)
+    except ValidationError:
+        return False
+    report = FailureReportRow.report(row)
+    event = report.events.get(observed.failure_id)
+    if report.omitted or report.failure_id is not None or event is None:
+        return False
+    details = event.details
+    return (
+        (observed.role, observed.outcome, observed.phase) == ("agent", "oom", "agent_execution")
+        and event.boundary == FailureBoundary.SANDBOX
+        and event.failure_kind == PROVIDER_OOM_KILLED
+        and isinstance(details, SandboxFailureDetails)
+        and bool(details.provider)
+        and bool(details.sandbox_id)
+        and row.get("sandbox_handle") == details.sandbox_id
+        and observed.provider in (None, details.provider)
+        and observed.sandbox_id in (None, details.sandbox_id)
+    )
+
+
 def _scored_kind(row: Mapping[str, Any]) -> str | None:
     """The registered failure kind a scored result row records as its own outcome, keyed on its recorded HTTP status
     (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result."""
     kind, status = _policy_evidence(row)
+    if kind == PROVIDER_OOM_KILLED and _agent_sandbox_oom_zero(row):
+        return AGENT_SANDBOX_OOM
     return status_fault_kind(kind, status) if _known_kind(kind) else None
 
 
@@ -5202,7 +5254,7 @@ def trial_failure_cause(kind: Any) -> str:
         return "timeout"
     if kind in (JUDGE_FAILED, JUDGE_UNPARSEABLE, VERIFIER_ERROR, GRADING_WITHOUT_VERDICT):
         return "judge"
-    if kind.startswith(("provider_", "session_")):
+    if kind == AGENT_SANDBOX_OOM or kind.startswith(("provider_", "session_")):
         return "sandbox"
     if kind.startswith(("model_", "transport_")):
         return "request"

@@ -65,6 +65,7 @@ def test_a_command_the_harness_refused_is_the_models_fault():
         "non_policy_model_rejection",
         "invalid_output_budget",
         "invalid_request_parameter",
+        "agent_sandbox_oom",
     ],
 )
 def test_the_gate_derived_classes_are_registered_but_no_producer_may_emit_them(kind):
@@ -127,3 +128,188 @@ def test_ungraded_harness_failure_is_evaluation_side_not_model_invalid_output():
     report = fault_report(Counter({"agent_route_failed": 1, "agent_invalid_output": 1}), 2)
     assert report["evaluation"]["kinds"] == {"agent_route_failed": 1}
     assert report["model"]["kinds"] == {"agent_invalid_output": 1}
+
+
+def _agent_oom_zero():
+    """A saved explicit-zero policy result, with its admitted provider event and observation."""
+    from nemo_gym.core import NgFailureEvent
+    from nemo_gym.core.failure_records import SandboxFailureDetails
+    from nemo_gym.core.failure_transport import FailureReportRow
+    from nemo_gym.core.typed_exceptions import failure_report_for
+    from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+    from tests.unit_tests.test_evaluation_health import _empty
+
+    collected = _run(1)
+    row = collected.results[0]
+    _empty(row)
+    event = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_oom_killed",
+        failure_reason="Confirmed sandbox lifecycle OOMKilled",
+        operation="pty",
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id="agent-sandbox"),
+    )
+    report = failure_report_for(event).model_copy(update={"failure_id": None})
+    observation = SandboxObservation(role="agent", phase="agent_execution", outcome="oom", failure_id=event.event_id)
+    row.update(
+        FailureReportRow.fields(report)
+        | {
+            "failure_kind": "provider_oom_killed",
+            "agent_failure_action": "count_as_zero",
+            "evaluation_completed": False,
+            "mask_sample": False,
+            "sandbox_handle": "agent-sandbox",
+        }
+    )
+    row["response"]["output"] = []
+    row["response"]["metadata"] = {NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()}
+    return collected
+
+
+def test_policy_counted_agent_oom_is_a_model_fault_with_a_sandbox_cause():
+    from nemo_gym.orchestration.recovery import trial_failure_cause
+
+    collected = _agent_oom_zero()
+    decision, (passed, reason, report), task = _gate(collected)
+    assert passed is True, reason
+    assert report["model"]["kinds"] == {"agent_sandbox_oom": 1}
+    assert report["evaluation"]["count"] == 0 and report["evaluation"]["server"] == 0
+    assert decision.counts["scored"] == 1
+    assert task["failures"]["metric_coverage"]["trials"] == 1
+    assert task["failures"]["trial_failures"]["by_cause"]["sandbox"] == {"count": 1, "rate": 1.0}
+    assert trial_failure_cause("agent_sandbox_oom") == "sandbox"
+    # The canonical observation stays provider-neutral, and provider kinds alone remain evaluation-side.
+    assert collected.results[0]["failure_kind"] == "provider_oom_killed"
+    assert fault_class("provider_oom_killed") == "server"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing_action",
+        "fail",
+        "verify",
+        "retry",
+        "nonzero_reward",
+        "boolean_reward",
+        "masked",
+        "graded",
+        "missing_completed",
+        "verifier",
+        "other_phase",
+        "not_oom",
+        "missing_event_id",
+        "wrong_event_id",
+        "selected_terminal_event",
+        "omitted_report",
+        "wrong_event_kind",
+        "wrong_boundary",
+        "missing_details",
+        "missing_provider",
+        "wrong_sandbox",
+        "missing_sandbox",
+        "conflicting_provider",
+        "conflicting_sandbox",
+        "nonempty_response",
+        "invalid_observation",
+    ],
+)
+def test_only_explicit_policy_zero_with_matching_agent_oom_evidence_is_model_side(change):
+    import json
+
+    from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY
+
+    collected = _agent_oom_zero()
+    row = collected.results[0]
+    [event] = row["_ng_failure_events"].values()
+    metadata = row["response"]["metadata"]
+    observed = json.loads(metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
+    if change == "missing_action":
+        row.pop("agent_failure_action")
+    elif change in {"fail", "verify", "retry"}:
+        row["agent_failure_action"] = change
+    elif change == "nonzero_reward":
+        row["reward"] = 1.0
+    elif change == "boolean_reward":
+        row["reward"] = False
+    elif change == "masked":
+        row["mask_sample"] = True
+    elif change == "graded":
+        row["evaluation_completed"] = True
+    elif change == "missing_completed":
+        row.pop("evaluation_completed")
+    elif change == "verifier":
+        observed["role"] = "verifier"
+    elif change == "other_phase":
+        observed["phase"] = "verification"
+    elif change == "not_oom":
+        observed["outcome"] = "sandbox_error"
+    elif change == "missing_event_id":
+        observed.pop("failure_id")
+    elif change == "wrong_event_id":
+        observed["failure_id"] = "missing-event"
+    elif change == "selected_terminal_event":
+        row["_ng_failure_id"] = event["event_id"]
+    elif change == "omitted_report":
+        row["_ng_failure_events_omitted"] = True
+    elif change == "wrong_event_kind":
+        event["failure_kind"] = "provider_unavailable"
+    elif change == "wrong_boundary":
+        event["boundary"] = "agent"
+    elif change == "missing_details":
+        event["details"] = None
+    elif change == "missing_provider":
+        event["details"]["provider"] = None
+    elif change == "wrong_sandbox":
+        row["sandbox_handle"] = "unrelated-sandbox"
+    elif change == "missing_sandbox":
+        row.pop("sandbox_handle")
+    elif change == "conflicting_provider":
+        observed["provider"] = "another-provider"
+    elif change == "conflicting_sandbox":
+        observed["sandbox_id"] = "another-sandbox"
+    elif change == "nonempty_response":
+        row["response"]["output"] = [{"type": "message", "role": "assistant", "content": []}]
+    metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY] = "invalid" if change == "invalid_observation" else json.dumps(observed)
+    assert recovery._scored_kind(row) == "provider_oom_killed", change
+    _, (_, _, report), _ = _gate(collected)
+    if report is not None:
+        assert report["model"]["count"] == 0, change
+        assert report["evaluation"]["kinds"] == {"provider_oom_killed": 1}
+
+
+def test_collector_round_trips_policy_zero_attribution_without_diagnostic_metadata(tmp_path):
+    import json
+
+    from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY
+    from tests.unit_tests.test_eval_resubmit_decision import collect
+
+    source = _agent_oom_zero()
+    row = source.results[0]
+    metadata = row["response"]["metadata"]
+    observation = json.loads(metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY])
+    observation["error_message"] = "private-command-output-marker"
+    metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY] = json.dumps(observation)
+    metadata["unrelated_metadata"] = "private-metadata-marker"
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    for name, rows in (
+        ("rollouts_materialized_inputs.jsonl", source.materialized),
+        ("rollouts.jsonl", source.results),
+        ("rollouts_failures.jsonl", []),
+    ):
+        (artifacts / name).write_text("".join(json.dumps(item) + "\n" for item in rows))
+    collected = collect(tmp_path)
+    projected = collected.results[0]
+    assert projected["agent_failure_action"] == "count_as_zero"
+    assert projected["sandbox_handle"] == "agent-sandbox"
+    projected_text = json.dumps(projected)
+    assert "private-command-output-marker" not in projected_text
+    assert "private-metadata-marker" not in projected_text
+    decision, (passed, reason, report), task = _gate(collected)
+    assert decision.counts == {"scored": 1}
+    # This minimal directory has no quality/provenance report, so it cannot certify the whole run.
+    assert passed is None and "UNVERIFIED" in reason
+    assert report["model"]["kinds"] == {"agent_sandbox_oom": 1}
+    assert report["evaluation"]["count"] == 0
+    assert task["failures"]["metric_coverage"]["trials"] == 1

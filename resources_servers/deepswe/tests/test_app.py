@@ -867,10 +867,20 @@ async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_
     assert log.report == body.failure_report
     assert log.report.failure_id is None
     counted = expected_action == OutcomeAction.COUNT_AS_ZERO
+    assert response.agent_failure_action == expected_action
+    assert response.model_dump(mode="json")["agent_failure_action"] == expected_action.value
     original_id = next(iter(body.failure_report.events))
     assert response.failure_report.events == body.failure_report.events
     assert response.failure_report.failure_id == (None if counted else original_id)
     fields = response.model_dump(mode="json")
+    from nemo_gym.core.failure_transport import FailureReportRow
+    from nemo_gym.orchestration.recovery import _scored_kind, status_fault_kind
+
+    # The actual applied policy survives serialization and selects only the gate's derived class.
+    saved_row = fields | FailureReportRow.fields(response.failure_report)
+    assert _scored_kind(saved_row) == (
+        "agent_sandbox_oom" if counted else status_fault_kind(PROVIDER_OOM_KILLED, http_status)
+    )
     if counted:
         assert "_ng_failure_class" not in fields
     else:
