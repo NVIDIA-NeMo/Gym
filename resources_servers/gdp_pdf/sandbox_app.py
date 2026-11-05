@@ -14,6 +14,7 @@ from pydantic import Field
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -28,7 +29,8 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gdp_pdf.app import GdpPdfConfig, GdpPdfResourcesServer
@@ -64,7 +66,10 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
         if self.config.sandbox_config.ttl_s is None:
             raise ValueError("GDP.pdf sandboxes require ttl_s for abandoned episodes")
         self._sessions: dict[str, _Session] = {}
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -78,7 +83,8 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
             finally:
                 for session_id in list(self._sessions):
                     try:
-                        await self._stop(session_id)
+                        async with self._locks.locked(session_id):
+                            await self._stop(session_id)
                     except Exception:
                         LOG.exception("Could not stop GDP.pdf sandbox %s", session_id)
 
@@ -98,8 +104,8 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
             session = self._sessions.get(session_id)
             if session is not None and session.seed != body:
                 raise ResourcesSessionConflictError("Session is already bound to another episode or task")
@@ -149,13 +155,13 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
+        async with self._locks.locked(session_id):
             session = self._sessions.get(session_id)
-            owner = session.seed.episode_id if session else self._fence.closed_episode(session_id)
+            owner = session.seed.episode_id if session else self._fences.get(session_id)
             if owner is not None and owner != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the resources session")
             await self._stop(session_id)
-            self._fence.mark_closed(session_id, body.episode_id)
+            self._fences.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
 

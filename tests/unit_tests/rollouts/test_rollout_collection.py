@@ -10392,60 +10392,6 @@ class TestFinalizeRolloutTokenCapture:
         assert await retire_rollout_token_capture("0-0", store, built) is True
         assert store.read_entries("0-0") == []
 
-    @pytest.mark.parametrize("replace_image", [False, True])
-    async def test_rebuild_preserves_prompt_and_tool_images(self, tmp_path, replace_image):
-        from nemo_gym.models.token_capture.records import capture_input_images
-
-        initial = {"type": "input_image", "image_url": "data:image/png;base64,initial"}
-        tool_image = {"type": "input_image", "image_url": "data:image/png;base64,tool"}
-        store = TokenCaptureStore(tmp_path)
-        previous = None
-        prompt = [1]
-        for index in range(3):
-            messages = [{"role": "user", "content": [initial]}]
-            if index:
-                messages.append(
-                    {"role": "tool", "content": [{"type": "image_url", "image_url": {"url": tool_image["image_url"]}}]}
-                )
-            images = capture_input_images(messages)
-            if index == 2 and replace_image:
-                images = [tool_image]
-            entry = TokenEntry(
-                capture_key="0-0",
-                model_call_id=f"call-{index}",
-                prompt_token_ids=prompt,
-                generation_token_ids=[10 + index],
-                generation_log_probs=[-0.1],
-                input_images=images,
-                output_items=[{"type": "message", "role": "assistant", "content": []}],
-            )
-            stamp_lineage(
-                entry,
-                previous.model_call_id if previous else None,
-                parent_resolution=ParentResolutionStatus.RESOLVED if previous else ParentResolutionStatus.ROOT,
-            )
-            store.append(entry)
-            previous = entry
-            prompt = prompt + [10 + index, 20 + index]
-        result = self._record()
-        built = await finalize_rollout_token_capture(result, store)
-        try:
-            assert bool(built["mask_sample"]) == replace_image
-            if replace_image:
-                assert "images are not a contiguous extension" in built["error"]
-            else:
-                assert result["reward"] == 1.0
-                assert result["response"]["agent_input"] == [{"role": "user", "content": [initial]}]
-                images = [item for item in result["response"]["output"] if item.get("role") == "user"]
-                assert images == [{"type": "message", "role": "user", "content": [tool_image]}]
-                assert [
-                    item["generation_token_ids"]
-                    for item in result["response"]["output"]
-                    if "generation_token_ids" in item
-                ] == [[10], [11], [12]]
-        finally:
-            await store.close()
-
     async def test_retirement_cannot_delete_a_newer_rollout_attempt(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
         self._capture(store)
@@ -11256,6 +11202,15 @@ class TestPreprocessExamples:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
 
+    def test_selects_task_ids_once_each_then_repeats(self) -> None:
+        examples = [{**self._ts_row(), "task_id": task_id} for task_id in ("a", "a", "b", "c")]
+        rows = RolloutCollectionHelper().preprocess_examples(examples, task_ids=["c", "a"], num_repeats=2)
+        assert [r["task_id"] for r in rows] == ["a", "a", "c", "c"]
+
+    def test_unknown_task_id_fails(self) -> None:
+        with pytest.raises(ConfigError, match="No input rows for task ids"):
+            RolloutCollectionHelper().preprocess_examples([{**self._ts_row(), "task_id": "a"}], task_ids=["b"])
+
 
 @pytest.mark.parametrize("alias_kind", ["dotdot", "symlink"])
 def test_aggregate_expansion_deduplicates_legacy_path_aliases(tmp_path, alias_kind):
@@ -11472,6 +11427,28 @@ class TestTurnsFromModelCalls:
         assert turn.invocation_id == "root"
         assert turn.reasoning_content == "think"
         assert turn.answer == {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]}
+
+    def test_messages_calls_split_the_content_blocks_and_their_thinking(self) -> None:
+        # Claude Code calls the Model Server's Anthropic Messages API.
+        thinking = {"type": "thinking", "thinking": "inspect first"}
+        tool_use = {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}
+        text = {"type": "text", "text": "Answer: 18"}
+        calls = [
+            self._call(
+                "first", {"type": "message", "role": "assistant", "content": [thinking, tool_use]}, started_at=1.0
+            ),
+            self._call("second", {"type": "message", "role": "assistant", "content": [text]}, started_at=2.0),
+        ]
+
+        turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
+            "task", "rollout", [self._invocation("root", ["first", "second"])], calls, resolved=True
+        )
+
+        assert turns[0].reasoning_content == [thinking]
+        assert turns[0].answer == [tool_use]
+        assert turns[1].reasoning_content is None
+        assert turns[1].answer == [text]
+        assert [turn.step_count for turn in turns] == [0, 1]
 
     def test_a_call_that_returned_nothing_is_not_a_turn(self) -> None:
         from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall

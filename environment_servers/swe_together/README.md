@@ -87,12 +87,20 @@ without being relabeled as candidate or verifier calls or excluded from checking
 
 Interaction-scoring calls use the existing verifier ownership context. Each
 physical judge session has its own capture key; its captured exchanges are merged
-into the parent trajectory using the judge's close-receipt references. Raw captures
+into the parent trajectory using the references in the judge's close reply. Raw captures
 and ownership provenance are retained, and missing or ambiguous evidence remains
 an explicit gap. Recognized Claude session-title housekeeping is excluded from
 canonical judge calls with its reason recorded in provenance.
 
 ## Ownership, reuse, and restart behavior
+
+When using a cell router, the runtime helper and all candidates and judges that
+consume its shared cache and submission directories automatically carry the same
+`nemo.nvidia.com/placement-group` metadata. The group lasts for that runtime
+provisioner's lifetime, including helper startup retries; a new environment server
+gets a new group. Consequently, one environment server's episodes share a cell.
+This placement label leaves the existing network policy and per-episode file
+isolation unchanged.
 
 Shared HTTP servers with per-episode sessions follow
 [`single_agent_turn`](../single_agent_turn/app.py) and
@@ -107,7 +115,7 @@ recipe-selected verified OpenCode/ripgrep files read-only.
 Agents install their own runtimes at seed. Candidate swaps must implement native
 continuation and the requested observation capabilities; unsupported adapters fail
 before execution. Judge swaps require ordinary seeded Responses calls, relative timeouts,
-and truthful close receipts. Benchmark-specific instances live in the recipe, so
+and truthful close responses. Benchmark-specific instances live in the recipe, so
 other benchmarks can compose the same base agent configurations independently.
 
 Grading lifetimes vary by benchmark: [SWE-bench](../../resources_servers/swebench/app.py)

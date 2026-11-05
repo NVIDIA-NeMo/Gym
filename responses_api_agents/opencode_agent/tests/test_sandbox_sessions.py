@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     is_harness_termination_failure,
@@ -25,9 +26,27 @@ from nemo_gym.agents import (
     raises_agent_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
+from nemo_gym.core import (
+    PROVIDER_OOM_KILLED,
+    EpisodeId,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    TaskId,
+)
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
+from nemo_gym.sandbox import SandboxHandle
+from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+
+
+def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason=reason,
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id=sandbox_id),
+    )
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -109,6 +128,7 @@ def read_params(text: str) -> dict:
 class Sandbox:
     def __init__(self):
         self.sandbox_id = "provider-sandbox-id"
+        self.provider_name = "opensandbox"
         self.files = {}
         self.snapshots = []
         self.result = {
@@ -131,6 +151,9 @@ class Sandbox:
         self.disconnect = AsyncMock()
         self.launch = AsyncMock(side_effect=self.create)
         self.request_stop = AsyncMock(side_effect=self.signal)
+
+    def _require_handle(self):
+        return SandboxHandle(sandbox_id=self.sandbox_id, provider_name=self.provider_name, raw=None)
 
     @property
     def pty(self):
@@ -226,10 +249,11 @@ def setup():
         ),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
-        patch(f"{module}.create_provider"),
+        patch(f"{module}.create_provider") as provider_factory,
         patch(f"{module}.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
         patch("responses_api_agents.opencode_agent.sandbox.snapshot", sandbox.snapshot),
     ):
+        provider_factory.return_value.name = "opensandbox"
         agent = OpenCodeAgent(config=config, server_client=client)
         yield agent, sandbox
 
@@ -255,10 +279,14 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
     sandbox.exec.side_effect = ([ok] if owned else []) + ([error, ok] if stage == "prepare" else [ok, error, ok])
     with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox) as sandbox_class:
         sandbox_class.connect = AsyncMock(return_value=sandbox)
-        with pytest.raises(RuntimeError, match=f"error={error_type}") as failed:
+        with pytest.raises(NgFailureEvent, match=f"error_type={error_type}") as failed:
             await agent.seed_agent_session(request, body)
+    assert failed.value.boundary == "harness"
+    assert failed.value.failure_kind == "agent_route_failed"
+    assert failed.value.operation == "opencode.setup"
     assert "bootstrap output" in str(failed.value)
     assert "provider failed" in str(failed.value)
+    assert "return_code=0" in failed.value.failure_reason
     assert not request.session
     sandbox.launch.assert_not_awaited()
     if owned:
@@ -268,6 +296,23 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
         sandbox.disconnect.assert_awaited_once()
         sandbox.stop.assert_not_awaited()
     assert not any(record.state is not None for record in agent._session_records.values())
+
+
+def test_setup_failure_retains_status_and_bounded_output_tails():
+    result = SimpleNamespace(
+        return_code=17,
+        error_type=None,
+        stdout="discard stdout prefix" + "x" * 4000 + "stdout end",
+        stderr="discard stderr prefix" + "y" * 4000 + "stderr end",
+    )
+    with pytest.raises(NgFailureEvent) as failed:
+        OpenCodeAgent._check_sandbox_setup("install runtime", result)
+    assert failed.value.stage == "seed"
+    reason = failed.value.failure_reason
+    assert "return_code=17; error_type=None" in reason
+    assert "stdout end" in reason and "stderr end" in reason
+    assert "discard stdout prefix" not in reason and "discard stderr prefix" not in reason
+    assert len(reason) < 2000
 
 
 def close_body(session_id):
@@ -334,8 +379,8 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"]["input"] == (
-            ["text", "image"] if supports_images else ["text"]
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"].get("modalities") == (
+            {"input": ["text", "image"], "output": ["text"]} if supports_images else None
         )
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
@@ -356,6 +401,196 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+@pytest.mark.parametrize("origin_stage", [None, "agent", "seed", "verification"])
+def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_session(setup, owned, origin_stage):
+    agent, sandbox = setup
+    agent.config.report_agent_sandbox_oom = True
+    body = seed()
+    if owned:
+        agent.config.sandbox_provider = "agent-provider"
+        agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+        body.sandbox_access = None
+        sandbox.sandbox_id = "agent-owned"
+        sandbox.start = AsyncMock()
+    error = sandbox_oom(
+        f"Sandbox was OOM-killed. OpenSandbox status: reason='OOMKilled'; sandbox_id='{sandbox.sandbox_id}'",
+        sandbox_id=sandbox.sandbox_id,
+    )
+    error.stage = origin_stage
+    sandbox.launch.side_effect = error
+
+    webapp = agent.setup_webserver()
+    agent.setup_exception_middleware(webapp)
+    module = "responses_api_agents.opencode_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox) as factory,
+        TestClient(webapp) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["output"] == []
+        from nemo_gym.agents import AgentOutcome, AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+        from nemo_gym.core import NeMoGymResponse
+
+        outcome = AgentOutcome.model_validate_json(body["metadata"][AGENT_OUTCOME_METADATA_KEY])
+        assert outcome.failure_kind == PROVIDER_OOM_KILLED
+        assert outcome.status_code is None
+        typed_response = NeMoGymResponse.model_validate(body)
+        assert agent_outcome_policy(typed_response) == OutcomeAction.VERIFY
+        for action in (OutcomeAction.FAIL, OutcomeAction.RETRY):
+            assert (
+                agent_outcome_policy(
+                    typed_response, config=AgentOutcomePolicyConfig(by_failure_kind={PROVIDER_OOM_KILLED: action})
+                )
+                == action
+            )
+        observation = SandboxObservation.model_validate_json(body["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert observation.role == "agent"
+        assert observation.outcome == "oom"
+        assert observation.stage == (origin_stage or "agent")
+        assert "phase" not in json.loads(body["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert observation.provider == "opensandbox"
+        assert observation.sandbox_id == sandbox.sandbox_id
+        assert observation.error_type is None
+        from nemo_gym.core import FailureHeader
+
+        report = FailureHeader.decode(response.headers)
+        assert report.failure_id is None
+        assert report.events[observation.failure_id].failure_kind == PROVIDER_OOM_KILLED
+        assert observation.failure_id == error.event_id
+        assert report.events[observation.failure_id].stage == origin_stage
+        assert observation.error_message is None
+
+        retried = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert retried.status_code == 200
+        retry_report = FailureHeader.decode(retried.headers)
+        assert set(retry_report.events) == set(report.events)
+        assert retry_report.failure_id is None
+        assert retried.json() == body
+        exec_count_at_failure = sandbox.exec.await_count
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+        assert observation.model_dump() in closed.json()["agent_observations"]["records"]
+        assert any(
+            record["kind"] == "agent_invocation" and record["invocation_id"] == "opencode-smoke-a2"
+            for record in closed.json()["agent_observations"]["records"]
+        )
+        assert any(gap["code"] == "observation_capture_failed" for gap in closed.json()["agent_observations"]["gaps"])
+
+    assert sandbox.launch.await_count == 1
+    assert sandbox.exec.await_count == exec_count_at_failure
+    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
+    if owned:
+        sandbox.stop.assert_awaited_once()
+        sandbox.disconnect.assert_not_awaited()
+    else:
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+
+
+async def test_agent_execution_oom_reporting_is_opt_in(setup):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    error = sandbox_oom("OpenSandbox reason='OOMKilled'; sandbox_id='resources-owned'")
+    sandbox.launch.side_effect = error
+
+    with pytest.raises(NgFailureEvent) as caught:
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+    assert caught.value is error
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert not any(isinstance(record, SandboxObservation) for record in closed.agent_observations.records)
+    sandbox.disconnect.assert_awaited_once()
+
+
+def test_http_splits_the_reasoning_block_a_gym_reply_starts_with(setup, tmp_path):
+    # The Gym Model Server returns a reply's reasoning ahead of its text as <think>...</think>, which OpenCode stores
+    # as a text part; graded output and observations carry it as reasoning, not as the answer.
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][1]
+    tool = assistant["parts"][1]
+    assistant["parts"] = [
+        {"type": "text", "text": "<think>run pwd</think>"},
+        tool,
+        {"type": "text", "text": "<think>it printed /app</think>\n\nAnswer: /app"},
+    ]
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        output = result.json()["output"]
+        assert [item["type"] for item in output] == [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "message",
+        ]
+        assert output[0]["summary"][0]["text"] == "run pwd"
+        assert output[3]["summary"][0]["text"] == "it printed /app"
+        assert output[4]["content"][0]["text"] == "Answer: /app"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    invocation = next(
+        record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+    )
+    persisted = [item for item in invocation["conversation"] if item.get("role") != "user"]
+    assert [item["type"] for item in persisted] == [item["type"] for item in output]
+    assert persisted[4]["content"][0]["text"] == "Answer: /app"
+
+
+async def test_http_keeps_an_empty_answer_when_the_final_gym_reply_is_only_reasoning(setup, tmp_path):
+    # Without the empty final message, the judge's backward search would grade the earlier answer "4".
+    from responses_api_agents.opencode_agent.tests.test_app import judge_final_answer
+
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][1]
+    tool = assistant["parts"][1]
+    assistant["info"]["finish"] = "tool-calls"
+    assistant["parts"] = [{"type": "text", "text": "4"}, {"type": "text", "text": "<think>run pwd</think>"}, tool]
+    final = {"info": {**assistant["info"], "finish": "stop"}, "parts": [{"type": "text", "text": "<think>r</think>"}]}
+    export["messages"].append(final)
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        output = result.json()["output"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    assert [item["type"] for item in output] == [
+        "message",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "message",
+    ]
+    assert output[0]["content"][0]["text"] == "4"
+    assert output[-1]["content"][0]["text"] == ""
+    assert await judge_final_answer(output) == (0.0, "empty_final_answer", False)
+    invocation = next(
+        record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+    )
+    # The observed conversation keeps the same empty answer for the final reply.
+    observed = [item for item in invocation["conversation"] if item.get("id") == "part-2-0"]
+    assert [(item["type"], item["content"][0]["text"]) for item in observed] == [("message", "")]
 
 
 @pytest.mark.parametrize("part_type", ["text", "reasoning"])
@@ -406,8 +641,8 @@ def test_http_preserves_typed_literal_think_tags_and_unique_ids(setup, tmp_path,
     "override",
     [
         {"max_output_tokens": 123},
-        {"temperature": 0.2},
-        {"top_p": 0.9},
+        {"top_logprobs": 2},
+        {"reasoning": {"effort": "high"}},
         {"tools": [{"type": "function", "name": "foo"}]},
         {"input": [{"role": "assistant", "content": "old turn"}]},
     ],
@@ -427,7 +662,7 @@ def test_rejected_request_does_not_consume_activation(setup):
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/opencode-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        assert client.post(path, json={"input": "task", "max_output_tokens": 5}).status_code == 422
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
@@ -491,6 +726,7 @@ async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, 
         await task
     records = closed.agent_observations.records
     agent_sandbox = next(record for record in records if record.kind == "sandbox")
+    assert agent_sandbox.stage == "agent"
     assert (agent_sandbox.outcome, agent_sandbox.error_type, agent_sandbox.exit_code) == (
         "cancelled",
         "cancelled",
@@ -601,7 +837,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     assert sandbox.disconnect.await_count == 66
 
 
-async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
+async def test_fence_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -616,7 +852,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     with pytest.raises(HTTPException) as error:
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert error.value.status_code == 409
@@ -642,7 +878,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -665,7 +901,7 @@ async def test_concurrent_closes_share_receipt(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
+async def test_seed_prunes_expired_fences(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -674,7 +910,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     clock[0] += agent.config.session_close_retry_window_seconds
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -706,7 +942,7 @@ async def test_install_failure_disconnects_without_stopping_owner(setup):
         SimpleNamespace(return_code=0, error_type=None),
     ]
     request = Request({"type": "http", "session": {}})
-    with pytest.raises(RuntimeError, match="curl failed"):
+    with pytest.raises(NgFailureEvent, match="curl failed"):
         await agent.seed_agent_session(request, seed())
     assert not active_sessions(agent)
     assert not request.session
@@ -1295,7 +1531,7 @@ async def test_caller_session_id_is_never_used_as_a_filesystem_path(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(body.agent_session_id)))
 
 
-async def test_expired_receipt_cookie_cannot_seed_or_activate(setup, monkeypatch):
+async def test_cookie_of_an_expired_fence_cannot_seed_or_activate(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1306,9 +1542,9 @@ async def test_expired_receipt_cookie_cannot_seed_or_activate(setup, monkeypatch
     close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
     await agent.close_agent_session(request, close)
     clock[0] = 111.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(request, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(request, body)
     with pytest.raises(HTTPException):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
@@ -1324,7 +1560,7 @@ async def test_failed_setup_cleanup_retains_state_for_cookieless_close(setup, fa
     sandbox.exec.side_effect = [success, failed, failed if failure == "remove" else success]
     if failure == "disconnect":
         sandbox.disconnect.side_effect = RuntimeError("disconnect failed")
-    with pytest.raises(RuntimeError, match="installer failed"):
+    with pytest.raises(NgFailureEvent, match="installer failed"):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     assert agent._session_records[body.agent_session_id].closing
     with pytest.raises(HTTPException, match="closing"):

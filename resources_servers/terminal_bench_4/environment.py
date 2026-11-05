@@ -14,11 +14,13 @@ from pathlib import Path, PurePosixPath
 from string import Formatter
 from time import monotonic
 from typing import Any, Literal
+from uuid import uuid4
 
 import yaml
 from pydantic import Field, PositiveFloat, PositiveInt, model_validator
 
 from nemo_gym.sandbox import (
+    PLACEMENT_GROUP_KEY,
     AsyncSandbox,
     AsyncSandboxCompose,
     SandboxResources,
@@ -147,10 +149,20 @@ class HealthcheckError(RuntimeError):
 
 
 class Environment:
-    def __init__(self, task, config: EnvironmentConfig, session_id, directory, *, verifier=False):
+    def __init__(
+        self,
+        task,
+        config: EnvironmentConfig,
+        session_id,
+        directory,
+        *,
+        verifier=False,
+        placement_group: str | None = None,
+    ):
         self.task = task
         self.config = config
         self.session_id = session_id
+        self.placement_group = placement_group or "tb4-" + uuid4().hex
         self.directory = Path(directory)
         self.settings = task.config.verifier_environment if verifier else task.config.environment
         if verifier and config.verifier_resources_from_agent:
@@ -224,6 +236,7 @@ class Environment:
             "tb4-task": self.task.name.split("/")[-1],
             **resolve_provider_metadata(self.provider_config),
             **config.sandbox_metadata,
+            PLACEMENT_GROUP_KEY: self.placement_group,
         }
         if self.pool != "default":
             metadata["nemo-gym.nvidia.com/resource-pool"] = self.pool
@@ -318,6 +331,7 @@ class Environment:
             self.compose = AsyncSandboxCompose(
                 resolve_provider_config(self.provider_config),
                 path,
+                placement_group=self.placement_group,
                 service_specs={
                     name: spec
                     if name == "main"

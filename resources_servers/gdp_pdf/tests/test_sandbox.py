@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -82,4 +83,19 @@ async def test_failed_upload_and_close_retain_retryable_cleanup(setup):
         await server.close_resources_session(close)
     assert "session" in server._sessions
     await server.close_resources_session(close)
+    assert not server._sessions
+
+
+async def test_shutdown_waits_for_session_operation(setup):
+    server, sandbox, body, _ = setup
+    app = server.setup_webserver()
+    lifespan = app.router.lifespan_context(app)
+    await lifespan.__aenter__()
+    await server.seed_session(Request({"type": "http", "session": {}}), body)
+    async with server._locks.locked(body.resources_session_id):
+        shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
+        await asyncio.sleep(0)
+        sandbox.stop.assert_not_awaited()
+    await asyncio.wait_for(shutdown, timeout=1)
+    sandbox.stop.assert_awaited_once()
     assert not server._sessions

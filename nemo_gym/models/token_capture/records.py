@@ -182,9 +182,6 @@ class TokenEntry(BaseModel):
     routed_experts: Any | None = None
     # Preserve response output items without token arrays.
     output_items: list[dict] = Field(default_factory=list)
-    # Ordered image occurrences in the prompt, including images returned by tools.
-    # None identifies records captured before multimodal payload preservation.
-    input_images: list[dict] | None = None
     # This index identifies the item that carried token arrays.
     # ``None`` means no item carried them.
     token_item_index: int | None = None
@@ -330,30 +327,6 @@ def stamp_lineage(
         if parent_call_id is not None:
             raise ValueError(f"{parent_resolution.value} parent metadata cannot carry parent_call_id")
     return entry
-
-
-def capture_input_images(messages: list[dict]) -> list[dict]:
-    """Keep image payloads from Chat/Responses prompts in occurrence order."""
-    images = []
-    for message in messages:
-        if message.get("role") == "assistant":
-            continue
-        content = message.get("content", message.get("output"))
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict) or part.get("type") not in {"input_image", "image_url"}:
-                continue
-            value = part.get("image_url")
-            url = value.get("url") if isinstance(value, dict) else value
-            if not isinstance(url, str) or not url:
-                raise ValueError("Captured prompt image has no image URL")
-            image = {"type": "input_image", "image_url": url}
-            detail = value.get("detail") if isinstance(value, dict) else part.get("detail")
-            if detail is not None:
-                image["detail"] = detail
-            images.append(image)
-    return images
 
 
 def response_to_output_items(payload: dict) -> list[dict]:

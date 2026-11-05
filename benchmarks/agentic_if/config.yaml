@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Agentic instruction following: OpenCode works each task in its sandbox through single_agent_turn, and the
+# agentic_if resources server grades the session. The resources server config wires the servers and the example
+# split; this adds the private task set, which prepare.py downloads from Gym's dataset registry (set
+# mlflow_tracking_uri and mlflow_tracking_token). README.md has the measurement contract and run conditions.
+config_paths:
+  - resources_servers/agentic_if/configs/agentic_if.yaml
+
+environment_server_routes:
+  agentic_if:benchmark: agentic_if_environment_server
+
+# The benchmark's episodes can use their whole deadline (default_episode_timeout_seconds, 18000), so the task
+# sandboxes outlive it and its cleanup.
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      sandbox_config:
+        ttl_s: 21600
+terminal_bench_2_1_resources_server:
+  resources_servers:
+    terminal_bench_2_1:
+      sandbox_config:
+        ttl_s: 21600
+
+# OpenCode's ripgrep and plugin dependencies come with the dataset (prepare.py) and the resources server stages them
+# into each task sandbox, so a sandbox without internet access needs only the OpenCode binary (opencode_agent's
+# sandbox_executable_* fields); opencode_agent checks each staged copy against its digest.
+agentic_if_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_ripgrep_path: /tmp/nemo-gym-agentic-if/rg
+      sandbox_ripgrep_sha256: ebeaf56f8a25e102e9419933423738b3a2a613a444fd749d695e15eba53f71f2  # pragma: allowlist secret
+      sandbox_plugin_dependencies_path: /tmp/nemo-gym-agentic-if/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
+
+agentic_if_resources:
+  resources_servers:
+    agentic_if:
+      opencode_runtime_files:
+        - benchmarks/agentic_if/data/opencode-runtime/rg
+        - benchmarks/agentic_if/data/opencode-runtime/opencode-1.17.11-plugin-dependencies.tar.gz
+      datasets:
+        - name: agentic_if
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_if/data/agentic_if_benchmark.jsonl
+          prepare_script: benchmarks/agentic_if/prepare.py
+          taskset: agentic_if:benchmark
+          num_repeats: 1

@@ -65,8 +65,8 @@ Rows are lightweight — no base64 in the JSONL:
 ```
 
 `verifier_metadata.prompt` is stored explicitly so `verify()` does not have to dig the prompt back
-out of the content blocks after the agent has rewritten them. `source_pdf` is provenance only
-(re-derives the original download without guessing a filename) — never read at rollout time.
+out of the content blocks after the agent has rewritten them. The OpenCode sandbox uses
+`source_pdf` to deliver the raw PDF; the single-turn agent uses `document_manifest`.
 
 The upstream table pads every row out to 30 fixed-width rubric column groups
 (`rubric - {i}. criterion`, `... criterion_type`, and so on); `extract_criteria` in
