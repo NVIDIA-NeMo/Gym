@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+    from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
     from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
     from nemo_gym.agents.utils.sandbox_session import (
@@ -90,6 +91,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "ActivationConflictError": "utils.ordered_operations",
     "AGENT_ACTIVATION_HEADER": "base_responses_api_agent",
     "AGENT_OUTCOME_METADATA_KEY": "agent_outcome",
     "AGENT_SESSION_COOKIE_KEY": "base_responses_api_agent",
@@ -116,6 +118,7 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
+    "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
     "OutcomePolicyConfig": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
