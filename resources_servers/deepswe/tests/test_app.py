@@ -50,7 +50,7 @@ def _config(
     tasks_dir: Path,
     *,
     golden: bool = True,
-    agent_failure_outcome_policy: dict | None = None,
+    agent_policy: dict | None = None,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
         host="0.0.0.0",
@@ -60,19 +60,20 @@ def _config(
         tasks_dir=tasks_dir,
         expected_task_count=1,
         is_verifying_golden_patch=golden,
-        **({"agent_failure_outcome_policy": agent_failure_outcome_policy} if agent_failure_outcome_policy else {}),
+        **({"outcome_policy": {"by_stage": {"agent": agent_policy}}} if agent_policy else {}),
         sandbox_provider="test",
         sandbox_config={},
     )
 
 
-def test_agent_failure_policy_defaults_to_fail_and_accepts_partial_rules(task_assets: Path) -> None:
-    default = _config(task_assets).agent_failure_outcome_policy
+def test_agent_failure_policy_uses_shared_defaults_and_accepts_partial_rules(task_assets: Path) -> None:
+    default = _config(task_assets).outcome_policy.by_stage["agent"]
     assert default.default_action == OutcomeAction.FAIL
-    assert default.by_failure_kind == {} and default.by_status_code == {}
+    assert default.by_failure_kind == {PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO}
+    assert default.by_status_code == {}
     override = _config(
-        task_assets, agent_failure_outcome_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}}
-    ).agent_failure_outcome_policy
+        task_assets, agent_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}}
+    ).outcome_policy.by_stage["agent"]
     assert override.default_action == OutcomeAction.FAIL
     assert override.by_failure_kind == {PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO}
 
@@ -83,13 +84,13 @@ def test_agent_failure_policy_rejects_actions_this_boundary_cannot_execute(
     task_assets: Path, action: str, rule: str
 ) -> None:
     value = action if rule == "default_action" else {503 if rule == "by_status_code" else PROVIDER_OOM_KILLED: action}
-    with pytest.raises(ValueError, match="supports only fail and count_as_zero"):
-        _config(task_assets, agent_failure_outcome_policy={rule: value})
+    with pytest.raises(ValueError, match="supports only count_as_zero, fail"):
+        _config(task_assets, agent_policy={rule: value})
 
 
 def test_agent_failure_policy_rejects_unregistered_failure_kind(task_assets: Path) -> None:
     with pytest.raises(ValueError, match="Unregistered failure kinds"):
-        _config(task_assets, agent_failure_outcome_policy={"by_failure_kind": {"typo_oom": "count_as_zero"}})
+        _config(task_assets, agent_policy={"by_failure_kind": {"typo_oom": "count_as_zero"}})
 
 
 def _request() -> dict:
@@ -767,7 +768,7 @@ def _agent_oom_request(*, sandbox_id: str = "agent-sandbox") -> dict:
     error.details = SandboxFailureDetails(provider="opensandbox", sandbox_id=sandbox_id)
     observation = SandboxObservation(
         role="agent",
-        phase="agent_execution",
+        stage="agent",
         outcome="oom",
         failure_id=error.event_id,
     )
@@ -812,7 +813,7 @@ async def test_empty_agent_response_can_still_receive_a_completed_verifier_zero(
 @pytest.mark.parametrize(
     "policy,http_status,expected_action",
     [
-        (None, None, OutcomeAction.FAIL),
+        (None, None, OutcomeAction.COUNT_AS_ZERO),
         (
             {"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}, "by_status_code": {503: "fail"}},
             None,
@@ -838,7 +839,7 @@ async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_
     expected_action: OutcomeAction,
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, agent_failure_outcome_policy=policy),
+        config=_config(task_assets, golden=False, agent_policy=policy),
         server_client=MagicMock(spec=ServerClient),
     )
     agent_sandbox = AsyncMock()
@@ -867,6 +868,7 @@ async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_
     assert log.report == body.failure_report
     assert log.report.failure_id is None
     counted = expected_action == OutcomeAction.COUNT_AS_ZERO
+    assert response.failure_outcome_attribution == "model"
     assert response.failure_outcome_action == expected_action
     assert response.model_dump(mode="json")["failure_outcome_action"] == expected_action.value
     original_id = next(iter(body.failure_report.events))
@@ -910,7 +912,7 @@ async def test_agent_sandbox_oom_zero_requires_a_seeded_session(task_assets: Pat
         config=_config(
             task_assets,
             golden=False,
-            agent_failure_outcome_policy={
+            agent_policy={
                 "default_action": "fail",
                 "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
             },
@@ -937,7 +939,7 @@ async def test_agent_sandbox_oom_zero_cannot_grade_a_golden_patch(task_assets: P
         config=_config(
             task_assets,
             golden=True,
-            agent_failure_outcome_policy={
+            agent_policy={
                 "default_action": "fail",
                 "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
             },
@@ -956,7 +958,7 @@ async def test_agent_sandbox_oom_zero_requires_matching_sandbox(task_assets: Pat
         config=_config(
             task_assets,
             golden=False,
-            agent_failure_outcome_policy={
+            agent_policy={
                 "default_action": "fail",
                 "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
             },
@@ -991,7 +993,7 @@ async def test_sandbox_loss_without_agent_execution_proof_fails_instead_of_scori
         config=_config(
             task_assets,
             golden=False,
-            agent_failure_outcome_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}},
+            agent_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}},
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -1212,7 +1214,9 @@ def _sandbox_failure(kind: str, reason: str) -> NgFailureEvent:
         "missing_sandbox_id",
         "golden",
         "nonempty_response",
-        "setup_phase",
+        "setup_stage",
+        "missing_stage",
+        "event_stage",
         "wrong_task",
         "wrong_image",
     ],
@@ -1222,7 +1226,7 @@ async def test_agent_oom_scoring_requires_matching_canonical_execution_evidence(
     task_assets: Path, monkeypatch: MonkeyPatch, invalid: str, action: str
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, agent_failure_outcome_policy={"default_action": action}),
+        config=_config(task_assets, golden=False, agent_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: action}}),
         server_client=MagicMock(spec=ServerClient),
     )
     sandbox = AsyncMock()
@@ -1239,7 +1243,7 @@ async def test_agent_oom_scoring_requires_matching_canonical_execution_evidence(
     if invalid == "missing_report":
         body.pop("failure_report")
     elif invalid == "missing_failure_id":
-        observation = SandboxObservation(role="agent", phase="agent_execution", outcome="oom")
+        observation = SandboxObservation(role="agent", stage="agent", outcome="oom")
         body["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json()
     elif invalid == "terminal_report":
         report["failure_id"] = event["event_id"]
@@ -1250,7 +1254,7 @@ async def test_agent_oom_scoring_requires_matching_canonical_execution_evidence(
     elif invalid in ("observation_provider", "observation_sandbox_id"):
         observation = SandboxObservation(
             role="agent",
-            phase="agent_execution",
+            stage="agent",
             outcome="oom",
             failure_id=event["event_id"],
             **{invalid.removeprefix("observation_"): "other"},
@@ -1261,7 +1265,7 @@ async def test_agent_oom_scoring_requires_matching_canonical_execution_evidence(
     elif invalid == "missing_event":
         report["events"] = {}
     elif invalid == "mismatched_id":
-        observation = SandboxObservation(role="agent", phase="agent_execution", outcome="oom", failure_id="other")
+        observation = SandboxObservation(role="agent", stage="agent", outcome="oom", failure_id="other")
         body["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json()
     elif invalid == "wrong_boundary":
         event["boundary"] = "resources_server"
@@ -1280,9 +1284,14 @@ async def test_agent_oom_scoring_requires_matching_canonical_execution_evidence(
         body["response"]["output"] = [
             {"type": "message", "id": "message", "role": "assistant", "status": "completed", "content": []}
         ]
-    elif invalid == "setup_phase":
-        observation = SandboxObservation(role="agent", phase="setup", outcome="oom", failure_id=event["event_id"])
+    elif invalid == "setup_stage":
+        observation = SandboxObservation(role="agent", stage="seed", outcome="oom", failure_id=event["event_id"])
         body["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json()
+    elif invalid == "missing_stage":
+        observation = SandboxObservation(role="agent", outcome="oom", failure_id=event["event_id"])
+        body["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json()
+    elif invalid == "event_stage":
+        event["stage"] = "seed"
     elif invalid == "wrong_task":
         server._agent_sessions["test-session"].task_id = "other"
     elif invalid == "wrong_image":
@@ -1366,7 +1375,7 @@ async def test_diagnostic_oom_event_without_execution_observation_does_not_choos
         config=_config(
             task_assets,
             golden=False,
-            agent_failure_outcome_policy={
+            agent_policy={
                 "default_action": "fail",
                 "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
             },
@@ -1413,6 +1422,7 @@ async def test_recovered_verifier_keeps_original_sandbox_failure_without_changin
 
     assert (response.reward, response.evaluation_completed, response.mask_sample) == (1.0, True, False)
     assert response.failure_kind is None and response.verification_attempts == 2
+    assert response.failure_outcome_action is None and response.failure_outcome_attribution is None
     assert log.report.failure_id is None and not log.report.omitted
     assert log.report.events[error.event_id] == failure_report_for(error).events[error.event_id]
     [attempt] = [event for event in log.report.events.values() if event.boundary == FailureBoundary.RESOURCES_SERVER]
@@ -1498,7 +1508,7 @@ async def test_rejected_oom_evidence_stops_only_its_owned_seeded_session(
     task_assets: Path, monkeypatch: MonkeyPatch, invalid: str, action: str
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, agent_failure_outcome_policy={"default_action": action}),
+        config=_config(task_assets, golden=False, agent_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: action}}),
         server_client=MagicMock(spec=ServerClient),
     )
     owned, other = AsyncMock(), AsyncMock()
@@ -1535,7 +1545,7 @@ async def test_rejected_oom_evidence_keeps_its_original_error_when_owned_cleanup
         config=_config(
             task_assets,
             golden=False,
-            agent_failure_outcome_policy={
+            agent_policy={
                 "default_action": "fail",
                 "by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"},
             },
@@ -1560,3 +1570,37 @@ async def test_rejected_oom_evidence_keeps_its_original_error_when_owned_cleanup
     assert caught.value is original and caught.value.__cause__ is cause
     owned.stop.assert_awaited_once()
     assert "owned" not in server._agent_sessions
+
+
+@pytest.mark.parametrize("action,attempts", [("retry", 3), ("fail", 1)])
+async def test_verification_stage_policy_controls_bounded_retry_and_retains_evaluation_fault(
+    task_assets: Path, monkeypatch: MonkeyPatch, action: str, attempts: int
+) -> None:
+    errors = [_sandbox_failure(PROVIDER_OOM_KILLED, f"verifier container OOM {i}") for i in range(3)]
+    server, created = _rollout_server(task_assets, monkeypatch, verifier_results=errors)
+    server.config.outcome_policy.by_stage["verification"].by_failure_kind[PROVIDER_OOM_KILLED] = action
+    response, log = await _verify(server)
+    assert response.verification_attempts == attempts
+    assert response.evaluation_completed is False and response.mask_sample is True
+    assert response.failure_outcome_action == OutcomeAction.FAIL
+    assert response.failure_outcome_attribution == "evaluation"
+    for error in errors[:attempts]:
+        assert log.report.events[error.event_id] == failure_report_for(error).events[error.event_id]
+    assert server._create_sandbox.await_count == attempts + 1
+    for sandbox in created[: attempts + 1]:
+        sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("stage", ["agent", "seed"])
+async def test_verifier_does_not_reassign_a_known_failure_origin_or_claim_its_ownership(
+    task_assets: Path, monkeypatch: MonkeyPatch, stage: str
+) -> None:
+    error = _sandbox_failure(PROVIDER_OOM_KILLED, "failure forwarded from another execution stage")
+    error.stage = stage
+    server, _ = _rollout_server(task_assets, monkeypatch, verifier_results=[error])
+    response, log = await _verify(server)
+    assert response.verification_attempts == 1
+    assert response.failure_outcome_action == OutcomeAction.FAIL
+    assert response.failure_outcome_attribution == "unknown"
+    assert response.mask_sample is True and response.evaluation_completed is False
+    assert log.report.events[error.event_id].stage == stage

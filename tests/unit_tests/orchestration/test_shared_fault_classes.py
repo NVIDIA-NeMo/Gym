@@ -193,7 +193,8 @@ def test_incomplete_rows_do_not_infer_a_counted_zero_without_a_consistent_decisi
     row.update(overrides)
     assert not is_policy_counted_zero(row)
     decision, _, _ = _gate(collected)
-    assert decision.counts == {"masked": 1}
+    expected = "terminal" if overrides.get("failure_outcome_action") == "fail" else "masked"
+    assert decision.counts == {expected: 1}
 
 
 def test_old_incomplete_rows_remain_readable_without_inventing_a_decision():
@@ -220,6 +221,7 @@ def test_collector_preserves_policy_decision_with_omitted_failure_evidence(tmp_p
 
     source = _policy_zero(kind="provider_unavailable")
     row = source.results[0]
+    row["failure_outcome_attribution"] = "evaluation"
     row["_ng_failure_events_omitted"] = True
     row["response"]["metadata"] = {"unrelated_metadata": "private-metadata-marker"}
     artifacts = tmp_path / "artifacts"
@@ -233,6 +235,7 @@ def test_collector_preserves_policy_decision_with_omitted_failure_evidence(tmp_p
     collected = collect(tmp_path)
     projected = collected.results[0]
     assert projected["failure_outcome_action"] == "count_as_zero"
+    assert projected["failure_outcome_attribution"] == "evaluation"
     assert "private-metadata-marker" not in json.dumps(projected)
     decision, (passed, reason, report), task = _gate(collected)
     assert decision.counts == {"scored": 1}
@@ -241,3 +244,122 @@ def test_collector_preserves_policy_decision_with_omitted_failure_evidence(tmp_p
     assert report["evaluation"]["kinds"] == {"provider_unavailable": 1}
     assert passed is False and report["status"] == "FAIL", reason
     assert task["failures"]["metric_coverage"]["trials"] == 1
+
+
+@pytest.mark.parametrize("kind", ["provider_oom_killed", "provider_unavailable", "verifier_error"])
+@pytest.mark.parametrize("attribution", ["model", "evaluation", "unknown"])
+def test_trial_health_uses_saved_attribution_without_failure_evidence(kind, attribution):
+    collected = _policy_zero(kind=kind)
+    row = collected.results[0]
+    row["failure_outcome_attribution"] = attribution
+    row["_ng_failure_events_omitted"] = True
+    decision, (passed, reason, report), task = _gate(collected)
+    assert decision.counts == {"scored": 1}
+    side = "model" if attribution == "model" else "evaluation"
+    other = "evaluation" if side == "model" else "model"
+    assert report[side]["kinds"] == {kind: 1}, reason
+    assert report[other]["count"] == 0
+    assert task["failures"]["metric_coverage"]["trials"] == 1
+    assert passed is (attribution == "model"), reason
+    assert row["evaluation_completed"] is False
+
+
+def test_same_failure_kind_can_have_different_saved_attribution_per_trial():
+    collected = _run(3)
+    for row, attribution in zip(collected.results, ["model", "evaluation", None], strict=True):
+        row.update(
+            reward=0.0,
+            failure_kind="provider_oom_killed",
+            failure_outcome_action="count_as_zero",
+            failure_outcome_attribution=attribution,
+            evaluation_completed=False,
+            mask_sample=False,
+        )
+    decision, (passed, reason, report), _ = _gate(collected)
+    assert decision.counts == {"scored": 3}
+    assert report["model"]["kinds"] == {"provider_oom_killed": 1}
+    assert report["evaluation"]["kinds"] == {"provider_oom_killed": 2}
+    assert report["evaluation"]["server"] == 2
+    assert passed is False, reason
+
+
+@pytest.mark.parametrize("attribution", [None, "invalid", 0, False, {}])
+def test_invalid_or_missing_saved_attribution_keeps_existing_health_classification(attribution):
+    collected = _policy_zero()
+    collected.results[0]["failure_outcome_attribution"] = attribution
+    _, (_, _, report), _ = _gate(collected)
+    assert report["evaluation"]["kinds"] == {"provider_oom_killed": 1}
+    assert report["model"]["count"] == 0
+
+
+def test_explicit_unknown_attribution_does_not_fall_back_to_model_kind():
+    collected = _policy_zero(kind="agent_timeout")
+    collected.results[0]["failure_outcome_attribution"] = "unknown"
+    _, (_, _, report), _ = _gate(collected)
+    assert report["model"]["count"] == 0
+    assert report["evaluation"]["kinds"] == {"agent_timeout": 1}
+
+
+def test_bad_judge_verdict_preserves_other_trials_saved_attribution():
+    from tests.unit_tests.orchestration.test_llm_judge_trial_coverage import _dep, _judge_call, _own
+
+    collected = _run(100)
+    collected.results[0].update(
+        reward=0.0,
+        failure_kind="provider_oom_killed",
+        failure_outcome_action="count_as_zero",
+        failure_outcome_attribution="model",
+        evaluation_completed=False,
+        mask_sample=False,
+    )
+    observed = collected.results[1]["ng_trial_observations"]
+    grade = observed["verifier_invocations"][0]["grading_operations"][0]
+    grade["kind"] = "llm_judge"
+    call = _judge_call(observed)
+    _own(observed, call)
+    grade["dependencies"] = [_dep(call)]
+    call["response_metadata"].update(dialect="chat", response_status=None, finish_reason="length")
+    _, (passed, reason, report), _ = _gate(collected)
+    assert report["model"]["kinds"] == {"provider_oom_killed": 1}, reason
+    assert report["evaluation"]["kinds"] == {"grading_without_verdict": 1}, reason
+    assert passed is True, reason  # One evaluation fault in 100 remains below the 2% gate.
+
+
+@pytest.mark.parametrize("kind", ["provider_oom_killed", "verifier_error", "session_lost"])
+def test_saved_fail_stops_masked_recovery_even_when_its_default_policy_would_retry(tmp_path, kind):
+    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _decide, _masked, _run
+
+    output, _ = _run(
+        tmp_path, [[_masked(kind) | {"failure_outcome_action": "fail", "failure_outcome_attribution": "evaluation"}]]
+    )
+    from nemo_gym.rollouts.rollout_store import RolloutStore
+
+    assert RolloutStore.read(output, import_legacy=False).pending() == []
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.action.value == "stop"
+    assert decision.counts == {"scored": 1, "terminal": 1}
+    assert not decision.complete
+
+
+def test_unfinished_run_health_preserves_saved_policy_attribution(tmp_path, monkeypatch):
+    import json
+
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    collected = _policy_zero()
+    collected.results[0]["failure_outcome_attribution"] = "model"
+    collected.materialized.append({"_ng_task_index": 1, "_ng_rollout_index": 0, "_ng_collected_task_id": "1"})
+    directory = tmp_path / "artifacts"
+    directory.mkdir()
+    output = directory / "rollouts.jsonl"
+    output.write_text(json.dumps(collected.results[0]) + "\n")
+    artifacts = RunArtifacts(output)
+    artifacts.aggregate_metrics_json_fpath.write_text(
+        json.dumps([{"agent_ref": {"type": "responses_api_agents", "name": "agent"}, "agent_metrics": {"score": 0.0}}])
+    )
+    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    values = _prepare_run_health_metrics(output)
+    assert values["health/trial/expected"] == 2
+    assert values["health/trial/failed_lower_bound"] == 0
+    assert values["health/trial/failure_rate_lower_bound"] == 0

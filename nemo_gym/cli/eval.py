@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -574,7 +575,9 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial, _, evaluation = trial_verdict(decision, collected)
         if evaluation is None and trials > 0:
             # Not evaluated (the run is not complete): its known faults are a lower bound.
-            evaluation = fault_report(trial_faults(decision, collected), trials) | {"exact": False}
+            attributions = Counter()
+            kinds = trial_faults(decision, collected, attributions=attributions)
+            evaluation = fault_report(kinds, trials, attributions=attributions) | {"exact": False}
         if evaluation is not None:
             exact = evaluation["exact"]
             failed = evaluation["evaluation"]["count"]

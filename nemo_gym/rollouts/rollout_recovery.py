@@ -59,6 +59,7 @@ from nemo_gym.core.failure_kinds import (
     is_evaluation_side,
     is_server_status,
 )
+from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.utils.path_utils import (
     attempt_extension_path_for,
     failures_path_for,
@@ -318,6 +319,7 @@ def _masked_evaluation_side_kind(row: Mapping[str, Any]) -> str | None:
     """
     if (
         row.get("mask_sample") is not True
+        or row.get("failure_outcome_action") == OutcomeAction.FAIL
         or row.get("_ng_failure_class") is not None
         or row.get("_ng_omitted_rollout") is True
         or row.get("_ng_rejudge_operation_id") is not None

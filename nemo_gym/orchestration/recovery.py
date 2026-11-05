@@ -93,7 +93,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureReportRow
-from nemo_gym.core.outcome_policy import is_policy_counted_zero
+from nemo_gym.core.outcome_policy import OutcomeAction, OutcomeAttribution, is_policy_counted_zero
 from nemo_gym.orchestration.collect_evidence import (
     COLLECT_SCRIPT,
     EPISODE_DEADLINE_REASON,  # noqa: F401
@@ -978,6 +978,18 @@ def decide_recovery(
                 and (row.get("mask_sample") is True or row.get("evaluation_completed") is False)
                 and not is_policy_counted_zero(row)
             ):
+                if row.get("failure_outcome_action") == OutcomeAction.FAIL:
+                    # The owning boundary already ended this failure; recovery cannot grant a new retry budget.
+                    policy_stopped = True
+                    evidence.append(
+                        IdentityEvidence(
+                            identity=identity,
+                            state=IdentityState.TERMINAL,
+                            failure_kind=row.get("failure_kind"),
+                            events=_events(row),
+                        )
+                    )
+                    continue
                 if reverification_cause(row) is not None:
                     # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
                     saved_results.add(identity)
@@ -4928,7 +4940,12 @@ def _recovered_note(joined: Mapping[str, int]) -> str:
     )
 
 
-def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None) -> Counter:
+def trial_faults(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    attributions: Counter | None = None,
+) -> Counter:
     """The trial gate's counted failures by kind.
 
     Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
@@ -4948,18 +4965,30 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     kinds.update(final_zero.values())
     kinds[AGENT_TIMEOUT_INFRASTRUCTURE] += len(infrastructure)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
-    kinds.update(
-        fault
-        for row in (collected.results or [] if collected is not None else [])
-        if _identity(row) in scored
-        and _identity(row) not in final_zero
-        and _identity(row) not in infrastructure
-        and (fault := _scored_fault(row, collected)) is not None
-    )
+    for row in collected.results or [] if collected is not None else []:
+        if (
+            _identity(row) not in scored
+            or _identity(row) in final_zero
+            or _identity(row) in infrastructure
+            or (fault := _scored_fault(row, collected)) is None
+        ):
+            continue
+        kinds[fault] += 1
+        # Attribution belongs to the persisted policy decision, never to replayed sandbox evidence.
+        if attributions is not None and row.get("failure_outcome_action") in OutcomeAction:
+            attribution = row.get("failure_outcome_attribution")
+            if attribution in OutcomeAttribution:
+                attributions[fault, attribution] += 1
     return +kinds
 
 
-def fault_report(kinds: Counter, trials: int, *, policy_timeout_counts_as_model: bool = True) -> dict[str, Any]:
+def fault_report(
+    kinds: Counter,
+    trials: int,
+    *,
+    policy_timeout_counts_as_model: bool = True,
+    attributions: Counter | None = None,
+) -> dict[str, Any]:
     """Model and evaluation-side fault counts, fractions and kinds over the trials; ``server`` counts server faults."""
 
     def side(found: dict) -> dict[str, Any]:
@@ -4969,8 +4998,13 @@ def fault_report(kinds: Counter, trials: int, *, policy_timeout_counts_as_model:
     def class_of(kind):
         return fault_class(kind, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
 
-    model = {kind: n for kind, n in kinds.items() if class_of(kind) == "model"}
-    evaluation = {kind: n for kind, n in kinds.items() if class_of(kind) != "model"}
+    remaining = kinds.copy()
+    model, evaluation = Counter(), Counter()
+    for (kind, attribution), count in (attributions or {}).items():
+        remaining[kind] -= count
+        (model if attribution == OutcomeAttribution.MODEL else evaluation)[kind] += count
+    model.update({kind: n for kind, n in remaining.items() if n and class_of(kind) == "model"})
+    evaluation.update({kind: n for kind, n in remaining.items() if n and class_of(kind) != "model"})
     server = sum(n for kind, n in evaluation.items() if class_of(kind) == "server")
     report = {"trials": trials, "evaluation": side(evaluation) | {"server": server}, "model": side(model)}
     return report if policy_timeout_counts_as_model else report | {"policy_timeout_counts_as_model": False}
@@ -5039,8 +5073,11 @@ def trial_verdict(
     trials = trial_population(decision)
     if not decision.complete or trials <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})", None
-    kinds = trial_faults(decision, collected)
-    report = fault_report(kinds, trials, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
+    attributions = Counter()
+    kinds = trial_faults(decision, collected, attributions=attributions)
+    report = fault_report(
+        kinds, trials, policy_timeout_counts_as_model=policy_timeout_counts_as_model, attributions=attributions
+    )
 
     def verdict(passed: bool | None, reason: str, *, exact: bool = False):
         state = {True: "PASS", False: "FAIL", None: "UNVERIFIED"}[passed]
@@ -5117,6 +5154,7 @@ def trial_verdict(
                 kinds + Counter({GRADING_WITHOUT_VERDICT: len(invalid_grades)}),
                 trials,
                 policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+                attributions=attributions,
             )
         retried = (
             f"{recovered_policy} failed policy attempt(s) were retried and completed in the same operation "

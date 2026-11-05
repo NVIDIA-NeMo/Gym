@@ -35,10 +35,10 @@ from nemo_gym.core import (
     FailureReportRow,
     NgFailureEvent,
     OutcomeAction,
-    OutcomePolicyConfig,
     RequestFailureLog,
     SandboxFailureDetails,
-    choose_action,
+    StageOutcomePolicyConfig,
+    choose_stage_outcome,
     current_verifier_invocation_id,
     failure_kinds,
     observe_failure,
@@ -100,9 +100,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
-    agent_failure_outcome_policy: OutcomePolicyConfig = Field(
-        default_factory=lambda: OutcomePolicyConfig(default_action=OutcomeAction.FAIL)
-    )
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=StageOutcomePolicyConfig)
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -118,19 +116,19 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
 
-    @field_validator("agent_failure_outcome_policy", mode="before")
+    @field_validator("outcome_policy")
     @classmethod
-    def retain_agent_failure_default(cls, value: object) -> object:
-        """Partial rule overrides retain the resource boundary's fail default."""
-        return {"default_action": OutcomeAction.FAIL} | value if isinstance(value, dict) else value
-
-    @field_validator("agent_failure_outcome_policy")
-    @classmethod
-    def require_supported_agent_failure_actions(cls, policy: OutcomePolicyConfig) -> OutcomePolicyConfig:
-        """A dead agent workspace can be failed or counted, but cannot be verified or replayed here."""
-        actions = {policy.default_action, *policy.by_failure_kind.values(), *policy.by_status_code.values()}
-        if actions - {OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO}:
-            raise ValueError("DeepSWE agent failure policy supports only fail and count_as_zero")
+    def require_supported_stage_actions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """Validate actions against the operations this resources server can perform."""
+        supported = {
+            "agent": {OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO},
+            "verification": {OutcomeAction.FAIL, OutcomeAction.RETRY},
+        }
+        for stage, allowed in supported.items():
+            rules = policy.by_stage.get(stage, policy.default_policy)
+            actions = {rules.default_action, *rules.by_failure_kind.values(), *rules.by_status_code.values()}
+            if actions - allowed:
+                raise ValueError(f"DeepSWE {stage} policy supports only {', '.join(sorted(allowed))}")
         return policy
 
 
@@ -603,6 +601,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         failure_cause: Exception | None = None
         replayed = False
         agent_failure_action: OutcomeAction | None = None
+        failure_outcome_attribution = None
         failure_log = RequestFailureLog.current()
         if body.failure_report is not None and failure_log is not None:
             failure_log.add(body.failure_report)
@@ -615,7 +614,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 if (
                     agent_oom_observation.role != "agent"
                     or agent_oom_observation.outcome != "oom"
-                    or agent_oom_observation.phase != "agent_execution"
+                    or agent_oom_observation.stage != "agent"
                 ):
                     raise ValueError("Invalid agent sandbox OOM observation for DeepSWE scoring")
                 report = body.failure_report
@@ -629,6 +628,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     or not isinstance(agent_oom_event.details, SandboxFailureDetails)
                     or not agent_oom_event.details.provider
                     or not agent_oom_event.details.sandbox_id
+                    or agent_oom_event.stage not in (None, "agent")
                 ):
                     raise ValueError("DeepSWE agent sandbox OOM requires its canonical sandbox failure event")
                 details = agent_oom_event.details
@@ -692,11 +692,14 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     if agent_oom_observation is not None:
                         if agent_oom_event.details.sandbox_id != agent_session.sandbox_handle:
                             raise ValueError("Agent sandbox OOM observation does not match the seeded DeepSWE sandbox")
-                        agent_failure_action = choose_action(
+                        decision = choose_stage_outcome(
                             failure_kind=agent_oom_event.failure_kind,
                             http_status=agent_oom_event.http_status,
-                            config=self.config.agent_failure_outcome_policy,
+                            stage=agent_oom_observation.stage,
+                            config=self.config.outcome_policy,
                         )
+                        agent_failure_action = decision.action
+                        failure_outcome_attribution = decision.attribution
                         patch_error = (
                             "Agent sandbox was OOM-killed during agent execution; no patch could be collected. "
                             f"{agent_oom_event.failure_reason}"
@@ -723,6 +726,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox_start_time_s = 0.0
         verification_time_s = 0.0
         verification_attempts = 0
+        verification_failure_action = None
         inconclusive_attempts: list[str] = []
         result = VerifierResult(evaluation_completed=False, reward=0.0, verifier_error=patch_error)
         # One verification operation, however many attempts it takes; outside a verifier invocation it gets its own id.
@@ -755,8 +759,29 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     if sandbox is not None:
                         await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
                 reason = _inconclusive_reason(result, attempt_error)
-                if reason is None or attempt == attempts:
+                decision = None
+                if reason is not None:
+                    # Policy decides whether an admitted inconclusive attempt can be retried; the existing
+                    # operation boundary still owns safety and the finite fresh-sandbox attempt budget.
+                    decision = choose_stage_outcome(
+                        failure_kind=attempt_error.failure_kind
+                        if isinstance(attempt_error, NgFailureEvent)
+                        else VERIFIER_ERROR,
+                        http_status=attempt_error.http_status if isinstance(attempt_error, NgFailureEvent) else None,
+                        # This loop establishes verifier ownership only. Preserve a different known
+                        # origin on the event and use the conservative policy for that unowned context.
+                        stage=None
+                        if isinstance(attempt_error, NgFailureEvent)
+                        and attempt_error.stage not in (None, "verification")
+                        else "verification",
+                        config=self.config.outcome_policy,
+                    )
+                if reason is None or attempt == attempts or decision.action != OutcomeAction.RETRY:
                     failure_cause = attempt_error
+                    if decision is not None:
+                        # A non-retry action or an exhausted retry budget ends this attempt sequence ungraded.
+                        verification_failure_action = OutcomeAction.FAIL
+                        failure_outcome_attribution = decision.attribution
                     break
                 inconclusive_attempts.append(bounded_text(reason, _MAX_FAILURE_REASON_CHARS))
                 # An attempt that is run again is observed as its own failure, as swebench_pro observes its
@@ -840,7 +865,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "inconclusive_attempts": inconclusive_attempts,
                 "replayed_saved_patch": replayed,
                 "mask_sample": not result.evaluation_completed and agent_failure_action != OutcomeAction.COUNT_AS_ZERO,
-                "failure_outcome_action": agent_failure_action,
+                "failure_outcome_action": agent_failure_action or verification_failure_action,
+                "failure_outcome_attribution": failure_outcome_attribution,
                 "failure_kind": PROVIDER_OOM_KILLED
                 if agent_oom_observation is not None
                 else (None if result.evaluation_completed else failure_kind),
