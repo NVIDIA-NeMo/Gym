@@ -14,8 +14,8 @@ from omegaconf import OmegaConf
 import nemo_gym.server_runtime.base_server
 import nemo_gym.server_runtime.ray_support
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli.env import _ray_server_names
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.orchestration.server_supervisor import _ray_server_names
 from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_class_flag
 from nemo_gym.server_runtime.ray_support import _connect_server_to_ray, _declared_ray_enabled, entrypoint_ray_enabled
@@ -28,7 +28,6 @@ WITHOUT_CLUSTER = OmegaConf.create({})
 DIRECT_RAY_COMPONENTS = {
     "resources_servers": {
         "code_fim",
-        "code_gen",
         "evalplus",
         "longmt_eval",
         "spider2_lite",
@@ -49,7 +48,7 @@ DIRECT_RAY_COMPONENTS = {
 }
 
 INHERITED_RAY_DECLARATIONS = {
-    # The sandbox-only entrypoint opts out of its code_gen parent's Ray execution path.
+    # Compatibility entrypoint inherits sandbox-only execution.
     ("resources_servers/code_gen/sandbox_app.py", "CompCodingSandboxResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
@@ -358,15 +357,16 @@ def test_ray_servers_request_the_ray_extra() -> None:
     assert not missing, "Servers declaring ray_enabled = True must request nemo-gym[ray]:\n" + "\n".join(missing)
 
 
-def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["app.py", "sandbox_app.py"])
+def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch, entrypoint):
     def unexpected_ray_check():
         pytest.fail("sandbox-only server must not check or initialize Ray")
 
-    monkeypatch.setattr("nemo_gym.cli.env.ray_is_installed", unexpected_ray_check)
+    monkeypatch.setattr("nemo_gym.orchestration.server_supervisor.ray_is_installed", unexpected_ray_check)
     monkeypatch.setattr("nemo_gym.server_runtime.ray_support.initialize_ray", unexpected_ray_check)
     server = SimpleNamespace(
         top_level_path="code_gen",
         dir_path=PARENT_DIR / "resources_servers/code_gen",
-        entrypoint_fpath=Path("sandbox_app.py"),
+        entrypoint_fpath=Path(entrypoint),
     )
     assert _ray_server_names([server]) == []

@@ -23,8 +23,9 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
 LEGACY_JUDGE_PROTOCOL = "legacy_v1_0"
@@ -140,33 +141,39 @@ class AalcrResourcesServer(SimpleResourcesServer):
         )
         judge_responses_create_params |= self.config.judge_responses_create_params_overrides
 
-        judge_response = await call_judge(
-            self.server_client,
-            server_name=self.config.judge_model_server.name,
-            url_path="/v1/responses",
-            json=judge_responses_create_params,
-            response_model=NeMoGymResponse,
-        )
-        verdict = _parse_judge_verdict(judge_response.output_text, self.config.judge_protocol)
-        if verdict == "CORRECT":
-            invalid_judge_response = False
-            reward = 1.0
-        elif verdict == "INCORRECT":
-            invalid_judge_response = False
-            reward = 0.0
-        else:
-            invalid_judge_response = True
-            reward = 0.0
+        async def grade() -> AALCRVerifyResponse:
+            judge_response = await call_judge(
+                self.server_client,
+                server_name=self.config.judge_model_server.name,
+                url_path="/v1/responses",
+                json=judge_responses_create_params,
+                response_model=NeMoGymResponse,
+            )
+            verdict = _parse_judge_verdict(judge_response.output_text, self.config.judge_protocol)
+            if verdict == "CORRECT":
+                invalid_judge_response = False
+                reward = 1.0
+                record_parsed_judge_verdict()
+            elif verdict == "INCORRECT":
+                invalid_judge_response = False
+                reward = 0.0
+                record_parsed_judge_verdict()
+            else:
+                # An unparseable verdict scores zero but is not an established grade.
+                invalid_judge_response = True
+                reward = 0.0
 
-        return AALCRVerifyResponse(
-            **body.model_dump(),
-            reward=reward,
-            invalid_model_response=False,
-            invalid_judge_response=invalid_judge_response,
-            judge_responses_create_params=judge_responses_create_params,
-            judge_response=judge_response,
-            **{input_tokens_band_key: reward},
-        )
+            return AALCRVerifyResponse(
+                **body.model_dump(),
+                reward=reward,
+                invalid_model_response=False,
+                invalid_judge_response=invalid_judge_response,
+                judge_responses_create_params=judge_responses_create_params,
+                judge_response=judge_response,
+                **{input_tokens_band_key: reward},
+            )
+
+        return await observe_llm_judge_grading(grade)
 
 
 def _build_judge_input(

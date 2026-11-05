@@ -85,7 +85,7 @@ tar -xzf responses_api_agents/harbor_agent/data/nemotron_terminal_synthetic_task
 
 ### 2) Set up dependencies and task images
 
-- Install `git` (required because `requirements.txt` installs Harbor from a Git URL)
+- Install `git` (required because `pyproject.toml` installs Harbor from a Git URL)
   and Apptainer/Singularity (required when running Harbor tasks on HPC clusters
   with the Singularity environment).
 

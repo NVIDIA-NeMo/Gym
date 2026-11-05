@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from app import CompCodingResourcesServerConfig
+from app import CompCodingResourcesServer, CompCodingResourcesServerConfig
 from pydantic import ValidationError
 from sandbox_app import CompCodingSandboxResourcesServer
 
@@ -15,7 +15,8 @@ from nemo_gym.client import ServerClient
 from nemo_gym.server_runtime import ReverifyMode
 
 
-def test_sandbox_entrypoint_imports_without_ray():
+@pytest.mark.parametrize("entrypoint", ["app", "sandbox_app"])
+def test_sandbox_entrypoint_imports_without_ray(entrypoint):
     script = """
 import importlib.abc
 import sys
@@ -26,11 +27,11 @@ class NoRay(importlib.abc.MetaPathFinder):
             raise ModuleNotFoundError('Ray unavailable in this environment')
 
 sys.meta_path.insert(0, NoRay())
-import sandbox_app
+__import__(sys.argv[1])
 assert 'ray' not in sys.modules
 """
     subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", script, entrypoint],
         cwd=Path(__file__).parents[1],
         check=True,
         capture_output=True,
@@ -38,25 +39,25 @@ assert 'ray' not in sys.modules
     )
 
 
-@pytest.mark.parametrize("provider", [None, "sandbox"])
-def test_sandbox_entrypoint_requires_provider(provider):
-    config = CompCodingResourcesServerConfig(
+@pytest.mark.parametrize("server_type", [CompCodingResourcesServer, CompCodingSandboxResourcesServer])
+def test_sandbox_entrypoint_requires_provider(server_type):
+    kwargs = dict(
         host="127.0.0.1",
         port=8080,
         name="code_gen",
-        entrypoint="sandbox_app.py",
+        entrypoint="app.py",
         num_processes=1,
         unit_test_timeout_secs=10,
         debug=False,
-        sandbox_provider=provider,
         sandbox_config={"image": "code-gen-verifier:test"},
     )
-    kwargs = {"config": config, "server_client": MagicMock(spec=ServerClient)}
-    if provider is None:
-        with pytest.raises(ValidationError, match="requires sandbox_provider"):
-            CompCodingSandboxResourcesServer(**kwargs)
-    else:
-        assert CompCodingSandboxResourcesServer(**kwargs).config.sandbox_provider == "sandbox"
+    with pytest.raises(ValidationError, match="sandbox_provider"):
+        CompCodingResourcesServerConfig(**kwargs)
+    with pytest.raises(ValidationError, match="sandbox_provider"):
+        CompCodingResourcesServerConfig(**kwargs, sandbox_provider=None)
+    config = CompCodingResourcesServerConfig(**kwargs, sandbox_provider="sandbox")
+    server = server_type(config=config, server_client=MagicMock(spec=ServerClient))
+    assert server.ray_enabled is False
 
 
 @pytest.mark.asyncio
