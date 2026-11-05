@@ -141,6 +141,8 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
             )
             if run.materialized_inputs:
                 lines.append(f"  Materialized inputs: `{_text(run.materialized_inputs)}`.")
+            if run.failures is not None:
+                lines.append(f"  Saved failure counts (entire rollout file): `{_text(run.failures.source)}`.")
             for note in run.coverage.notes:
                 lines.append(f"  {_text(note)}")
         if cell.statistics and cell.statistics.interval_unavailable_reason:
@@ -163,6 +165,8 @@ def write_suite_reports(result: SuiteComparisonResult, output_dir: Path, report_
             sources.update((run.rollouts.resolve(), run.aggregate_metrics.resolve()))
             if run.materialized_inputs:
                 sources.add(run.materialized_inputs.resolve())
+            if run.failures is not None:
+                sources.add(run.failures.source.resolve())
     names = [
         name
         for extension, name in (("md", "suite_compare_report.md"), ("json", "suite_compare_report.json"))

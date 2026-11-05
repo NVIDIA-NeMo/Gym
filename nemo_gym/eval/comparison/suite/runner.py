@@ -22,9 +22,15 @@ from pathlib import Path
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides
+from nemo_gym.eval.comparison.suite.failures import read_saved_failures, saved_failure_warning
 from nemo_gym.eval.comparison.suite.loading import load_suite_manifest, load_suite_run, resolve_metric_definitions
 from nemo_gym.eval.comparison.suite.processing import aggregate_suite_cells, compare_suite_cell
-from nemo_gym.eval.comparison.suite.schema import SuiteComparisonConfig, SuiteComparisonResult, SuiteMetricResult
+from nemo_gym.eval.comparison.suite.schema import (
+    SuiteComparisonConfig,
+    SuiteComparisonResult,
+    SuiteFailureSummary,
+    SuiteMetricResult,
+)
 from nemo_gym.package_info import __version__
 
 
@@ -88,7 +94,7 @@ def build_suite_comparison(
         raise ConfigError("No eligible model-benchmark comparisons remain. " + " ".join(warnings))
     for cell in eligible:
         cell.overall_weight = 1 / len(eligible)
-    return SuiteComparisonResult(
+    result = SuiteComparisonResult(
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         nemo_gym_version=__version__,
         command=command,
@@ -99,3 +105,14 @@ def build_suite_comparison(
         overall=aggregate_suite_cells("overall", cells, confidence_level=config.confidence_level),
         warnings=warnings,
     )
+    failures_by_path: dict[Path, SuiteFailureSummary | None] = {}
+    for cell in result.cells:
+        for role, run in (("baseline", cell.baseline), ("candidate", cell.candidate)):
+            if run.rollouts not in failures_by_path:
+                failures_by_path[run.rollouts] = read_saved_failures(run.rollouts)
+            run.failures = failures_by_path[run.rollouts]
+            if run.failures is not None:
+                warning = saved_failure_warning(run.failures)
+                if warning is not None:
+                    result.warnings.append(f"{cell.model}/{cell.benchmark} {role}: {warning}")
+    return result

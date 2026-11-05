@@ -277,14 +277,26 @@ Every selected metric must be present in every included repeat. Gym does not sil
 
 Recorded task sets must agree across repeats and sides. When materialized inputs are available, Gym also verifies planned coverage. Without those inputs, planned coverage remains unverified; recorded coverage checks cannot prove that a task absent from every completed result was collected. Known incomplete or inconsistent coverage suppresses affected confidence intervals while retaining descriptive results.
 
+## Read saved failure counts
+
+Suite comparison automatically reads the rollout file's `*_coverage.json` companion when present. It uses the saved `failed`, `failed_final`, `failed_not_final`, and `failed_by_class` counts without scanning rollout records or reconstructing retries from failure logs. No additional flag is needed. Positive counts add a short warning, for example:
+
+```text
+llama31-8b/birdbench candidate: Saved failures (entire rollout file): 2 (1 final, 1 not final; agent_run_error=2).
+```
+
+These counts are a saved snapshot for the **entire rollout file**, including every agent and benchmark in that file. They do not establish the current health of its trajectories. A failure counted as zero by the run's scoring policy can contribute to both the score and the failure count; these counts do not identify all policy-assigned zeros.
+
+Missing coverage files leave failure counts unknown without a warning. An existing file with unavailable, unreadable, or malformed counts produces a brief unavailable warning. Counts of zero produce no warning. Failure reporting does not change scores, weights, coverage decisions, or confidence intervals. Per-source JSON `failures` records the `source` path, `scope`, `counts`, and any `unavailable_reason`.
+
 ## Read the reports
 
 `gym eval compare-suite` writes these files to `--output-dir`, defaulting to the YAML file's directory:
 
 | File | Contents |
 | --- | --- |
-| `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, and coverage notes. |
-| `suite_compare_report.json` | Raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, and provenance. |
+| `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, coverage notes, and saved failure warnings. |
+| `suite_compare_report.json` | Raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, saved failure counts, and provenance. |
 
 The suite JSON report has its own versioned format with `"schema_version": "1"`. Its filename identifies the report type; it has no `level` field.
 
