@@ -26,22 +26,23 @@ from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
 from sandbox_execution import check_correctness_in_sandbox
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.reward_profile import (
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.metrics import (
     add_avg_sample_std_dev,
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, SandboxVerificationError
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+    observe_programmatic_grading,
+)
+from nemo_gym.verification import SandboxVerificationConfig, SandboxVerificationError
 
 
 LOG = logging.getLogger(__name__)
@@ -190,10 +191,12 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
-            return CompCodingVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                difficulty=difficulty,
+            return observe_programmatic_grading(
+                lambda: CompCodingVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    difficulty=difficulty,
+                )
             )
 
         # Tests are stored compressed by benchmarks/livecodebench/prepare_utils.py
@@ -214,11 +217,13 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
         if not code:
-            return CompCodingVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                extracted_model_output=model_out,
-                difficulty=difficulty,
+            return observe_programmatic_grading(
+                lambda: CompCodingVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    extracted_model_output=model_out,
+                    difficulty=difficulty,
+                )
             )
 
         # 4) run on a Ray worker, or in a sandbox when sandbox_provider is set
@@ -285,23 +290,25 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
             unit_tests_time_taken = time() - start_time
 
-        has_violation = self._has_reasoning_format_violation(body.response)
+        def _grade() -> CompCodingVerifyResponse:
+            has_violation = self._has_reasoning_format_violation(body.response)
+            return CompCodingVerifyResponse(
+                **body.model_dump(),
+                reward=(
+                    self.config.reasoning_format_penalty
+                    if has_violation
+                    else (1.0 if all(r == True for r in result) else 0.0)
+                ),
+                extracted_model_output=model_out,
+                extracted_model_code=code,
+                result=result,
+                metadata=metadata,
+                unit_tests_time_taken=unit_tests_time_taken,
+                reasoning_format_violation_rate=1.0 if has_violation else 0.0,
+                difficulty=difficulty,
+            )
 
-        return CompCodingVerifyResponse(
-            **body.model_dump(),
-            reward=(
-                self.config.reasoning_format_penalty
-                if has_violation
-                else (1.0 if all(r == True for r in result) else 0.0)
-            ),
-            extracted_model_output=model_out,
-            extracted_model_code=code,
-            result=result,
-            metadata=metadata,
-            unit_tests_time_taken=unit_tests_time_taken,
-            reasoning_format_violation_rate=1.0 if has_violation else 0.0,
-            difficulty=difficulty,
-        )
+        return observe_programmatic_grading(_grade)
 
 
 if __name__ == "__main__":

@@ -25,8 +25,9 @@ from openai.types.responses.response import IncompleteDetails
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -34,7 +35,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.arena.app import (
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
@@ -1422,8 +1422,25 @@ class TestArenaResourcesServer:
             "style_reference_token_count": 10,
             "games": None,
         }
-        context_exceeded = truncated | {
+        # Rollouts saved before vllm_model marked context rejections carry no usage.
+        context_exceeded_without_marker = truncated | {
             "response": {"incomplete_details": {"reason": "max_output_tokens"}, "usage": None}
+        }
+        # vllm_model now reports zero usage for a context rejection and marks it in metadata.
+        context_exceeded = truncated | {
+            "response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "metadata": {"nemo_gym_context_window_exceeded": "true"},
+            }
+        }
+        # vllm_model also reports zero usage, without the marker, when the output budget alone exceeds the
+        # context window (invalid_output_token_parameter); that rejection stays an output-limit failure.
+        output_budget_rejected = truncated | {
+            "response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            }
         }
         reasoning_only = truncated | {
             "response": {"status": "completed"},
@@ -1431,16 +1448,25 @@ class TestArenaResourcesServer:
             "policy_reasoning": "Reasoning without a final answer",
         }
 
-        metrics = reference_server.compute_metrics([[win], [truncated], [context_exceeded], [reasoning_only]])
+        metrics = reference_server.compute_metrics(
+            [
+                [win],
+                [truncated],
+                [context_exceeded_without_marker],
+                [context_exceeded],
+                [output_budget_rejected],
+                [reasoning_only],
+            ]
+        )
 
-        assert metrics["max_token_reached_rate"] == approx(1 / 4)
-        assert metrics["context_window_exceeded_rate"] == approx(1 / 4)
+        assert metrics["max_token_reached_rate"] == approx(2 / 6)
+        assert metrics["context_window_exceeded_rate"] == approx(2 / 6)
         assert metrics["rollout_failure_rate"] == approx(0.0)
-        assert metrics["reasoning_only_response_rate"] == approx(1 / 4)
+        assert metrics["reasoning_only_response_rate"] == approx(1 / 6)
         assert metrics["missing_judgment_rate"] == approx(0.0)
-        assert metrics["win_rate_no_SC"] == approx(1 / 4, abs=0.05)
-        assert metrics["win_rate"] == approx(1 / 4, abs=0.05)
-        assert metrics["verbosity_acceptance_rate"] == approx(1 / 4)
+        assert metrics["win_rate_no_SC"] == approx(1 / 6, abs=0.05)
+        assert metrics["win_rate"] == approx(1 / 6, abs=0.05)
+        assert metrics["verbosity_acceptance_rate"] == approx(1 / 6)
 
     @mark.parametrize("style_control_method", ["bradley_terry", "none"])
     def test_compute_metrics_v2_max_token_response_remains_failure(
@@ -1661,14 +1687,17 @@ class TestJudgeHttpError:
     _make_verify_request = TestArenaResourcesServer._make_verify_request
 
     async def test_a_judge_500_is_a_judge_failure_with_its_status_and_body_not_a_parse_error(
-        self, server: ArenaResourcesServer
+        self, server: ArenaResourcesServer, monkeypatch
     ):
         import aiohttp
         from aiohttp import web
         from aiohttp.test_utils import TestServer
 
-        from nemo_gym.base_resources_server import judge_failsafe
+        from nemo_gym.verification import judge as judge_module
+        from nemo_gym.verification import judge_failsafe
 
+        monkeypatch.setattr(judge_module, "_judge_retry_wait_s", lambda attempt: 0)
+        attempts = judge_module.JUDGE_CALL_MAX_ATTEMPTS
         body = "Error code: 429 - rate limit exceeded"
         hits = []
 
@@ -1693,4 +1722,6 @@ class TestJudgeHttpError:
         # The judge's real status and body are kept; the 429 in the body text classifies nothing.
         assert "ClientResponseError" in error and "500" in error and "ValidationError" not in error
         assert row["response"] == request.response.model_dump(mode="json")  # the saved answer is kept
-        assert len(hits) == 2  # one call per ordering, no extra request
+        # A 500 is retried up to the bounded attempts of one call; the ordering that exhausts them
+        # first cancels its sibling, so two orderings never make more than twice that bound.
+        assert attempts <= len(hits) <= 2 * attempts

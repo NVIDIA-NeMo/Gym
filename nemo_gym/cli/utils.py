@@ -17,16 +17,8 @@ import json
 import sys
 from typing import Dict, Iterable, Optional
 
-
-def did_you_mean(value: str, candidates: Iterable[str]) -> str:
-    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    # Exclude the exact input so it is not suggested as its own correction.
-    matches = difflib.get_close_matches(
-        value,
-        [candidate for candidate in candidates if candidate != value],
-        n=1,
-    )
-    return f" Did you mean `{matches[0]}`?" if matches else ""
+from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.utils.text import did_you_mean
 
 
 def exit_unknown_component(name: str, candidates: Iterable[str], type_label: str) -> None:
@@ -145,7 +137,8 @@ def exit_cleanly_on_config_error(fn):
 
     Config mistakes (missing/typo'd config_paths, malformed config_paths, nothing configured to
     run) should fail fast with an actionable message, not a Python traceback. Unexpected errors
-    still propagate normally.
+    still propagate normally. An error that carries a registered ``failure_kind`` is also recorded
+    for the guard of an orchestrated job's next segment (see ``record_failure_kind``).
     """
     from functools import wraps
 
@@ -154,13 +147,33 @@ def exit_cleanly_on_config_error(fn):
         import rich
         from rich.markup import escape
 
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
         try:
             return fn(*args, **kwargs)
-        except ConfigError as e:
-            # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
-            rich.print(f"[red]Error:[/red] {escape(str(e))}")
-            raise SystemExit(1)
+        except BaseException as e:
+            if getattr(e, "failure_kind", None) is not None:
+                # The driver step of a resumable job hands the kind to the guard of its next segment.
+                from nemo_gym.orchestration.executors.resume_script import record_failure_kind
+
+                record_failure_kind(e)
+            if isinstance(e, IncompleteEvaluationError):
+                rich.print(f"[yellow]Evaluation incomplete:[/yellow] {escape(str(e))}")
+                raise SystemExit(e.exit_code) from None
+            if isinstance(e, ConfigError):
+                # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
+                rich.print(f"[red]Error:[/red] {escape(str(e))}")
+                raise SystemExit(1)
+            code = getattr(e, "stop_exit_code", None) if isinstance(e, RuntimeError) else None
+            if code is None:
+                raise
+            # A typed stop (for example a head server that never answered): exit with its code, not a traceback.
+            rich.print(f"[red]Stopped:[/red] {escape(str(e))}")
+            raise SystemExit(code) from None
 
     return wrapper
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

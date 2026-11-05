@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, ClassVar, Literal
@@ -19,7 +20,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, field_validator
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,
@@ -27,22 +28,29 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_global_config_dict
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.transfer import SandboxUnavailableError
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    get_response_json,
-    get_server_url,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
+from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
+    FailureReportRow,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    agent_route_failure,
+    current_rollout_id,
+    failure_report_for,
+    rebuild_failure,
+    rollout_context,
 )
-from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxUnavailableError,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
     HarnessOutcome,
@@ -59,6 +67,24 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Episode sessions under an environment server are not deprecated; only the flat /run path, which a configured
+# resources_server selects, is.
+DEPRECATION_WARNING = (
+    "DEPRECATED: miniswe_sandboxed_agent is configured for its legacy /run path (resources_server is set), which "
+    "will be removed after the environment-server migration. Run Harbor tasks on episode sessions instead "
+    "(gym eval run <tasks> --agent miniswe_sandboxed_agent; for TB4, gym eval run terminal_bench_4 --agent "
+    "miniswe_sandboxed_agent). Terminal-Bench-Science has no session path yet and keeps working here. "
+    "See responses_api_agents/miniswe_sandboxed_agent/README.md#harbor-episodes."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
+
 
 # The harbor resources server leaves the task's in-sandbox tool declarations here at seed time.
 TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
@@ -209,6 +235,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        if self.config.resources_server is not None:
+            _warn_deprecated_once()
         self._runs = {}
         self._sessions: dict[tuple[str, str], MiniSWESession] = {}
         self._finalizers = set()
@@ -470,7 +498,9 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         deadline = monotonic() + self._agent_timeout_sec(state, body)
                         agent_started = True
                         response, termination, extra = await harness.execute(max(0, deadline - monotonic()))
-                        if monotonic() >= deadline:
+                        # A kill is read from an exit code the sandbox returned before the deadline; only collecting
+                        # its artifacts afterwards can cross it.
+                        if monotonic() >= deadline and termination.reason != "killed":
                             termination.reason = "timeout"
                 except asyncio.CancelledError:
                     termination = HarnessOutcome(reason="cancelled")
@@ -481,6 +511,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         else "infrastructure_error",
                         detail=f"{type(exc).__name__}: {exc}",
                     )
+                    if not isinstance(exc, TimeoutError):
+                        failure = agent_route_failure(
+                            exc, operation="harness.run", stage="agent" if agent_started else "seed"
+                        )
+                        failure.__cause__ = exc
+                        FailureReportRow.merged_into(extra, failure_report_for(failure))
                 finally:
                     if harness is not None and not agent_started:
                         try:
@@ -532,8 +568,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     def _episode_turn_response(state: MiniSWESession, result: AgentExecutionResult) -> NeMoGymResponse:
         """The environment server sees one response; carry the harness outcome in its metadata.
 
-        "completed", "nonzero_exit" and an execution "timeout" are the agent's own result and are
-        verified. An "infrastructure_error", a cancelled run, or a "timeout" before the agent started (the
+        "completed", "nonzero_exit", "killed" and an execution "timeout" are the agent's own result and
+        are verified. An "infrastructure_error", a cancelled run, or a "timeout" before the agent started (the
         setup budget ran out installing the harness, so the sandbox is untouched) is not the agent's doing
         and is refused with a 503 so the episode is recorded as a masked failure instead of an unmasked
         zero. A repeated request for the same turn replays the same answer.
@@ -544,7 +580,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             detail = f"mini-SWE {'setup timeout' if setup_timeout else result.termination.reason}"
             if result.termination.detail:
                 detail += f": {result.termination.detail[:500]}"
-            raise HTTPException(503, detail)
+            error = HTTPException(503, detail)
+            # The harness's own typed failure, when it reported one, stays the cause of the 503's failure report.
+            cause = rebuild_failure(FailureReportRow.report(result.harness_metadata))
+            if cause is not None:
+                raise error from cause
+            raise error
         response = result.response
         metadata = dict(response.metadata or {})
         metadata["miniswe_termination"] = result.termination.reason
@@ -651,6 +692,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 reason="timeout" if isinstance(exc, TimeoutError) else "infrastructure_error",
                 detail=f"{type(exc).__name__}: {exc}",
             )
+            if not isinstance(exc, TimeoutError):
+                failure = agent_route_failure(exc, operation="harness.run")
+                failure.__cause__ = exc
+                FailureReportRow.merged_into(result.harness_metadata, failure_report_for(failure))
         finally:
             if state is not None and self._sessions.get(key) is state:
                 self._sessions.pop(key, None)

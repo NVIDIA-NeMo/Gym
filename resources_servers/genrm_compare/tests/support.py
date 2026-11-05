@@ -6,7 +6,7 @@ from typing import Optional
 
 from starlette.requests import Request
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 
 
 def request_with_session(session_id: Optional[str] = None) -> Request:
