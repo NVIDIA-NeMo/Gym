@@ -27,7 +27,8 @@ class SessionIDMiddleware:
     """Assign the session ID before the route runs, and settle it when the reply starts.
 
     ``SessionMiddleware`` must wrap this middleware.
-    It puts the session in ``scope["session"]``, and writes the cookie when the reply starts, after this middleware has settled the session.
+    It puts the session in ``scope["session"]``, and writes the cookie when the reply starts, after this middleware has
+    settled the session.
     """
 
     # Direct MCP dispatch materializes the session itself.
@@ -65,10 +66,12 @@ class SessionIDMiddleware:
                 if claim is None:
                     if minted and failed:
                         # A failed request keeps nothing under a new session, so its reply names none.
-                        # A seed refused for another episode's resources_session_id must not hand this client that session's cookie.
+                        # A seed refused for another episode's resources_session_id must not hand this client that
+                        # session's cookie.
                         del session[SESSION_ID_KEY]
                 else:
-                    # With several workers, a session nobody claims, new or named by a cookie whose claim ended, is claimed only if the route uses it.
+                    # With several workers, a session nobody claims, new or named by a cookie whose claim ended, is
+                    # claimed only if the route uses it.
                     # The claim happens before the reply leaves this worker, so the client's next request finds it.
                     used = session.accessed if tracks_access else True
                     if tracks_access:
@@ -82,7 +85,8 @@ class SessionIDMiddleware:
                         await conflict(scope, receive, send)
                         return
                     if minted and (not used or failed):
-                        # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session.
+                        # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed
+                        # session.
                         # A failed request hands out no cookie, as with one worker.
                         del session[SESSION_ID_KEY]
             await send(message)

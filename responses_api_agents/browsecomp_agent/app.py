@@ -281,7 +281,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         # Thin diagnostic wrapper around the real implementation. A full-400 eval lost 6
         # samples to a 500 out of THIS endpoint with NO traceback anywhere in the log — not
-        # even the `🚨` marker that exception_handling_middleware prints for ordinary app
+        # even the `🚨` marker that the exception middleware prints for ordinary app
         # exceptions (the malformed-JSON bug printed a full ExceptionGroup). With nothing
         # logged the cause can only be bounded, never named. Print whatever escapes, then
         # RE-RAISE unchanged so run()'s containment behaves exactly as before.

@@ -32,13 +32,17 @@ except ImportError:  # the telemetry extra is optional; without the SDK there is
 class RequestContextIsolationMiddleware:
     """Serve every request in a fresh copy of the server's context, whatever task uvicorn started it from.
 
-    uvicorn starts a *pipelined* request's task from inside the previous request's task (``on_response_complete`` → ``loop.create_task``).
+    uvicorn starts a *pipelined* request's task from inside the previous request's task (``on_response_complete`` →
+    ``loop.create_task``).
     That task inherits the previous request's contextvars.
     Gym's middleware and routes run in the request's own task.
-    So a value a route sets and never resets, such as a resources server's per-request state, would reach the next request on the same connection.
-    Pipelining happens whenever a client reuses a kept-alive connection before this server has sent the terminating body message.
+    So a value a route sets and never resets, such as a resources server's per-request state, would reach the next
+    request on the same connection.
+    Pipelining happens whenever a client reuses a kept-alive connection before this server has sent the terminating
+    body message.
 
-    Each request therefore runs in a task of its own, with a copy of the context captured when the middleware was installed.
+    Each request therefore runs in a task of its own, with a copy of the context captured when the middleware was
+    installed.
     That copy also starts with no OTel context and no rollout id.
     The OTel ASGI instrumentation runs inside this middleware, and must see no current span.
     Only then does it extract the inbound ``traceparent`` rather than file the request as a child of the previous one.
@@ -69,10 +73,14 @@ def install_request_context_isolation(app: FastAPI) -> None:
     """Wrap the complete middleware stack, instrumentation included, in context isolation.
 
     `add_middleware` is not enough.
-    The FastAPI instrumentor installs its middleware by overriding `build_middleware_stack`, so it always ends up outside anything added that way.
-    Wrapping the build the same way, after instrumentation, puts isolation outside the instrumentor, which is the only place it works.
-    The instrumentor must see an empty context so it extracts `traceparent`, and the handlers must still see the server span the instrumentor then makes current.
-    Call it after `instrument_app_for_telemetry`, and before the server starts, because the context it captures then is the one every request starts from.
+    The FastAPI instrumentor installs its middleware by overriding `build_middleware_stack`, so it always ends up
+    outside anything added that way.
+    Wrapping the build the same way, after instrumentation, puts isolation outside the instrumentor, which is the only
+    place it works.
+    The instrumentor must see an empty context so it extracts `traceparent`, and the handlers must still see the server
+    span the instrumentor then makes current.
+    Call it after `instrument_app_for_telemetry`, and before the server starts, because the context it captures then is
+    the one every request starts from.
     """
     if getattr(app.state, "nemo_gym_request_context_isolation_installed", False):
         return

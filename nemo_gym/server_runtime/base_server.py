@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from functools import partial
 from ipaddress import ip_network
 from os import environ, getenv
-from traceback import format_exc, print_exc
+from traceback import format_exception, print_exception
 from typing import Any, Awaitable, Callable, ClassVar, List, Optional, Protocol, Sequence, TextIO, Tuple, Type
 from urllib.parse import urlsplit, urlunsplit
 
@@ -386,11 +386,11 @@ class SimpleServer(BaseServer):
         if isinstance(e, Exception):
             print(
                 f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
-Formatted exception: {format_exc()}
+Formatted exception: {"".join(format_exception(e))}
 repr(e): {repr(e)}"""
             )
             return JSONResponse(content=repr(e), status_code=500)
-        print_exc()
+        print_exception(e)
         print(
             f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
         )
