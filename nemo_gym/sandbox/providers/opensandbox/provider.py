@@ -110,7 +110,6 @@ class _SandboxDeathNotice:
     message: str
     failure_kind: str
     provider_status_reason: str | None = None
-    exit_code: int | None = None
 
 
 def _lifecycle_oom_evidence(info: Any, *, sandbox_id: str) -> _SandboxDeathNotice | None:
@@ -144,7 +143,6 @@ def _lifecycle_oom_evidence(info: Any, *, sandbox_id: str) -> _SandboxDeathNotic
         f"Sandbox was OOM-killed; lifecycle status confirms {report}",
         failure_kind=PROVIDER_OOM_KILLED,
         provider_status_reason=status.reason,
-        exit_code=int(match["exit"]),
     )
 
 
@@ -2344,7 +2342,6 @@ class OpenSandboxProvider:
                     failure_kind=evidence.failure_kind,
                     reason=evidence.message,
                     provider_status_reason=evidence.provider_status_reason,
-                    exit_code=evidence.exit_code,
                 ) from error
             if isinstance(error, NgFailureEvent):
                 raise
@@ -2455,7 +2452,6 @@ class OpenSandboxProvider:
             failure_kind=evidence.failure_kind if evidence is not None else PROVIDER_COMMAND_OUTCOME_UNKNOWN,
             reason=evidence.message if evidence is not None else "PTY connection lost; command outcome is unknown",
             provider_status_reason=evidence.provider_status_reason if evidence is not None else None,
-            exit_code=evidence.exit_code if evidence is not None else None,
         )
 
     async def _exec_background(
@@ -2595,7 +2591,6 @@ class OpenSandboxProvider:
                         cause=failure,
                         reason=evidence.message,
                         provider_status_reason=evidence.provider_status_reason,
-                        exit_code=evidence.exit_code,
                     ) from failure
                 if action != OutcomeAction.RETRY:
                     if failure is error:
