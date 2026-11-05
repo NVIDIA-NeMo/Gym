@@ -23,6 +23,7 @@ from nemo_gym.agents import (
     OutcomeAction,
     agent_outcome_policy,
     confirmed_policy_response_timeout,
+    verification_failure_fields,
 )
 from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
 from nemo_gym.config import (
@@ -541,7 +542,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
-                json=self._verify_body(request, agent_response),
+                json=self._verify_body(request, agent_response) | verification_failure_fields(agent_response),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},

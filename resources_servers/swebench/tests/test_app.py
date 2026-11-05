@@ -117,7 +117,8 @@ class TestApp:
         )
         assert res.status_code == 200
         observation = res.json()["verifier_sandbox_observation"]
-        assert observation.pop("wall_time_s") >= 0
+        wall_time_s = observation["wall_time_s"]
+        assert wall_time_s >= 0
         assert observation == {
             "kind": "sandbox",
             "role": "verifier",
@@ -125,11 +126,14 @@ class TestApp:
             "sandbox_id": "sandbox-123",
             "outcome": "completed",
             "stage": "verification",
+            "wall_time_s": wall_time_s,
             "exit_code": None,
             "cpu_time_s": None,
             "peak_memory_mib": None,
             "resource_usage_source": None,
             "error_type": None,
+            "error_message": None,
+            "failure_id": None,
             "observed_client_interval_s": None,
             "teardown_confirmed": None,
             "cleanup_errors": [],
