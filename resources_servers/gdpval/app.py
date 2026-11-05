@@ -422,7 +422,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
-    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked.
+    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked
+    # with failure_kind gdpval:judging_disabled.
     judge_deliverables: bool = True
     # Names a top-level sandbox provider block.
     sandbox_provider: str
@@ -558,8 +559,12 @@ def _permanent_judge_failure(
     )
 
 
-# The agent ran out of wall time. The row is retried like any other timeout and left out of the fit if it is waived.
+# The agent ran out of wall time. With the agent's answer kept, this is the model's result: never run again and left
+# out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
 _AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
+
+# judge_deliverables=false saves the deliverables without judging them, so the row is masked under this kind.
+JUDGING_DISABLED = "gdpval:judging_disabled"
 
 
 # Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
@@ -610,6 +615,9 @@ class _TaskSession:
 
 
 class GDPValResourcesServer(SimpleResourcesServer):
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: GDPValResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -1051,7 +1059,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
         if not self.config.judge_deliverables:
             return GDPValVerifyResponse(
-                **body.model_dump(), reward=0.0, mask_sample=True, verify_mode=self.config.reward_mode
+                **body.model_dump(),
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=JUDGING_DISABLED,
+                failure_reason="judge_deliverables is false, so the deliverables were saved without judging",
+                verify_mode=self.config.reward_mode,
             )
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
@@ -1950,6 +1963,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if staged:
             extra["comparison/num_stages"] = len(staged)
             stage_fits: Dict[int, tuple[Optional[float], Optional[float], int]] = {}
+            # Per stage, the rows its fit used: judged ones and losses imputed for a missing evaluation.
+            stage_fit_rows: Dict[int, int] = {}
             for stage_index in sorted(staged):
                 stage_responses = staged[stage_index]
                 _, _, _, stage_ref_totals = _accumulate(stage_responses)
@@ -1975,6 +1990,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 extra[f"{prefix}/judged_votes"] = sum(sum(_votes(vr)) for vr in judged_rows)
                 extra[f"{prefix}/imputed_loss_tasks"] = len({vr.get("task_id") for vr in imputed})
                 extra[f"{prefix}/imputed_loss_votes"] = sum(_votes(vr)[1] for vr in imputed)
+                stage_fit_rows[stage_index] = len(
+                    {
+                        (vr.get("_ng_task_index", vr.get("task_id")), vr.get("_ng_rollout_index", 0))
+                        for vr in judged_rows + imputed
+                    }
+                )
 
             headline_stage_index: Optional[int] = None
             headline: Optional[tuple[Optional[float], Optional[float], int]] = None
@@ -2025,6 +2046,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 if final_stage_accepted and final_stage_fit:
                     headline_stage_index = expected_final_stage_index
                     headline = candidate
+                    if expected_final_stage_count is not None:
+                        # The headline ELO covers the final stage's fit rows of the rows that stage planned.
+                        extra["metric_coverage/trials"] = stage_fit_rows[expected_final_stage_index]
+                        extra["metric_coverage/expected"] = int(expected_final_stage_count)
                 extra["comparison/final_stage_present"] = int(final_stage_present)
                 extra["comparison/final_stage_complete"] = int(final_stage_complete)
                 extra["comparison/final_stage_partial_accepted"] = int(final_stage_partial_accepted)

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
 from nemo_gym.artifacts.rollout_rows import (
@@ -29,6 +29,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -36,6 +37,7 @@ from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
@@ -71,10 +73,12 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         rollout_id = identity.get("rollout_id")
         if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
             return task_id, rollout_id
-    task_id = next(
-        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
-    )
+    if is_materialized_task_row(row):
+        task_id = TaskId.model_validate(row["task_id"]).task_id
+    else:
+        task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+        if task_id is None:
+            task_id = str(row[TASK_INDEX_KEY_NAME])
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 
@@ -82,8 +86,8 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
 def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
     """Split one captured model call into the turn's question, answer, reasoning, and tool-call count.
 
-    Handles Responses API output items and chat-completions messages, the two dialects the Model
-    Server captures.
+    Handles the three dialects the Model Server captures: Responses API output items, chat-completions
+    messages, and Anthropic Messages content blocks.
     """
     question = request.get("input", request.get("messages")) if isinstance(request, dict) else request
     if isinstance(request, dict) and isinstance(request.get("input"), list):
@@ -97,6 +101,13 @@ def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
         reasoning = [item for item in output if item.get("type") == "reasoning"] or None
         answer = [item for item in output if item.get("type") != "reasoning"]
         tool_calls = sum(1 for item in answer if item.get("type") == "function_call")
+        return question, answer, reasoning, tool_calls
+    if isinstance(response, dict) and response.get("type") == "message" and isinstance(response.get("content"), list):
+        blocks = [block for block in response["content"] if isinstance(block, dict)]
+        thinking = ("thinking", "redacted_thinking")
+        reasoning = [block for block in blocks if block.get("type") in thinking] or None
+        answer = [block for block in blocks if block.get("type") not in thinking]
+        tool_calls = sum(1 for block in answer if block.get("type") == "tool_use")
         return question, answer, reasoning, tool_calls
     choices = response.get("choices") if isinstance(response, dict) else None
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
@@ -115,13 +126,17 @@ def _turns_from_model_calls(
     resolved: Any,
     *,
     verifier_invocations: Iterable[VerifierInvocation] = (),
+    compactions: Sequence[ContextCompactionObservation] = (),
 ) -> list[TrajectoryTurn]:
-    """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
+    """Build policy turns from captured calls for an agent that sent no trajectory.
 
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
-    or auxiliary calls that do not belong to the agent. Explicit verifier ownership also excludes
-    a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
+    or auxiliary calls that do not belong to the agent. Compaction helpers remain invocation-owned
+    calls for token accounting, but never become policy turns, even when agent ownership claims
+    conflict. Preserve those claims for validation rather than choosing which owner is correct.
+    Explicit verifier ownership also excludes a call from turns when an agent incorrectly references it;
+    retain both ownership claims for validation.
     """
     verifier_call_ids = {
         ref.model_call_id for invocation in verifier_invocations for ref in invocation.model_calls if ref.model_call_id
@@ -134,6 +149,20 @@ def _turns_from_model_calls(
                 invocation_by_call_id[ref.model_call_id] = invocation.invocation_id
             if ref.response_id:
                 invocation_by_response_id[ref.response_id] = invocation.invocation_id
+
+    compaction_calls: set[int] = set()
+    for compaction in compactions:
+        for ref in compaction.model_calls:
+            matches = [
+                call
+                for call in model_calls
+                if (ref.model_call_id is None or ref.model_call_id == call.model_call_id)
+                and (ref.model_ref is None or ref.model_ref == call.response_metadata.model_ref)
+                and (ref.response_id is None or ref.response_id == call.response_metadata.response_id)
+            ]
+            # Unresolved or ambiguous references must not silently hide policy calls.
+            if len(matches) == 1:
+                compaction_calls.add(id(matches[0]))
 
     turns: list[TrajectoryTurn] = []
     turn_counts: Counter = Counter()
@@ -148,7 +177,7 @@ def _turns_from_model_calls(
         invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
             metadata.response_id or ""
         )
-        if invocation_id is None:
+        if invocation_id is None or id(call) in compaction_calls:
             continue
         question, answer, reasoning, tool_calls = _turn_content(call.request, call.response)
         turn_counts[invocation_id] += 1
@@ -186,6 +215,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
+    compactions: list[ContextCompactionObservation] = []
 
     producer_turns_observed = False
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
@@ -221,6 +251,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     if raw_observations is not None:
         try:
             observations = AgentObservationBundle.model_validate(raw_observations)
+            compactions = [
+                record for record in observations.records if isinstance(record, ContextCompactionObservation)
+            ]
             gaps.extend(observations.gaps)
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
             producer_invocation_ids = {record.invocation_id for record in invocations}
@@ -292,6 +325,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "model_operations",
                 "error_category",
                 "latency_ttft_ms",
+                "requested_max_tokens",
+                "applied_max_tokens",
+                "output_budget_refit",
             )
             if raw_call.get(key) is not None
         }
@@ -353,6 +389,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         # Contradictory returned facts cannot establish authoritative verifier coverage.
                         gaps.append(ObservationGap(code=f"verifier_{field}_conflict"))
                         setattr(existing, field, [])
+                if invocation.grading_record is not None:
+                    existing.grading_record = invocation.grading_record
                 if invocation.status != "unknown":
                     existing.status = invocation.status
                     existing.failure_kind = invocation.failure_kind
@@ -375,6 +413,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             model_calls,
             result.get("resolved"),
             verifier_invocations=verifier_invocations,
+            compactions=compactions,
         )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))

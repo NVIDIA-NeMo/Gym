@@ -7,8 +7,10 @@
 # Worked example of `backend: remote_cdp` + a session provider. Credentials come
 # from the environment, never from this file:
 #   LEXMOUNT_API_KEY / LEXMOUNT_PROJECT_ID / LEXMOUNT_BASE_URL
-# and the SDK is installed by the operator (`pip install lexmount`) — it is not
-# a dependency of this environment. See providers/lexmount/README.md.
+# The SDK is an opt-in locked extra. See providers/lexmount/README.md.
+component_extras:
+  resources_servers/interactive_browser: [lexmount]
+
 interactive_browser:
   resources_servers:
     interactive_browser:

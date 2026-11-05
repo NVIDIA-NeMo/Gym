@@ -236,7 +236,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 failure.episode_evidence.update(
                     agent_close=agent_close,
                     agent_observations=agent_close.agent_observations if agent_close else None,
-                    trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    trajectory=agent_close.trajectory if agent_close else None,
                     cleanup_receipts=state.cleanup_receipts,
                 )
                 wire_reply = self.failure_response(request, failure)
@@ -376,7 +376,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(trajectory),
+                        "ng_trajectory": trajectory,
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -399,7 +399,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     "activations": activations,
                     "agent_close": agent_close,
                     "agent_observations": agent_close.agent_observations if agent_close else None,
-                    "trajectory": request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    "trajectory": agent_close.trajectory if agent_close else None,
                     "cleanup_receipts": state.cleanup_receipts,
                     "artifact_directory": str(state.directory),
                     "dependency_error": dependency,
@@ -460,8 +460,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     env=proxy_env,
                     files=proxy_files,
                     provider_options=options,
-                    metadata=state.runtime.metadata()
-                    | dict(sandbox_config.get("metadata", {}))
+                    metadata=state.runtime.metadata(dict(sandbox_config.get("metadata", {})))
                     | {
                         "benchmark": "swe-together",
                         "task_id": state.task.task_id,
