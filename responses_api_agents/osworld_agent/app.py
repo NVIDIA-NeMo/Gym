@@ -43,19 +43,25 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
+    failure_report_for,
 )
-from nemo_gym.failure_transport import FailureReportRow
+from nemo_gym.core.failure_kinds import INFRASTRUCTURE_ERROR
 from nemo_gym.models import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,
@@ -1344,7 +1350,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             metadata = body.verifier_metadata or {}
             task_config = metadata.get("osworld_task") or (body.model_extra or {}).get("osworld_task")
             if not task_config:
-                return _empty_response(body, error="No 'osworld_task' provided in verifier_metadata.")
+                # A row without a task spec is a configuration refusal, not an infrastructure failure to retry.
+                return _empty_response(
+                    body,
+                    error="No 'osworld_task' provided in verifier_metadata.",
+                    termination_reason="task_configuration_error",
+                )
 
             try:
                 requires_proxy = task_requires_proxy(task_config)
@@ -1854,10 +1865,97 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
+    response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")
     if isinstance(sandbox_start_failure, Mapping):
         response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+# Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest
+# that never became ready has its own typed fields (``_sandbox_start_failure_fields``); a configuration refusal (a
+# task without a spec, a proxy that is required but disabled or misconfigured) stays an untyped masked row, since a
+# retry would meet the same configuration.
+_INFRASTRUCTURE_ADMISSION_REASONS = frozenset(
+    {
+        "timeout",
+        "task_timeout",
+        "action_timeout",
+        "evaluator_error",
+        "proxy_setup_error",
+        "rollout_error",
+        "rollout_state_incomplete",
+        "evaluation_incomplete",
+    }
+)
+# Runtime-admission reasons a failed policy call caused: the row is a model failure of the kind the call shows.
+_MODEL_ADMISSION_REASONS = frozenset({"model_call_failed", "model_timeout"})
+_HTTP_STATUS_IN_ERROR = re.compile(r"(?:Error code|status(?:_code)?)[:= ]+\s*(\d{3})\b")
+
+
+def _model_failure_kind(reason: str, error: str) -> tuple[str, Optional[int]]:
+    """The failure kind of the policy call the runtime refused a rollout for, and the HTTP status it recorded.
+
+    A call that exceeded the agent's model timeout is the policy's response timeout; a request the server rejected
+    for its length is a context-window limit; any other HTTP reply is a request error with its status; a call that
+    never got a reply is a transport error.
+    """
+    from responses_api_agents.osworld_agent.adapter_agents import classify_model_failure  # noqa: PLC0415
+
+    if reason == "model_timeout":
+        return MODEL_POLICY_RESPONSE_TIMEOUT, None
+    match = _HTTP_STATUS_IN_ERROR.search(error)
+    status = int(match.group(1)) if match is not None and 100 <= int(match.group(1)) <= 599 else None
+    if classify_model_failure(RuntimeError(error), model_call_completed=False) == "context_overflow":
+        return MODEL_CONTEXT_LIMIT, status
+    return (MODEL_REQUEST_ERROR if status is not None else MODEL_TRANSPORT_ERROR), status
+
+
+def _admission_failure_fields(result: Mapping[str, Any], runtime_admission: Mapping[str, Any]) -> Dict[str, Any]:
+    """The typed failure of a rollout that runtime admission refused for an infrastructure or policy-call cause.
+
+    The reason used to live only in ``verifier_metadata``, so the row was a masked result that nothing graded again
+    or retried. An infrastructure cause (a task or action timeout, a failed evaluator, a proxy that did not come up,
+    a crashed or errored rollout, a runner that recorded no terminal state) is an ``infrastructure_error`` with an
+    agent failure event, so the row reaches the failures sidecar and the default retry; a failed policy call is a
+    model failure of the kind the call shows (``_model_failure_kind``). Reward and mask stay as they are, so no score
+    changes. Legacy results and configuration refusals are left as they were.
+    """
+    if (
+        runtime_admission["runtime_eligible"]
+        or runtime_admission["runtime_admission_policy_id"] == LEGACY_RUNTIME_ADMISSION_POLICY_ID
+    ):
+        return {}
+    reason = str(runtime_admission["runtime_admission_reason"])
+    error = str(result.get("error") or "").strip()
+    detail = error.splitlines()[0][:1500] if error else "no error recorded"
+    if reason in _MODEL_ADMISSION_REASONS:
+        kind, http_status = _model_failure_kind(reason, error)
+        event = NgFailureEvent(
+            boundary="agent",
+            failure_kind=kind,
+            failure_reason=f"OSWorld policy call failed ({reason}): {detail}"[:2000],
+            http_status=http_status,
+            operation="agent.policy_request",
+            stage="agent",
+        )
+    elif reason in _INFRASTRUCTURE_ADMISSION_REASONS:
+        event = NgFailureEvent(
+            boundary="agent",
+            failure_kind=INFRASTRUCTURE_ERROR,
+            failure_reason=f"OSWorld runtime admission refused the rollout ({reason}): {detail}"[:2000],
+            operation=f"osworld.{reason}",
+            stage="agent",
+        )
+    else:
+        return {}
+    return {
+        "failure_kind": event.failure_kind,
+        "failure_reason": event.failure_reason,
+        "_ng_failure_class": event.failure_kind,
+        **FailureReportRow.fields(failure_report_for(event)),
+    }
 
 
 def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1950,6 +2048,14 @@ def _empty_response(
         "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
         "mask_sample": outcome.mask_sample,
     }
+    response_fields |= _admission_failure_fields(
+        {"error": error},
+        {
+            "runtime_eligible": outcome.runtime_eligible,
+            "runtime_admission_reason": outcome.runtime_admission_reason,
+            "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
+        },
+    )
     return OSWorldVerifyResponse(**response_fields)
 
 

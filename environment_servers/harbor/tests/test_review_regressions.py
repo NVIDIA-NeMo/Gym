@@ -688,7 +688,7 @@ def test_task_data_requires_digest_and_accepts_materialized_row(tmp_path, monkey
 async def test_pull_failure_keeps_its_provider_cause_when_cleanup_fails(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
 
-    from nemo_gym.sandbox.providers.base import SandboxCreateError
+    from nemo_gym.sandbox import SandboxCreateError
 
     server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
     provider_error = RuntimeError("registry unavailable")

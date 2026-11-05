@@ -141,8 +141,7 @@ async def services(config, monkeypatch, request):
         if status != 200:
             headers = {}
             if state.emit_failure_reports:
-                from nemo_gym.failure_transport import FailureHeader
-                from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+                from nemo_gym.core import FailureHeader, NgFailureEvent, failure_report_for
 
                 event = NgFailureEvent(
                     boundary="model",
@@ -292,7 +291,7 @@ async def test_run_resampling_conflicts_while_exact_verify_replays(services):
 @pytest.mark.parametrize("during_judging", [False, True])
 @pytest.mark.parametrize("recovered", [False, True])
 async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, during_judging, recovered):
-    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.core import FailureHeader
 
     services.emit_failure_reports = recovered
     services.judge_statuses = [503] if recovered else []
@@ -624,7 +623,7 @@ async def test_explicit_judge_failure_requires_new_shared_attempt_over_http(serv
 @pytest.mark.parametrize("mode", ["recovered", "one_failed", "all_failed"])
 async def test_cohort_failure_reports_survive_actual_collection_and_resume(services, tmp_path, monkeypatch, mode):
     import nemo_gym.rollouts.rollout_collection as collection
-    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.core import FailureReportRow
     from nemo_gym.rollouts import RolloutStore
 
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)

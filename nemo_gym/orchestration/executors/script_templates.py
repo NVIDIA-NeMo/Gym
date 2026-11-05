@@ -18,8 +18,13 @@ import re
 import shlex
 from pathlib import Path
 
+from nemo_gym.core.failure_kinds import DRIVER_INSTALL_FAILED
 from nemo_gym.orchestration.jobs import EVAL_EXIT_FILENAME, EXPORTS_DIRNAME
 
+
+# The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
+# that the next segment would repeat leaves its registered kind (see the guard in resume_script.py).
+DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
 
 _RAY_PRELUDE = """\
 # Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
@@ -32,7 +37,9 @@ export RAY_HEAD_NODE_IP="$head_node_ip:6379"
 echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
-ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
+# A container without the ray CLI installs a tested Ray with the Serve extra: the gateway imports ray.serve, whose
+# dependencies `default` lacks, and an unpinned install takes whatever Ray was released last.
+ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default,serve]==2.59.0"'
 
 # Default node-join wait (30s) is too short for slow image pulls. Also bounds a worker's wait for the head.
 RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
@@ -241,6 +248,19 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
     return "\n".join(lines)
 
 
+# `uv sync` errors on an extra the checkout does not define. A pin from before `ray` and `mlflow` became extras defines
+# neither, so each requested `--extra NAME` is kept only when the checkout's pyproject.toml declares NAME.
+_DECLARED_EXTRAS_FILTER = (
+    "import sys, tomllib\n"
+    'declared = set(tomllib.load(open("pyproject.toml", "rb")).get("project", {}).get("optional-dependencies", {}))\n'
+    "requested = sys.argv[2::2]\n"
+    'print(*(f"--extra {name}" for name in requested if name in declared))\n'
+    "for name in requested:\n"
+    "    if name not in declared:\n"
+    '        print(f"gym: the checkout defines no {name!r} extra, installing without it", file=sys.stderr)\n'
+)
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -248,6 +268,9 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    cleanup: bool = False,
+    record_install_failure: bool = False,
+    private_uv: bool = False,
     export_tail: str | None = None,
 ) -> str:
     """Render the srun entrypoint for the driver step.
@@ -262,15 +285,33 @@ def render_driver_entrypoint(
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
     is where `telemetry` has to be installed for any server to have it. `ray` is
-    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
-    and an extra the checkout does not define only makes uv warn.
+    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`.
+    An extra the checkout does not define is dropped with a notice, since uv errors on it.
+
+    `record_install_failure` writes `driver_install_failed` to the file named by `$GYM_DRIVER_FAILURE_FILE` when
+    the install exits with a failure status (1 to 128; a signal is not an install failure), for the guard of the
+    next segment. It replaces the EXIT trap, so it cannot be combined with `cleanup`.
+
+    `private_uv` gives the install its own uv binary inside its temporary directory (a copy of a working `uv`, else
+    a fresh install there), keeps uv's cache on the host's local disk in this user's own directory only, and gives
+    the install its own managed Pythons. Concurrent installs on other hosts replace the shared `~/.local/bin/uv` and
+    cache entries on a network home, and a uv running from those files then dies with SIGBUS.
+
+    `cleanup` removes the temporary checkout (`$GYM_SRC`) through an EXIT trap when the step exits.
 
     `export_tail` (see `render_export_tail`) takes the place of `exec "$@"`, so the exports run in the same step and
     container as the run, where `gym` is installed.
     """
+    if record_install_failure and cleanup:
+        raise ValueError("record_install_failure and cleanup both need the EXIT trap")
+    on_exit = (
+        f'_gym_rc=$?; if (( _gym_rc > 0 && _gym_rc <= 128 )) && [[ -n "${{{DRIVER_FAILURE_ENV}:-}}" ]]; then '
+        f'echo {DRIVER_INSTALL_FAILED} > "${DRIVER_FAILURE_ENV}"; fi'
+    )
+    record_failure = [f"trap {shlex.quote(on_exit)} EXIT"] if record_install_failure else []
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
-    install_target = f'".[{",".join((*extras, "ray"))}]"'
+    sync_extras = "".join(f" --extra {shlex.quote(extra)}" for extra in dict.fromkeys((*extras, "ray")))
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -278,12 +319,46 @@ def render_driver_entrypoint(
         # the artifacts. `cd` into it because a benchmark's prepare_script and
         # jsonl_fpath resolve against cwd; the driver's output path is absolute,
         # so nothing depends on the clone being reachable afterwards.
+        if private_uv:
+            uv_setup = [
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+                *(["trap " + shlex.quote('rm -rf -- "$GYM_SRC"') + " EXIT"] if cleanup else []),
+                'mkdir -p "$GYM_SRC/uv-bin"',
+                'export PATH="$HOME/.local/bin:$PATH"',
+                # Run a private copy, never the shared binary another host's installer may replace; a copy that
+                # does not run is replaced by a private install. That install is unmanaged: it writes no user-level
+                # receipt pointing at a directory this read deletes, and leaves PATH files alone.
+                'if _gym_uv="$(command -v uv)" && "$_gym_uv" --version >/dev/null 2>&1 '
+                '&& cp "$_gym_uv" "$GYM_SRC/uv-bin/uv" && "$GYM_SRC/uv-bin/uv" --version >/dev/null 2>&1; then :; '
+                "else curl -LsSf https://astral.sh/uv/install.sh | "
+                'env UV_UNMANAGED_INSTALL="$GYM_SRC/uv-bin" sh; fi',
+                # The cache and managed Pythons stay on this host's local disk, reused by its later readers: a
+                # rename there leaves a running uv's open files intact, where a network home does not. A shared
+                # temporary-directory name is used only when it is this user's own directory, not a link and not
+                # writable by others; otherwise another user could plant a Python or a cache entry there, so the
+                # install keeps them in its own temporary directory instead.
+                '_gym_own_dir() { mkdir -p -m 700 "$1" 2>/dev/null; if [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] '
+                '&& [ -z "$(find "$1" -maxdepth 0 -perm /022)" ]; then printf %s "$1"; else printf %s "$2"; fi; }',
+                'export PATH="$GYM_SRC/uv-bin:$PATH" '
+                'UV_CACHE_DIR="$(_gym_own_dir "${TMPDIR:-/tmp}/gym-uv-cache-$(id -u)" "$GYM_SRC/uv-cache")" '
+                # Managed Pythons are per read: an interpreter file another process rewrites or a killed install
+                # leaves half-written breaks every venv built on it, so no reader shares one. uv otherwise prefers
+                # a compatible Python already on PATH, such as a link in the shared `~/.local/bin`, so only the
+                # managed Pythons of this read are allowed.
+                'UV_PYTHON_INSTALL_DIR="$GYM_SRC/uv-python" UV_PYTHON_PREFERENCE=only-managed',
+            ]
+        else:
+            uv_setup = [
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
+                # the directory is already on PATH, and the file only does this export anyway.
+                'export PATH="$HOME/.local/bin:$PATH"',
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+                *(["trap " + shlex.quote('rm -rf -- "$GYM_SRC"') + " EXIT"] if cleanup else []),
+            ]
         preamble += [
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
-            # the directory is already on PATH, and the file only does this export anyway.
-            'export PATH="$HOME/.local/bin:$PATH"',
-            'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+            *record_failure,
+            *uv_setup,
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on
             # the container's PATH, sidestepping uv's own project-aware Python selection - `uv
@@ -292,7 +367,10 @@ def render_driver_entrypoint(
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
-            f"uv pip install -e {install_target}",
+            f'_gym_declared_extras() {{ python -c {shlex.quote(_DECLARED_EXTRAS_FILTER)} "$@"; }}',
+            f'_gym_sync_extras="$(_gym_declared_extras{sync_extras})"',
+            'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked $_gym_sync_extras',
+            *(["trap - EXIT"] if record_failure else []),
         ]
 
     if prepare_cmd:
