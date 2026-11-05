@@ -8,6 +8,9 @@ version=$2
 source_binary=${3:-}
 source_sha256=${4:-}
 path_prefix=${5:-}
+cached_install_script=${6:-}
+cached_binary=${7:-}
+cached_musl_binary=${8:-}
 if [ -n "$path_prefix" ]; then export PATH="$path_prefix:$PATH"; fi
 
 [ "$(uname -s)" = Linux ] || { echo 'OpenCode sandbox execution requires a Linux task image' >&2; exit 1; }
@@ -76,6 +79,22 @@ else
 fi
 mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
 export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
+if [ -n "$cached_install_script" ]; then
+  if [ -n "$cached_musl_binary" ]; then
+    bash "$cached_install_script" --glibc-binary "$cached_binary" --musl-binary "$cached_musl_binary"
+  else
+    bash "$cached_install_script" --binary "$cached_binary"
+  fi
+  staged=$(mktemp "$runtime/.opencode-XXXXXX")
+  cp "$HOME/.opencode/bin/opencode" "$staged"
+  chmod 755 "$staged"
+  if ! actual=$("$staged" --version) || [ "$actual" != "$version" ]; then
+    echo 'Cached OpenCode installer produced an invalid version' >&2
+    exit 1
+  fi
+  mv -f "$staged" "$runtime/opencode"
+  staged=
+fi
 if [ -n "$source_binary" ]; then
   [ -n "$source_sha256" ] || { echo 'A preinstalled OpenCode binary requires its SHA-256' >&2; exit 1; }
   # Publish a verified new inode so active sessions can keep executing the old one.
