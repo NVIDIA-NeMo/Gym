@@ -225,19 +225,19 @@ class _BaseExternalCaptureHandler(ABC):
             # harness failure.
             LOGGER.exception(
                 f"{self._BACKEND_LABEL} worker capture acknowledgement failed for rollout %s call %s",
-                context.rollout_id,
+                context.capture_key,
                 context.model_call_id,
             )
             try:
                 await ledger.record_failure(
-                    context.rollout_id,
+                    context.capture_key,
                     context.model_call_id,
                     self._INVALID_CAPTURE_REASON,
                 )
             except Exception:
                 LOGGER.exception(
                     f"Could not poison rollout %s call %s after a failed {self._BACKEND_LABEL} worker acknowledgement",
-                    context.rollout_id,
+                    context.capture_key,
                     context.model_call_id,
                 )
 
@@ -265,20 +265,20 @@ class _BaseExternalCaptureHandler(ABC):
         """
         if coords_payload is None:
             await ledger.record_failure(
-                context.rollout_id,
+                context.capture_key,
                 context.model_call_id,
                 WORKER_MISSING_COMMIT_COORDS_REASON,
             )
             return
         coords = CommitCoords.model_validate(coords_payload)
-        if coords.capture_key != context.rollout_id or coords.model_call_id != context.model_call_id:
+        if coords.capture_key != context.capture_key or coords.model_call_id != context.model_call_id:
             raise ValueError(
                 f"coordinates for {coords.capture_key}/{coords.model_call_id} do not match the "
-                f"active capture context {context.rollout_id}/{context.model_call_id}"
+                f"active capture context {context.capture_key}/{context.model_call_id}"
             )
         if coords.disposition == "capture_failed":
             await ledger.record_failure(
-                context.rollout_id,
+                context.capture_key,
                 context.model_call_id,
                 WORKER_CAPTURE_FAILED_REASON,
             )
@@ -358,7 +358,7 @@ class _BaseExternalCaptureHandler(ABC):
             ),
         )
         commit = CaptureLedgerCommit(
-            capture_key=context.rollout_id,
+            capture_key=context.capture_key,
             record=record,
             # Framework capture reconstructs ancestry from CallRecord parents.
             # Only ordinary capture uses this separately persisted lookup chain.
@@ -387,14 +387,14 @@ async def publish_deferred_commit(context: CaptureContext) -> None:
         await ledger.record(context.deferred_commit)
     except Exception:
         LOGGER.exception(
-            "Could not publish the ledger row of rollout %s call %s", context.rollout_id, context.model_call_id
+            "Could not publish the ledger row of rollout %s call %s", context.capture_key, context.model_call_id
         )
         try:
-            await ledger.record_failure(context.rollout_id, context.model_call_id, INVALID_COMMIT_COORDS_REASON)
+            await ledger.record_failure(context.capture_key, context.model_call_id, INVALID_COMMIT_COORDS_REASON)
         except Exception:
             LOGGER.exception(
                 "Could not poison rollout %s call %s after its ledger row failed",
-                context.rollout_id,
+                context.capture_key,
                 context.model_call_id,
             )
         raise
