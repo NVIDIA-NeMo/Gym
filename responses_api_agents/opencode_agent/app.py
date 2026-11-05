@@ -87,8 +87,9 @@ from nemo_gym.trajectory import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.artifacts import (
+    _assistant_part_items,
+    _empty_answer_part,
     _parse_opencode_session,
-    parse_opencode_export,
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
@@ -501,7 +502,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             db_path = data_home / "opencode" / "opencode.db"
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
-                ([], {"input_tokens": 0, "output_tokens": 0}) if timed_out else parse_opencode_session(db_path)
+                ([], {"input_tokens": 0, "output_tokens": 0})
+                if timed_out
+                else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
             observations = AgentObservationBundle(source="opencode")
             if collect_observations:
@@ -1002,10 +1005,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, export: dict[str, Any], observations: AgentObservationBundle
     ) -> list[NeMoGymResponseOutputItem]:
         output = []
+        gym_reasoning = self.config.model_server is not None
         for message in export.get("messages", []):
             if message.get("info", {}).get("role") != "assistant":
                 continue
-            for part in message.get("parts", []):
+            parts = message.get("parts", [])
+            # The empty-answer decision needs the whole message; each part still converts on its own.
+            empty_answer = _empty_answer_part(parts) if gym_reasoning else None
+            for index, part in enumerate(parts):
                 if part.get("type") in (
                     "step-start",
                     "step-finish",
@@ -1017,7 +1024,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 ):
                     continue
                 try:
-                    items = parse_opencode_export({"messages": [{"info": message["info"], "parts": [part]}]})
+                    items = _assistant_part_items(
+                        part, gym_reasoning=gym_reasoning, keep_empty_answer=index == empty_answer
+                    )
                     if part.get("type") == "tool":
                         state = part.get("state") or {}
                         for item in items:
