@@ -124,13 +124,15 @@ gym eval run --no-serve \
 
 Session allocation, release, and live-state lookup use the shared `SimpleResourcesServer` hooks, and close and
 checkpoint retirement are inherited. Newton keeps a typed seed adapter to check that a repeated seed still has
-metadata: the idle sweep and `/end_session` can remove it before the episode closes. Ownership conflicts are
+metadata: the idle sweep can remove it before the episode closes. Ownership conflicts are
 checked before reporting that state as expired or lost. Cookie seeds use the shared lifecycle; a failed cookie reseed keeps
 the previous verification receipt, which is discarded only after the replacement metadata is ready.
 
-The first `execute_python` call starts a fresh Python interpreter, so workers do not inherit the server's sockets.
-That call includes numerical-library startup within the `max_execution_time + 5` second response wait; later
-calls reuse the worker and its Python variables.
+A session's first `execute_python` call starts its Python worker from a forkserver, a separate process that imports
+the server once: workers neither inherit the server's sockets nor import the numerical libraries again. The first
+worker in a server process waits a few seconds for that import, off the event loop and outside the
+`max_execution_time + 5` second response wait; later workers start in milliseconds. The session's other calls reuse
+that worker and its Python variables.
 
 The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
 `task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
@@ -141,11 +143,13 @@ without invoking the judge again, and a changed payload is masked. `/close_sessi
 any still-active session. Checkpoint retirement also releases live workers and metadata. A legacy seed cannot
 replace a typed session; a new legacy `/run` reusing a completed legacy cookie keeps its session ID and replaces
 the completed run's state, including its retry record.
-The idle sweep (`session_ttl`)
-and `/end_session` also release state; a later seed retry for that session fails with 404 instead of confirming a
-session that no longer exists. A tool call for a session the server no longer holds fails with 404, and `/verify`
-for it returns a masked sample (`failure_kind` `session_lost`, or `session_expired` for the longer of `session_ttl`
-and `session_close_retry_window_seconds` after the idle sweep).
+The idle sweep (`session_ttl`) also releases state; a later seed retry for that session fails with 404 instead of
+confirming a session that no longer exists. A tool call for a session the server no longer holds fails with 404, and
+`/verify` for it returns a masked sample (`failure_kind` `session_lost`, or `session_expired` for the longer of
+`session_ttl` and `session_close_retry_window_seconds` after the idle sweep, even once the session is closed).
+`/end_session` stops only the session's Python worker, and the next `execute_python` starts a fresh one. The task
+metadata stays until verify, close, checkpoint retirement or the idle sweep, so a model that calls the route as a tool
+is still scored; it is not offered as an MCP tool.
 
 ## Running Tests
 ```bash

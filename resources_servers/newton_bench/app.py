@@ -37,12 +37,14 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     ClosedResourcesSessionRecords,
+    MCPTool,
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from resources_servers.newton_bench.newton_bench_utils.sandbox import (
     SessionHandle,
@@ -88,17 +90,6 @@ def _load_module(module_name: str):
         param_description = None
     _loaded_modules[module_name] = {"core": core, "param_description": param_description}
     return _loaded_modules[module_name]
-
-
-def _reject_typed_seed(value: object) -> object:
-    # A body that names a resources_session_id, or carries typed episode_id and task_id objects, is a malformed typed
-    # seed and must not create a /run session. A dataset row's own scalar task_id does not make a body typed.
-    if isinstance(value, dict) and (
-        "resources_session_id" in value
-        or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
-    ):
-        raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
-    return value
 
 
 class NewtonBenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -228,6 +219,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
 
         return app
 
+    def mcp_tools(self, harvested: list[MCPTool], catchall: Optional[Any]) -> Optional[list[MCPTool]]:
+        """Expose the experiment and Python tools; /end_session is a client cleanup route, not a model tool."""
+        return [tool for tool in harvested if tool.name != "end_session"]
+
     def has_session_state(self, session_id: str) -> bool:
         return session_id in self.session_metadata
 
@@ -249,12 +244,12 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
         self,
         request: Request,
         body: ResourcesSeedSessionRequest
-        | Annotated[NewtonBenchSeedSessionRequest, BeforeValidator(_reject_typed_seed)],
+        | Annotated[NewtonBenchSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         """Use the shared seed policy, checking that a repeated typed seed still has live metadata.
 
-        The idle sweep and /end_session can release metadata before the episode closes. The shared lifecycle
-        does not revalidate an existing binding, so this adapter preserves the expired/lost response for that retry.
+        The idle sweep can release metadata before the episode closes. The shared lifecycle does not revalidate an
+        existing binding, so this adapter preserves the expired/lost response for that retry.
         Cookie seeds use the base lifecycle and keep their session ID when replacing a completed run.
         """
         if not isinstance(body, ResourcesSeedSessionRequest):
@@ -325,9 +320,22 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
             if sid in self._sessions and self._sessions[sid].is_closed:
                 self._sessions.pop(sid, None)
 
-            if sid not in self._sessions:
-                self._sessions[sid] = SessionHandle(self.config.max_execution_time)
-            handle = self._sessions[sid]
+            # One start per session at a time, so concurrent first calls share a worker.
+            async with self._fence.locked(sid):
+                if sid not in self._sessions:
+                    # The first start in this process waits for the worker forkserver to import the server.
+                    handle = await asyncio.to_thread(SessionHandle, self.config.max_execution_time)
+                    if self.session_metadata.get(sid) is not metadata:
+                        # Verify or the idle sweep released the session meanwhile; nothing else would stop this worker.
+                        handle.close()
+                        return ExecutePythonResponse(
+                            success=False,
+                            stdout="",
+                            stderr="",
+                            error_message="The session ended while its Python worker started.",
+                        )
+                    self._sessions[sid] = handle
+                handle = self._sessions[sid]
 
             try:
                 stdout, stderr, result = await loop.run_in_executor(
@@ -366,7 +374,10 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
             return NewtonBenchVerifyResponse(
                 **(
                     body.model_dump()
-                    | lost_session_verification("No active NewtonBench session for this verification")
+                    | lost_session_verification(
+                        "No active NewtonBench session for this verification",
+                        failure_kind=self._lost_failure_kind(session_id),
+                    )
                 )
             )
         if verified is not None:
@@ -516,9 +527,15 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
             )
 
     async def end_session(self, request: Request, body: NewtonBenchEndSessionRequest) -> NewtonBenchEndSessionResponse:
-        """Clean up session handle for Python execution and metadata."""
+        """Stop the session's Python worker; a later execute_python starts a fresh one.
+
+        The task metadata stays until verify, close, checkpoint retirement or the idle sweep: a model can call this
+        route as a tool, and releasing the metadata would mask its own verification.
+        """
         sid = request.session[SESSION_ID_KEY]
-        self._close_session(sid)
+        handle = self._sessions.pop(sid, None)
+        if handle:
+            handle.close()
         return NewtonBenchEndSessionResponse()
 
     def _close_session(self, sid: str):

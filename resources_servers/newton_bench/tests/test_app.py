@@ -14,7 +14,9 @@
 
 import asyncio
 import math
+import threading
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
@@ -139,7 +141,7 @@ class TestApp:
 
     @mark.asyncio
     async def test_end_session(self, server: NewtonBenchResourcesServer, mock_request: Request) -> None:
-        """Test that end_session cleans up session handles."""
+        """Test that end_session stops the Python worker and keeps the task metadata for verify."""
         await server.seed_session(
             mock_request,
             NewtonBenchSeedSessionRequest(
@@ -161,7 +163,7 @@ class TestApp:
 
         assert isinstance(end_response, NewtonBenchEndSessionResponse)
         assert session_id not in server._sessions
-        assert session_id not in server.session_metadata
+        assert session_id in server.session_metadata
 
     @mark.asyncio
     async def test_end_session_nonexistent(self, server: NewtonBenchResourcesServer, mock_request: Request) -> None:
@@ -172,7 +174,7 @@ class TestApp:
 
     @mark.asyncio
     async def test_end_session_idempotent(self, server: NewtonBenchResourcesServer, mock_request: Request) -> None:
-        """Test that end_session is idempotent and cleans up session state."""
+        """Test that end_session is idempotent and the next call runs in a fresh worker."""
         seed_request = NewtonBenchSeedSessionRequest(
             module_name="m0_gravity", difficulty="easy", system="vanilla_equation", noise_level=0.0, law_version="v0"
         )
@@ -191,16 +193,15 @@ class TestApp:
         res2 = await server.end_session(mock_request, end_req)
         assert isinstance(res2, NewtonBenchEndSessionResponse)
 
-        from fastapi import HTTPException
-
-        with raises(HTTPException):
-            await server.execute_python(mock_request, exec_request)
+        fresh = await server.execute_python(mock_request, ExecutePythonRequest(code="a"))
+        assert fresh.success is False
+        assert "name 'a' is not defined" in fresh.error_message
 
     @mark.asyncio
     async def test_concurrent_end_session_race(
         self, server: NewtonBenchResourcesServer, mock_request: Request
     ) -> None:
-        """Simulate concurrent client teardown + janitor race and ensure no exceptions and clean state."""
+        """Simulate concurrent client teardown + janitor race: no exceptions, the worker stops, the task stays."""
         seed_request = NewtonBenchSeedSessionRequest(
             module_name="m0_gravity", difficulty="easy", system="vanilla_equation", noise_level=0.0, law_version="v0"
         )
@@ -223,7 +224,7 @@ class TestApp:
         await asyncio.gather(*tasks)
 
         sid = mock_request.session[SESSION_ID_KEY]
-        assert sid not in server.session_metadata
+        assert sid in server.session_metadata
         assert sid not in server._sessions
 
     @mark.asyncio
@@ -985,6 +986,80 @@ result
         assert response.error_message is not None
         assert "timeout" in response.error_message.lower()
 
+    @staticmethod
+    def _blocking_worker_start(
+        worker: MagicMock,
+    ) -> tuple[threading.Event, threading.Event, Callable[[int], MagicMock]]:
+        """A SessionHandle stand-in that returns ``worker`` once the test sets ``release``, which only the loop does."""
+        started, release = threading.Event(), threading.Event()
+
+        def start(max_execution_time: int) -> MagicMock:
+            started.set()
+            assert release.wait(5), "the worker start blocked the event loop"
+            return worker
+
+        return started, release, start
+
+    @mark.asyncio
+    async def test_worker_starts_off_the_event_loop_once_per_session(
+        self, server: NewtonBenchResourcesServer, mock_request: Request
+    ) -> None:
+        await server.seed_session(
+            mock_request,
+            NewtonBenchSeedSessionRequest(
+                module_name="m0_gravity",
+                difficulty="easy",
+                system="vanilla_equation",
+                noise_level=0.0,
+                law_version="v0",
+            ),
+        )
+        worker = MagicMock(is_closed=False)
+        worker.exec.return_value = ("", "", "1")
+        started, release, start = self._blocking_worker_start(worker)
+
+        with patch("resources_servers.newton_bench.app.SessionHandle", side_effect=start) as session_handle:
+            calls = [
+                asyncio.create_task(server.execute_python(mock_request, ExecutePythonRequest(code="1")))
+                for _ in range(2)
+            ]
+            assert await asyncio.to_thread(started.wait, 5)
+            release.set()
+            responses = await asyncio.gather(*calls)
+
+        assert [response.result for response in responses] == ["1", "1"]
+        session_handle.assert_called_once()
+        assert server._sessions[mock_request.session[SESSION_ID_KEY]] is worker
+
+    @mark.asyncio
+    async def test_worker_started_for_a_released_session_is_stopped(
+        self, server: NewtonBenchResourcesServer, mock_request: Request
+    ) -> None:
+        await server.seed_session(
+            mock_request,
+            NewtonBenchSeedSessionRequest(
+                module_name="m0_gravity",
+                difficulty="easy",
+                system="vanilla_equation",
+                noise_level=0.0,
+                law_version="v0",
+            ),
+        )
+        worker = MagicMock(is_closed=False)
+        started, release, start = self._blocking_worker_start(worker)
+
+        with patch("resources_servers.newton_bench.app.SessionHandle", side_effect=start):
+            call = asyncio.create_task(server.execute_python(mock_request, ExecutePythonRequest(code="1")))
+            assert await asyncio.to_thread(started.wait, 5)
+            # Verify releases the session while its worker is still starting.
+            server._close_session(mock_request.session[SESSION_ID_KEY])
+            release.set()
+            response = await call
+
+        assert response.success is False
+        worker.close.assert_called_once()
+        assert server._sessions == {}
+
     # ============================================================================
     # 5. Verification Logic Tests
     # ============================================================================
@@ -1398,27 +1473,50 @@ class TestResourcesSessions:
 
         assert server.session_metadata == {}
 
-    @mark.parametrize("release", ["expiry", "end_session"])
-    def test_repeated_seed_does_not_confirm_a_released_session(self, release: str) -> None:
+    def test_repeated_seed_does_not_confirm_a_swept_session(self) -> None:
         server = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
             assert client.post("/seed_session", json=_typed_seed()).status_code == 200
-            if release == "expiry":
-                server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
-                server._cleanup_sessions()
-            else:
-                assert client.post("/end_session", json={}).status_code == 200
+            server.session_metadata["resources-session"]["last_used"] = time.time() - server.config.session_ttl - 1
+            server._cleanup_sessions()
             other_episode = _typed_seed()
             other_episode["episode_id"]["rollout_id"] = "other"
             assert client.post("/seed_session", json=other_episode).status_code == 409
             response = client.post("/seed_session", json=_typed_seed())
 
         assert response.status_code == 404
-        assert response.json()["detail"]["failure_kind"] == (
-            "session_expired" if release == "expiry" else "session_lost"
-        )
+        assert response.json()["detail"]["failure_kind"] == "session_expired"
         assert server.session_metadata == {}
+
+    def test_end_session_stops_the_worker_but_verify_still_scores_the_law(self) -> None:
+        # A model can call /end_session as a tool; that must not drop its own sample from the score.
+        server = _session_server()
+        evaluator = MagicMock()
+        evaluator.evaluate_law.return_value = {"symbolic_equivalent": True, "rmsle": 0.0}
+
+        with (
+            TestClient(server.setup_webserver()) as client,
+            patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
+        ):
+            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            assert client.post("/execute_python", json={"code": "x = 41\nx + 1"}).json()["result"] == "42"
+            handle = server._sessions["resources-session"]
+            assert client.post("/end_session", json={}).status_code == 200
+            assert handle.is_closed and server._sessions == {}
+
+            # The repeated seed still confirms the session, whose next call runs in a fresh worker.
+            client.cookies.clear()
+            assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+            fresh = client.post("/execute_python", json={"code": "x"}).json()
+            assert "name 'x' is not defined" in fresh["error_message"]
+            verify = client.post("/verify", json=_final_law_verify_body()).json()
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+
+        assert verify["mask_sample"] is False
+        assert verify["reward"] == 1.0
+        evaluator.evaluate_law.assert_called_once()
+        assert server._sessions == {} and server.session_metadata == {}
 
     def test_session_reaped_by_idle_sweep_reports_expired(self) -> None:
         server = _session_server()
@@ -1432,12 +1530,15 @@ class TestResourcesSessions:
             verify = client.post("/verify", json=VERIFY_BODY)
             # The Environment Server still closes the session it seeded.
             close = client.post("/close_session", json=_typed_close())
+            late_verify = client.post("/verify", json=VERIFY_BODY)
 
         assert python.status_code == 404
         assert python.json()["detail"]["failure_kind"] == "session_expired"
         assert verify.json()["mask_sample"] is True
         assert verify.json()["failure_kind"] == "session_expired"
         assert close.status_code == 200
+        assert late_verify.json()["mask_sample"] is True
+        assert late_verify.json()["failure_kind"] == "session_expired"
 
     def test_a_swept_session_still_reports_expired_after_the_close_retry_window(self) -> None:
         server = _session_server()
@@ -1483,6 +1584,16 @@ def test_malformed_typed_seed_does_not_fall_back_to_legacy(expose_tools_over_mcp
         assert client.post("/seed_session", json=malformed).status_code == 422
     assert server.session_metadata == {}
     assert server._session_episodes == {}
+
+
+def test_end_session_is_not_an_mcp_tool() -> None:
+    server = _session_server()
+    server.config.expose_tools_over_mcp = True
+
+    tools = maybe_auto_expose(server, server.setup_webserver())
+
+    assert "end_session" not in tools
+    assert {"execute_python", "run_experiment_m0_gravity"} <= set(tools)
 
 
 def test_run_seed_keeps_a_row_with_its_own_task_id() -> None:

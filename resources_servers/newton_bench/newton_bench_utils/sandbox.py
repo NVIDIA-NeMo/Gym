@@ -73,8 +73,12 @@ class SessionHandle:
     """Light wrapper around one long-lived worker process."""
 
     def __init__(self, max_execution_time: int):
-        # Fork would retain the server's accepted HTTP sockets after their owning transport closes them.
-        context = multiprocessing.get_context("spawn")
+        # Fork would retain the server's accepted HTTP sockets after their owning transport closes them, and spawn
+        # re-imports the server in every worker. A forkserver worker forks from a separate process that imported the
+        # server (__main__ when it runs as app.py) and this module once, so it holds neither the sockets nor its own
+        # copy of the imports. The first start in a process waits for that import; call this off the event loop.
+        context = multiprocessing.get_context("forkserver")
+        context.set_forkserver_preload(["__main__", __name__])
         parent_conn, child_conn = context.Pipe()
         self._conn = parent_conn
         self._max_execution_time = max_execution_time
