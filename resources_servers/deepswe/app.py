@@ -123,12 +123,20 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
         supported = {
             "agent": {OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO},
             "verification": {OutcomeAction.FAIL, OutcomeAction.RETRY},
+            None: {OutcomeAction.FAIL},
         }
         for stage, allowed in supported.items():
             rules = policy.by_stage.get(stage, policy.default_policy)
-            actions = {rules.default_action, *rules.by_failure_kind.values(), *rules.by_status_code.values()}
+            actions = {
+                rules.default_action,
+                *rules.by_failure_kind.values(),
+                *rules.by_status_code.values(),
+                *rules.by_failure_class.values(),
+            }
             if actions - allowed:
-                raise ValueError(f"DeepSWE {stage} policy supports only {', '.join(sorted(allowed))}")
+                raise ValueError(
+                    f"DeepSWE {stage or 'unknown-stage'} policy supports only {', '.join(sorted(allowed))}"
+                )
         return policy
 
 

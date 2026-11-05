@@ -17,6 +17,7 @@ from nemo_gym.core import (
     SESSION_LOST,
     VERIFIER_ERROR,
     FailureBoundary,
+    FailureClass,
     NgFailureEvent,
     OutcomeAction,
     RequestFailureLog,
@@ -31,6 +32,7 @@ from resources_servers.deepswe.app import (
     DeepSWEResourcesServerConfig,
     DeepSWESeedSessionRequest,
     DeepSWEVerifyRequest,
+    DeepSWEVerifyResponse,
     VerifierResult,
     _resolve_task,
     _resolve_task_id,
@@ -51,6 +53,7 @@ def _config(
     *,
     golden: bool = True,
     agent_policy: dict | None = None,
+    classification: dict | None = None,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
         host="0.0.0.0",
@@ -60,7 +63,10 @@ def _config(
         tasks_dir=tasks_dir,
         expected_task_count=1,
         is_verifying_golden_patch=golden,
-        **({"outcome_policy": {"by_stage": {"agent": agent_policy}}} if agent_policy else {}),
+        outcome_policy={
+            **({"by_stage": {"agent": agent_policy}} if agent_policy else {}),
+            **({"classification": classification} if classification else {}),
+        },
         sandbox_provider="test",
         sandbox_config={},
     )
@@ -79,13 +85,31 @@ def test_agent_failure_policy_uses_shared_defaults_and_accepts_partial_rules(tas
 
 
 @pytest.mark.parametrize("action", ["verify", "retry"])
-@pytest.mark.parametrize("rule", ["default_action", "by_failure_kind", "by_status_code"])
+@pytest.mark.parametrize("rule", ["default_action", "by_failure_kind", "by_status_code", "by_failure_class"])
 def test_agent_failure_policy_rejects_actions_this_boundary_cannot_execute(
     task_assets: Path, action: str, rule: str
 ) -> None:
-    value = action if rule == "default_action" else {503 if rule == "by_status_code" else PROVIDER_OOM_KILLED: action}
+    key = {"by_status_code": 503, "by_failure_class": "model"}.get(rule, PROVIDER_OOM_KILLED)
+    value = action if rule == "default_action" else {key: action}
     with pytest.raises(ValueError, match="supports only count_as_zero, fail"):
         _config(task_assets, agent_policy={rule: value})
+
+
+@pytest.mark.parametrize(
+    "stage,action",
+    [
+        ("verification", "verify"),
+        ("verification", "count_as_zero"),
+        (None, "retry"),
+        (None, "count_as_zero"),
+        (None, "verify"),
+    ],
+)
+def test_stage_policy_rejects_unsupported_class_actions(task_assets: Path, stage: str | None, action: str) -> None:
+    policy = {"by_failure_class": {"evaluation": action}}
+    override = {"default_policy": policy} if stage is None else {"by_stage": {stage: policy}}
+    with pytest.raises(ValueError, match="policy supports only"):
+        DeepSWEResourcesServerConfig.model_validate(_config(task_assets).model_dump() | {"outcome_policy": override})
 
 
 def test_agent_failure_policy_rejects_unregistered_failure_kind(task_assets: Path) -> None:
@@ -831,15 +855,22 @@ async def test_empty_agent_response_can_still_receive_a_completed_verifier_zero(
         ),
     ],
 )
+@pytest.mark.parametrize("failure_class", [FailureClass.MODEL, FailureClass.EVALUATION])
 async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_verifying(
     task_assets: Path,
     monkeypatch: MonkeyPatch,
     policy: dict | None,
     http_status: int | None,
     expected_action: OutcomeAction,
+    failure_class: FailureClass,
 ) -> None:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False, agent_policy=policy),
+        config=_config(
+            task_assets,
+            golden=False,
+            agent_policy=policy,
+            classification={"by_stage": {"agent": {"by_failure_kind": {PROVIDER_OOM_KILLED: failure_class}}}},
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     agent_sandbox = AsyncMock()
@@ -868,7 +899,11 @@ async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_
     assert log.report == body.failure_report
     assert log.report.failure_id is None
     counted = expected_action == OutcomeAction.COUNT_AS_ZERO
-    assert response.failure_outcome_attribution == "model"
+    assert response.failure_outcome_attribution is failure_class
+    restored = DeepSWEVerifyResponse.model_validate_json(response.model_dump_json())
+    assert restored.failure_outcome_attribution is failure_class
+    assert restored.failure_outcome_action == expected_action
+    assert restored.failure_report == response.failure_report
     assert response.failure_outcome_action == expected_action
     assert response.model_dump(mode="json")["failure_outcome_action"] == expected_action.value
     original_id = next(iter(body.failure_report.events))
@@ -1408,8 +1443,9 @@ async def test_diagnostic_oom_event_without_execution_observation_does_not_choos
 
 
 @pytest.mark.parametrize("kind", [PROVIDER_OOM_KILLED, "provider_unavailable"])
+@pytest.mark.parametrize("failure_class", [FailureClass.MODEL, FailureClass.EVALUATION])
 async def test_recovered_verifier_keeps_original_sandbox_failure_without_changing_its_score(
-    task_assets: Path, monkeypatch: MonkeyPatch, kind: str
+    task_assets: Path, monkeypatch: MonkeyPatch, kind: str, failure_class: FailureClass
 ) -> None:
     error = _sandbox_failure(kind, "first verifier sandbox failed")
     server, created = _rollout_server(
@@ -1417,12 +1453,25 @@ async def test_recovered_verifier_keeps_original_sandbox_failure_without_changin
         monkeypatch,
         verifier_results=[error, VerifierResult(evaluation_completed=True, reward=1.0)],
     )
+    server.config = DeepSWEResourcesServerConfig.model_validate(
+        server.config.model_dump()
+        | {
+            "outcome_policy": {
+                "classification": {"by_stage": {"verification": {"by_failure_kind": {kind: failure_class}}}},
+                "by_stage": {"verification": {"by_failure_class": {failure_class: "retry"}}},
+            },
+        }
+    )
 
     response, log = await _verify(server)
 
     assert (response.reward, response.evaluation_completed, response.mask_sample) == (1.0, True, False)
     assert response.failure_kind is None and response.verification_attempts == 2
     assert response.failure_outcome_action is None and response.failure_outcome_attribution is None
+    restored = DeepSWEVerifyResponse.model_validate_json(response.model_dump_json())
+    assert restored.reward == 1.0 and restored.mask_sample is False
+    assert "failure_outcome_action" not in restored.model_dump(mode="json")
+    assert "failure_outcome_attribution" not in restored.model_dump(mode="json")
     assert log.report.failure_id is None and not log.report.omitted
     assert log.report.events[error.event_id] == failure_report_for(error).events[error.event_id]
     [attempt] = [event for event in log.report.events.values() if event.boundary == FailureBoundary.RESOURCES_SERVER]
@@ -1604,3 +1653,30 @@ async def test_verifier_does_not_reassign_a_known_failure_origin_or_claim_its_ow
     assert response.failure_outcome_attribution == "unknown"
     assert response.mask_sample is True and response.evaluation_completed is False
     assert log.report.events[error.event_id].stage == stage
+
+
+@pytest.mark.parametrize("action,attempts", [("retry", 3), ("fail", 1)])
+async def test_verifier_uses_shared_class_override_for_actions_and_saved_result(
+    task_assets: Path, monkeypatch: MonkeyPatch, action: str, attempts: int
+) -> None:
+    errors = [_sandbox_failure("provider_unavailable", f"verifier unavailable {i}") for i in range(3)]
+    server, _ = _rollout_server(task_assets, monkeypatch, verifier_results=errors)
+    server.config = DeepSWEResourcesServerConfig.model_validate(
+        server.config.model_dump()
+        | {
+            "outcome_policy": {
+                "classification": {
+                    "by_stage": {"verification": {"by_failure_kind": {"provider_unavailable": "model"}}}
+                },
+                "by_stage": {"verification": {"by_failure_class": {"model": action}}},
+            },
+        }
+    )
+    response, log = await _verify(server)
+    restored = DeepSWEVerifyResponse.model_validate_json(response.model_dump_json())
+    assert response.verification_attempts == attempts
+    assert restored.failure_outcome_attribution is FailureClass.MODEL
+    assert restored.failure_outcome_action == OutcomeAction.FAIL
+    assert restored.mask_sample is True and restored.evaluation_completed is False
+    assert response.failure_report == restored.failure_report
+    assert all(log.report.events[error.event_id].failure_kind == "provider_unavailable" for error in errors[:attempts])
