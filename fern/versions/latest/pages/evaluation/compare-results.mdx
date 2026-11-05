@@ -277,14 +277,28 @@ Every selected metric must be present in every included repeat. Gym does not sil
 
 Recorded task sets must agree across repeats and sides. When materialized inputs are available, Gym also verifies planned coverage. Without those inputs, planned coverage remains unverified; recorded coverage checks cannot prove that a task absent from every completed result was collected. Known incomplete or inconsistent coverage suppresses affected confidence intervals while retaining descriptive results.
 
+## Read saved failure counts
+
+Suite comparison automatically reads `<stem>_coverage.json` beside `<stem>.jsonl` when present; collection and aggregation with `merge_shards=true` write this companion. Metrics-only aggregation (`merge_shards=false`) writes `<stem>_aggregate_coverage.json`, which suite comparison does not read. The comparison uses the saved failure counts and available zero-count fields without scanning rollout records or reconstructing retries from failure logs. No additional flag is needed. Positive counts add a short warning, for example:
+
+```text
+llama31-8b/birdbench candidate: Saved failures (entire rollout file): 3 (3 scored as zero, 0 not in the score; context_length_exceeded=3).
+```
+
+These counts are a saved snapshot for the **entire rollout file**, including every agent and benchmark in that file. Each warning appears once per file and lists all model/benchmark/role usages. Per-source JSON entries can refer to the same summary; count each file once when combining cells. The snapshot does not establish the current health of the trajectories.
+
+When recorded, `failures_counted_as_zero` becomes JSON `counts.counted_as_zero`: the warning splits failures into those already scored as zero and those not in the score. Schema-2 `final_zeros` becomes `counts.final_zeros` and records settled policy zeros. If only this narrower count is available, the warning reports final policy zeros and labels any remainder as other failures with unknown score inclusion. Without either field, score inclusion remains unknown; the total failure count is still reported.
+
+Missing coverage files leave failure counts unknown without a warning. An existing file with unavailable, unreadable, or malformed counts produces a brief unavailable warning. Counts of zero produce no warning. Failure reporting does not change scores, weights, coverage decisions, or confidence intervals. Per-source JSON `failures` records the `source` path, `scope`, `counts`, and any `unavailable_reason`.
+
 ## Read the reports
 
 `gym eval compare-suite` writes these files to `--output-dir`, defaulting to the YAML file's directory:
 
 | File | Contents |
 | --- | --- |
-| `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, and coverage notes. |
-| `suite_compare_report.json` | Raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, and provenance. |
+| `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, coverage notes, and saved failure warnings. |
+| `suite_compare_report.json` | Raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, saved failure counts, and provenance. |
 
 The suite JSON report has its own versioned format with `"schema_version": "1"`. Its filename identifies the report type; it has no `level` field.
 

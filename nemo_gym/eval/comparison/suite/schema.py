@@ -15,7 +15,7 @@
 """Manifest, configuration, and report contracts for benchmark-suite comparisons."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -119,6 +119,50 @@ class SuiteCoverage(_SuiteModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class SuiteFailureCounts(_SuiteModel):
+    """Saved selected failure outcomes for the entire rollout file."""
+
+    total: int = Field(strict=True, ge=0)
+    final: int = Field(strict=True, ge=0)
+    not_final: int = Field(strict=True, ge=0)
+    by_class: dict[str, Annotated[int, Field(strict=True, ge=0)]]
+    counted_as_zero: int | None = Field(default=None, strict=True, ge=0)
+    final_zeros: int | None = Field(default=None, strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def validate_totals(self) -> "SuiteFailureCounts":
+        if self.final + self.not_final != self.total:
+            raise ValueError("Final and not-final failure counts must sum to the total.")
+        if sum(self.by_class.values()) != self.total:
+            raise ValueError("Failure class counts must sum to the total.")
+        if self.counted_as_zero is not None and self.counted_as_zero > self.total:
+            raise ValueError("Failures counted as zero must not exceed the total failure count.")
+        if self.final_zeros is not None and self.final_zeros > self.final:
+            raise ValueError("Final policy zeros must not exceed the final failure count.")
+        if (
+            self.counted_as_zero is not None
+            and self.final_zeros is not None
+            and self.counted_as_zero < self.final_zeros
+        ):
+            raise ValueError("Failures counted as zero must include all final policy zeros.")
+        return self
+
+
+class SuiteFailureSummary(_SuiteModel):
+    """Precomputed accounting, without rescanning or certifying the source artifacts."""
+
+    source: Path
+    scope: Literal["rollout_file"] = "rollout_file"
+    counts: SuiteFailureCounts | None = None
+    unavailable_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "SuiteFailureSummary":
+        if (self.counts is None) == (self.unavailable_reason is None):
+            raise ValueError("Provide exactly one of failure counts and an unavailable reason.")
+        return self
+
+
 class SuiteRunSummary(_SuiteModel):
     rollouts: Path
     aggregate_metrics: Path
@@ -131,6 +175,7 @@ class SuiteRunSummary(_SuiteModel):
     unscored_repeat_indices: list[int] = Field(default_factory=list)
     summary: SuiteSampleSummary | None = None
     coverage: SuiteCoverage
+    failures: SuiteFailureSummary | None = None
 
 
 class SuiteMetricResult(_SuiteModel):
