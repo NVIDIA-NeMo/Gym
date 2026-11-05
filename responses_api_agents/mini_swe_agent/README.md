@@ -74,7 +74,7 @@ The runtime is installed at seed, before the activation, with
   1.106.0 with its MCP extra, MCP 2.2.0), constrained to the full lock in
   [`runtime/requirements.txt`](runtime/requirements.txt), and uploads it with a pinned CPython 3.13. The sandbox needs
   no network, no `uv` and no Python of its own: x86_64 or aarch64 Linux with glibc 2.28 or newer (LiteLLM's wheels) or
-  musl, `bash`, `tar` with gzip, and about 300 MB under `/tmp`.
+  musl, `bash`, `tar` with gzip, and about 450 MB under `/tmp` (the runtime is about 410 MB).
 - The lock replaces this server's own environment as the runtime's constraints: `/run` keeps the SWE-Gym fork in this
   server's environment, and LiteLLM 1.106.0 needs MCP 2, which Gym's MCP 1 clients cannot share. After changing
   `requirements.in`, regenerate the lock with the command in its header.
