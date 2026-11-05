@@ -54,7 +54,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge, reraise_judge_errors
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure, reraise_judge_errors
 from resources_servers.sec_local_index.cache import atomic_write, make_shared_dirs
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
 from resources_servers.sec_local_index.html_text import html_to_text
@@ -1508,7 +1508,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         for attempt in range(max_judge_retries):
             try:
                 judge_response = await self._call_judge(judge_params)
-            except JudgeError as judge_error:
+            except JUDGE_FAILURES as judge_error:
+                if not is_judge_failure(judge_error):
+                    raise
                 logger.warning("Judge call attempt %d/%d failed: %s", attempt + 1, max_judge_retries, judge_error)
                 if attempt < max_judge_retries - 1:
                     await asyncio.sleep(2**attempt)

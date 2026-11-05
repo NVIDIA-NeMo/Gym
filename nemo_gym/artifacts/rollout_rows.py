@@ -14,19 +14,33 @@
 # limitations under the License.
 """The rollout rows a run writes: the private keys that mark a row, and the row as it is exported."""
 
+from collections.abc import Mapping
 from typing import Any
 
 from nemo_gym.trajectory.trajectory_record import (
     NG_TRAJECTORY_KEY,
     NG_VERIFIER_INVOCATIONS_KEY,
+    TrajectoryRecord,
 )
 
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
+# Response metadata an agent sets on the placeholder response it returns when no generation happened, for
+# example when its remote service or simulator failed before the model answered. Recovery never keeps such a
+# placeholder as an answer, while a model's own blank answer (no marker) stays one.
+NG_NO_GENERATION_METADATA = {"ng_no_generation": "true"}
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
+
+
+def is_no_generation_placeholder(response: Mapping[str, Any]) -> bool:
+    """Whether ``response`` carries the ``NG_NO_GENERATION_METADATA`` marker."""
+    metadata = response.get("metadata")
+    return isinstance(metadata, Mapping) and all(
+        metadata.get(key) == value for key, value in NG_NO_GENERATION_METADATA.items()
+    )
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
@@ -42,9 +56,21 @@ def _strip_capture_payloads(result: dict[str, Any]) -> None:
 
 
 def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
-    """Return an exporter view without the complete trajectory or raw capture payloads."""
+    """Keep canonical operation evidence in the exporter view, without conversation or capture payloads."""
     sanitized = dict(result)
-    sanitized.pop(NG_TRAJECTORY_KEY, None)
+    trajectory = result.get(NG_TRAJECTORY_KEY)
+    if trajectory is not None:
+        # Reuse the canonical schema and retain identities, statuses, timing, joins, causes and gaps.
+        # Omitted payloads remain unavailable to consumers; this is not a complete response/answer export.
+        sanitized[NG_TRAJECTORY_KEY] = TrajectoryRecord.model_validate(trajectory).model_dump(
+            exclude_unset=True,
+            exclude={
+                "invocations": {"__all__": {"conversation"}},
+                "turns": {"__all__": {"question", "answer", "reasoning_content"}},
+                "model_calls": {"__all__": set(_MODEL_CALL_PAYLOAD_KEYS)},
+                "tool_calls": {"__all__": {"output"}},
+            },
+        )
     sanitized.pop("ng_model_call_capture", None)
     capture = result.get("ng_model_call_capture")
     if isinstance(capture, dict):

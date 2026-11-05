@@ -177,6 +177,8 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     ]
     assert payload["env"]["ANTHROPIC_BASE_URL"] == "https://model.example"
     assert "HOME" not in payload["env"]
+    # A backgrounded command would keep the CLI, and so the run, alive after the final answer.
+    assert payload["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
     assert response.output[0].content[0].text == "partial"
     assert response.status == status
     assert response.usage.total_tokens == 12
@@ -592,7 +594,7 @@ def test_sandbox_accepts_one_text_turn_with_optional_system_message(input):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("confirmed", [True, False])
 async def test_close_distinguishes_borrowed_release_from_confirmed_termination(confirmed):
-    from nemo_gym.agents import HarnessTerminationError, SandboxSession
+    from nemo_gym.agents import SandboxSession, harness_termination_failure
 
     remote = SimpleNamespace(exec=AsyncMock(return_value=result()), disconnect=AsyncMock())
     session = SandboxSession(sandbox=remote, session_dir="/tmp/session", workdir="/app", harness="Claude Code")
@@ -606,7 +608,7 @@ async def test_close_distinguishes_borrowed_release_from_confirmed_termination(c
     if confirmed:
         session.cleanup = receipt
     else:
-        session.termination_error = HarnessTerminationError(harness="Claude Code", receipt=receipt)
+        session.termination_error = harness_termination_failure(harness="Claude Code", receipt=receipt)
     state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
     close = await agent()._close_agent_session_state(state)
     remote.disconnect.assert_awaited_once()

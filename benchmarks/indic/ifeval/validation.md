@@ -31,8 +31,8 @@ reproduced before the fixes. With Python 3.13.14, `PYTHONPATH=.`, and the existi
 NLTK/checker caches, final targeted validation passed:
 
 ```bash
-python -m pytest tests/unit_tests/test_indic_ifeval.py \
-  tests/unit_tests/data/test_task_data.py tests/unit_tests/test_aggregate_metrics.py \
+python -m pytest tests/unit_tests/benchmarks/test_indic_ifeval.py \
+  tests/unit_tests/data/test_task_data.py tests/unit_tests/metrics/test_aggregate_metrics.py \
   -q --tb=short
 python -m pytest resources_servers/instruction_following/tests -q --tb=short
 pre-commit run --all-files
@@ -70,7 +70,7 @@ is covered as follows:
 | Shared seeds and metadata | The merged upstream collector supplies independent metadata. Tests verify seeds 0–3, preserved `extra_body.top_k`, and unchanged source metadata when repeats are explicitly requested. |
 | Defaults leaking into other benchmarks | Combined IndicIFEval/Numb3rs tests preserve audio metadata and routing; explicit CLI sampling overrides still apply across the run. |
 | Shared English verifier disappearing | `_copy` keeps the original English resource instance. Two regression tests reproduced the missing-server error before the fix, in both benchmark orders. |
-| Behavioral tests absent from CI | Preparation and composition tests live in `tests/unit_tests/test_indic_ifeval.py`. Scorer tests stay in the instruction-following server suite, and adapter checks stay in the vLLM server suite. |
+| Behavioral tests absent from CI | Preparation and composition tests live in `tests/unit_tests/benchmarks/test_indic_ifeval.py`. Scorer tests stay in the instruction-following server suite, and adapter checks stay in the vLLM server suite. |
 | Server imports inflating core coverage | Preparation imports a small shared schema rather than the scorer or server implementation. A subprocess import check guards that boundary. |
 | Current branch and honest evidence | Upstream main is merged; preparation, tests, saved-model replay, and live-smoke artifacts are recorded below. |
 
@@ -108,15 +108,15 @@ Python 3.13.14; NLTK resources and the pinned checker cache were pre-provisioned
 The existing campaign driver environment supplied the installed dependencies.
 
 ```bash
-python -m pytest tests/unit_tests/test_indic_ifeval.py \
-  tests/unit_tests/test_rollout_seed_metadata.py \
-  tests/unit_tests/test_indic_aime_2026.py tests/unit_tests/test_benchmarks.py \
+python -m pytest tests/unit_tests/benchmarks/test_indic_ifeval.py \
+  tests/unit_tests/rollouts/test_rollout_seed_metadata.py \
+  tests/unit_tests/benchmarks/test_indic_aime_2026.py tests/unit_tests/environment/test_benchmarks.py \
   tests/unit_tests/data/test_prompt.py -q --tb=short
 python -m pytest resources_servers/instruction_following/tests \
   responses_api_models/vllm_model/tests/test_app.py -q --tb=short
-python -m pytest tests/unit_tests/test_indic_ifeval.py \
-  tests/unit_tests/test_rollout_seed_metadata.py -q --tb=short
-python -m pytest tests/unit_tests/test_indic_ifeval.py \
+python -m pytest tests/unit_tests/benchmarks/test_indic_ifeval.py \
+  tests/unit_tests/rollouts/test_rollout_seed_metadata.py -q --tb=short
+python -m pytest tests/unit_tests/benchmarks/test_indic_ifeval.py \
   --cov=resources_servers.instruction_following.indicifeval_schema \
   --cov-report=term-missing --cov-fail-under=100 -q --tb=short
 pre-commit run --all-files
