@@ -2041,6 +2041,98 @@ class TestRolloutCollection:
         assert maybe_rollout_id_from_run_body(returned_row) == "caller-owned-capture-id"
         assert result == {"reward": 1.0}
 
+    @pytest.mark.parametrize("include_payloads", [False, True])
+    async def test_run_examples_enrichment_matches_shared_projection(self, monkeypatch, include_payloads):
+        from copy import deepcopy
+
+        from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+        source_row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            ROLLOUT_ID_KEY_NAME: "capture",
+            "task_id": "task",
+            "responses_create_params": {"input": "solve"},
+        }
+        raw = {
+            "response": {},
+            "reward": 1.0,
+            "ng_agent_observations": {
+                "schema_version": "2.0",
+                "source": "test",
+                "records": [
+                    {"kind": "agent_invocation", "invocation_id": "root"},
+                    *[
+                        {
+                            "kind": "tool_call",
+                            "invocation_id": "root",
+                            "tool_call_id": "request",
+                            "native_tool_call_id": "request",
+                            "span_id": span,
+                            "source_message_id": "message",
+                            "status": status,
+                            "timings": [
+                                {
+                                    "boundary": "lifecycle",
+                                    "timing_source": "test.tool",
+                                    "duration_ms": 2,
+                                    "duration_source": "reported",
+                                }
+                            ],
+                        }
+                        for span, status in (("first", "failed"), ("retry", "completed"))
+                    ],
+                ],
+            },
+        }
+        raw["ng_model_call_capture"] = {
+            "calls": [
+                {
+                    "model_call_id": "failed",
+                    "client_session_id": "root",
+                    "client_assistant_message_id": "message",
+                    "status_code": 503,
+                    "response_raw": "unavailable",
+                },
+                {
+                    "model_call_id": "requesting",
+                    "client_session_id": "root",
+                    "client_assistant_message_id": "message",
+                    "status_code": 200,
+                    "response": {
+                        "output": [{"type": "function_call", "call_id": "request", "name": "bash", "arguments": "{}"}]
+                    },
+                },
+            ]
+        }
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, deepcopy(raw))))
+        _, result = await next(
+            RolloutCollectionHelper().run_examples(
+                [source_row],
+                enrich_results=True,
+                include_model_call_payloads=include_payloads,
+                trajectory_schema_version="2.0",
+            )
+        )
+        expected = deepcopy(raw)
+        await enrich_run_result(
+            source_row,
+            expected,
+            capture_dirs=[],
+            observability_enabled=False,
+            trajectory_schema_version="2.0",
+            include_payloads=include_payloads,
+        )
+        assert result["ng_trajectory"] == expected["ng_trajectory"]
+        assert result["reward"] == 1.0
+        assert [tool["model_call_id"] for tool in result["ng_trajectory"]["tool_calls"]] == [
+            "requesting",
+            "requesting",
+        ]
+        assert len({tool["span_id"] for tool in result["ng_trajectory"]["tool_calls"]}) == 2
+        assert (result["ng_trajectory"]["model_calls"][1]["response"] is not None) == include_payloads
+
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -15921,3 +16013,123 @@ async def test_a_run_that_is_not_a_shard_keeps_its_rollout_ids_and_capture_keys(
     assert sorted(maybe_rollout_id_from_run_body(row) for row in dispatched) == ["0-0", "task-7"]
     assert sorted(row.get(ROLLOUT_ID_KEY_NAME) or "" for row in dispatched) == ["", "task-7"]
     assert sorted(maybe_rollout_id_from_run_body(result) for result in saved) == ["0-0", "task-7"]
+
+
+@pytest.mark.parametrize(
+    "configured,selected,expected",
+    [(None, None, "1.0"), ("2.0", None, "2.0"), ("2.0", "1.0", "1.0"), ("1.0", "2.0", "2.0")],
+)
+@pytest.mark.parametrize("mode", ["raw", "enriched", "recorded"])
+@pytest.mark.parametrize("envelope", ["direct", "success", "failure"])
+@pytest.mark.parametrize("collision", [False, True])
+async def test_returned_and_stored_projection_share_one_decision(
+    tmp_path, configured, selected, expected, mode, envelope, collision
+):
+    config = {"model_call_capture": {"trajectory_schema_version": configured}} if configured else {}
+    row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "agent"}, "task_id": "task"}
+    if envelope != "direct":
+        row.update(
+            task_id={"taskset": "test", "task_id": "task"}, task_input={"responses_create_params": {"input": "solve"}}
+        )
+    primary = {
+        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}]
+    }
+
+    class Helper(RolloutCollectionHelper):
+        def setup_server_client(self, head_server_config=None):
+            return SimpleNamespace(global_config_dict=config)
+
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            dispatched = examples[0]
+            conversation = [
+                {"type": "function_call", "call_id": "stable", "name": "bash", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "stable", "output": "done"},
+            ]
+            bundle = {
+                "schema_version": "2.0",
+                "source": "test",
+                "records": [
+                    {"kind": "agent_invocation", "invocation_id": "root", "conversation": deepcopy(conversation)},
+                    {
+                        "kind": "tool_call",
+                        "invocation_id": "root",
+                        "tool_call_id": "stable",
+                        "native_tool_call_id": "native",
+                        "span_id": "attempt",
+                        "status": "completed",
+                    },
+                ],
+            }
+            trajectory = {
+                "schema_version": "1.0",
+                "task_id": str(dispatched["task_id"]),
+                "rollout_id": maybe_rollout_id_from_run_body(dispatched),
+                "invocations": [{"invocation_id": "root", "conversation": conversation}],
+            }
+            if collision:
+                # Only the trajectory has this independent ID. Reflecting a second
+                # bundle-only projection would incorrectly restore the native ID.
+                trajectory["turns"] = [
+                    {
+                        "invocation_id": "root",
+                        "task_id": trajectory["task_id"],
+                        "rollout_id": trajectory["rollout_id"],
+                        "turn_no": 1,
+                        "timestamp": 1.0,
+                        "step_count": 1,
+                        "question": [{"type": "message", "id": "native", "role": "user", "content": "unrelated"}],
+                    }
+                ]
+            evidence = {
+                "ng_agent_observations": bundle,
+                "ng_trajectory": trajectory,
+                "response": deepcopy(primary),
+                "reward": 1.0,
+            }
+            if envelope == "direct":
+                reply = evidence
+            else:
+                identity = nemo_gym.rollouts.rollout_collection._episode_request_body(dispatched)
+                reply = {"episode_id": identity["episode_id"], "task_id": identity["task"]["task_id"]}
+                if envelope == "success":
+                    reply["result"] = evidence
+                else:
+                    reply["failure"] = {
+                        "failure_kind": "agent_request_failed",
+                        "failure_reason": "failed",
+                        "stage": "agent",
+                        "terminal": False,
+                        "partial_response": deepcopy(primary),
+                        "agent_observations": bundle,
+                        "trajectory": trajectory,
+                    }
+            future = Future()
+            future.set_result(_CompletedRollout(row=dispatched, result=reply, rollout_latency_ms=1.0))
+            return iter([future])
+
+    options = {"enrich_results": mode == "enriched", "trajectory_schema_version": selected}
+    if mode == "recorded":
+        options.update(record_output_dir=tmp_path, record_shard="test")
+    _, result = await next(Helper().run_examples([row], **options))
+    if envelope == "failure":
+        container, bundle_key, trajectory_key = result["failure"], "agent_observations", "trajectory"
+        assert container["partial_response"] == primary
+    else:
+        container = result if envelope == "direct" else result["result"]
+        bundle_key, trajectory_key = "ng_agent_observations", "ng_trajectory"
+        assert container["response"] == primary and container["reward"] == 1
+    bundle = container[bundle_key]
+    observed = next(record for record in bundle["records"] if record["kind"] == "tool_call")
+    expected_call = "stable" if expected == "2.0" or collision else "native"
+    assert bundle.get("schema_version", "1.0") == expected
+    assert observed["tool_call_id"] == expected_call
+    assert container[trajectory_key]["invocations"][0]["conversation"][0]["call_id"] == expected_call
+    if mode != "raw":
+        assert result["ng_trajectory"] == container[trajectory_key]
+        assert result["ng_trajectory"]["schema_version"] == expected
+        assert result["ng_trajectory"]["tool_calls"][0]["tool_call_id"] == expected_call
+    if mode == "recorded":
+        filename = "rollouts-test_failures.jsonl" if envelope == "failure" else "rollouts-test.jsonl"
+        [saved] = [json.loads(line) for line in (tmp_path / filename).read_text().splitlines()]
+        assert saved["ng_trajectory"] == result["ng_trajectory"]
+        assert saved["ng_agent_observations"] == bundle

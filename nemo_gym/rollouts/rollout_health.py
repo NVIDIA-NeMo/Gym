@@ -166,7 +166,11 @@ def evaluate_record(
     )
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
     trajectory = record.get("ng_trajectory")
-    trajectory_rollout_id = trajectory.get("rollout_id") if isinstance(trajectory, dict) else None
+    trajectory_rollout_id = (
+        trajectory.get("capture_key" if trajectory.get("schema_version") == "2.0" else "rollout_id")
+        if isinstance(trajectory, dict)
+        else None
+    )
     rollout_id = str(record.get(ROLLOUT_ID_KEY) or trajectory_rollout_id or f"{task_index}-{rollout_index}")
     subject = _subject(task_index, rollout_index)
 
