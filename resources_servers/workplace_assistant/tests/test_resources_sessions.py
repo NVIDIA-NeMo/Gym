@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Workplace Assistant serves the typed resources sessions API through its real routes, next to an Agent's /run seed."""
+"""Workplace Assistant serves the resources sessions API through its real routes, next to an Agent's /run seed."""
 
 import asyncio
 import json
@@ -110,7 +110,7 @@ def test_follows_the_session_contract() -> None:
     )
 
 
-def test_a_typed_verify_releases_tables_and_keeps_only_its_retry_identity() -> None:
+def test_an_episode_verify_releases_tables_and_keeps_only_its_retry_identity() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
 
@@ -266,7 +266,7 @@ def test_mcp_tool_calls_reach_the_tables_seeded_under_the_callers_id() -> None:
     ],
 )
 @pytest.mark.parametrize("over_mcp", [False, True])
-def test_malformed_typed_seed_cannot_fall_back_to_legacy(payload: dict[str, Any], over_mcp: bool) -> None:
+def test_malformed_episode_seed_cannot_fall_back_to_legacy(payload: dict[str, Any], over_mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=over_mcp)
     webserver = server.setup_webserver()
     maybe_auto_expose(server, webserver)
@@ -277,7 +277,7 @@ def test_malformed_typed_seed_cannot_fall_back_to_legacy(payload: dict[str, Any]
 
 
 def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
-    # A dataset row's scalar task_id is a row field, not a typed seed's TaskId.
+    # A dataset row's scalar task_id is a row field, not an episode seed's TaskId.
     server = make_server()
     client = TestClient(server.setup_webserver())
     body = {"responses_create_params": {"input": "hi"}, **TASK_DATA, "task_id": "wb-0007"}
@@ -287,7 +287,7 @@ def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
 
 
 @pytest.mark.parametrize("completed", ["active", "verified", "closed"])
-def test_legacy_seed_cannot_replace_a_typed_session(completed: str) -> None:
+def test_legacy_seed_cannot_replace_an_episode_session(completed: str) -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -333,13 +333,15 @@ def test_verified_session_keeps_close_ownership_but_not_tools() -> None:
     assert client.post("/verify", json=verify_json(SEND)).json()["mask_sample"] is True
 
 
-@pytest.mark.parametrize("typed", [False, True])
-def test_verify_retry_record_expires_without_extending_on_retry(monkeypatch: pytest.MonkeyPatch, typed: bool) -> None:
+@pytest.mark.parametrize("episode", [False, True])
+def test_verify_retry_record_expires_without_extending_on_retry(
+    monkeypatch: pytest.MonkeyPatch, episode: bool
+) -> None:
     now = 0.0
     monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: now)
     server = make_server(session_close_retry_window_seconds=10)
     client = TestClient(server.setup_webserver())
-    assert client.post("/seed_session", json=seed_json() if typed else {}).status_code == 200
+    assert client.post("/seed_session", json=seed_json() if episode else {}).status_code == 200
     assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
     now = 9.0
     assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
@@ -394,14 +396,14 @@ def test_next_legacy_run_keeps_its_cookie_and_replaces_the_finished_run() -> Non
     assert server.session_id_to_tool_env == {}
 
 
-def test_typed_seed_cannot_adopt_a_live_legacy_session() -> None:
+def test_episode_seed_cannot_adopt_a_live_legacy_session() -> None:
     server = make_server()
     webserver = server.setup_webserver()
-    legacy, typed = TestClient(webserver), TestClient(webserver)
+    legacy, episode = TestClient(webserver), TestClient(webserver)
     assert legacy.post("/seed_session", json={}).status_code == 200
     [session_id] = server.session_id_to_tool_env
     assert legacy.post("/email_send_email", json=SEND).status_code == 200
-    assert typed.post("/seed_session", json=seed_json(session_id)).status_code == 409
+    assert episode.post("/seed_session", json=seed_json(session_id)).status_code == 409
     assert server._session_episodes == {}
     found = legacy.post("/email_search_emails", json={"query": SEND["body"]}).json()
     assert found["output"]["pagination"]["total_emails"] == 1
@@ -413,11 +415,11 @@ def test_failed_cookie_reseed_preserves_verification_retry(monkeypatch: pytest.M
     assert client.post("/seed_session", json={}).status_code == 200
     [session_id] = server.session_id_to_tool_env
     assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
-    receipt = server._verified_sessions.get(session_id)
+    verification_record = server._verified_sessions.get(session_id)
     with monkeypatch.context() as patch:
         patch.setattr(app, "get_tools", MagicMock(side_effect=OSError("tables unavailable")))
         assert client.post("/seed_session", json={}).status_code == 500
-    assert server._verified_sessions.get(session_id) == receipt
+    assert server._verified_sessions.get(session_id) == verification_record
     assert client.post("/verify", json=verify_json(SEND)).json()["reward"] == 1.0
     assert client.post("/seed_session", json={}).status_code == 200
     assert list(server.session_id_to_tool_env) == [session_id]

@@ -112,7 +112,7 @@ def _flaky_server() -> FlakyInitializationServer:
     return FlakyInitializationServer(config=_server().config, server_client=MagicMock(spec=ServerClient))
 
 
-async def test_failed_typed_initialization_binds_nothing_and_a_retry_initializes_again() -> None:
+async def test_failed_episode_initialization_binds_nothing_and_a_retry_initializes_again() -> None:
     server = _flaky_server()
     request = _request()
     with pytest.raises(RuntimeError, match="provider unavailable"):
@@ -136,10 +136,10 @@ async def test_close_releases_what_a_failed_initialization_left_behind() -> None
     await server.close_resources_session(CLOSE)
 
     assert server.partial == {}
-    assert server._fence.closed_episode("session") == SEED.episode_id
+    assert server._resources_session_fences.get("session") == SEED.episode_id
 
 
-async def test_typed_seed_after_verification_is_refused_and_does_not_reinitialize() -> None:
+async def test_episode_seed_after_verification_is_refused_and_does_not_reinitialize() -> None:
     server = _server()
     await server.seed_session(SEED, request=_request())
     _verify_and_release(server)
@@ -150,10 +150,10 @@ async def test_typed_seed_after_verification_is_refused_and_does_not_reinitializ
 
 
 def _verify_and_release(server: AsyncResourceServer) -> None:
-    """What a verifier that releases at /verify does: drop the live state, keep the identity with its receipt."""
+    """What a verifier that releases at /verify does: drop the live state, keep the identity with its saved result."""
     server.state.clear()
     server._session_episodes.pop("session")
-    server._verified_sessions.remember("session", ((SEED.episode_id, SEED.task_id), "receipt"))
+    server._verified_sessions.remember("session", ((SEED.episode_id, SEED.task_id), "result"))
 
 
 async def test_close_after_verification_checks_the_verified_episode() -> None:
@@ -163,13 +163,13 @@ async def test_close_after_verification_checks_the_verified_episode() -> None:
 
     with pytest.raises(ResourcesSessionConflictError):
         await server.close_resources_session(CLOSE.model_copy(update={"episode_id": EpisodeId(rollout_id="other")}))
-    assert server._fence.closed_episode("session") is None
+    assert server._resources_session_fences.get("session") is None
 
     await server.close_resources_session(CLOSE)
-    assert server._fence.closed_episode("session") == SEED.episode_id
+    assert server._resources_session_fences.get("session") == SEED.episode_id
 
 
-async def test_cookie_seed_cannot_replace_a_verified_typed_session() -> None:
+async def test_agent_run_seed_cannot_replace_a_verified_episode_session() -> None:
     server = _server()
     request = _request()
     await server.seed_session(SEED, request=request)
@@ -178,33 +178,33 @@ async def test_cookie_seed_cannot_replace_a_verified_typed_session() -> None:
     with pytest.raises(ResourcesSessionConflictError):
         await server.seed_session(TaskSeed(value=2), request=request)
     assert server.state == {}
-    assert server._verified_sessions.get("session") == ((SEED.episode_id, SEED.task_id), "receipt")
+    assert server._verified_sessions.get("session") == ((SEED.episode_id, SEED.task_id), "result")
 
 
-async def test_cookie_seed_after_verification_keeps_the_session_id_and_starts_fresh_state() -> None:
+async def test_agent_run_seed_after_verification_keeps_the_session_id_and_starts_fresh_state() -> None:
     server = _server()
     request = _request()
     await server.seed_session(TaskSeed(value=1), request=request)
-    # What a verifier does: release the live state, keep a receipt for the cookie's session ID.
+    # What a verifier does: release the live state, keep a result for the cookie's session ID.
     server.state.clear()
-    server._verified_sessions.remember("caller-cookie", (None, "receipt"))
+    server._verified_sessions.remember("caller-cookie", (None, "result"))
 
     await server.seed_session(TaskSeed(value=2), request=request)
 
     assert request.session[SESSION_ID_KEY] == "caller-cookie"
     assert server.state == {"caller-cookie": 2}
-    # The new run's verify must score its own state, not replay the finished run's receipt.
+    # The new run's verify must score its own state, not replay the finished run's result.
     assert "caller-cookie" not in server._verified_sessions
 
 
-async def test_a_failed_cookie_reseed_keeps_the_finished_runs_receipt() -> None:
+async def test_a_failed_agent_run_reseed_keeps_the_finished_runs_result() -> None:
     server = _flaky_server()
-    server._verified_sessions.remember("caller-cookie", (None, "receipt"))
+    server._verified_sessions.remember("caller-cookie", (None, "result"))
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await server.seed_session(TaskSeed(value=2), request=_request())
 
-    assert server._verified_sessions.get("caller-cookie") == (None, "receipt")
+    assert server._verified_sessions.get("caller-cookie") == (None, "result")
 
 
 @pytest.mark.parametrize("operation", ["close", "retire"])
@@ -224,7 +224,7 @@ async def test_release_waits_for_in_flight_initialization(operation: str) -> Non
     assert server.state == {}
     assert server._session_episodes == {}
     # Only a close fences the session; retirement leaves refusing late requests to the checkpoint participant.
-    assert server._fence.closed_episode("session") == (SEED.episode_id if operation == "close" else None)
+    assert server._resources_session_fences.get("session") == (SEED.episode_id if operation == "close" else None)
 
 
 @pytest.mark.parametrize("operation", ["close", "retire"])
@@ -236,12 +236,12 @@ async def test_failed_release_retains_state_and_identity_for_retry(operation: st
         await _release(server, operation)
     assert server.state == {"session": 42}
     assert server._session_episodes == {"session": (SEED.episode_id, SEED.task_id)}
-    assert server._fence.closed_episode("session") is None
+    assert server._resources_session_fences.get("session") is None
     server._fail_release = False
     await _release(server, operation)
     assert server.state == {}
     assert server._session_episodes == {}
-    assert server._fence.closed_episode("session") == (SEED.episode_id if operation == "close" else None)
+    assert server._resources_session_fences.get("session") == (SEED.episode_id if operation == "close" else None)
 
 
 async def test_invalid_task_never_initializes_or_binds_the_cookie() -> None:
@@ -277,8 +277,8 @@ def test_inherited_seed_route_validates_task_data_and_preserves_retries() -> Non
 
 @pytest.mark.parametrize("expose_tools_over_mcp", [False, True])
 @pytest.mark.parametrize("missing", ["resources_session_id", "episode_id", "task_id", "task_data"])
-def test_inherited_seed_route_rejects_partial_typed_requests(missing: str, expose_tools_over_mcp: bool) -> None:
-    # MCP auto-exposure wraps /seed_session; the cookie arm's validator must survive the wrapper.
+def test_inherited_seed_route_rejects_partial_episode_requests(missing: str, expose_tools_over_mcp: bool) -> None:
+    # MCP auto-exposure wraps /seed_session; the agent-run seed arm's validator must survive the wrapper.
     server = _server(expose_tools_over_mcp=expose_tools_over_mcp)
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
@@ -336,6 +336,41 @@ async def test_exported_server_can_inherit_retirement_from_the_state_hooks() -> 
     await server.retire_session_state(SEED.resources_session_id)
     assert server.state == {}
     # The participant also retires a session to undo a restore, and the same session may be installed again.
-    assert server._fence.closed_episode(SEED.resources_session_id) is None
+    assert server._resources_session_fences.get(SEED.resources_session_id) is None
     await server.seed_session(SEED, request=_request())
     assert server.state == {SEED.resources_session_id: 42}
+
+
+async def test_verification_expiry_does_not_expire_or_remove_a_later_close_fence(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    _verify_and_release(server)
+    # Verification is not a close; its result and a later close have independent expiries.
+    assert "session" not in server._resources_session_fences
+    clock[0] = 110.0
+    await server.close_resources_session(CLOSE)
+    clock[0] = 400.0
+    assert "session" not in server._verified_sessions
+    assert server._resources_session_fences.get("session") == SEED.episode_id
+    server._verified_sessions.forget("session")
+    with pytest.raises(ResourcesSessionConflictError, match="already closed"):
+        await server.seed_session(SEED, request=_request())
+    clock[0] = 410.0
+    await server.seed_session(SEED, request=_request())
+    assert server.state == {"session": 42}
+
+
+async def test_shared_lifecycle_keeps_subclass_execution_locks_separate() -> None:
+    class ResourceWithExecutionLocks(AsyncResourceServer):
+        _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+
+    server = ResourceWithExecutionLocks(config=_server().config, server_client=MagicMock(spec=ServerClient))
+    execution_lock = asyncio.Lock()
+    server._session_locks["session"] = execution_lock
+    await server.seed_session(SEED, request=_request())
+    await server.close_resources_session(CLOSE)
+    assert server.state == {}
+    assert server._session_locks == {"session": execution_lock}
+    assert server._resources_session_fences.get("session") == SEED.episode_id

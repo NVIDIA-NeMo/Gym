@@ -139,7 +139,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
     seed_request_model = WorkbenchSeedSessionRequest
-    # Restored tables without identity await adoption by a typed seed until their cookie run first uses them.
+    # Restored tables without identity await adoption by an episode seed until their cookie run first uses them.
     _restored_unbound_sessions: set[str] = PrivateAttr(default_factory=set)
 
     def setup_webserver(self) -> FastAPI:
@@ -158,16 +158,16 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        # Keep permissive legacy bodies at the HTTP boundary; the base validates typed task_data against TaskData.
+        # Keep permissive legacy bodies at the HTTP boundary; the base validates episode task_data against TaskData.
         return await super().seed_session(body, request=request)
 
     def has_session_state(self, session_id: str) -> bool:
-        # The base asks whether a typed seed would replace a live legacy owner. Unbound restored tables have no
+        # The base asks whether an episode seed would replace a live legacy owner. Unbound restored tables have no
         # owner yet; initialize_session_state adopts them without rebuilding the checkpoint's tool state.
         return session_id in self.session_id_to_tool_env and session_id not in self._restored_unbound_sessions
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Build fresh tables, or adopt unbound checkpoint tables for a validated typed seed."""
+        """Build fresh tables, or adopt unbound checkpoint tables for a validated episode seed."""
         if not (isinstance(body, WorkbenchSeedSessionRequest) and session_id in self._restored_unbound_sessions):
             self.session_id_to_tool_env[session_id] = get_tools(_TOOLKITS)
         self._restored_unbound_sessions.discard(session_id)
@@ -182,7 +182,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
         if session_id not in self.session_id_to_tool_env:
             raise ResourcesSessionLostError("No seeded workplace_assistant session for this tool call")
-        # The cookie run's first tool call claims restored tables, so another episode's typed seed cannot adopt them.
+        # The cookie run's first tool call claims restored tables, so another episode's seed cannot adopt them.
         self._restored_unbound_sessions.discard(session_id)
 
         tool_env = self.session_id_to_tool_env[session_id]
@@ -201,8 +201,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         # Seeds, closes and retires take this lock too, so none of them can run between the checks, the release and
         # the retry record, even if release_session_state suspends. Scoring is synchronous, so the lock delays no one.
-        async with self._fence.locked(session_id):
-            if self._fence.closed_episode(session_id) is not None or (
+        async with self._resources_session_locks.locked(session_id):
+            if session_id in self._resources_session_fences or (
                 session_id not in self.session_id_to_tool_env and session_id not in self._verified_sessions
             ):
                 # Never seeded, closed, or gone with a restart: the agent's tool calls had no tables to act on,
@@ -261,7 +261,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         def rebuild() -> tuple[dict[str, Any], dict[str, tuple[EpisodeId, TaskId]]]:
             restored = {}
-            typed_sessions = {}
+            episode_sessions = {}
             for session_id, state in states.items():
                 try:
                     if "tool_env" in state:
@@ -270,7 +270,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
                             raise ValueError("episode_id and task_id must both be present or both null")
                         if episode is not None:
                             # The checkpoint participant transfers ownership to the replacement attempt.
-                            typed_sessions[session_id] = (
+                            episode_sessions[session_id] = (
                                 next_attempt(EpisodeId.model_validate(episode)),
                                 TaskId.model_validate(task),
                             )
@@ -279,13 +279,13 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
                     restored[session_id] = _restore_tool_env(state)
                 except (AttributeError, KeyError, TypeError, ValueError) as error:
                     raise ValueError(f"invalid workplace assistant state for session {session_id}: {error}") from error
-            return restored, typed_sessions
+            return restored, episode_sessions
 
         # Rebuild every session before installing any, so an invalid state installs nothing.
-        restored, typed_sessions = await asyncio.to_thread(rebuild)
+        restored, episode_sessions = await asyncio.to_thread(rebuild)
         self.session_id_to_tool_env.update(restored)
-        self._session_episodes.update(typed_sessions)
-        self._restored_unbound_sessions.update(restored.keys() - typed_sessions.keys())
+        self._session_episodes.update(episode_sessions)
+        self._restored_unbound_sessions.update(restored.keys() - episode_sessions.keys())
 
 
 if __name__ == "__main__":
