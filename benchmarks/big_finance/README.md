@@ -81,7 +81,8 @@ question, the reference answer, and the final answer (not the trace) and applies
 fixed equivalence rules: numbers converted to the unit the question asks for must
 match the reference at the precision it asks for, with no further tolerance;
 without a stated precision they must be numerically equivalent. Sign and any
-stated sign convention must match, and every requested part must be present. The
+stated sign convention must match, and every requested part must be present;
+requested explanations and conclusions must agree with the reference in substance. The
 reward is its binary `correct` verdict. A rollout with no final answer scores 0
 without a judge call, and a reply without a boolean verdict is a judge failure.
 

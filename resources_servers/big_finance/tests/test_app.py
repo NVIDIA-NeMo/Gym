@@ -1017,6 +1017,14 @@ def test_answer_match_grades_at_the_question_precision_without_a_numeric_toleran
     assert "within 1%" not in prompt and "0.1 percentage points" not in prompt
 
 
+def test_answer_match_grades_requested_explanations_as_parts() -> None:
+    prompt = _answer_judge_prompt(BigFinanceVerifyRequest.model_construct(query="Q", reference_answer="R"), "A")
+
+    assert "Non-numeric parts the question asks for" in prompt
+    assert "agree with the reference in substance;\n  wording may differ" in prompt
+    assert "Omitting a requested explanation makes the answer incorrect." in prompt
+
+
 @pytest.mark.asyncio
 async def test_answer_match_scores_a_missing_final_answer_zero_without_the_judge() -> None:
     server = _server(reward_mode="answer_match")

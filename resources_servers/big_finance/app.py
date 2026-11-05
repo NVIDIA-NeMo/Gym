@@ -408,6 +408,9 @@ Decide whether the agent's final answer is correct. Rules:
   the reference; only differences in formatting or units are acceptable.
 - Sign and direction must match: a 5% decrease equals -5%, not 5%. Follow any sign
   convention the question specifies (for example, losses reported as negative).
+- Non-numeric parts the question asks for (explanations, drivers, causes, comparisons, yes/no or
+  directional conclusions) are parts too. They must agree with the reference in substance;
+  wording may differ. Omitting a requested explanation makes the answer incorrect.
 - If the reference is a range or a set, the answer must lie within the range or be a member
   of the set.
 - If the reference says the answer cannot be determined, only an equivalent statement is
