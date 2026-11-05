@@ -94,6 +94,14 @@ canonical judge calls with its reason recorded in provenance.
 
 ## Ownership, reuse, and restart behavior
 
+When using a cell router, the runtime helper and all candidates and judges that
+consume its shared cache and submission directories automatically carry the same
+`nemo.nvidia.com/placement-group` metadata. The group lasts for that runtime
+provisioner's lifetime, including helper startup retries; a new environment server
+gets a new group. Consequently, one environment server's episodes share a cell.
+This placement label leaves the existing network policy and per-episode file
+isolation unchanged.
+
 Shared HTTP servers with per-episode sessions follow
 [`single_agent_turn`](../single_agent_turn/app.py) and
 [`nemo_user_sim`](../nemo_user_sim/app.py). Seed prepares the adapter runtime and

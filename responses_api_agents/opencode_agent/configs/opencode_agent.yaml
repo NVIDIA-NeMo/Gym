@@ -23,6 +23,18 @@ opencode_agent:
       session_close_timeout_seconds: 60
       session_close_retry_window_seconds: 300
 
+      # Owner extensions for sandbox sessions (README "Owner extensions"); these defaults change nothing.
+      plugins: []  # absolute sandbox paths of owner-staged OpenCode plugins, loaded after Gym's
+      # Pinned offline bundle beside the binary: a file already in the sandbox (*_path), each requiring its SHA-256
+      # (*_sha256), which is checked inside the sandbox.
+      sandbox_ripgrep_path: null  # e.g. ripgrep 15.1.0, the build OpenCode 1.17.11 downloads
+      sandbox_ripgrep_sha256: null
+      sandbox_plugin_dependencies_path: null  # tar of package.json, package-lock.json and node_modules
+      sandbox_plugin_dependencies_sha256: null
+      export_dir: null  # absolute sandbox directory outside the workdir; keeps OpenCode session exports after close
+      session_import_path: null  # absolute sandbox path of an OpenCode export to continue, if present
+      return_session_trajectory: false  # close also returns an ordinary session's own turns (no compaction summaries)
+
       opencode_config:
         tools:
           bash: true
