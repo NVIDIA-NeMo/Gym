@@ -967,7 +967,27 @@ class TestRolloutErrorFact:
         )
         assert body["rollout_error"]["kind_candidate"] == "http_5xx" and body["rollout_error"]["status_code"] == 503
         assert body["response"]["rollout_error"] == body["rollout_error"]
-        # recorded only: the score and the mask are what they were
+        # an infrastructure error is masked, not scored as a zero
+        assert body["mask_sample"] is True and body["failure_kind"] == "agent_route_failed"
+
+    @pytest.mark.parametrize(
+        "chain, message",
+        [("ModelError -> APITimeoutError", "Request timed out."), ("SandboxError", "sandbox died")],
+    )
+    def test_other_infrastructure_kinds_are_masked(self, chain, message) -> None:
+        body = self._run({"error": chain.split(" ")[0], "message": message, "error_chain_str": chain})
+        assert body["mask_sample"] is True and body["failure_kind"] == "agent_route_failed"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            {"error": "ModelError", "message": "Error code: 400", "error_chain_str": "ModelError"},
+            {"error": "ToolError", "message": "bad tool", "error_chain_str": "ToolError"},
+            {"error": "EmptyModelResponseError", "message": "empty", "error_chain_str": "EmptyModelResponseError"},
+        ],
+    )
+    def test_a_model_caused_error_is_still_scored(self, error) -> None:
+        body = self._run(error)
         assert body["reward"] == 0.0 and not body.get("mask_sample") and body.get("failure_kind") is None
 
     def test_a_clean_rollout_has_no_field(self) -> None:

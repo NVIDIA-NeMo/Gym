@@ -43,7 +43,12 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -55,6 +60,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 from responses_api_agents.pi_agent.app import (
     MCP_SETUP_ERROR_EXIT_CODE,
     PiAgent,
@@ -226,8 +232,32 @@ class PiSandboxedAgent(PiAgent):
                 timeout_s=timeout,
             )
         except Exception as exc:
-            error_type = type(exc).__name__
-            LOG.exception("Pi sandbox execution failed")
+            # An exception, including a provider timeout, does not establish how Pi ended: report it, do not grade it.
+            raise NgFailureEvent(
+                boundary="agent",
+                failure_kind=AGENT_ROUTE_FAILED,
+                failure_reason=self._agent_sandbox_facts(
+                    sandbox, reason=provider_error_reason(exc), http_status=error_to_http_status(exc)
+                )
+                + f"Agent operation agent.sandbox_exec failed: {type(exc).__name__}",
+                operation="agent.sandbox_exec",
+                stage="agent",
+            ) from exc
+        if result is not None and result.error_type != "timeout" and (result.error_type or result.return_code == -1):
+            # A native deadline (or exit 124) is a protocol result; the -1 sentinel or an execution error is not.
+            raise NgFailureEvent(
+                boundary="agent",
+                failure_kind=AGENT_ROUTE_FAILED,
+                failure_reason=self._agent_sandbox_facts(
+                    sandbox,
+                    reason=result.error_type if isinstance(result.error_type, str) else None,
+                    exit_code=result.return_code if isinstance(result.return_code, int) else None,
+                )
+                + "Sandbox command outcome cannot be classified",
+                exception_type=str(result.error_type) if result.error_type is not None else None,
+                operation="agent.sandbox_exec",
+                stage="agent",
+            )
         root = Path(self.config.artifacts_dir) / sha256((rollout_id or uuid4().hex).encode()).hexdigest()
         root.mkdir(parents=True, exist_ok=True)
         # Export failures propagate; retrying such a request must not become a scored zero.
@@ -285,6 +315,20 @@ class PiSandboxedAgent(PiAgent):
         }
         output, usage = parse_pi_events(stdout)
         return output, usage, self.config.model, events
+
+    @staticmethod
+    def _agent_sandbox_facts(sandbox: AsyncSandbox, **facts: Any) -> str:
+        """The failure_reason prefix for the agent's own command: its phase, provider, sandbox and command."""
+        handle = getattr(sandbox, "_handle", None)
+        provider = getattr(handle, "provider_name", None)
+        sandbox_id = getattr(handle, "sandbox_id", None)
+        return sandbox_failure_prefix(
+            phase="agent",
+            provider=provider if isinstance(provider, str) else None,
+            sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+            command="pi_run",
+            **facts,
+        )
 
     async def responses(
         self,

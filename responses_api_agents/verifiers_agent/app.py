@@ -36,6 +36,7 @@ from verifiers.clients import NeMoRLChatCompletionsClient
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -245,6 +246,8 @@ _ROLLOUT_ERROR_KIND_CANDIDATES = (
 )
 _STATUS_CODE = re.compile(r"(?:Error code|status(?:_code)?)\s*[:=]?\s*(\d{3})\b", re.IGNORECASE)
 _ROLLOUT_ERROR_MESSAGE_CHARS = 500
+# Rollout errors that are the harness or serving stack failing, not the model's answer: such a row is masked.
+_INFRA_ROLLOUT_ERROR_KINDS = frozenset({"http_5xx", "http_429", "connection", "infra", "timeout"})
 
 
 def _rollout_error_fact(error: Any) -> Optional[dict[str, Any]]:
@@ -311,8 +314,8 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    # The error the rollout ended on, on the row itself so a run's rollout errors can be counted; recorded only, it
-    # does not change the reward or mask the sample.
+    # The error the rollout ended on, on the row itself so a run's rollout errors can be counted; an infrastructure
+    # kind (_INFRA_ROLLOUT_ERROR_KINDS) also masks the sample.
     rollout_error: Optional[dict[str, Any]] = Field(default=None, exclude_if=lambda value: value is None)
 
 
@@ -835,6 +838,13 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 result.mask_sample = True
                 result.failure_kind = VERIFIER_ERROR
                 result.failure_reason = f"reward function raised: {', '.join(sorted(set(failures)))}"
+            elif (resp.rollout_error or {}).get("kind_candidate") in _INFRA_ROLLOUT_ERROR_KINDS:
+                # The rollout ended on an infrastructure error: its reward is no grade of the model.
+                result.mask_sample = True
+                result.failure_kind = AGENT_ROUTE_FAILED
+                result.failure_reason = (
+                    f"rollout ended on {resp.rollout_error['kind_candidate']}: {resp.rollout_error['message_head']}"
+                )
             return result
 
         # This agent is its own verifier: the rubric graded inside the rollout above. Its result is its grading
