@@ -198,6 +198,8 @@ def test_legacy_adapter_preserves_task_identity_and_data():
             cleanup_timeout_seconds=10,
             resources_server={"type": "resources_servers", "name": "resources"},
             agent_server={"type": "responses_api_agents", "name": "agent"},
+            # Explicit, like resources_server, so the server never reads the agent's config from this bare client.
+            tool_servers=[],
         ),
         server_client=MagicMock(spec=ServerClient),
     )
