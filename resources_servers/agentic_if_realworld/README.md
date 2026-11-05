@@ -70,7 +70,7 @@ gym env test +entrypoint=responses_api_models/agentic_if_text +should_validate_d
 ### Evidence-ID judge transport
 
 The shipped profile selects `judge_evidence_transport: evidence_ids_v1`, following
-[bounded real-task validation](../../benchmarks/agentic_if_realworld/validation.md#november-4-bounded-evidence-id-validation).
+[bounded real-task validation](../../benchmarks/agentic_if_realworld/validation.md#bounded-evidence-id-validation).
 Judges select instruction IDs and exact response-span IDs instead of copying
 quotes. The adapter restores the original text and runs the unchanged strict-v2.2
 validator. IDs establish location, not correctness: the judge must still justify

@@ -243,10 +243,10 @@ configuration should pin the approved merged Gym revision.
 Public synthetic checks do not establish cluster readiness, a complete paid
 benchmark result, training authorization or certification.
 
-## November 4 evidence-ID transport
+## Evidence-ID transport
 
-The initial November 4 configuration selected `evidence_ids_v1`: instruction quote IDs and exact
-response span IDs are resolved before unchanged strict-v2.2 validation. The
+The `evidence_ids_v1` transport uses instruction quote IDs and exact response
+span IDs, which are resolved before unchanged strict-v2.2 validation. The
 full rubric and evaluation payload remain present. Historical quote transport
 and its cached grades remain available under `quotes`; transport variants use
 different request identities and must retain their provenance.
@@ -276,9 +276,9 @@ Earlier validation receipts remain bound to their original revisions and modes.
 The default-restoration check passes all 258 component/model tests. No model
 calls or real benchmark rows were needed to restore this reviewed transport.
 
-## November 4 bounded evidence-ID validation
+## Bounded evidence-ID validation
 
-The benchmark PIC requested validation before enabling `evidence_ids_v1` by default.
+A bounded real-task run validated `evidence_ids_v1` before default activation.
 `gym eval run --benchmark agentic_if_realworld --split benchmark --limit 50
 --num-repeats 1 --concurrency 4` completed at
 `f35546de22be354e757a5781a950967c81885794`, explicitly selecting that transport.
