@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -136,10 +137,10 @@ def _runtime_archive(root: Path) -> tuple[bytes, str]:
     # setuptools-scm normally obtains from Git, including non-Python package data.
     files["MANIFEST.in"] = ("\n".join(f"include {name}" for name in sorted(files)) + "\n").encode()
     agent_dir = root / "responses_api_agents/nooa_agent"
-    requirements = (agent_dir / "requirements.txt").read_text()
+    requirements = tomllib.loads((agent_dir / "pyproject.toml").read_text())["project"]["dependencies"]
     runtime_requirements = []
-    for line in requirements.splitlines():
-        if not line.strip() or line.startswith(("#", "-e ")):
+    for line in requirements:
+        if line.startswith("nemo-gym"):
             continue
         # Same immutable source pin, without a dependency on the task image's git.
         line = re.sub(

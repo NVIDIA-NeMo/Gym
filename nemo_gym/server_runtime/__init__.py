@@ -88,7 +88,12 @@ if TYPE_CHECKING:
         SimpleResourcesServer,
         lost_session_verification,
     )
-    from nemo_gym.server_runtime.base_server import SimpleServer
+    from nemo_gym.server_runtime.base_server import (
+        SimpleServer,
+        async_rollout_prefix_hook,
+        rollout_prefix_hook,
+        with_rollout_prefix,
+    )
     from nemo_gym.server_runtime.mcp_auto_exposure import (
         TOKEN_HEADER,
         MCPTool,
@@ -124,6 +129,9 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "async_rollout_prefix_hook": "base_server",
+    "rollout_prefix_hook": "base_server",
+    "with_rollout_prefix": "base_server",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
     "AgentSessionParticipant": "_checkpoint.agent",

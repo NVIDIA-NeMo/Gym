@@ -181,6 +181,8 @@ def _payload(model_base_url: str, **overrides) -> dict:
 
 @pytest.mark.parametrize("inherited_hermes_home", [False, True])
 def test_worker_configures_session_state_before_hermes_imports(tmp_path, inherited_hermes_home) -> None:
+    import yaml
+
     from responses_api_agents.hermes_agent import sandbox_runner
 
     task_home = tmp_path / "task-home"
@@ -275,10 +277,24 @@ raise SystemExit(status)
     assert json.loads(output_path.read_text())["result"]["final_response"] == "done"
     report = json.loads(report_path.read_text())
     hermes_home = session_dir / "hermes-home"
+    expected_config = {
+        "model": "policy_model",
+        "provider": "auto",
+        "auxiliary": {
+            "compression": {
+                "provider": "custom",
+                "base_url": server.base_url,
+                "api_key": "gym",
+                "model": "policy_model",
+            }
+        },
+    }
+    for imported in report["imports"].values():
+        imported["config"] = yaml.safe_load(imported["config"])
     assert report["imports"] == {
         name: {
             "home": str(hermes_home),
-            "config": payload["config_yaml"],
+            "config": expected_config,
             "model_base_url": server.base_url,
             "model_api_key": "gym",
         }
@@ -704,3 +720,17 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)
+
+
+def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_process_globals):
+    import yaml
+    from agent.auxiliary_client import call_llm
+
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, max_turns=4), tmp_path)
+        response = call_llm(task="compression", messages=[{"role": "user", "content": "Summarize"}])
+    assert response.choices[0].message.content == "done"
+    assert server.requests[-1]["messages"] == [{"role": "user", "content": "Summarize"}]
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == server.base_url
+    assert config["auxiliary"]["compression"]["model"] == "policy_model"

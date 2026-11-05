@@ -16,6 +16,112 @@ import pytest
 from responses_api_agents.codex_agent.sandbox_transport import rate_limit_proxy
 
 
+@pytest.mark.parametrize(
+    "damage", [None, "policy", "prompt_only", "failed", "missing_id", "duplicate", "oversize", "truncated"]
+)
+def test_forwarder_retains_only_completed_compaction_identity_without_changing_stream(tmp_path, monkeypatch, damage):
+    from responses_api_agents.codex_agent import sandbox_transport
+
+    response = {
+        "id": "helper-id",
+        "status": "completed",
+        "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Summary café"}]}
+        ],
+    }
+    if damage == "missing_id":
+        del response["id"]
+    if damage == "failed":
+        response["status"] = "failed"
+    event = json.dumps({"type": "response.completed", "response": response}, ensure_ascii=False).encode()
+    wire = b": keepalive\r\n\r\nevent: response.completed\r\ndata: " + event + b"\r\n\r\n"
+    if damage == "truncated":
+        wire = wire.rstrip(b"\r\n")
+    if damage == "duplicate":
+        wire += wire
+    if damage == "oversize":
+        monkeypatch.setattr(sandbox_transport, "_MAX_COMPACTION_RESPONSE_BYTES", 32)
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for start in range(0, len(wire), 7):
+                self.wfile.write(wire[start : start + 7])
+                self.wfile.flush()
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    attempts_path = tmp_path / "attempts.jsonl"
+    prompt = (
+        "You are performing a CONTEXT CHECKPOINT COMPACTION."
+        if damage in {"policy", "prompt_only"}
+        else "Summarize the current conversation using a different prompt."
+    )
+    payload = {"input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]}
+    if damage != "prompt_only":
+        payload["client_metadata"] = {
+            "x-codex-turn-metadata": json.dumps({"request_kind": "turn" if damage == "policy" else "compaction"})
+        }
+    body = json.dumps(payload).encode()
+    try:
+        with rate_limit_proxy(
+            f"http://127.0.0.1:{upstream.server_port}", "invocation", attempts_path, timeout=10
+        ) as proxy:
+            with urlopen(Request(f"{proxy}/responses", data=body)) as forwarded:
+                assert forwarded.read() == wire
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join()
+    [attempt] = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    assert attempt["status"] == 200
+    assert attempt.get("compaction_response") == (
+        {"response_id": "helper-id", "summary": "Summary café"} if damage is None else None
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b"\xff",
+        b"null",
+        b"[]",
+        b"{}",
+        b'{"client_metadata":null}',
+        b'{"client_metadata":[]}',
+        b'{"client_metadata":{}}',
+        *[
+            json.dumps({"client_metadata": {"x-codex-turn-metadata": value}}).encode()
+            for value in (
+                None,
+                {},
+                1,
+                '{"request_kind":',
+                "null",
+                "[]",
+                '"compaction"',
+                "{}",
+                '{"request_kind":"turn"}',
+                '{"request_kind":"prewarm"}',
+                '{"request_kind":["compaction"]}',
+            )
+        ],
+    ],
+)
+def test_compaction_request_rejects_missing_or_malformed_metadata(body):
+    from responses_api_agents.codex_agent.sandbox_transport import _compaction_request
+
+    assert not _compaction_request(body)
+
+
 @pytest.mark.parametrize("statuses", [[429, 429, 200], [429, 429, 429], [400], [500]])
 def test_sandbox_forwarder_retries_only_429_and_retains_every_attempt(tmp_path, statuses):
     requests = []
