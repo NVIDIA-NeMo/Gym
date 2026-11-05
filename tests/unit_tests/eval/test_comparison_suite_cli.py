@@ -100,6 +100,34 @@ def test_missing_suite_reports_the_required_flag(monkeypatch, capsys) -> None:
     assert "gym eval compare-suite requires --suite PATH" in " ".join(capsys.readouterr().out.split())
 
 
+@pytest.mark.parametrize("help_key", ["help", "h"])
+def test_configuration_help_does_not_require_suite(help_key: str, monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.argv", ["gym", "eval", "compare-suite", f"+{help_key}=true"])
+
+    with pytest.raises(SystemExit) as error:
+        main()
+
+    assert error.value.code in (None, 0)
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Displaying help for SuiteComparisonConfig" in output
+    assert "suite_fpath" in output
+    assert "[required]" in output
+    assert "requires --suite PATH" not in output
+
+
+@pytest.mark.parametrize("help_key", ["help", "h"])
+def test_disabled_configuration_help_still_requires_suite(help_key: str, monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.argv", ["gym", "eval", "compare-suite", f"+{help_key}=false"])
+
+    with pytest.raises(SystemExit) as error:
+        main()
+
+    assert error.value.code == 1
+    output = " ".join(capsys.readouterr().out.split())
+    assert "gym eval compare-suite requires --suite PATH" in output
+    assert "Displaying help for SuiteComparisonConfig" not in output
+
+
 def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     suite_path: Path, monkeypatch, capsys
 ) -> None:

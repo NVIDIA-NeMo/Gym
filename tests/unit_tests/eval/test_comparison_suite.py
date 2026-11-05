@@ -23,6 +23,7 @@ import yaml
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
+from nemo_gym.eval.comparison.loading import resolve_aggregate_metrics_fpath
 from nemo_gym.eval.comparison.suite.loading import load_suite_run
 from nemo_gym.eval.comparison.suite.processing import compare_suite_cell
 from nemo_gym.eval.comparison.suite.report import write_suite_reports
@@ -746,6 +747,126 @@ def test_source_aggregate_override_is_resolved_relative_to_manifest(tmp_path: Pa
     result = _compare(path)
     assert result.cells[0].baseline.aggregate_metrics == custom
     assert result.overall.statistics.delta == pytest.approx(20)
+
+
+@pytest.mark.parametrize("companions_beside_alias", [False, True])
+def test_rollout_alias_reads_same_companions_as_run_comparison(tmp_path: Path, companions_beside_alias: bool) -> None:
+    target = Path(_write_run(tmp_path / "blob", _values(0.2, 0.4)))
+    candidate = _write_run(tmp_path / "candidate", _values(0.4, 0.6))
+    alias = tmp_path / "baseline" / "rollouts.jsonl"
+    alias.parent.mkdir()
+    alias.symlink_to(target)
+    if companions_beside_alias:
+        for companion in (aggregate_metrics_path_for, materialized_path_for):
+            companion(target).replace(companion(alias))
+    path = _manifest(
+        tmp_path,
+        benchmarks={"test": {"metrics": [_scale()]}},
+        models={
+            "model": {
+                "test": {
+                    "baseline": {"rollouts": str(alias.relative_to(tmp_path))},
+                    "candidate": {"rollouts": candidate},
+                }
+            }
+        },
+    )
+    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+
+    result = _compare(path)
+
+    cell = result.cells[0]
+    expected_rollouts = alias if companions_beside_alias else target
+    assert cell.baseline.rollouts == expected_rollouts
+    assert cell.baseline.aggregate_metrics == resolve_aggregate_metrics_fpath(str(alias), None)
+    assert cell.baseline.aggregate_metrics == aggregate_metrics_path_for(expected_rollouts)
+    assert cell.baseline.materialized_inputs == materialized_path_for(expected_rollouts)
+    assert cell.baseline.coverage.status == cell.candidate.coverage.status == "verified"
+    assert cell.baseline.coverage.planned_task_count == 2
+    assert cell.baseline.repeat_scores == pytest.approx([20, 40])
+    assert cell.candidate.repeat_scores == pytest.approx([40, 60])
+    assert result.overall.statistics.delta == pytest.approx(20)
+    assert result.overall.statistics.ci_low is not None
+    assert result.warnings == []
+    assert {file: file.read_bytes() for file in sources} == sources
+
+
+def test_rollout_alias_rejects_competing_companion_layouts_like_run_comparison(tmp_path: Path) -> None:
+    target = Path(_write_run(tmp_path / "blob", _values(0.8, 0.9)))
+    alias = Path(_write_run(tmp_path / "alias", _values(0.2, 0.4)))
+    alias.unlink()
+    alias.symlink_to(target)
+    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        resolve_aggregate_metrics_fpath(str(alias), None)
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        load_suite_run(SuiteRunSource(rollouts=alias), directory=tmp_path)
+
+    assert {file: file.read_bytes() for file in sources} == sources
+
+
+def test_rollout_alias_keeps_explicit_artifact_overrides_relative_to_manifest(tmp_path: Path) -> None:
+    target = Path(_write_run(tmp_path / "blob", _values(0.8, 0.9), planned_tasks=(99,)))
+    override = Path(_write_run(tmp_path / "overrides", _values(0.2, 0.4)))
+    candidate = _write_run(tmp_path / "candidate", _values(0.4, 0.6))
+    alias = tmp_path / "aliases" / "latest.jsonl"
+    alias.parent.mkdir()
+    alias.symlink_to(target)
+    metrics = aggregate_metrics_path_for(override)
+    inventory = materialized_path_for(override)
+    path = _manifest(
+        tmp_path,
+        benchmarks={"test": {"metrics": [_scale()]}},
+        models={
+            "model": {
+                "test": {
+                    "baseline": {
+                        "rollouts": str(alias.relative_to(tmp_path)),
+                        "aggregate_metrics": str(metrics.relative_to(tmp_path)),
+                        "materialized_inputs": str(inventory.relative_to(tmp_path)),
+                    },
+                    "candidate": {"rollouts": candidate},
+                }
+            }
+        },
+    )
+    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+
+    result = _compare(path)
+
+    cell = result.cells[0]
+    assert cell.baseline.rollouts == target
+    assert cell.baseline.aggregate_metrics == metrics
+    assert cell.baseline.materialized_inputs == inventory
+    assert cell.baseline.coverage.status == "verified"
+    assert cell.baseline.repeat_scores == pytest.approx([20, 40])
+    assert result.overall.statistics.delta == pytest.approx(20)
+    assert result.overall.statistics.ci_low is not None
+    assert result.warnings == []
+    assert {file: file.read_bytes() for file in sources} == sources
+
+
+def test_rollout_aliases_cannot_reuse_physical_source_with_distinct_aggregate_overrides(tmp_path: Path) -> None:
+    target = tmp_path / "blob" / "data.jsonl"
+    target.parent.mkdir()
+    baseline = Path(_write_run(tmp_path / "baseline", _values(0.2, 0.4)))
+    baseline.replace(target)
+    baseline.symlink_to(target)
+    candidate = Path(_write_run(tmp_path / "candidate", _values(0.2, 0.4)))
+    candidate.unlink()
+    candidate.symlink_to(target)
+    sources = {
+        role: {
+            "rollouts": str(alias.relative_to(tmp_path)),
+            "aggregate_metrics": str(aggregate_metrics_path_for(alias).relative_to(tmp_path)),
+        }
+        for role, alias in (("baseline", baseline), ("candidate", candidate))
+    }
+    path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": sources}})
+
+    with pytest.raises(ConfigError, match="reuses the same rollouts file and agent.*independent source"):
+        _compare(path)
 
 
 def test_explicit_inventory_is_relative_to_manifest_and_ignores_other_agents(
