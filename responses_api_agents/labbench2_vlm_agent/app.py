@@ -25,12 +25,13 @@ for figqa2/tableqa2). Non-protocol rows always use the image path when
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import Request
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest
 from resources_servers.labbench2_vlm.prepare_data import embed_media_into_row
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
@@ -102,6 +103,14 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
 
 class LabbenchVLMAgent(SimpleAgent):
     config: LabbenchVLMAgentConfig
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NoReturn:
+        # run() embeds the images named by the row's verifier_metadata.media_dir. An agent session receives no task
+        # data, so the inherited Simple Agent session would ask the model about images it never sees.
+        raise AgentSeedRejectedError(
+            "labbench2_vlm_agent does not support agent sessions: it embeds the task's media in /run, and an agent "
+            "session does not receive the media reference. Run this agent through a legacy_agent environment server."
+        )
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         resolved_base = Path(self.config.media_base_dir)

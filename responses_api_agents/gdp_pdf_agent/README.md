@@ -27,6 +27,10 @@ user message's content to:
 This matches the published setup: parsed document text, with page images for models that accept
 vision input.
 
+The document reaches the model only through `run()`, so the agent refuses agent sessions (a seed
+answers 422) rather than answering from the bare prompt. Run it through a `legacy_agent`
+environment server, as the shipped configs do.
+
 ## Config
 
 | Field | Default | Meaning |

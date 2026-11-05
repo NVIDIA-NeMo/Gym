@@ -46,7 +46,7 @@ import math
 import re
 from pathlib import Path
 from time import time
-from typing import Any, Literal, Optional
+from typing import Any, Literal, NoReturn, Optional
 
 from aiohttp import ClientResponseError
 from fastapi import Request
@@ -54,6 +54,7 @@ from PIL import Image, ImageDraw
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import AgentSeedRejectedError, AgentSeedSessionRequest
 from nemo_gym.agents.utils.verify_call import verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import (
@@ -477,6 +478,14 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
 
 class GdpPdfAgent(SimpleAgent):
     config: GdpPdfAgentConfig
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NoReturn:
+        # run() builds the model input from the row's document manifest. An agent session receives no task data,
+        # so the inherited Simple Agent session would answer from the bare prompt without the document.
+        raise AgentSeedRejectedError(
+            "gdp_pdf_agent does not support agent sessions: it reads the task's document manifest in /run, and an "
+            "agent session does not receive it. Run this agent through a legacy_agent environment server."
+        )
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         resolved_base = Path(self.config.documents_base_dir)

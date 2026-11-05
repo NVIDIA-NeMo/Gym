@@ -25,8 +25,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import ClientPayloadError, ClientResponseError
+from fastapi.testclient import TestClient
 from PIL import Image
 
+from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.agents.utils import verify_call
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
@@ -280,6 +282,24 @@ class TestIncompleteOutputIsTheResult:
         assert result.document_delivery["rejected_attempts"] == []
         assert result.document_delivery["input_limit_rejections"] == 0
         assert result.document_delivery["output_truncation_regenerations"] == 0
+
+
+class TestAgentSessions:
+    def test_seed_is_refused_because_the_session_would_have_no_document(self) -> None:
+        agent = _agent()
+        agent.server_client.global_config_dict = {}
+        seed = AgentSeedSessionRequest(
+            agent_session_id="gdp-pdf-session",
+            episode_id={"rollout_id": "gdp-pdf-rollout"},
+            task_id={"taskset": "gdp_pdf", "task_id": "0"},
+        )
+
+        seeded = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+
+        # 422 is terminal for an environment server, so the episode fails once instead of running without the PDF.
+        assert seeded.status_code == 422
+        assert "reads the task's document manifest in /run" in seeded.json()["detail"]
+        assert not agent.holds_agent_session("gdp-pdf-session")
 
 
 class TestConfig:

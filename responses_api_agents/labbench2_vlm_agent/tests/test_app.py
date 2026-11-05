@@ -15,6 +15,9 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+from fastapi.testclient import TestClient
+
+from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from responses_api_agents.labbench2_vlm_agent import app as labbench_agent_app
@@ -47,6 +50,23 @@ def test_agent_instantiation() -> None:
     agent = LabbenchVLMAgent(config=config, server_client=MagicMock(spec=ServerClient))
     assert agent.config.media_base_dir == "resources_servers/labbench2_vlm/data"
     assert agent.config.dpi == 170
+
+
+def test_agent_session_seed_is_refused_because_the_session_would_have_no_media() -> None:
+    agent = LabbenchVLMAgent(config=_agent_config(), server_client=MagicMock(spec=ServerClient))
+    agent.server_client.global_config_dict = {}
+    seed = AgentSeedSessionRequest(
+        agent_session_id="labbench2-session",
+        episode_id={"rollout_id": "labbench2-rollout"},
+        task_id={"taskset": "labbench2_vlm", "task_id": "0"},
+    )
+
+    seeded = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+
+    # 422 is terminal for an environment server, so the episode fails once instead of running without images.
+    assert seeded.status_code == 422
+    assert "embeds the task's media in /run" in seeded.json()["detail"]
+    assert not agent.holds_agent_session("labbench2-session")
 
 
 def test_effective_media_mode_text_only_for_protocolqa2() -> None:
