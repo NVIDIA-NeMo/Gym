@@ -52,6 +52,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
     confirmed_policy_response_timeout,
     failure_outcome_policy,
+    queued_policy_response_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.client import request as http_request
@@ -66,6 +67,7 @@ from nemo_gym.core import (
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_SERVER_QUEUE_TIMEOUT,
     EpisodeId,
     FailureBoundary,
     FailureClassificationConfig,
@@ -591,10 +593,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     if _policy_request_timed_out(error):
                         report = FailureHeader.decode(error.headers)
                         final = report.events[report.failure_id]
+                        # Waiting in the model server's queue is that server's capacity, not the model's answer.
+                        queued = queued_policy_response_timeout(report)
                         failure = NgFailureEvent(
                             boundary=FailureBoundary.AGENT,
-                            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-                            failure_reason="Policy model request timed out on every attempt",
+                            failure_kind=MODEL_SERVER_QUEUE_TIMEOUT if queued else MODEL_POLICY_RESPONSE_TIMEOUT,
+                            failure_reason=(
+                                "Policy model request timed out on every attempt while the model server queued requests"
+                                if queued
+                                else "Policy model request timed out on every attempt"
+                            ),
                             operation=POLICY_TIMEOUT_OPERATION,
                             operation_id=final.operation_id,
                         )
@@ -612,7 +620,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
+                    reported_kind = failure.failure_kind if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
