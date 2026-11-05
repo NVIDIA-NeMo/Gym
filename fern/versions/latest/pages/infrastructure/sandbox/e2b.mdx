@@ -70,6 +70,8 @@ sandbox:
       network: null
       custom_extension_params: null
       strict_resources: false
+      idle_policy: never
+      idle_timeout_s: 1.0
     exec:
       default_timeout_s: 180.0
       user: null
@@ -218,6 +220,37 @@ pause/connect endpoints.
 A paused sandbox does not count down its timeout, so pausing turns off the `ttl_s` cleanup
 backstop: if the process exits between `pause()` and `close()`, nothing deletes the sandbox
 (AgentENV never evicts paused sandboxes). Close paused sandboxes in a `finally` block.
+
+### Idle Sandboxes
+
+An agent's sandbox sits idle while the agent waits on its model. With `create.idle_policy: pause`,
+the provider pauses a sandbox that no request has touched for `create.idle_timeout_s` seconds since
+its creation or its last request, and resumes it before the next request:
+
+```yaml
+sandbox:
+  e2b:
+    create:
+      idle_policy: pause
+      idle_timeout_s: 1.0
+```
+
+- A paused sandbox holds no CPU or memory on the backend. Each idle period costs one pause and one
+  resume, which the agent sees as added latency on its next command.
+- The sandbox resumes on the node that paused it, with the lifetime it was created with, including a
+  per-sandbox `SandboxSpec.ttl_s`.
+- A request in flight is never cut off. The idle timer restarts with every request, and an explicit
+  `pause()` waits for requests in flight to finish.
+- If the backend refuses a pause with a 409, the sandbox keeps running until its next idle period.
+- If a resume fails, `exec` returns `return_code` 125 with `error_type="sandbox"`, and the next
+  request tries again.
+- Traffic that bypasses the provider would find the sandbox paused, so opening an `endpoint()` or
+  calling `serialize()` keeps that sandbox running from then on.
+- The cleanup caveat above applies: a process that dies while its sandboxes are paused leaves them
+  paused.
+
+The default, `never`, leaves sandboxes running until they are closed. The idle policy is independent
+of `create.auto_resume`, which acts only when a sandbox reaches its timeout.
 
 ## Security and Isolation
 
