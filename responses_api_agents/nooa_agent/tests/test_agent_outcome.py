@@ -106,7 +106,7 @@ async def test_model_rejection_obeys_environment_policy_and_closes(
     }
     assert "diagnostic mentions HTTP 500" in response.error.message
     assert NOOATerminationReason.MODEL_REJECTED in {gap.code for gap in observations.gaps}
-    receipt = next(iter(instance._closed_session_records.values())).close_response
+    receipt = next(iter(instance._fenced_session_records.values())).close_response
     assert receipt.agent_observations == observations
     assert receipt.resources_cookies == {"resource": "seed"}
     assert client.post.call_args_list[-1].kwargs["cookies"] == receipt.resources_cookies
