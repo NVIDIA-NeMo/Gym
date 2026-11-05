@@ -1,0 +1,48 @@
+---
+title: "Evaluate SWE-bench Pro v2 with OpenCode"
+description: "Prepare the SWE-bench Pro v2 tasks and run a sandboxed OpenCode agent."
+position: 6
+---
+
+# Evaluate SWE-bench Pro v2 with OpenCode
+
+[opencode.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/swebench/pro_v2/opencode.yaml) pairs a
+sandboxed OpenCode agent with the SWE-bench Pro v2 Resources Server (642 validated tasks). The agent edits the task
+repository in the sandbox; the server extracts its patch and grades it in a clean sandbox with each task's own
+upstream `test.sh`. v2 uses different images and a different verifier from v1, so v1 and v2 scores are not
+interchangeable. For v1, see the SWE-bench Pro with Hermes tutorial.
+
+## Requirements
+
+- A `model-provider.yaml` that supplies `policy_model`, `policy_model_name` and a `sandbox` provider.
+- A Linux sandbox that can pull the GHCR task images (`ghcr.io/scaleapi/swe-bench_pro-v2:<instance_id>`) and reach the
+  Gym Model Server.
+- OpenCode installs itself in the sandbox, which needs outbound network access. For the offline agent phase, see
+  the [server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/swebench_pro_v2/README.md).
+
+## Prepare the tasks
+
+```bash
+python benchmarks/swebench/pro_v2/prepare.py
+```
+
+## Run the evaluation
+
+```bash
+gym eval run --benchmark swebench/pro_v2/opencode --config model-provider.yaml -o rollouts.jsonl
+```
+
+To start the servers and collect rollouts separately:
+
+```bash
+gym env start --config benchmarks/swebench/pro_v2/opencode.yaml --config model-provider.yaml
+```
+
+```bash
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro_v2/opencode.yaml --config model-provider.yaml \
+  -i benchmarks/swebench/data/swebench_pro_v2_benchmark.jsonl -o rollouts.jsonl \
+  +agent_name=swebench_pro_v2_opencode_sandboxed_agent
+```
+
+The server README covers the golden-patch smoke test and the offline agent phase.
