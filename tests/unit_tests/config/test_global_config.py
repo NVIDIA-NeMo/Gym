@@ -3474,6 +3474,18 @@ class TestComposeUnboundAgent:
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
         }
 
+    def test_legacy_relay_keeps_the_servers_own_worker_settings(self) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        server["num_workers"] = 4
+        server["uvicorn_reuse_port"] = True
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert relay["num_workers"] == 4
+        assert relay["uvicorn_reuse_port"] is True
+
     @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
     def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
         config = self._session_environment_config(harness_type)

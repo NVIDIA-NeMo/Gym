@@ -532,6 +532,14 @@ repr(e): {repr(e)}"""
         startup.mark("init_server")
         # Before the dry-run return, so a dry run reports the misconfiguration too.
         refuse_unsupported_num_workers(server)
+        reuse_port = server.config.uvicorn_reuse_port
+        if reuse_port is None:
+            reuse_port = UvicornReusePortConfig.model_validate(global_config_dict).uvicorn_reuse_port
+        if reuse_port and (server.config.num_workers or 1) > 1 and not reuse_port_supported():
+            raise RuntimeError(
+                f"{server.config.name} sets uvicorn_reuse_port, which needs Linux, where SO_REUSEPORT spreads "
+                "connections across sockets"
+            )
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
@@ -575,11 +583,6 @@ repr(e): {repr(e)}"""
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
         backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
-        reuse_port = server.config.uvicorn_reuse_port
-        if reuse_port is None:
-            reuse_port = UvicornReusePortConfig.model_validate(global_config_dict).uvicorn_reuse_port
-        if reuse_port and (server.config.num_workers or 1) > 1 and not reuse_port_supported():
-            raise RuntimeError("uvicorn_reuse_port needs Linux, where SO_REUSEPORT spreads connections across sockets")
         # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
         # The main process of a multi-worker server never serves the app.
         session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None

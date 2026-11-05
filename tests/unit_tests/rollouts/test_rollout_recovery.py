@@ -1137,6 +1137,7 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
         "anthropic_api_key",
         "sandbox_model_base_url",
         "num_workers",
+        "uvicorn_reuse_port",
         "switchyard_api_key",
         "switchyard_base_url",
     ],

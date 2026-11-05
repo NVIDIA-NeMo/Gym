@@ -27,7 +27,7 @@ from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
-from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fail, mark, raises
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
@@ -1330,11 +1330,44 @@ class TestRunWebserverProxyKwargs:
         assert bool(reuse_port_kwargs) is uses_reuse_port
         assert bool(plain_kwargs) is not uses_reuse_port
 
-    def test_reuse_port_is_refused_before_startup_is_reported_off_linux(self, monkeypatch: MonkeyPatch) -> None:
+    def _fail_if_serving_starts(self, monkeypatch: MonkeyPatch) -> None:
+        """Make every step from reporting start-up to serving fail the test, so none runs before a refusal."""
+
+        def started(*args: object, **kwargs: object) -> None:
+            fail("the server started up before refusing uvicorn_reuse_port")
+
+        base_server = nemo_gym.server_runtime.base_server
+        monkeypatch.setattr(base_server, "run_with_reuse_port", started)
+        monkeypatch.setattr(base_server, "create_session_socket_dir", started)
+        for step in ("report", "report_when_serving", "announce_serve"):
+            monkeypatch.setattr(base_server.ServerStartupTimeline, step, started)
+
+    @mark.parametrize("dry_run", [False, True])
+    def test_reuse_port_is_refused_off_linux_before_the_server_starts_up(
+        self, monkeypatch: MonkeyPatch, dry_run: bool
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "reuse_port_supported", lambda: False)
+        self._fail_if_serving_starts(monkeypatch)
+
+        with raises(RuntimeError, match="my_server sets uvicorn_reuse_port, which needs Linux"):
+            self._capture_uvicorn_kwargs(
+                monkeypatch, {"uvicorn_reuse_port": True, DRY_RUN_KEY_NAME: dry_run}, num_workers=4
+            )
+
+        # The helper replaces uvicorn.run with a recorder; nothing reached it.
+        assert self.uvicorn_kwargs == {}
+
+    def test_off_linux_a_single_worker_server_ignores_reuse_port(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_runtime.base_server, "reuse_port_supported", lambda: False)
 
-        with raises(RuntimeError, match="needs Linux"):
-            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_reuse_port": True}, num_workers=4)
+        def run_with_reuse_port(**kwargs: object) -> None:
+            fail("a single-worker server was started with per-worker sockets")
+
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "run_with_reuse_port", run_with_reuse_port)
+
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_reuse_port": True}, num_workers=1)
+
+        assert kwargs["port"] == 8000
 
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)

@@ -10,7 +10,8 @@ idle. Here each worker binds its own socket to the server's address with SO_REUS
 Linux kernel spreads new connections evenly across the workers' sockets.
 
 The main process keeps Uvicorn's usual role (spawning, health-checking and restarting workers). Its
-own socket reserves the address and is never listened on, so it takes no connections.
+own socket reserves the address, also while workers are still starting, and is never listened on, so
+it takes no connections.
 """
 
 import logging
@@ -31,16 +32,20 @@ def reuse_port_supported() -> bool:
     return sys.platform == "linux" and hasattr(socket, "SO_REUSEPORT")
 
 
-def _bind_reuse_port_socket(family: socket.AddressFamily, address: tuple) -> socket.socket:
+def _bind_reuse_port_socket(
+    family: socket.AddressFamily, address: tuple, *, reuse_address: bool = True
+) -> socket.socket:
     sock = socket.socket(family, socket.SOCK_STREAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if reuse_address:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.bind(address)
     except OSError:
         sock.close()
         raise
-    sock.set_inheritable(True)
+    # Not inheritable (PEP 446): a process a worker execs must not keep the worker's socket in the port's
+    # SO_REUSEPORT group after the worker dies, where the kernel would keep sending it connections nobody accepts.
     return sock
 
 
@@ -56,7 +61,11 @@ class _ReusePortUvicornConfig(uvicorn.Config):
             with socket.socket(family, socket.SOCK_STREAM) as probe:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind((self.host, self.port))
-            sock = _bind_reuse_port_socket(family, (self.host, self.port))
+            # Without SO_REUSEADDR this socket holds the address against every bind that does not join the group,
+            # including while no worker listens yet, so a worker's listen() cannot lose the port to another server.
+            sock = _bind_reuse_port_socket(family, (self.host, self.port), reuse_address=False)
+            # Like uvicorn.Config.bind_socket, so the workers can be handed this socket.
+            sock.set_inheritable(True)
         except OSError as exc:
             LOG.error(exc)
             sys.exit(STARTUP_FAILURE)

@@ -181,12 +181,69 @@ def test_a_second_server_on_a_port_in_use_exits_instead_of_sharing_it(tmp_path: 
         _stop_server(first)
 
 
+def test_after_its_main_process_is_killed_a_server_keeps_its_port_from_a_restart(tmp_path: Path) -> None:
+    port = _free_port()
+    first = _start_server(tmp_path, port, 2)
+    try:
+        workers = _pids_answering(port, 2)
+        assert len(workers) == 2
+
+        # Only the main process: its workers keep serving on their own sockets.
+        os.kill(first.pid, signal.SIGKILL)
+        first.wait(timeout=30)
+
+        restart = _start_server(tmp_path, port, 2)
+        try:
+            assert restart.wait(timeout=30) != 0
+        finally:
+            _stop_server(restart)
+        assert {_get_pid(port) for _ in range(40)} == workers
+    finally:
+        try:
+            os.killpg(first.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def test_a_second_bind_with_reuse_port_shares_the_address() -> None:
     port = _free_port()
     first = uvicorn_reuse_port._bind_reuse_port_socket(socket.AF_INET, ("127.0.0.1", port))
     second = uvicorn_reuse_port._bind_reuse_port_socket(socket.AF_INET, ("127.0.0.1", port))
-    first.close()
-    second.close()
+    try:
+        # Both can listen only with SO_REUSEPORT; SO_REUSEADDR alone lets them bind but not listen together.
+        first.listen()
+        second.listen()
+        assert first.getsockname() == second.getsockname()
+        # A process a worker execs must not keep the worker's socket in the port's group.
+        assert not first.get_inheritable()
+    finally:
+        first.close()
+        second.close()
+
+
+def test_the_main_process_socket_holds_the_address_before_any_worker_listens() -> None:
+    port = _free_port()
+    config = uvicorn_reuse_port._ReusePortUvicornConfig(app="pid_app:app", host="127.0.0.1", port=port, workers=2)
+    sock = config.bind_socket()
+    try:
+        # An ordinary server binds with SO_REUSEADDR, as uvicorn.run does, and must not take the port.
+        with socket.socket() as ordinary:
+            ordinary.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            with pytest.raises(OSError):
+                ordinary.bind(("127.0.0.1", port))
+        # Neither may a second reuse-port server, which would otherwise split the connections.
+        with pytest.raises(SystemExit):
+            uvicorn_reuse_port._ReusePortUvicornConfig(
+                app="pid_app:app", host="127.0.0.1", port=port, workers=2
+            ).bind_socket()
+        # The workers still join it.
+        worker = uvicorn_reuse_port._bind_reuse_port_socket(socket.AF_INET, ("127.0.0.1", port))
+        try:
+            worker.listen()
+        finally:
+            worker.close()
+    finally:
+        sock.close()
 
 
 def test_bind_socket_exits_when_a_plain_listener_holds_the_port() -> None:

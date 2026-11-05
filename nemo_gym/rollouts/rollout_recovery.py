@@ -103,6 +103,7 @@ _SERVER_RUNTIME_OPTIONS = frozenset(
         "switchyard_api_key",
         "hf_token",
         "num_workers",
+        "uvicorn_reuse_port",
         "base_url",
         "openai_base_url",
         "policy_base_url",
