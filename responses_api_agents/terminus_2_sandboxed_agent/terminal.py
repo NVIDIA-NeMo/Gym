@@ -75,8 +75,10 @@ class TerminusTmuxSession(TmuxSession):
     async def is_session_alive(self) -> bool:
         if not await super().is_session_alive():
             # Harbor treats False as normal agent completion. A missing session
-            # is a terminal failure, not a model completion declaration.
-            raise SandboxLostError("The terminal session disappeared before the agent completed")
+            # is a terminal failure, not a model completion declaration. The model can destroy its own
+            # session (tmux kill-server), so this is not proof that the sandbox is lost; the sandbox
+            # adapter raises SandboxLostError for transport and provider failures.
+            raise RuntimeError("The terminal session disappeared before the agent completed")
         return True
 
     async def _require_live_shell(self) -> None:
@@ -85,7 +87,7 @@ class TerminusTmuxSession(TmuxSession):
         )
         state = (result.stdout or "").strip()
         if result.return_code != 0 or state not in ("0", "1"):
-            raise SandboxLostError(f"Could not inspect terminal shell state: {result.stderr}")
+            raise RuntimeError(f"Could not inspect terminal shell state: {result.stderr}")
         if state == "1":
             raise ShellExitedError("The interactive shell exited")
 
