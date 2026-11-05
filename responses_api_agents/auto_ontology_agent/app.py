@@ -18,6 +18,7 @@ from time import perf_counter, time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
+import httpx
 from fastapi import HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveFloat, PositiveInt, PrivateAttr, field_validator
 
@@ -51,6 +52,7 @@ from nemo_gym.trajectory import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.auto_ontology_agent import c_interact
+from responses_api_agents.auto_ontology_agent.model_calls import ModelCallRoute, ModelCallTransport, model_call_route
 from responses_api_agents.auto_ontology_agent.runtime import AskUser, AutoOntologyRuntime, TurnKind
 
 
@@ -59,15 +61,9 @@ LOG = logging.getLogger(__name__)
 C_INTERACT_TOOLS = ("ask_user", "submit_sql")
 # Auto Ontology's model clients need a key; a Gym Model Server holds the provider's key itself.
 _MODEL_SERVER_API_KEY = "gym-model-server"
+# Model names with these prefixes select Auto Ontology's ChatOpenAI client, the one that can send through Gym.
+_CHAT_OPENAI_PREFIXES = ("openai/", "azure/", "aws/")
 _DATABASE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
-# Auto Ontology builds its model clients once for the process, so its calls carry no rollout prefix.
-_MODEL_CALL_GAPS = (
-    ObservationGap(
-        code="model_call_ownership_unavailable",
-        detail="Auto Ontology's model clients serve the whole process, so its model calls carry no rollout prefix",
-    ),
-    ObservationGap(code="model_call_usage_unavailable", detail="Auto Ontology does not report its token usage"),
-)
 
 
 class AutoOntologyCatalogConfig(BaseModel):
@@ -87,9 +83,9 @@ class AutoOntologyAgentConfig(BaseResponsesAPIAgentConfig):
 
     # The Gym Model Servers that serve Auto Ontology's two model roles. The reasoning model decides what to ask and
     # what SQL to submit, so it is the policy. The fast model makes helper calls (merging the user's answers into the
-    # question, evidence checks, structured extraction), usually on another Model Server. Auto Ontology sends the
-    # model names below; a name with an ``openai/``, ``azure/`` or ``aws/`` prefix selects its OpenAI-compatible
-    # client.
+    # question, evidence checks, structured extraction), usually on another Model Server. The model names below need
+    # an ``openai/``, ``azure/`` or ``aws/`` prefix, which selects Auto Ontology's OpenAI-compatible client. Gym's
+    # Model Servers send their own model name, so ``openai/<any name>`` works.
     reasoning_model_server: ModelServerRef
     reasoning_model: str
     fast_model_server: ModelServerRef
@@ -123,6 +119,17 @@ class AutoOntologyAgentConfig(BaseResponsesAPIAgentConfig):
             raise ValueError("source_database_url must contain a {database} field")
         return value
 
+    @field_validator("reasoning_model", "fast_model")
+    @classmethod
+    def selects_chat_openai(cls, value: str) -> str:
+        if not value.startswith(_CHAT_OPENAI_PREFIXES):
+            raise ValueError(
+                f"{value!r} must start with {', '.join(_CHAT_OPENAI_PREFIXES)}: only Auto Ontology's "
+                "OpenAI-compatible client sends through Gym. Gym's Model Servers send their own model name, so "
+                "openai/<name> works"
+            )
+        return value
+
 
 @dataclass
 class AutoOntologySessionState(AgentSessionState):
@@ -131,6 +138,12 @@ class AutoOntologySessionState(AgentSessionState):
     tool_access: DirectHTTPToolAccess
     session: Any = None
     question_budget: int = 0
+    # The rollout route of the session's activations, which their model calls also take; empty without a rollout.
+    model_path_prefix: str = ""
+    # Calls made outside any activation, across the process, when the session was seeded.
+    unrouted_calls_at_seed: int = 0
+    activation_without_rollout: bool = False
+    usage_unavailable: bool = False
     invocations: list[AgentInvocation] = field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = field(default_factory=list)
 
@@ -139,23 +152,27 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
     config: AutoOntologyAgentConfig
 
     _runtime: Optional[AutoOntologyRuntime] = PrivateAttr(default=None)
+    _model_transport: Optional[ModelCallTransport] = PrivateAttr(default=None)
     _steps: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _knowledge_children: dict[str, dict[int, list[int]]] = PrivateAttr(default_factory=dict)
 
     def runtime(self) -> AutoOntologyRuntime:
-        """The Auto Ontology of this process, set up with this agent's settings on first use."""
+        """The Auto Ontology of this process, set up with this agent's settings on first use, on the event loop."""
         if self._runtime is None:
             config = self.config
+            reasoning_url = self.resolve_model_base_url(config.reasoning_model_server.name, trace_context=False)
+            fast_url = self.resolve_model_base_url(config.fast_model_server.name, trace_context=False)
+            self._model_transport = ModelCallTransport(
+                self.server_client,
+                {reasoning_url: config.reasoning_model_server.name, fast_url: config.fast_model_server.name},
+                loop=asyncio.get_running_loop(),
+            )
             environment = {
                 **config.feature_flags,
-                "REASONING_ENDPOINT": self.resolve_model_base_url(
-                    config.reasoning_model_server.name, trace_context=False
-                ),
+                "REASONING_ENDPOINT": reasoning_url,
                 "REASONING_API_KEY": _MODEL_SERVER_API_KEY,
                 "REASONING_MODEL": config.reasoning_model,
-                "NON_REASONING_ENDPOINT": self.resolve_model_base_url(
-                    config.fast_model_server.name, trace_context=False
-                ),
+                "NON_REASONING_ENDPOINT": fast_url,
                 "NON_REASONING_API_KEY": _MODEL_SERVER_API_KEY,
                 "NON_REASONING_MODEL": config.fast_model,
                 "EMBED_ENDPOINT": config.embedding_base_url,
@@ -167,8 +184,13 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                 "POSTGRES_PASSWORD": config.catalog.password,
                 "POSTGRES_DATABASE": config.catalog.database,
             }
-            self._runtime = AutoOntologyRuntime(environment, config.source_database_url)
+            self._runtime = AutoOntologyRuntime(
+                environment, config.source_database_url, http_client=httpx.Client(transport=self._model_transport)
+            )
         return self._runtime
+
+    def _unrouted_calls(self) -> int:
+        return self._model_transport.unrouted_calls if self._model_transport is not None else 0
 
     async def _in_thread(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Run a synchronous Auto Ontology call in a thread, at most ``max_concurrent_steps`` at a time."""
@@ -197,7 +219,9 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                 f"Auto Ontology needs one direct HTTP grant for the episode's {' and '.join(C_INTERACT_TOOLS)} tools, "
                 f"got {len(direct)}"
             )
-        return AutoOntologySessionState(request=body, tool_access=direct[0])
+        return AutoOntologySessionState(
+            request=body, tool_access=direct[0], unrouted_calls_at_seed=self._unrouted_calls()
+        )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, AutoOntologySessionState):
@@ -205,21 +229,49 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         tool_observations = [
             ToolCallObservation.model_validate(call.model_dump(exclude={"output"})) for call in state.tool_calls
         ]
+        gaps = self._model_call_gaps(state)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=AgentObservationBundle(
                 source="auto_ontology",
                 records=[*state.invocations, *tool_observations],
-                gaps=list(_MODEL_CALL_GAPS),
+                gaps=gaps,
             ),
             trajectory=TrajectoryRecord(
                 task_id=state.request.task_id.task_id,
                 rollout_id=state.request.episode_id.capture_key,
                 invocations=list(state.invocations),
                 tool_calls=list(state.tool_calls),
-                gaps=list(_MODEL_CALL_GAPS),
+                gaps=list(gaps),
             ),
         )
+
+    def _model_call_gaps(self, state: AutoOntologySessionState) -> list[ObservationGap]:
+        """The model-call evidence the session lacks.
+
+        Gym gives each captured call to its invocation by its ``x-session-id``, so no gap means every call has both.
+        """
+        gaps = []
+        if state.activation_without_rollout:
+            gaps.append(
+                ObservationGap(
+                    code="model_call_ownership_unavailable",
+                    detail="An activation came without a rollout route, so its model calls carry no rollout",
+                )
+            )
+        elif self._unrouted_calls() > state.unrouted_calls_at_seed:
+            # The transport cannot tell whose call it was, so each session open at the time declares the gap.
+            gaps.append(
+                ObservationGap(
+                    code="model_call_ownership_unavailable",
+                    detail="Auto Ontology made a model call outside an activation while this session was open",
+                )
+            )
+        if state.usage_unavailable:
+            gaps.append(
+                ObservationGap(code="model_call_usage_unavailable", detail="A model call's reply had no usage")
+            )
+        return gaps
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
         return AgentContinuationCapabilities(observations=["trajectory", "timing"])
@@ -245,13 +297,17 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         began = perf_counter()
         output: list[Any] = []
         status, error_type = "failed", None
+        route = ModelCallRoute(path_prefix=state.model_path_prefix, invocation_id=invocation_id)
+        state.activation_without_rollout |= not route.path_prefix
         try:
-            if state.session is None:
-                turn, text = await self._open(state, body)
-            else:
-                next_turn = c_interact.read_next_turn(_message_text(body.input, ("user",)))
-                turn, text = next_turn.kind, next_turn.text
-            await self._run_turn(state, turn, text, invocation_id, output)
+            # Auto Ontology's threads copy the route, so each model call of this turn takes it.
+            with model_call_route(route):
+                if state.session is None:
+                    turn, text = await self._open(state, body)
+                else:
+                    next_turn = c_interact.read_next_turn(_message_text(body.input, ("user",)))
+                    turn, text = next_turn.kind, next_turn.text
+                await self._run_turn(state, turn, text, invocation_id, output)
             status = "completed"
         except c_interact.ProtocolError as error:
             error_type = type(error).__name__
@@ -270,6 +326,8 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                     error_type=error_type,
                 )
             )
+        usage = route.usage()
+        state.usage_unavailable |= usage is None
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -279,6 +337,7 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=False,
+            usage=usage,
         )
 
     async def _open(
@@ -416,8 +475,14 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        if self._agent_session_id_from_request(request) is None:
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is None:
             raise HTTPException(409, "Auto Ontology runs only in agent sessions; use an Environment Server")
+        state = self._require_agent_session(agent_session_id)
+        if isinstance(state, AutoOntologySessionState):
+            # The Environment Server activates the session on its rollout's route, with the training-capture segment
+            # when training capture is on. Auto Ontology's model calls take the same route.
+            state.model_path_prefix = self.url_path_for_request("", request)
         return await self.activate_agent_session(request, body)
 
     async def run(self, request: Request, body: BaseRunRequest = Body()) -> None:
