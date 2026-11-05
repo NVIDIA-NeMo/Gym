@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from pydantic import Field
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
@@ -89,7 +90,10 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
         source = metadata.get("source_pdf") if isinstance(metadata, dict) else None
         if not isinstance(source, str) or not source:
             raise ResourcesSeedRejectedError("verifier_metadata.source_pdf must name a PDF")
-        root = Path(self.config.documents_base_dir).resolve()
+        root = Path(self.config.documents_base_dir)
+        if not root.is_absolute():
+            root = PARENT_DIR / root
+        root = root.resolve()
         path = (root / source).resolve()
         if not path.is_relative_to(root) or not path.is_file() or path.suffix.lower() != ".pdf":
             raise ResourcesSeedRejectedError("source_pdf must be an existing PDF within documents_base_dir")

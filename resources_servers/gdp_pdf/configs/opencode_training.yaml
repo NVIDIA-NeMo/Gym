@@ -28,3 +28,4 @@ policy_model:
         temperature: 1.0
         top_p: 1.0
         top_k: -1
+        max_tokens: ${gdp_pdf_opencode.responses_api_agents.opencode_agent.max_output_tokens}

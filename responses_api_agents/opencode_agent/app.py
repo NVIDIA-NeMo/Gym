@@ -964,6 +964,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         supported = {"input", "instructions", "model"}
+        sampling_fields = {"temperature": "temperature", "top_p": "top_p", "max_output_tokens": "max_tokens"}
         for key, field in type(body).model_fields.items():
             if key in supported:
                 continue
@@ -973,6 +974,28 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
             if value != field.get_default(call_default_factory=True):
+                if key in sampling_fields:
+                    # Trainers send request controls. Accept them only when the model server enforces them.
+                    models = self.server_client.global_config_dict[self.config.model_server.name][
+                        "responses_api_models"
+                    ]
+                    model = models.get("vllm_model", {})
+                    overrides = model.get("sampling_overrides") or {}
+                    pinned = overrides.get(sampling_fields[key])
+                    if key == "max_output_tokens":
+                        # vLLM chat gives this alias precedence over max_tokens.
+                        alias = overrides.get(
+                            "max_completion_tokens", (model.get("extra_body") or {}).get("max_completion_tokens")
+                        )
+                        if alias is not None and alias != value:
+                            raise HTTPException(422, "OpenCode max_output_tokens conflicts with max_completion_tokens")
+                    if value == pinned and (key != "max_output_tokens" or value == self.config.max_output_tokens):
+                        continue
+                    raise HTTPException(
+                        422,
+                        f"OpenCode request {key}={value} must match the Gym model server sampling_overrides "
+                        f"({sampling_fields[key]}={pinned}); max_output_tokens must also match the agent config",
+                    )
                 raise HTTPException(
                     422,
                     f"OpenCode sandbox execution does not support request field {key}; configure Gym model limits/sampling",

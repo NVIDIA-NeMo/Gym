@@ -78,6 +78,19 @@ async def test_seed_retry_and_close_fence(setup):
         await server.seed_session(request, body)
 
 
+async def test_relative_document_root_from_component_workdir(setup, tmp_path, monkeypatch):
+    server, sandbox, _, request, body = setup
+    component = tmp_path / "resources_servers/gdp_pdf"
+    (component / "data").mkdir(parents=True)
+    pdf = component / "data/source.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.setattr(sandbox_app, "PARENT_DIR", tmp_path)
+    monkeypatch.chdir(component)
+    server.config.documents_base_dir = "resources_servers/gdp_pdf/data"
+    await server.seed_session(request, body)
+    sandbox.upload.assert_awaited_once_with(pdf, DOCUMENT_PATH)
+
+
 async def test_setup_failure_releases_sandbox_and_can_retry(setup):
     server, sandbox, _, request, body = setup
     sandbox.upload.side_effect = RuntimeError("upload failed")

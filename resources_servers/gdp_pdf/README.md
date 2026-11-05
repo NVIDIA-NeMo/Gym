@@ -243,13 +243,16 @@ gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml \
   +gdp_pdf_sandbox_image=gdp-pdf-tools \
+  ++policy_model.responses_api_models.vllm_model.host=GYM_HOST_IP \
   +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
   +policy_model_name=MODEL \
   --num-repeats 3 --output results/gdp-pdf-opencode.jsonl
 ```
 
-Set judge credentials in your private `env.yaml`. The model endpoint must be
-reachable from the sandbox, support images and tool calling, and use the model's
+Set judge credentials in your private `env.yaml`. Replace `GYM_HOST_IP` with a host
+interface address reachable from the Docker container, not `127.0.0.1`: OpenCode
+connects to Gym's model server, which forwards requests to `policy_base_url`.
+The inference endpoint must support images and tool calling and use the model's
 vLLM tool-call and reasoning parsers. Replace the Docker provider config for your
 deployment. The shared adapter installs OpenCode 1.17.11; preinstall that version
 for offline workers. Preparation downloads the PDFs without OCR or rendering.
@@ -271,9 +274,12 @@ JSONL and replace its `TBD` license. The existing GDP.pdf row format applies:
 Never train on benchmark questions.
 
 The overlay enables shared token capture and disables history compaction/pruning.
-It pins sampling on Gym's model server to temperature 1.0, top-p 1.0 and top-k -1
-(disabled). Configure the same distribution in your trainer; change both together
-when using another recipe. The trainer owns capture storage. For NeMo RL, enable
+It pins sampling on Gym's model server to temperature 1.0, top-p 1.0, top-k -1
+(disabled) and the agent's 16,384-token per-call output limit. Set the trainer's
+temperature, top-p and `max_new_tokens` to match; change both together when using
+another recipe. OpenCode accepts matching request controls and rejects mismatches
+before inference, so no trainer-side removal of these fields is needed.
+The trainer owns capture storage. For NeMo RL, enable
 `token_capture.enabled` and `token_capture.forest_training`, select
 `returned_history`, and keep `skip_tokenizer_init: false`. See the
 [shared capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml).
@@ -282,6 +288,8 @@ A four-update multimodal RL smoke completed with 32 unmasked answers, policy
 refits and a model/optimizer checkpoint save. Captured tool images reached the
 learner. [Recorded smoke evidence](data/opencode_evidence.zip) includes the synthetic
 PDF, tool/image transcript, judge verdicts and per-update metrics (Gym `33878bb87`,
-before extraction onto current main). This qualifies the exercised training path,
-not checkpoint restore or large-scale throughput. Capture failures must remain explicit; do not replace
+before extraction onto current main). The smoke used a development NeMo RL bridge
+that finalizes external-harness token capture; unmodified upstream NeMo RL is not
+yet qualified. Checkpoint restore and large-scale throughput were not tested.
+Capture failures must remain explicit; do not replace
 missing tokens/images with retokenized text or zero rewards.

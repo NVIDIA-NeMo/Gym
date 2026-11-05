@@ -130,7 +130,10 @@ reported as an `mcp_server_skipped` gap. A run that called the model but left no
 also fails, because nothing confirms its required tools; a run that failed for another reason keeps
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Configure
-sampling on the Gym model server. Request-level overrides are not silently ignored.
+sampling on the Gym model server. Requests may repeat `temperature`, `top_p` and
+`max_output_tokens` when they match the vLLM model server's `sampling_overrides`
+(`max_tokens` for the output limit); the output limit must also match the agent
+config. Conflicting or unpinned controls are rejected before inference.
 Session `opencode_config` permits `permission`, `tools` and `compaction`, preserving Gym routing.
 Training configs can disable automatic compaction and pruning to retain the sampled history.
 
