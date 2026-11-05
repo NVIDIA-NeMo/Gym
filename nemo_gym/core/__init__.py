@@ -55,9 +55,15 @@ if TYPE_CHECKING:
         SESSION_EXPIRED,
         SESSION_LOST,
         VERIFIER_ERROR,
+        FailureClass,
+        FailureClassificationConfig,
         FailureStage,
+        StageClassificationConfig,
+        classify_failure,
         is_namespaced,
         is_registered,
+        is_server_failure,
+        reporting_failure_kind,
         validate_failure_kind,
     )
     from nemo_gym.core.failure_records import (
@@ -79,7 +85,6 @@ if TYPE_CHECKING:
         report_for_current_request,
     )
     from nemo_gym.core.outcome_policy import (
-        OutcomeAttribution,
         OutcomeDecision,
         StageOutcomePolicyConfig,
         StagePolicyConfig,
@@ -165,7 +170,12 @@ _PUBLIC_API = {
     "FailureReport": "failure_records",
     "FailureReportRow": "failure_transport",
     "FailureStage": "failure_kinds",
-    "OutcomeAttribution": "outcome_policy",
+    "FailureClass": "failure_kinds",
+    "FailureClassificationConfig": "failure_kinds",
+    "StageClassificationConfig": "failure_kinds",
+    "classify_failure": "failure_kinds",
+    "reporting_failure_kind": "failure_kinds",
+    "is_server_failure": "failure_kinds",
     "OutcomeDecision": "outcome_policy",
     "StageOutcomePolicyConfig": "outcome_policy",
     "StagePolicyConfig": "outcome_policy",

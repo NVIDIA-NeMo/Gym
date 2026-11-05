@@ -80,3 +80,12 @@ def test_rejects_unregistered_failure_kinds(kind):
         AgentOutcome(**fields)
     with pytest.raises(ValidationError, match="Unregistered failure kind"):
         AgentOutcome.model_validate_json(json.dumps(fields))
+
+
+def test_class_action_cannot_bypass_environment_supported_actions():
+    from pydantic import ValidationError
+
+    from nemo_gym.agents.agent_outcome import AgentOutcomePolicyConfig
+
+    with pytest.raises(ValidationError, match="does not support count_as_zero"):
+        AgentOutcomePolicyConfig(by_failure_class={"model": "count_as_zero"})

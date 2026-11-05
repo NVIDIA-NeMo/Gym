@@ -15,7 +15,10 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_OOM_KILLED,
     SHUTDOWN,
+    FailureClass,
+    FailureClassificationConfig,
     FailureStage,
+    classify_failure,
 )
 
 
@@ -49,9 +52,10 @@ class OutcomePolicyConfig(BaseModel):
 
     by_failure_kind: dict[str, OutcomeAction] = Field(default_factory=dict)
     by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(default_factory=dict)
+    by_failure_class: dict[FailureClass, OutcomeAction] = Field(default_factory=dict)
     default_action: OutcomeAction
 
-    @field_validator("by_failure_kind", "by_status_code")
+    @field_validator("by_failure_kind", "by_status_code", "by_failure_class")
     @classmethod
     def merge_default_rules(
         cls, value: dict[str | int, OutcomeAction], info: ValidationInfo
@@ -66,22 +70,30 @@ class OutcomePolicyConfig(BaseModel):
         return _require_registered_kinds(value)
 
 
-def choose_action(*, failure_kind: str, http_status: int | None, config: OutcomePolicyConfig) -> OutcomeAction:
-    """Select by status, then kind, then default; parsing and execution belong to the boundary."""
-    return config.by_status_code.get(http_status, config.by_failure_kind.get(failure_kind, config.default_action))
+def choose_action(
+    *,
+    failure_kind: str,
+    http_status: int | None,
+    config: OutcomePolicyConfig,
+    failure_class: FailureClass = FailureClass.UNKNOWN,
+) -> OutcomeAction:
+    """Select by status, kind, class, then default; execution belongs to the boundary."""
+    return config.by_status_code.get(
+        http_status,
+        config.by_failure_kind.get(failure_kind, config.by_failure_class.get(failure_class, config.default_action)),
+    )
 
 
 def failure_outcome_policy(failure: "NgFailureEvent", *, config: OutcomePolicyConfig) -> OutcomeAction:
-    """Adapt only this event's selected kind and status, without searching its causal chain."""
-    return choose_action(failure_kind=failure.failure_kind, http_status=failure.http_status, config=config)
-
-
-class OutcomeAttribution(StrEnum):
-    """Policy attribution, distinct from the observed failure and the selected action."""
-
-    MODEL = "model"
-    EVALUATION = "evaluation"
-    UNKNOWN = "unknown"
+    """Adapt only this event's evidence, without searching its causal chain."""
+    return choose_action(
+        failure_kind=failure.failure_kind,
+        http_status=failure.http_status,
+        config=config,
+        failure_class=classify_failure(
+            failure_kind=failure.failure_kind, stage=failure.stage, http_status=failure.http_status
+        ),
+    )
 
 
 class OutcomeDecision(BaseModel):
@@ -90,37 +102,22 @@ class OutcomeDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     action: OutcomeAction
-    attribution: OutcomeAttribution
+    attribution: FailureClass
 
 
 class StagePolicyConfig(OutcomePolicyConfig):
-    """Action and attribution rules for an execution stage.
-
-    HTTP action overrides retain explicit kind attribution. Counting a failure as
-    zero never establishes attribution by itself.
-    """
+    """Action rules for one stage; classification is configured independently."""
 
     default_action: OutcomeAction = OutcomeAction.FAIL
-    attribution_by_failure_kind: dict[str, OutcomeAttribution] = Field(default_factory=dict)
-    default_attribution: OutcomeAttribution = OutcomeAttribution.UNKNOWN
-
-    @field_validator("attribution_by_failure_kind")
-    @classmethod
-    def require_registered_attribution_kinds(
-        cls, value: dict[str, OutcomeAttribution]
-    ) -> dict[str, OutcomeAttribution]:
-        return _require_registered_kinds(value)
 
 
 def _default_stage_policies() -> dict[FailureStage, StagePolicyConfig]:
     return {
         "agent": StagePolicyConfig(
             by_failure_kind={PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO},
-            attribution_by_failure_kind={PROVIDER_OOM_KILLED: OutcomeAttribution.MODEL},
         ),
         "seed": StagePolicyConfig(
             by_failure_kind={PROVIDER_OOM_KILLED: OutcomeAction.RETRY},
-            attribution_by_failure_kind={PROVIDER_OOM_KILLED: OutcomeAttribution.EVALUATION},
         ),
         "verification": StagePolicyConfig(
             by_failure_kind={
@@ -130,7 +127,6 @@ def _default_stage_policies() -> dict[FailureStage, StagePolicyConfig]:
                 PROVIDER_CREDENTIALS_REJECTED: OutcomeAction.FAIL,
             },
             default_action=OutcomeAction.RETRY,
-            default_attribution=OutcomeAttribution.EVALUATION,
         ),
     }
 
@@ -147,6 +143,7 @@ class StageOutcomePolicyConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
     by_stage: dict[FailureStage, StagePolicyConfig] = Field(default_factory=_default_stage_policies)
     default_policy: StagePolicyConfig = Field(default_factory=StagePolicyConfig)
 
@@ -165,9 +162,7 @@ class StageOutcomePolicyConfig(BaseModel):
                 continue
             policy = defaults.get(stage, {})
             for field, rules in override.items():
-                if field in ("by_failure_kind", "by_status_code", "attribution_by_failure_kind") and isinstance(
-                    rules, dict
-                ):
+                if field in ("by_failure_kind", "by_status_code", "by_failure_class") and isinstance(rules, dict):
                     policy[field] = policy.get(field, {}) | rules
                 else:
                     policy[field] = rules
@@ -189,7 +184,18 @@ def choose_stage_outcome(
     not turn it into a verifier failure.
     """
     policy = config.by_stage.get(stage, config.default_policy)
+    classification = classify_failure(
+        failure_kind=failure_kind,
+        stage=stage,
+        http_status=http_status,
+        config=config.classification,
+    )
     return OutcomeDecision(
-        action=choose_action(failure_kind=failure_kind, http_status=http_status, config=policy),
-        attribution=policy.attribution_by_failure_kind.get(failure_kind, policy.default_attribution),
+        action=choose_action(
+            failure_kind=failure_kind,
+            http_status=http_status,
+            config=policy,
+            failure_class=classification,
+        ),
+        attribution=classification,
     )

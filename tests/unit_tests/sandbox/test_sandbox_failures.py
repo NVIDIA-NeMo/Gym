@@ -822,3 +822,11 @@ def test_retry_cap_does_not_replace_polling_fallback(header):
     failure = opensandbox_failure(operation="status", cause=error)
     assert module._retry_delay(failure, fallback=2, max_delay_s=0) == 2
     assert module._retry_delay(None, fallback=2, max_delay_s=0) == 2
+
+
+@pytest.mark.parametrize("action", ["verify", "count_as_zero"])
+def test_class_actions_cannot_bypass_provider_supported_actions(action):
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxOutcomePolicy
+
+    with pytest.raises(ValueError):
+        OpenSandboxOutcomePolicy(by_failure_class={"evaluation": action})

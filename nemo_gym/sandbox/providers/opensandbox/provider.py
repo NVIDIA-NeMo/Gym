@@ -679,7 +679,12 @@ class OpenSandboxOutcomePolicy(OutcomePolicyConfig):
     def supported_actions(self) -> "OpenSandboxOutcomePolicy":
         if any(
             action not in (OutcomeAction.RETRY, OutcomeAction.FAIL)
-            for action in (self.default_action, *self.by_failure_kind.values(), *self.by_status_code.values())
+            for action in (
+                self.default_action,
+                *self.by_failure_kind.values(),
+                *self.by_status_code.values(),
+                *self.by_failure_class.values(),
+            )
         ):
             raise ValueError("Sandbox request policies support only retry and fail")
         if any(not 400 <= status <= 599 for status in self.by_status_code):

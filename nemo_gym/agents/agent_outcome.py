@@ -14,6 +14,7 @@ from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    classify_failure,
 )
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
 
@@ -85,6 +86,7 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             self.default_action,
             *self.by_failure_kind.values(),
             *self.by_status_code.values(),
+            *self.by_failure_class.values(),
         ]:
             raise ValueError("Environment Server policy does not support count_as_zero")
         return self
@@ -107,7 +109,12 @@ def agent_outcome_policy(
         # Keep malformed classification in the partial response for diagnosis, not scoring.
         return OutcomeAction.FAIL
     config = config or AgentOutcomePolicyConfig()
-    return choose_action(failure_kind=outcome.failure_kind, http_status=outcome.status_code, config=config)
+    return choose_action(
+        failure_kind=outcome.failure_kind,
+        http_status=outcome.status_code,
+        config=config,
+        failure_class=classify_failure(failure_kind=outcome.failure_kind, http_status=outcome.status_code),
+    )
 
 
 def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:

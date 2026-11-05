@@ -28,15 +28,17 @@ what another caller does not.
 Names are low cardinality on purpose. They are safe as a metric label or a span dimension;
 ``failure_reason`` never is, because it carries occurrence detail and can be unbounded.
 
-This module imports only the standard library so that data tooling can read the vocabulary
-without installing any server's requirements.
+Classification configuration uses Pydantic, but this module imports no server code.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Literal
+from enum import StrEnum
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 logger = logging.getLogger(__name__)
@@ -262,8 +264,10 @@ NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
 INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 INVALID_REQUEST_PARAMETER = "invalid_request_parameter"
+GRADING_WITHOUT_VERDICT = "grading_without_verdict"
 GATE_DERIVED_KINDS: frozenset[str] = frozenset(
     {
+        GRADING_WITHOUT_VERDICT,
         TRUNCATED_ANSWER,
         EMPTY_ANSWER,
         MALFORMED_ANSWER,
@@ -276,46 +280,228 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
 )
 
 
-# --- fault classes: the shared default for evaluation and RL ---------------------------- #
-# A model fault is the evaluated model's own outcome under the benchmark protocol: its request rejected or timed out
-# (``MODEL_POLICY_RESPONSE_TIMEOUT``: a deployment's slowness is on the model's side by default; the acceptance gate's
-# ``policy_timeout_counts_as_model`` setting can move it to the server class), its context limit, its agent's limit, timeout, invalid output or a command the
-# harness refused (the model issued it), or an answer it left cut off, empty or malformed. The evaluation gate counts
-# these by kind and never fails health on them; RL treats them as the policy's own failures. A server fault is a
-# server that did not start, a model transport error, a model server's 5xx reply or an agent timeout whose window held
-# such a fault (``AGENT_TIMEOUT_INFRASTRUCTURE``): evaluation-side. Any other kind is
-# evaluation-side by its kind alone. A recorded HTTP status refines the class: the gate keys it on the status first.
+# --- shared classification: interpretation, not observed failure facts ------------------ #
+class FailureClass(StrEnum):
+    """Configurable responsibility for reporting; no class implies an action or health verdict."""
+
+    MODEL = "model"
+    EVALUATION = "evaluation"
+    UNKNOWN = "unknown"
+
+
+# Each default contains its class and optional evaluation-side reporting subcategory.
+# Keep these together so historical model/server views cannot become competing classifiers.
+_DEFAULT_CLASSIFICATION: dict[str, tuple[FailureClass, str | None]] = {
+    kind: (FailureClass.EVALUATION, None) for kind in FAILURE_KINDS | GATE_DERIVED_KINDS
+}
+_DEFAULT_CLASSIFICATION.update(
+    dict.fromkeys(
+        (
+            MODEL_REQUEST_ERROR,
+            MODEL_POLICY_RESPONSE_TIMEOUT,
+            MODEL_CONTEXT_LIMIT,
+            AGENT_TIMEOUT,
+            AGENT_COMMAND_NOT_ALLOWED,
+            AGENT_LIMIT,
+            AGENT_INVALID_OUTPUT,
+            TRUNCATED_ANSWER,
+            EMPTY_ANSWER,
+            MALFORMED_ANSWER,
+        ),
+        (FailureClass.MODEL, None),
+    )
+)
+_DEFAULT_CLASSIFICATION.update(
+    dict.fromkeys(
+        (
+            SERVER_START_FAILED,
+            MODEL_TRANSPORT_ERROR,
+            MODEL_SERVER_ERROR,
+            AGENT_TIMEOUT_INFRASTRUCTURE,
+            PROVIDER_CREATE_TIMEOUT,
+            PROVIDER_CREATE_PENDING,
+            PROVIDER_NOT_READY,
+            PROVIDER_SETUP_FAILED,
+            PROVIDER_INTERNAL_ERROR,
+            PROVIDER_PTY_UNAVAILABLE,
+            PROVIDER_PTY_BUSY,
+            PROVIDER_PROTOCOL_ERROR,
+            PROVIDER_REQUEST_FAILED,
+            PROVIDER_IO_TIMEOUT,
+            PROVIDER_COMMAND_TIMEOUT,
+            PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+            PROVIDER_STATUS_UNAVAILABLE,
+            PROVIDER_UNAVAILABLE,
+            PROVIDER_QUOTA_EXHAUSTED,
+            PROVIDER_CREDENTIALS_REJECTED,
+        ),
+        (FailureClass.EVALUATION, "server"),
+    )
+)
+# OOM requires admitted execution/ownership context; its kind alone cannot assign responsibility.
+_DEFAULT_CLASSIFICATION[PROVIDER_OOM_KILLED] = (FailureClass.UNKNOWN, "server")
 MODEL_FAULT_KINDS: frozenset[str] = frozenset(
-    {
-        MODEL_REQUEST_ERROR,
-        MODEL_POLICY_RESPONSE_TIMEOUT,
-        MODEL_CONTEXT_LIMIT,
-        AGENT_TIMEOUT,
-        AGENT_COMMAND_NOT_ALLOWED,
-        AGENT_LIMIT,
-        AGENT_INVALID_OUTPUT,
-        TRUNCATED_ANSWER,
-        EMPTY_ANSWER,
-        MALFORMED_ANSWER,
-    }
+    kind for kind, (classification, _) in _DEFAULT_CLASSIFICATION.items() if classification == FailureClass.MODEL
 )
 SERVER_FAULT_KINDS: frozenset[str] = frozenset(
-    {SERVER_START_FAILED, MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR, AGENT_TIMEOUT_INFRASTRUCTURE}
+    kind
+    for kind, (classification, category) in _DEFAULT_CLASSIFICATION.items()
+    if classification == FailureClass.EVALUATION and category == "server"
 )
+
+
+def _validate_classification_kinds[T](rules: dict[str, T]) -> dict[str, T]:
+    invalid = rules.keys() - FAILURE_KINDS - GATE_DERIVED_KINDS - {"unknown"}
+    if invalid:
+        raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
+    return rules
+
+
+class StageClassificationConfig(BaseModel):
+    """Classification overrides for an established originating stage."""
+
+    model_config = ConfigDict(extra="forbid")
+    by_failure_kind: dict[str, FailureClass] = Field(default_factory=dict)
+    default_class: FailureClass | None = None
+
+    @field_validator("by_failure_kind")
+    @classmethod
+    def validate_kinds(cls, value: dict[str, FailureClass]) -> dict[str, FailureClass]:
+        return _validate_classification_kinds(value)
+
+
+def _default_stage_classification() -> dict[FailureStage, StageClassificationConfig]:
+    return {
+        "agent": StageClassificationConfig(by_failure_kind={PROVIDER_OOM_KILLED: FailureClass.MODEL}),
+        "seed": StageClassificationConfig(by_failure_kind={PROVIDER_OOM_KILLED: FailureClass.EVALUATION}),
+        "verification": StageClassificationConfig(default_class=FailureClass.EVALUATION),
+    }
+
+
+class FailureClassificationConfig(BaseModel):
+    """One shared stage/kind mapping and explicit HTTP evidence rules.
+
+    Class overrides by HTTP status take precedence, followed by stage kind/default,
+    HTTP-derived evidence, kind, and the unknown fallback. Stage rules require context
+    admitted by the caller; a provider cannot establish agent ownership on its own.
+    Partial overrides retain unspecified defaults. HTTP-derived labels are reporting
+    projections only: never write them back into observed failure events.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    by_failure_kind: dict[str, FailureClass] = Field(
+        default_factory=lambda: {kind: value[0] for kind, value in _DEFAULT_CLASSIFICATION.items()}
+    )
+    by_stage: dict[FailureStage, StageClassificationConfig] = Field(default_factory=_default_stage_classification)
+    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], FailureClass] = Field(default_factory=dict)
+    default_class: FailureClass = FailureClass.UNKNOWN
+    reporting_kind_by_status_code: dict[Annotated[int, Field(ge=400, le=599)], str | None] = Field(
+        default_factory=lambda: dict.fromkeys(range(500, 600), MODEL_SERVER_ERROR)
+    )
+    non_policy_reporting_kind_by_status_code: dict[Annotated[int, Field(ge=400, le=599)], str | None] = Field(
+        default_factory=lambda: dict.fromkeys(range(400, 500), NON_POLICY_MODEL_REJECTION)
+    )
+
+    @field_validator(
+        "by_failure_kind",
+        "by_status_code",
+        "reporting_kind_by_status_code",
+        "non_policy_reporting_kind_by_status_code",
+    )
+    @classmethod
+    def merge_rules(cls, value: dict, info: ValidationInfo) -> dict:
+        return cls.model_fields[info.field_name].get_default(call_default_factory=True) | value
+
+    @field_validator("by_failure_kind")
+    @classmethod
+    def validate_kinds(cls, value: dict[str, FailureClass]) -> dict[str, FailureClass]:
+        return _validate_classification_kinds(value)
+
+    @field_validator("reporting_kind_by_status_code", "non_policy_reporting_kind_by_status_code")
+    @classmethod
+    def validate_reporting_kinds(cls, value: dict[int, str | None]) -> dict[int, str | None]:
+        _validate_classification_kinds({kind: None for kind in value.values() if kind is not None})
+        return value
+
+    @field_validator("by_stage", mode="before")
+    @classmethod
+    def merge_stages(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        defaults = {stage: rules.model_dump() for stage, rules in _default_stage_classification().items()}
+        for stage, override in value.items():
+            if isinstance(override, StageClassificationConfig):
+                override = override.model_dump(exclude_unset=True)
+            if not isinstance(override, dict):
+                defaults[stage] = override
+                continue
+            rules = defaults.get(stage, {})
+            for name, rule in override.items():
+                rules[name] = (
+                    rules.get(name, {}) | rule if name == "by_failure_kind" and isinstance(rule, dict) else rule
+                )
+            defaults[stage] = rules
+        return defaults
+
+
+def reporting_failure_kind(
+    kind: str | None,
+    http_status: object,
+    *,
+    policy: bool = True,
+    config: FailureClassificationConfig | None = None,
+) -> str | None:
+    """Project observed HTTP evidence to a reporting label without changing the event."""
+    if type(http_status) is not int:
+        return kind
+    config = config or FailureClassificationConfig()
+    if not policy and http_status in config.non_policy_reporting_kind_by_status_code:
+        return config.non_policy_reporting_kind_by_status_code[http_status] or kind
+    return config.reporting_kind_by_status_code.get(http_status) or kind
+
+
+def classify_failure(
+    *,
+    failure_kind: str | None,
+    stage: FailureStage | None = None,
+    http_status: object = None,
+    policy: bool = True,
+    config: FailureClassificationConfig | None = None,
+) -> FailureClass:
+    """Interpret only supplied evidence; never walk causes or mutate the observed kind/stage."""
+    config = config or FailureClassificationConfig()
+    if type(http_status) is int and http_status in config.by_status_code:
+        return config.by_status_code[http_status]
+    stage_rules = config.by_stage.get(stage)
+    if stage_rules is not None:
+        if failure_kind in stage_rules.by_failure_kind:
+            return stage_rules.by_failure_kind[failure_kind]
+        if stage_rules.default_class is not None:
+            return stage_rules.default_class
+    reporting_kind = reporting_failure_kind(failure_kind, http_status, policy=policy, config=config)
+    return config.by_failure_kind.get(reporting_kind, config.default_class)
+
+
+def is_server_failure(kind: str | None, *, config: FailureClassificationConfig | None = None) -> bool:
+    """Server subcategory for an already established evaluation failure, never a class decision.
+
+    Callers check the applied class first. In particular, OOM can be model-side or
+    evaluation-side depending on its originating stage and admitted ownership.
+    """
+    return _DEFAULT_CLASSIFICATION.get(kind, (FailureClass.UNKNOWN, None))[1] == "server" or (
+        kind == MODEL_POLICY_RESPONSE_TIMEOUT
+        and classify_failure(failure_kind=kind, config=config) == FailureClass.EVALUATION
+    )
 
 
 def is_server_status(status: object) -> bool:
-    """Whether a recorded HTTP status is a server's own failure: an integer in the 5xx class."""
+    """Whether a recorded HTTP status is an integer in the 5xx class."""
     return type(status) is int and 500 <= status <= 599
 
 
 def is_evaluation_side(name: str) -> bool:
-    """Whether ``name`` is a registered kind whose class is evaluation-side by its kind alone: not a model fault.
-
-    A recorded HTTP status can still refine an occurrence of it (see the fault classes above); this is the kind's own
-    class, for a saved row that carries a kind and nothing else.
-    """
-    return is_registered(name) and name not in MODEL_FAULT_KINDS
+    """Whether a registered kind has a shared evaluation-side default without extra context."""
+    return is_registered(name) and classify_failure(failure_kind=name) == FailureClass.EVALUATION
 
 
 def is_gate_derived(name: str) -> bool:

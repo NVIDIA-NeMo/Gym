@@ -186,3 +186,79 @@ def test_the_shipped_producer_labels_are_registered() -> None:
     from nemo_gym.core.failure_kinds import is_registered
 
     assert is_registered("harbor_failed") and is_registered("infrastructure_error")
+
+
+class TestSharedClassification:
+    def test_registered_and_unknown_defaults_are_distinct(self):
+        from nemo_gym.core.failure_kinds import FailureClass, classify_failure
+
+        assert classify_failure(failure_kind="judge_failed") == FailureClass.EVALUATION
+        assert classify_failure(failure_kind="provider_io_timeout", stage="seed") == FailureClass.EVALUATION
+        assert classify_failure(failure_kind="provider_oom_killed") == FailureClass.UNKNOWN
+        assert classify_failure(failure_kind="provider_new_unregistered") == FailureClass.UNKNOWN
+        assert classify_failure(failure_kind=None) == FailureClass.UNKNOWN
+        assert classify_failure(failure_kind="grading_without_verdict") == FailureClass.EVALUATION
+
+    def test_http_evidence_is_shared_configurable_and_strict(self):
+        from nemo_gym.core.failure_kinds import FailureClassificationConfig, classify_failure, reporting_failure_kind
+
+        assert classify_failure(failure_kind="model_request_error", http_status=503) == "evaluation"
+        assert classify_failure(failure_kind="model_request_error", http_status=400) == "model"
+        assert classify_failure(failure_kind="model_request_error", http_status=400, policy=False) == "evaluation"
+        assert classify_failure(failure_kind="model_request_error", http_status="503") == "model"
+        assert classify_failure(failure_kind="model_request_error", http_status=True) == "model"
+        config = FailureClassificationConfig(reporting_kind_by_status_code={503: None})
+        assert classify_failure(failure_kind="model_request_error", http_status=503, config=config) == "model"
+        assert reporting_failure_kind("model_request_error", 503, config=config) == "model_request_error"
+        assert reporting_failure_kind("model_request_error", 500, config=config) == "model_server_error"
+
+    def test_stage_classification_precedes_generic_http_evidence(self):
+        from nemo_gym.core.failure_kinds import FailureClassificationConfig, classify_failure
+
+        assert classify_failure(failure_kind="provider_oom_killed", stage="agent", http_status=502) == "model"
+        config = FailureClassificationConfig(by_status_code={502: "unknown"})
+        assert (
+            classify_failure(failure_kind="provider_oom_killed", stage="agent", http_status=502, config=config)
+            == "unknown"
+        )
+
+    def test_partial_overrides_round_trip_and_do_not_share_state(self):
+        from nemo_gym.core.failure_kinds import FailureClassificationConfig, classify_failure
+
+        config = FailureClassificationConfig.model_validate_json(
+            '{"by_stage":{"agent":{"by_failure_kind":{"provider_io_timeout":"unknown"}}},"by_failure_kind":{"model_policy_response_timeout":"evaluation"}}'
+        )
+        assert classify_failure(failure_kind="provider_oom_killed", stage="agent", config=config) == "model"
+        assert classify_failure(failure_kind="provider_io_timeout", stage="agent", config=config) == "unknown"
+        assert classify_failure(failure_kind="model_policy_response_timeout", config=config) == "evaluation"
+        assert FailureClassificationConfig.model_validate_json(config.model_dump_json()) == config
+        config.by_stage["agent"].by_failure_kind["provider_oom_killed"] = "unknown"
+        assert classify_failure(failure_kind="provider_oom_killed", stage="agent") == "model"
+
+    def test_server_is_an_evaluation_subcategory(self):
+        from nemo_gym.core.failure_kinds import FailureClassificationConfig, classify_failure, is_server_failure
+
+        assert is_server_failure("provider_io_timeout")
+        assert not is_server_failure("judge_failed")
+        assert classify_failure(failure_kind="judge_failed") == "evaluation"
+        assert is_server_failure("provider_oom_killed")
+        assert not is_server_failure("provider_typo")
+        config = FailureClassificationConfig(by_failure_kind={"model_policy_response_timeout": "evaluation"})
+        assert is_server_failure("model_policy_response_timeout", config=config)
+
+    def test_invalid_overrides_fail_at_configuration_load(self):
+        import pytest
+        from pydantic import ValidationError
+
+        from nemo_gym.core.failure_kinds import FailureClassificationConfig
+
+        for value in (
+            {"by_failure_kind": {"provider_typo": "evaluation"}},
+            {"by_failure_kind": {"provider_io_timeout": "infra"}},
+            {"by_stage": {"agent_execution": {}}},
+            {"by_stage": {"agent": {"by_failure_kind": {"typo": "model"}}}},
+            {"by_status_code": {600: "evaluation"}},
+            {"reporting_kind_by_status_code": {503: "typo"}},
+        ):
+            with pytest.raises(ValidationError):
+                FailureClassificationConfig.model_validate(value)
