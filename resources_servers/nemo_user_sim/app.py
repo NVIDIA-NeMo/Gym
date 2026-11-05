@@ -290,7 +290,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 mask_sample=False,
                 failure_kind=_usersim_failure_kind(outcome.get("failure_class")),
-                failure_reason=outcome.get("failure_detail") or outcome.get("failure_reason"),
+                failure_reason=_usersim_failure_reason(outcome),
                 reward_components={
                     "participants_completed": float(participants_completed),
                     "conversation_status": float(usersim_result.conversation_status),
@@ -373,9 +373,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         failure_kind = (
             (_usersim_failure_kind(outcome.get("failure_class")) or SIMULATION_FAILED) if simulation_failed else None
         )
-        failure_reason = (
-            (outcome.get("failure_detail") or outcome.get("failure_reason")) if simulation_failed else None
-        )
+        failure_reason = _usersim_failure_reason(outcome) if simulation_failed else None
         if scorer_error:
             failure_kind = VERIFIER_ERROR
             failure_reason = str(scorer_error)
@@ -563,6 +561,10 @@ def _usersim_failure_kind(value: Any) -> str | None:
         return name
     normalized = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "simulation_failed"
     return f"usersim:{normalized}"
+
+
+def _usersim_failure_reason(outcome: Mapping[str, Any]) -> str | None:
+    return outcome.get("failure_detail") or outcome.get("failure_reason")
 
 
 def _conversation_roles(result: UserSimSimulationResult) -> set[str]:
