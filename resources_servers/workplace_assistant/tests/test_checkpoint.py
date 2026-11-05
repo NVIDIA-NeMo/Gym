@@ -404,17 +404,52 @@ async def test_mixed_checkpoint_restores_both_seed_protocols(tmp_path: Path) -> 
         assert closed.status_code == 200
 
 
-async def test_old_flat_checkpoint_can_be_adopted_without_resetting_tables() -> None:
+# "flat" is the tables-only snapshot main wrote; "wrapped" is a cookie session's snapshot with a null identity.
+@pytest.mark.parametrize("snapshot", ["flat", "wrapped"])
+async def test_an_unused_restored_cookie_session_can_be_adopted_without_resetting_tables(snapshot: str) -> None:
     source, source_app = make_server()
     async with client_for(source_app) as client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         await call_tools(client, BEFORE, "r")
-    [tool_env] = source.session_id_to_tool_env.values()
+    [(session_id, tool_env)] = source.session_id_to_tool_env.items()
+    if snapshot == "flat":
+        state = _export_tool_env(tool_env)
+    else:
+        state = (await source.export_session_states([session_id]))[session_id]
+        assert state["episode_id"] is None and state["task_id"] is None
     restored, _ = make_server()
-    await restored.restore_session_states({"typed-session": _export_tool_env(tool_env)})
+    await restored.restore_session_states({"typed-session": state})
     from fastapi import Request
 
     request = Request({"type": "http", "session": {}})
     await restored.seed_session(request, typed_seed())
     assert _export_tool_env(restored.session_id_to_tool_env["typed-session"]) == _export_tool_env(tool_env)
     assert restored._session_episodes["typed-session"] == (typed_seed().episode_id, typed_seed().task_id)
+
+
+async def test_a_restored_cookie_session_in_use_cannot_be_adopted(tmp_path: Path) -> None:
+    _, source_app = make_server()
+    async with client_for(source_app) as client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await call_tools(client, BEFORE, "r")
+        await checkpoint(client, tmp_path)
+        cookies = dict(client.cookies)
+
+    restored, restored_app = make_server()
+    async with client_for(restored_app, cookies) as cookie_run, client_for(restored_app) as other:
+        assert (await restore(cookie_run, tmp_path)).json()["phase"] == "restored"
+        await cookie_run.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        [session_id] = restored.session_id_to_tool_env
+        # The restored /run continues, so its tables are no longer unbound.
+        assert await call_tools(cookie_run, AFTER[:1], "r-a1") == ["00000301"]
+        taken = await other.post(
+            "/ng-rollout/x/seed_session", json=typed_seed(session_id, rollout_id="x").model_dump(mode="json")
+        )
+        assert taken.status_code == 409, taken.text
+        assert restored._session_episodes == {}
+        # The refused seed left the cookie run's tables as they were, and the run's verify scores.
+        [found] = await call_tools(cookie_run, AFTER[3:], "r-a1")
+        assert found["pagination"]["total_emails"] == 1
+        verified = (await cookie_run.post("/ng-rollout/r-a1/verify", json=verify_body())).json()
+        assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    assert restored.session_id_to_tool_env == {}

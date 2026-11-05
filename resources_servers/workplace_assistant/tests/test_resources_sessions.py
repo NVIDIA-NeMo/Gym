@@ -14,23 +14,30 @@
 # limitations under the License.
 """Workplace Assistant serves the typed resources sessions API through its real routes, next to an Agent's /run seed."""
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
     check_resources_session_contract,
     maybe_auto_expose,
 )
 from resources_servers.workplace_assistant import app
-from resources_servers.workplace_assistant.app import WorkbenchResourcesServer, WorkbenchResourcesServerConfig
+from resources_servers.workplace_assistant.app import (
+    WorkbenchResourcesServer,
+    WorkbenchResourcesServerConfig,
+    WorkbenchVerifyRequest,
+)
 
 
 EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
@@ -415,3 +422,26 @@ def test_failed_cookie_reseed_preserves_verification_retry(monkeypatch: pytest.M
     assert client.post("/seed_session", json={}).status_code == 200
     assert list(server.session_id_to_tool_env) == [session_id]
     assert session_id not in server._verified_sessions
+
+
+async def test_a_seed_cannot_interleave_with_a_verify_whose_release_suspends(monkeypatch: pytest.MonkeyPatch) -> None:
+    release = WorkbenchResourcesServer.release_session_state
+
+    async def suspending_release(self: WorkbenchResourcesServer, session_id: str) -> None:
+        await release(self, session_id)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(WorkbenchResourcesServer, "release_session_state", suspending_release)
+    server = make_server()
+    seed = ResourcesSeedSessionRequest.model_validate(seed_json())
+    await server.seed_session(Request({"type": "http", "session": {}}), seed)
+    verify_request = Request({"type": "http", "session": {SESSION_ID_KEY: seed.resources_session_id}})
+    verified, retried_seed = await asyncio.gather(
+        server.verify(verify_request, WorkbenchVerifyRequest.model_validate(verify_json(SEND))),
+        server.seed_session(Request({"type": "http", "session": {}}), seed),
+        return_exceptions=True,
+    )
+    assert verified.reward == 1.0
+    # The retried seed waits for the verify's retry record instead of reusing a binding whose tables are gone.
+    assert isinstance(retried_seed, ResourcesSessionConflictError), retried_seed
+    assert server.session_id_to_tool_env == {} and server._session_episodes == {}

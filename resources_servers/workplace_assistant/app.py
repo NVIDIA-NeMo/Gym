@@ -35,6 +35,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
     next_attempt,
+    reject_partial_typed_seed,
 )
 from resources_servers.workplace_assistant.task_data import TaskData
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
@@ -103,24 +104,12 @@ def _restore_tool_env(state: dict[str, Any]) -> dict[str, Any]:
     return tool_env
 
 
-def _legacy_seed_only(value: object) -> object:
-    # The permissive /run body must not swallow a malformed typed seed and allocate an unrelated cookie session. A body
-    # that names a resources_session_id, or carries typed episode_id and task_id objects, is such a seed; a dataset
-    # row's own scalar task_id does not make a body typed.
-    if isinstance(value, dict) and (
-        "resources_session_id" in value
-        or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
-    ):
-        raise ValueError("typed session fields require a valid ResourcesSeedSessionRequest")
-    return value
-
-
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
 
 class WorkbenchSeedSessionRequest(TaskData, BaseSeedSessionRequest):
-    """Typed workplace task data; legacy seeds may still omit the task fields."""
+    """Typed workplace task_data schema; cookie seeds use the permissive BaseSeedSessionRequest arm of seed_session."""
 
 
 class WorkbenchRequest(BaseModel):
@@ -150,7 +139,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
     seed_request_model = WorkbenchSeedSessionRequest
-    # Unbound restored tables await adoption; an active legacy run must never be adopted by a typed seed.
+    # Restored tables without identity await adoption by a typed seed until their cookie run first uses them.
     _restored_unbound_sessions: set[str] = PrivateAttr(default_factory=set)
 
     def setup_webserver(self) -> FastAPI:
@@ -166,7 +155,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self,
         request: Request,
-        body: ResourcesSeedSessionRequest | Annotated[BaseSeedSessionRequest, BeforeValidator(_legacy_seed_only)],
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         # Keep permissive legacy bodies at the HTTP boundary; the base validates typed task_data against TaskData.
         return await super().seed_session(body, request=request)
@@ -192,6 +182,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
         if session_id not in self.session_id_to_tool_env:
             raise ResourcesSessionLostError("No seeded workplace_assistant session for this tool call")
+        # The cookie run's first tool call claims restored tables, so another episode's typed seed cannot adopt them.
+        self._restored_unbound_sessions.discard(session_id)
 
         tool_env = self.session_id_to_tool_env[session_id]
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
@@ -207,41 +199,42 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        # Nothing below awaits, so a seed or close for this session cannot interleave between the checks and the
-        # release. Hold self._fence.locked(session_id) across them if scoring ever awaits.
-        if self._fence.closed_episode(session_id) is not None or (
-            session_id not in self.session_id_to_tool_env and session_id not in self._verified_sessions
-        ):
-            # Never seeded, closed, or gone with a restart: the agent's tool calls had no tables to act on,
-            # so replaying them would not measure the policy.
-            lost = lost_session_verification("No seeded workplace_assistant session for this verify")
-            return WorkbenchVerifyResponse(**(body.model_dump() | lost))
-        try:
-            ground_truth = body.ground_truth
-            response = body.response.output
+        # Seeds, closes and retires take this lock too, so none of them can run between the checks, the release and
+        # the retry record, even if release_session_state suspends. Scoring is synchronous, so the lock delays no one.
+        async with self._fence.locked(session_id):
+            if self._fence.closed_episode(session_id) is not None or (
+                session_id not in self.session_id_to_tool_env and session_id not in self._verified_sessions
+            ):
+                # Never seeded, closed, or gone with a restart: the agent's tool calls had no tables to act on,
+                # so replaying them would not measure the policy.
+                lost = lost_session_verification("No seeded workplace_assistant session for this verify")
+                return WorkbenchVerifyResponse(**(body.model_dump() | lost))
+            try:
+                ground_truth = body.ground_truth
+                response = body.response.output
 
-            total_score = 0.0
+                total_score = 0.0
 
-            # Convert list of ResponseFunctionToolCall objects into list of dictionaries
-            predicted_function_calls = []
+                # Convert list of ResponseFunctionToolCall objects into list of dictionaries
+                predicted_function_calls = []
 
-            for message in response:
-                if message.type == "function_call":
-                    predicted_function_calls.append(message.model_dump())
+                for message in response:
+                    if message.type == "function_call":
+                        predicted_function_calls.append(message.model_dump())
 
-            predicted_chat_content = []
+                predicted_chat_content = []
 
-            for message in response:
-                if message.type == "output_text":
-                    predicted_chat_content.append(message.model_dump())
+                for message in response:
+                    if message.type == "output_text":
+                        predicted_chat_content.append(message.model_dump())
 
-            total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
-            return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
-        finally:
-            if session_id in self.session_id_to_tool_env:
-                await self.release_session_state(session_id)
-                # Verification replays scoring from the request, so no environment payload needs retaining.
-                self._verified_sessions.remember(session_id, (self._session_episodes.pop(session_id, None), None))
+                total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
+                return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
+            finally:
+                if session_id in self.session_id_to_tool_env:
+                    await self.release_session_state(session_id)
+                    # Verification replays scoring from the request, so no environment payload needs retaining.
+                    self._verified_sessions.remember(session_id, (self._session_episodes.pop(session_id, None), None))
 
     async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
         # A session verify already discarded, for example because it raised, is left out.
