@@ -108,7 +108,8 @@ def test_a_queued_policy_timeout_is_a_server_fault():
 
     kind = failure_kinds.MODEL_SERVER_QUEUE_TIMEOUT
     assert kind in failure_kinds.SERVER_FAULT_KINDS and kind not in failure_kinds.MODEL_FAULT_KINDS
-    assert fault_class(kind) == "server"
+    assert failure_kinds.classify_failure(failure_kind=kind) == failure_kinds.FailureClass.EVALUATION
+    assert failure_kinds.is_server_failure(kind)
     report = fault_report(Counter({kind: 1}), 100)
     assert report["evaluation"]["kinds"] == {kind: 1} and report["evaluation"]["server"] == 1
     assert report["model"]["count"] == 0
