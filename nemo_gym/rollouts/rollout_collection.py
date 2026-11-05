@@ -126,7 +126,6 @@ from nemo_gym.rollouts.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
     retire_covered_model_call_captures_from_config,
-    shared_capture_rollout_ids,
     snapshot_model_call_capture,
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
@@ -898,7 +897,9 @@ async def enrich_run_result(
     from the record. Harness output and reward are never modified. A row that names no task (no task id field,
     task index or trajectory identity) gets no ``ng_trajectory`` rather than a guessed task id.
     ``include_payloads=False`` keeps call metadata only; ``delete_capture`` removes the rollout's capture file once it
-    has been merged, so it requires the payloads to be kept.
+    has been merged, so it requires the payloads to be kept. This serves callers retaining the returned
+    in-memory result. File-based collection instead uses ``CaptureRetirementBatch`` after persisting
+    and syncing the JSONL row; enrichment alone does not make that row durable.
     """
     if not isinstance(result, dict):
         return result
@@ -3996,7 +3997,6 @@ executions → not run again (left to recovery)
         retire_captures = bool(capture_dirs) and retire_covered_model_call_captures_from_config(global_config)
         capture_retirements = CaptureRetirementBatch() if retire_captures else None
         strip_token_metadata = bool(global_config.get(STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME, False))
-        shared_capture_ids = shared_capture_rollout_ids(input_rows) if retire_captures else set()
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
@@ -4409,12 +4409,7 @@ executions → not run again (left to recovery)
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
                     if rollout_id is not None and capture_retirements is not None:
-                        capture_retirements.add(
-                            rollout_id,
-                            result,
-                            capture_snapshot,
-                            shares_capture_key=rollout_id in shared_capture_ids,
-                        )
+                        capture_retirements.add(rollout_id, result, capture_snapshot)
                         if capture_retirements.due():
                             await capture_retirements.flush_async(store.sync_outcomes)
 

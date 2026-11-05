@@ -881,12 +881,12 @@ def test_delete_if_unchanged_reports_a_missing_file(tmp_path):
     assert CaptureStore(tmp_path).delete_if_unchanged("0-0", 0) == "capture_file_missing"
 
 
-def _retire(rollout_id, record, snapshot, **add_kwargs):
+def _retire(rollout_id, record, snapshot):
     """Queue one persisted rollout and flush, as rollout collection does; return the batch."""
     from nemo_gym.rollouts.model_calls import CaptureRetirementBatch
 
     batch = CaptureRetirementBatch()
-    batch.add(rollout_id, record, snapshot, **add_kwargs)
+    batch.add(rollout_id, record, snapshot)
     batch.flush(lambda: None)
     return batch
 
@@ -930,19 +930,6 @@ def test_retirement_keeps_a_capture_file_that_grew_after_the_snapshot(tmp_path):
     batch = _retire("0-0", record, snapshot)
 
     assert dict(batch.kept) == {"capture_file_changed": 1}
-    assert store.path_for("0-0").exists()
-
-
-def test_retirement_keeps_a_capture_file_that_a_rollout_shares_with_another(tmp_path):
-    from nemo_gym.rollouts.model_calls import snapshot_model_call_capture
-
-    store, record = _covered_capture(tmp_path)
-    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
-    _merge_and_attach(tmp_path, record)
-
-    batch = _retire("0-0", record, snapshot, shares_capture_key=True)
-
-    assert dict(batch.kept) == {"rollout_id_shared": 1}
     assert store.path_for("0-0").exists()
 
 
@@ -995,26 +982,6 @@ def test_retiring_covered_captures_is_opt_in_and_needs_observability():
     assert retire_covered_model_call_captures_from_config(base) is False
     assert retire_covered_model_call_captures_from_config({**base, "retire_covered_model_call_captures": True}) is True
     assert retire_covered_model_call_captures_from_config({"retire_covered_model_call_captures": True}) is False
-
-
-def test_shared_capture_rollout_ids_names_keys_that_several_rows_map_to():
-    from nemo_gym.rollouts.model_calls import shared_capture_rollout_ids
-
-    rows = [
-        {"_ng_task_index": 0, "_ng_rollout_index": 0},
-        {"_ng_task_index": 0, "_ng_rollout_index": 0},
-        {"_ng_task_index": 0, "_ng_rollout_index": 1},
-        # A later attempt of the same rollout has its own capture key.
-        {"_ng_task_index": 1, "_ng_rollout_index": 0},
-        {"_ng_task_index": 1, "_ng_rollout_index": 0, "_ng_attempt_index": 1},
-        {"_ng_rollout_id": "explicit-1"},
-        {"_ng_rollout_id": "explicit-1"},
-        # A row without a usable id cannot share one.
-        {"_ng_rollout_id": "not valid!"},
-        {"unrelated": True},
-    ]
-
-    assert shared_capture_rollout_ids(rows) == {"0-0", "explicit-1"}
 
 
 _COVERED_ROLLOUT = {

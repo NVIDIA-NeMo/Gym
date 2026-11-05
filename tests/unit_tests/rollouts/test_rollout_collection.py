@@ -7051,7 +7051,7 @@ class TestRolloutCollection:
         assert store.path_for("0-0").exists() is redact_payloads
 
     @pytest.mark.usefixtures("empty_global_config")
-    async def test_run_from_config_keeps_the_capture_file_that_several_rollouts_share(
+    async def test_duplicate_rollout_ids_are_rejected_before_capture_cleanup(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from nemo_gym.config.global_config import ROLLOUT_ID_KEY_NAME
@@ -7085,7 +7085,7 @@ class TestRolloutCollection:
         with pytest.raises(ConfigError, match="Duplicate logical rollout id"):
             await RolloutCollectionHelper().run_from_config(config)
 
-        assert store.path_for("shared-0").exists()
+        assert [call["model_call_id"] for call in store.read("shared-0")] == ["existing"]
 
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock

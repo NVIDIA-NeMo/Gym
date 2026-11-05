@@ -1805,6 +1805,31 @@ def test_a_recovered_responses_call_has_no_finish_reason_and_is_still_a_successf
     assert digest.model_call_errors == 0
 
 
+@pytest.mark.parametrize("reason, failed", [(None, True), ("max_output_tokens", False)])
+def test_recovered_incomplete_cancelled_stream_health_depends_on_finish_reason(reason, failed):
+    response = {
+        **_RECOVERED_RESPONSES_BODY,
+        "status": "incomplete",
+        "incomplete_details": {"reason": reason},
+    }
+    call = _build_captured_model_call_record(
+        {
+            "dialect": "responses",
+            "status_code": 200,
+            "error_category": "cancelled",
+            "response_raw": "event: response.incomplete\ndata: "
+            + json.dumps({"type": "response.incomplete", "response": response})
+            + "\n\n",
+        },
+        call_index=0,
+    )
+
+    assert call.response == response
+    assert (call.response_status, call.finish_reason) == ("incomplete", reason)
+    assert (call.tokens_in, call.tokens_out) == (3, 2)
+    assert health_checks._is_failed(call.model_dump(mode="json")) is failed
+
+
 # Cancelled calls that were not delivered in full keep failing, whatever else they carry.
 NOT_DELIVERED_AFTER_CANCEL = {
     "cut 200, no status and no finish reason": {"status_code": 200, "response_status": None, "finish_reason": None},

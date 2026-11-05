@@ -311,12 +311,11 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
 
 
 def _is_delivered_cancelled(call: dict[str, Any]) -> bool:
-    """A call the server marked cancelled after it had answered in full.
+    """Recognize recovered cancelled calls as delivered from their terminal metadata.
 
-    The client disconnecting after the last byte is not a failure: the answer was complete and
-    its usage and completion were recovered from the captured body. A completed Responses body
-    carries a `completed` status and often no finish reason; Chat and Messages bodies carry a
-    finish reason. A cancelled call with neither was cut before a complete answer and stays failed.
+    A completed Responses status or a finish reason suffices unless the response explicitly failed.
+    This includes ``response.incomplete`` with a reason such as ``max_output_tokens``: delivered here
+    does not mean the answer is complete. A cancelled call with neither stays failed.
     """
     status = call.get("status_code")
     return (

@@ -160,10 +160,15 @@ def test_fully_masked_run_is_complete_without_unmasked_measurements(run):
     assert len(recovered.selected("success")) == 5
 
 
-def test_duplicate_inventory_cannot_conflate_distinct_tasks(run):
+@pytest.mark.parametrize("explicit_ids", [(False, False), (True, True), (False, True)])
+def test_duplicate_inventory_cannot_conflate_distinct_tasks(run, explicit_ids):
     _, manifest, rows = run
+    duplicates = [dict(rows[0]), rows[0] | {"question": "Different question"}]
+    for row, explicit in zip(duplicates, explicit_ids):
+        if explicit:
+            row["_ng_rollout_id"] = "0-0"
     with pytest.raises(ConfigError, match="Duplicate logical rollout"):
-        RolloutRecords(manifest, [rows[0], rows[0] | {"question": "Different question"}])
+        RolloutRecords(manifest, duplicates)
 
 
 @pytest.mark.parametrize("arrival_order", list(permutations(range(3))))

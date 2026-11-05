@@ -266,6 +266,7 @@ the body only as raw text, and what collection does with it depends on how far t
 | Cancelled | Capture holds | Collection | Health |
 | --- | --- | --- | --- |
 | After a complete answer (2xx status; a complete JSON body or terminal SSE event, with completed status or a finish reason) | Raw text | Recovers the parsed response, `response_id`, and available token counts; drops the raw text. `error_category` stays `cancelled`. | A successful call |
+| After a Responses stream ends with `response.incomplete` and `incomplete_details.reason` (2xx status) | Raw text | Recovers the partial response and counts; the reason becomes `finish_reason`. | Counts as delivered, so cancellation alone does not make it a failed call. Other health checks still apply, including output-limit checks. |
 | After a Responses stream ends with `response.incomplete` (2xx status; no finish reason) | Raw text | Recovers the partial response, `response_id`, available token counts, and `response_status="incomplete"`; drops the raw text. `error_category` stays `cancelled`. | Still a failed call; recovering its data does not make the answer complete. |
 | Before a parseable JSON body or terminal SSE event arrives | Raw text, if any | Keeps it as is, with null token counts and no `response_id`. | A failed call that [reported no usage](/main/evaluation/rollout-health) |
 
@@ -343,7 +344,7 @@ The CLI workflow above sets these top-level fields in Gym's [global config](/mai
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
-| `retire_covered_model_call_captures` | `bool` | `false` | Deletes a rollout's capture file once the persisted rollout covers it. Requires `observability_enabled`. See [Delete covered capture files](#delete-covered-capture-files). |
+| `retire_covered_model_call_captures` | `bool` | `false` | Deletes a rollout's capture file once the persisted rollout covers it. Has no effect unless `observability_enabled` is true. See [Delete covered capture files](#delete-covered-capture-files). |
 | `strip_duplicate_token_metadata` | `bool` | `false` | Keeps each call's token IDs, log-probs, and routed experts only on `response.output`. See [Keep token metadata once in a rollout](#keep-token-metadata-once-in-a-rollout). |
 
 You can put the same settings in a YAML config instead:
@@ -380,7 +381,8 @@ capture file is deleted only if all of these hold:
 - Every call in `ng_model_call_capture.calls` has its request and response in `ng_trajectory.model_calls`.
   A rollout with a `multimodal_history_redacted` or `trajectory_projection_failed` gap does not qualify.
 - The file has not grown since collection read it, and no model call of the rollout still has a pending write.
-- No other dispatched row maps to the same capture key (rollout id).
+
+Duplicate logical rollout ids are rejected before dispatch; retries use distinct capture keys.
 
 Capture files of failed rollouts, of earlier attempts of a retried rollout, and of any rollout that
 does not meet these conditions stay in place, so the files left in a capture directory after a run are

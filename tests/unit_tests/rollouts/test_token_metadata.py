@@ -133,14 +133,15 @@ def test_a_record_without_a_trajectory_or_observations_is_fine():
 
 class _NotIterated(list):
     def __iter__(self):
-        raise AssertionError("visited every element of a list of numbers")
+        raise AssertionError("walked a token metadata array")
 
 
-def test_long_lists_of_numbers_on_a_replayed_copy_are_not_walked():
+def test_token_arrays_on_a_replayed_copy_are_not_walked():
     result = _result()
     replayed = result["ng_trajectory"]["turns"][0]["question"][1]
     replayed["generation_token_ids"] = _NotIterated(range(100))
     replayed["generation_log_probs"] = _NotIterated([-0.1] * 100)
+    replayed["routed_experts"] = _NotIterated([[[1, 2]]] * 100)
 
     removed = strip_duplicate_token_metadata(result)
 

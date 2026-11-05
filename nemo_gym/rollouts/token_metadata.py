@@ -29,12 +29,10 @@ def _strip_matching_items(value: Any, canonical: Mapping[str, Mapping[str, Any]]
             for field in TOKEN_METADATA_FIELDS.intersection(value):
                 del value[field]
                 removed += 1
-        for child in value.values():
-            removed += _strip_matching_items(child, canonical)
+        for key, child in value.items():
+            if key not in TOKEN_METADATA_FIELDS:
+                removed += _strip_matching_items(child, canonical)
     elif isinstance(value, list):
-        # A list of numbers (token ids, log-probs) holds no items; skip it instead of visiting every element.
-        if value and isinstance(value[0], (int, float)):
-            return 0
         for child in value:
             removed += _strip_matching_items(child, canonical)
     return removed
