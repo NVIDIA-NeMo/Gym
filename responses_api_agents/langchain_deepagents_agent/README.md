@@ -12,6 +12,14 @@ subclass example and follow a similar pattern to run
 run a different `deepagents` graph. Subclass `DeepAgentsAgent` the same way rather than modifying
 `reasoning_search_agent.py`.
 
+`DeepAgentsAgent` runs its graph in the agent server process. For benchmarks whose resources server lends a task
+sandbox, such as Terminal-Bench 2.1, `sandbox_agent.py`'s `SandboxedDeepAgent` runs deepagents' own graph inside
+that sandbox instead; see [Sandboxed agent](#sandboxed-agent-sandbox_agentpy).
+
+Both run deepagents 0.6.12 (`deepagents<0.7.0` in `pyproject.toml`, resolved in `uv.lock`) at the Evaluation
+capability level: they return responses for verification, and their close bundles record the missing invocation
+and tool-call evidence as gaps.
+
 ## Quick start
 
 ### env.yaml
@@ -94,36 +102,73 @@ session, and then calls `/verify`. The agent's side of that contract:
 - **Seed** refuses any *required* tool grant with HTTP 422, because the graph runs only its own tools; an
   optional grant is skipped. Keep `resources_tool_transports: []`, including on a `single_agent_turn_legacy`
   Environment Server you swap this agent into with `--agent-type`.
-- **Task sandbox.** When the Resources Server lends its task sandbox (`sandbox_access`, as Terminal-Bench 2.1
-  does), the seed connects to it as a borrower and builds the session's graph with a backend that runs
-  deepagents' `execute` tool and its file tools (`ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`)
-  in that sandbox. Commands run in the sandbox's `workdir`, with the owner's `env`, and the model still reaches
-  the Model Server from the Agent Server. Without `sandbox_access` the graph runs in process as before: its
-  files live in graph state and it has no `execute` tool. Limits:
-  - The file tools need `python3` in the task image: deepagents runs its read, write, edit, `ls` and `glob`
-    helpers as `python3` scripts. `execute` and `grep` do not.
-  - A `sandbox_access.user` override and a relative `workdir` are refused with HTTP 422.
-  - A command gets deepagents' default timeout (120 s) unless the model passes `timeout`. A timed-out command
-    returns its output with a timeout note; a sandbox runtime failure ends the activation instead.
-  - deepagents' own files (offloaded conversation history, evicted large tool results) stay in graph state under
-    `/.deepagents/`, so the harness writes nothing of its own into the task sandbox.
-  - The agent does not enforce the task's agent timeout (`agent_timeout_sec`), and it does not support rollout
-    stops (`/rollouts/<id>/stop` answers 501).
-- **Subclasses** must pass `build_agent()`'s `backend` argument to `create_deep_agent(backend=...)`. A subclass
-  that ignores it runs a sandbox session's tools in process.
+- **Task sandbox.** Seed refuses `sandbox_access` with HTTP 422: the graph runs in the agent server, its files
+  live in graph state, and it has no `execute` tool. Use the [sandboxed agent](#sandboxed-agent-sandbox_agentpy)
+  for a benchmark that lends its task sandbox.
 - **Activation** runs the graph once per session. An identical retry joins that run, and a different request or
   a request for another rollout answers 409. A client that disconnects does not cancel the run.
-- **Close** cancels a graph that is still running, then disconnects from a borrowed sandbox without stopping it:
-  the Resources Server that lent it stops it after `/verify`. Close returns no resources cookie jar, so `/verify`
-  receives the seed's cookies unchanged. It returns an observation bundle with the gaps
-  `agent_transcript_unavailable` and `model_call_ownership_unavailable` (see
-  [Open gaps](#open-gapslimitations)), and for a borrowed sandbox a `sandbox` record whose outcome says how the
-  run ended (`completed`, `failed` with the error type, or `cancelled`).
+- **Close** cancels a graph that is still running. Close returns no resources cookie jar, so `/verify` receives
+  the seed's cookies unchanged. It returns an observation bundle with the gaps `agent_transcript_unavailable` and
+  `model_call_ownership_unavailable` (see [Open gaps](#open-gapslimitations)).
+- The agent does not enforce a task's agent timeout (`metadata.agent_timeout_sec`), and it does not support
+  rollout stops (`/rollouts/<id>/stop` answers 501).
 - **`execute_tools: false`** is rejected when the config loads: the graph always runs its own tools.
 - **Checkpointing** restarts an unfinished rollout from its input. The graph's state lives inside one
   `ainvoke()` call and cannot be exported.
 - **`skip_verification: true`** skips `/verify` on the session path, including the Tavily judge. Set it on the
   Environment Server, or on the agent when the Environment Server leaves it unset.
+
+## Sandboxed agent (`sandbox_agent.py`)
+
+`SandboxedDeepAgent` runs deepagents' own graph, `create_deep_agent()` with its built-in tools (`write_todos`, `ls`,
+`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `execute` and `task` subagents), inside a task sandbox. It
+adds no tools of its own, so it has no Tavily search. It runs only in agent sessions:
+[`configs/langchain_deepagents_sandbox_agent.yaml`](configs/langchain_deepagents_sandbox_agent.yaml) sets
+`resources_server: null`, and an Environment Server composes it with a benchmark. For Terminal-Bench 2.1, follow
+[Configure a run](../../benchmarks/terminal_bench_2_1/README.md#configure-a-run) with this config import, the agent
+name `langchain_deepagents_sandbox_agent` and `resources_tool_transports: []`. The benchmark's `allowed_agents` does
+not list this agent yet, so start its servers with `--allow-unsupported-pairing`.
+
+- **Sandbox.** The session runs in the sandbox the resources server lends (`sandbox_access`, direct connections), or
+  in one the agent starts from `sandbox_provider` with an absolute `sandbox_config.workdir` and stops at close. Seed
+  refuses with HTTP 422 a session with neither, a `sandbox_access.user` override, a relative `workdir`, a *required*
+  tool grant (an optional one is skipped; keep `resources_tool_transports: []`), and a loopback Model Server URL
+  for a provider whose sandboxes cannot reach the host's loopback.
+- **Runtime.** Seed installs a private Python with deepagents and its dependencies at this server's versions
+  (`SandboxPythonRuntime`) under `/tmp/nemo-gym-deepagents-runtime-<key>`, and reuses one that an earlier session
+  left there. The sandbox needs x86_64 or aarch64 Linux (glibc 2.17 or newer, or musl), `bash` and `tar`, but no
+  Python and no network access to a package index. The agent server needs `uv` and access to the package index and
+  the python-build-standalone releases; `sandbox_install_timeout_seconds` bounds the install.
+- **Model calls** go from the sandbox to the Model Server at the rollout's URL, so the sandbox must reach the Model
+  Server: set `use_absolute_ip: true` for a sandbox outside the host's network. An HTTP 408, 429 or 5xx, or a
+  connection failure, is retried twice after the server's `Retry-After` or an exponential backoff, at most 30 s. A
+  call that still fails ends the run: the response is `failed` and reports the cause in `ng_agent_outcome`
+  (`model_request_error` with the HTTP status, or `model_transport_error`), so the Environment Server's outcome
+  policy decides whether to verify or retry the episode.
+- **Request fields.** `input`, `instructions` (as a system message), and `temperature`, `top_p`,
+  `max_output_tokens` and `reasoning` apply to every model call; `max_output_tokens` limits each call, not the
+  episode. A request that declares `tools` is refused with HTTP 422, because the graph runs only its own tools.
+  Other fields, such as `tool_choice` and `parallel_tool_calls`, are ignored.
+- **Tools** work on the sandbox's filesystem. Commands run in `workdir` with the sandbox's environment plus the
+  owner's `sandbox_access.env`; `HOME` is the task's. A command's default time limit is `shell_timeout_seconds`
+  (120 s), and the model may pass its own. Each command runs in a session of its own with its output in files, so
+  a background process it starts does not hold the command open, and survives as a task service unless the
+  command times out, which kills its process group. deepagents' own files (offloaded conversation history, evicted
+  large tool results) stay in graph state under `/.deepagents/`; the runtime and session files live under `/tmp`,
+  outside `workdir`.
+- **Time limit and stop.** The run's limit is `sandbox_runner_timeout_seconds`, or a task's shorter
+  `metadata.agent_timeout_sec`. At the limit Gym's process supervisor stops the runner, which reports the messages
+  finished so far: the response is `incomplete` with `metadata.stop_reason: wall_time`, and it is still verified. A
+  rollout stop (`POST /rollouts/<id>/stop`) ends the run the same way and adds `ng_rollout_stop`; while the graph
+  runs, it needs a provider whose uploads never wait for running commands (Local, or OpenSandbox with background
+  exec). Reaching deepagents' step limit also returns `incomplete`, with `stop_reason: max_iterations`.
+- **Activation** runs the graph once per session. An identical retry joins that run, and a different request or a
+  request for another rollout answers 409. A client that disconnects does not cancel the run.
+- **Close** stops the graph through the supervisor, then disconnects from a borrowed sandbox without stopping it:
+  the resources server that lent it stops it after `/verify`. The observation bundle has a `sandbox` record whose
+  outcome says how the run ended (`completed`, `failed`, `timeout` or `cancelled`), and the same two gaps as the
+  in-process agent.
+- **Usage** is the sum over the run's model calls when every call returned usage; otherwise it is unknown.
 
 ## Tool ownership: agent vs. resources server
 

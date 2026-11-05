@@ -24,23 +24,20 @@ and the message-conversion helpers) and why it can't just be `langchain_openai.C
 
 The compiled deepagents graph is built once, in `__init__`, and stored as `self.agent` — not per-request,
 and named to match how `deepagents`' own docs/examples name the object `create_deep_agent()` returns
-(`agent = create_deep_agent(...)`), rather than `langgraph_agent`'s `self.graph`. An agent session that borrows
-the Resources Server's task sandbox gets a graph of its own, built at seed with a backend that runs the graph's
-file and shell tools in that sandbox (see `sandbox_backend.py`).
+(`agent = create_deep_agent(...)`), rather than `langgraph_agent`'s `self.graph`. This graph runs in process; a
+benchmark that lends its task sandbox runs deepagents through `SandboxedDeepAgent` (sandbox_agent.py) instead.
 """
 
 import asyncio
 from abc import abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 from typing import Any
 
-from deepagents.backends.protocol import BackendProtocol
 from fastapi import Body, HTTPException, Request, Response
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import Field, model_validator
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
@@ -49,14 +46,12 @@ from nemo_gym.agents import (
     AgentSessionState,
 )
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
-from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
     to_langchain,
     to_responses,
 )
-from responses_api_agents.langchain_deepagents_agent.sandbox_backend import task_sandbox_backend
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentSessionState
 
 
@@ -65,15 +60,12 @@ OBSERVATION_SOURCE = "langchain_deepagents_agent"
 
 @dataclass
 class DeepAgentsSessionState(SimpleAgentSessionState):
-    """One agent session: its single activation and, when the Resources Server lent one, the task sandbox.
+    """One agent session and its single activation.
 
     The first activation request starts `activation`. An identical retry joins it, a different request is refused,
-    and close cancels it before releasing the sandbox.
+    and close cancels it.
     """
 
-    sandbox: AsyncSandbox | None = None
-    # The graph whose tools run in `sandbox`; None runs the agent's in-process graph.
-    agent: Any = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     activation: asyncio.Task[NeMoGymResponse] | None = None
 
@@ -124,36 +116,29 @@ class DeepAgentsAgent(SimpleAgent):
 
     config: DeepAgentsAgentConfig
     agent: Any = Field(default=None, exclude=True)
-    _chat_model: GymResponsesChatModel = PrivateAttr()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._chat_model = GymResponsesChatModel(agent=self)
-        self.agent = self.build_agent(self._chat_model)
+        self.agent = self.build_agent(GymResponsesChatModel(agent=self))
 
     @abstractmethod
-    def build_agent(self, model: BaseChatModel, backend: BackendProtocol | None = None) -> Any:
-        """Return a compiled deepagents graph, e.g. create_deep_agent(model=model, backend=backend, tools=[...]).
-
-        Pass `backend` through to `create_deep_agent()`. `__init__` calls this once without one, for the in-process
-        graph whose files live in graph state. A session seeded with a task sandbox calls it again with a backend
-        that runs the graph's file tools and its `execute` tool in that sandbox.
-        """
+    def build_agent(self, model: BaseChatModel) -> Any:
+        """Return a compiled deepagents graph, e.g. create_deep_agent(model=model, tools=[...], ...).
+        Called once, from __init__ — not per-request."""
         raise NotImplementedError
 
     def _new_session_state(self, body: AgentSeedSessionRequest) -> DeepAgentsSessionState:
-        """Accept a session only for what the graph uses: its own tools, in process or in a lent task sandbox.
+        """Accept a session only for what the graph uses: its own tools, in process.
 
         The graph never calls a granted Resources tool, so a required grant is refused rather than silently
         dropped. An optional grant is skipped. The session holds no Resources cookie jar, so close leaves the
-        Environment Server's jar for /verify unchanged.
+        Environment Server's jar for /verify unchanged. A lent task sandbox is refused: this graph runs in the
+        Agent Server, and `SandboxedDeepAgent` runs deepagents in the sandbox.
         """
         if body.sandbox_access is not None:
-            # Files reach the sandbox through the provider's upload, which does not take a user.
-            if body.sandbox_access.user is not None:
-                raise AgentSeedRejectedError("DeepAgents agent does not support a sandbox user override")
-            if not PurePosixPath(body.sandbox_access.workdir).is_absolute():
-                raise AgentSeedRejectedError("DeepAgents agent requires an absolute sandbox workdir")
+            raise AgentSeedRejectedError(
+                "DeepAgents agent runs in process and cannot use a task sandbox; use the sandbox_agent.py entrypoint"
+            )
         required = [access.name for access in self.effective_tool_accesses(body) if access.required]
         if required:
             raise AgentSeedRejectedError(
@@ -175,37 +160,9 @@ class DeepAgentsAgent(SimpleAgent):
             ),
         )
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> DeepAgentsSessionState:
-        """Connect to a lent task sandbox, as a borrower, and build the session's graph on it."""
-        state = self._new_session_state(body)
-        access = body.sandbox_access
-        if access is None:
-            return state
-        connection = access.connection
-        provider = create_provider(
-            resolve_provider_config(connection.provider_config_ref, self.server_client.global_config_dict)
-        )
-        try:
-            state.sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
-        except BaseException:
-            # No sandbox owns the provider yet.
-            await provider.aclose()
-            raise
-        try:
-            state.agent = self.build_agent(
-                self._chat_model, backend=task_sandbox_backend(state.sandbox, workdir=access.workdir, env=access.env)
-            )
-        except BaseException:
-            await state.sandbox.disconnect()
-            raise
-        return state
-
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        """Stop the activation, then release a borrowed sandbox without stopping it.
-
-        The Resources Server that lent the sandbox stops it after /verify. A close whose activation does not stop in
-        time raises, which keeps the session for the Environment Server's close retry.
-        """
+        """Stop the activation. A close whose activation does not stop in time raises, which keeps the session for the
+        Environment Server's close retry."""
         if not isinstance(state, DeepAgentsSessionState):
             raise TypeError("Expected a DeepAgents session state")
         activation = state.activation
@@ -214,28 +171,7 @@ class DeepAgentsAgent(SimpleAgent):
             await asyncio.wait({activation}, timeout=self.config.session_close_timeout_seconds)
             if not activation.done():
                 raise TimeoutError("DeepAgents activation did not stop within session_close_timeout_seconds")
-        if state.sandbox is not None:
-            observation = self._sandbox_observation(state)
-            await state.sandbox.disconnect()
-            state.sandbox = None
-            state.observations.records.append(observation)
         return await super()._close_agent_session_state(state)
-
-    @staticmethod
-    def _sandbox_observation(state: DeepAgentsSessionState) -> SandboxObservation:
-        """How the graph's run in the lent sandbox ended; a session closed before a run finished is cancelled."""
-        activation = state.activation
-        outcome, error_type = "cancelled", None
-        if activation is not None and not activation.cancelled():
-            error = activation.exception()
-            outcome, error_type = ("failed", type(error).__name__) if error is not None else ("completed", None)
-        return SandboxObservation(
-            role="agent",
-            provider=state.sandbox.provider_name,
-            sandbox_id=state.sandbox.sandbox_id,
-            outcome=outcome,
-            error_type=error_type,
-        )
 
     async def responses(
         self,
@@ -254,7 +190,7 @@ class DeepAgentsAgent(SimpleAgent):
             # server's /seed_session does not automatically ride through to /verify unless re-set here.
             for key, value in request.cookies.items():
                 response.set_cookie(key, value)
-            return await self._run_graph(self.agent, body, model_url_path=model_url_path, rollout_id=rollout_id)
+            return await self._run_graph(body, model_url_path=model_url_path, rollout_id=rollout_id)
 
         # An activation of a seeded session: the Environment Server holds the Resources cookies and sends them to
         # /verify itself, so nothing is mirrored back. An unknown or closing session answers 409.
@@ -267,7 +203,7 @@ class DeepAgentsAgent(SimpleAgent):
             # Bound before the first await, so a retry that arrives meanwhile joins this run.
             state.activation_request = body.model_copy(deep=True)
             state.activation = asyncio.create_task(
-                self._run_graph(state.agent or self.agent, body, model_url_path=model_url_path, rollout_id=rollout_id)
+                self._run_graph(body, model_url_path=model_url_path, rollout_id=rollout_id)
             )
         elif body != state.activation_request:
             raise HTTPException(409, "DeepAgents sessions run one activation; retry the same request")
@@ -276,7 +212,6 @@ class DeepAgentsAgent(SimpleAgent):
 
     async def _run_graph(
         self,
-        agent: Any,
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         model_url_path: str,
@@ -307,9 +242,8 @@ class DeepAgentsAgent(SimpleAgent):
                 # new file, and the pointer it hands the model — under a prompt claiming the full history
                 # was saved there — only ever covers the most recent one, orphaning everything older.
                 # Safe to share the "unscoped" fallback across rollouts even though `thread_id` is
-                # LangGraph's checkpointing key: the graph is compiled without a checkpointer, and
-                # deepagents' StateBackend keeps that file in per-`ainvoke` graph state (a sandbox session's
-                # graph routes it there too; see sandbox_backend.py).
+                # LangGraph's checkpointing key: the graph is compiled without a checkpointer, and the
+                # default StateBackend keeps its virtual filesystem in per-`ainvoke` graph state.
                 "thread_id": rollout_id or "unscoped",
                 # Forwarded verbatim to every internal model call (see GymResponsesChatModel._agenerate()),
                 # so a caller requesting e.g. {"summary": "auto"} gets reasoning summaries back on every
@@ -321,7 +255,7 @@ class DeepAgentsAgent(SimpleAgent):
                 "model_reasoning": body.reasoning,
             }
         }
-        final_state = await agent.ainvoke({"messages": input_messages}, config=run_config)
+        final_state = await self.agent.ainvoke({"messages": input_messages}, config=run_config)
 
         new_messages = final_state["messages"][len(input_messages) :]
         response_body = to_responses(new_messages, self.config.model_server.name)
