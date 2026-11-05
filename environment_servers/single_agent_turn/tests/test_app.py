@@ -16,8 +16,7 @@ import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Response
-from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from environment_servers.single_agent_turn.app import (
     SessionHandles,
@@ -38,10 +37,8 @@ from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
-    BaseServerConfig,
     ResourcesServerRef,
 )
 from nemo_gym.core import (
@@ -49,27 +46,21 @@ from nemo_gym.core import (
     EpisodeId,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     TaskId,
-    current_rollout_id,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
-    HandledEpisodeError,
-    MaterializedTask,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     SimpleServer,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
-    SingleAgentTurnTaskInput,
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
-
-
-class _Cookie:
-    value = "cookie-value"
+from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,160 +74,6 @@ def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPa
     )
 
     assert namespace["app"] is worker_app
-
-
-class _Response:
-    ok = True
-    cookies = {"session": _Cookie()}
-
-    def __init__(self, body: dict, headers: dict | None = None) -> None:
-        self.body = orjson.dumps(body)
-        self.headers = headers or {}
-
-    async def read(self) -> bytes:
-        return self.body
-
-
-def _agent_response() -> NeMoGymResponse:
-    return NeMoGymResponse(
-        id="response",
-        created_at=0,
-        model="model",
-        object="response",
-        output=[
-            {
-                "type": "message",
-                "role": "assistant",
-                "id": "message",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": "Patch applied", "annotations": []}],
-                "prompt_token_ids": [1, 2],
-                "generation_token_ids": [3, 4],
-                "generation_log_probs": [-0.1, -0.2],
-            }
-        ],
-        tool_choice="auto",
-        parallel_tool_calls=True,
-        tools=[],
-    )
-
-
-class _Client(ServerClient):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    calls: list[tuple[str, str, dict]]
-    responses: list[_Response | Exception]
-    fail_path: str | None = None
-    slow_path: str | None = None
-    rollout_ids: list[str | None] = []
-
-    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
-        body = kwargs.get("json")
-        if isinstance(body, BaseModel):
-            body = body.model_dump(exclude_unset=True)
-        if body is not None:
-            encoded = orjson.dumps(body)
-            if url_path == "/v1/agent_sessions":
-                AgentSeedSessionRequest.model_validate_json(encoded)
-            kwargs["json"] = orjson.loads(encoded)
-        self.calls.append((server_name, url_path, kwargs))
-        self.rollout_ids.append(current_rollout_id())
-        if url_path == self.slow_path:
-            await asyncio.sleep(0.2)
-        if url_path == self.fail_path:
-            self.fail_path = None
-            raise TimeoutError(f"response lost for {url_path}")
-        response = self.responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        payload = orjson.loads(response.body)
-        body = kwargs.get("json")
-        if url_path == "/seed_session" and "resources_session_id" in body:
-            payload["resources_session_id"] = body["resources_session_id"]
-        elif url_path == "/v1/agent_sessions":
-            payload["agent_session_id"] = body["agent_session_id"]
-        elif url_path == "/v1/agent_sessions/close":
-            payload["agent_session_id"] = body["agent_session_id"]
-        elif url_path == "/close_session":
-            payload["resources_session_id"] = body["resources_session_id"]
-        return type(response)(payload, response.headers)
-
-    def _resolve_base_url(self, server_name: str) -> str:
-        return f"http://{server_name}:8000"
-
-
-def _environment_server(
-    *,
-    token_capture: bool = False,
-    resources_tool_transports: list[Literal["direct_http", "mcp"]] | None = None,
-    client_type: type[_Client] = _Client,
-) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
-    global_config = OmegaConf.create(
-        {
-            "resources": {"resources_servers": {"test": {"host": "resources", "port": 8000, "entrypoint": "app.py"}}},
-            "agent": {
-                "responses_api_agents": {
-                    "test": {
-                        "host": "agent",
-                        "port": 8001,
-                        "entrypoint": "app.py",
-                        "token_id_capture": token_capture,
-                    }
-                }
-            },
-            "token_id_capture": {"enabled": token_capture},
-        }
-    )
-    response = _agent_response()
-    client = client_type(
-        head_server_config=BaseServerConfig(host="head", port=1),
-        global_config_dict=global_config,
-        calls=[],
-        responses=[
-            _Response({"resources_session_id": "resources-session"}),
-            _Response({"agent_session_id": "agent-session"}),
-            _Response(response.model_dump(mode="json")),
-            _Response(
-                {
-                    "agent_session_id": "agent-session",
-                    "resources_cookies": {"session": "updated-cookie"},
-                }
-            ),
-            _Response(
-                {
-                    "responses_create_params": {"input": "task"},
-                    "response": response.model_dump(mode="json"),
-                    "reward": 1.0,
-                    "benchmark_field": "preserved",
-                }
-            ),
-            _Response({"resources_session_id": "resources-session"}),
-        ],
-    )
-    config = SingleAgentTurnEnvironmentServerConfig(
-        name="environment",
-        host="environment",
-        port=8002,
-        entrypoint="app.py",
-        resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
-        agent_server=AgentServerRef(type="responses_api_agents", name="agent"),
-        cleanup_timeout_seconds=10,
-        resources_tool_transports=resources_tool_transports or [],
-    )
-    return SingleAgentTurnEnvironmentServer(config=config, server_client=client), client
-
-
-def _request() -> SingleAgentTurnRequest:
-    return SingleAgentTurnRequest(
-        episode_id=EpisodeId(rollout_id="rollout", attempt=2),
-        task=MaterializedTask(
-            task_id=TaskId(taskset="test:source", task_id="task"),
-            task_input=SingleAgentTurnTaskInput(
-                responses_create_params={"input": "task"},
-                task_data={"instance_id": "task"},
-            ),
-        ),
-    )
 
 
 async def test_single_agent_turn_with_direct_resources_tools() -> None:
@@ -420,7 +257,7 @@ async def test_every_downstream_call_carries_the_attempt_rollout_id() -> None:
 def test_dependency_failure_reasons_are_bounded() -> None:
     environment_server, _ = _environment_server()
     error = environment_server._failure(stage="agent", failure_reason="x" * 3000, terminal=False)
-    assert len(error.failure.failure_reason) == 2000
+    assert len(error.event.failure_reason) == 2000
 
 
 def test_retry_requires_a_transient_dependency_error() -> None:
@@ -791,34 +628,29 @@ async def test_aggregation_returns_resources_repeat_rows_as_published_when_nothi
     assert result == published
 
 
-def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:
-    return SingleAgentTurnEnvironmentServerConfig.model_validate(
-        {**environment_server.config.model_dump(), "resources_server": None}
-    )
-
-
-async def test_an_unset_resources_server_is_the_agents_own() -> None:
-    # A server that replaced a legacy_agent relay binds the resources server the agent's /run used.
-    configured, client = _environment_server(resources_tool_transports=["direct_http"])
+async def test_environment_resources_binding_is_independent_of_the_agents() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     client.global_config_dict.agent.responses_api_agents.test.update(
         {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
     )
-    environment_server = SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
 
     result = await environment_server.run_request(_request())
 
     assert result.result.reward == 1.0
-    resources_calls = [path for server, path, _ in client.calls if server == "agents_resources"]
+    resources_calls = [path for server, path, _ in client.calls if server == "resources"]
     assert resources_calls == ["/seed_session", "/verify", "/close_session"]
+    assert not any(server == "agents_resources" for server, _, _ in client.calls)
     create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
-    assert [access.name for access in create_body.tool_accesses] == ["agents_resources.direct_http"]
+    assert [access.name for access in create_body.tool_accesses] == ["resources.direct_http"]
 
 
-def test_a_server_whose_agent_names_no_resources_server_does_not_start() -> None:
-    configured, client = _environment_server()
+@pytest.mark.parametrize("resources", [{}, {"resources_server": None}])
+def test_environment_requires_its_own_resources_binding(resources: dict) -> None:
+    configured, _ = _environment_server()
+    config = configured.config.model_dump(exclude={"resources_server"})
 
-    with pytest.raises(ValueError, match="sets no resources_server"):
-        SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
+    with pytest.raises(ValidationError, match="resources_server"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate({**config, **resources})
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])
@@ -1619,7 +1451,8 @@ def _tool_calling_agent() -> Any:
 
 async def test_a_session_reports_the_tools_the_agent_executed_as_run_does(monkeypatch: pytest.MonkeyPatch) -> None:
     from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.rollout_collection import _attach_trajectory_record, _build_ng_perf
+    from nemo_gym.rollouts.rollout_perf import _build_ng_perf
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
     from responses_api_agents.simple_agent import app as simple_agent_app
     from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
 
@@ -1949,6 +1782,7 @@ async def test_seed_observation_is_appended_only_to_the_agent_request(
         **request.task.task_input.task_data,
         "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
         "response": _agent_response().model_dump(mode="json"),
+        "failure_report": None,
     }
     assert verify_call["cookies"] == {"session": "updated-cookie"}
     assert request.task.task_input.responses_create_params is params
@@ -2027,9 +1861,9 @@ async def test_unvalidated_seed_observations_do_not_enter_session_handles(
         return _Response({"resources_session_id": handles.resources_session_id, **seed_fields})
 
     monkeypatch.setattr(_Client, "post", reply)
-    with pytest.raises(HandledEpisodeError) as error:
+    with pytest.raises(NgFailureEvent) as error:
         await environment._seed_resources(_request(), handles)
-    assert error.value.failure.stage == "seed"
+    assert error.value.stage == "seed"
     assert handles.observation is None
 
 
@@ -2037,7 +1871,8 @@ async def test_unvalidated_seed_observations_do_not_enter_session_handles(
 async def test_verifier_evidence_reaches_collector_through_result_or_failure(outcome, tmp_path):
     from fastapi.testclient import TestClient
 
-    from nemo_gym.rollout_collection import _attach_trajectory_record, _episode_record
+    from nemo_gym.rollouts.rollout_collection import _episode_record
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
     from nemo_gym.server_runtime import BaseResourcesServerConfig, BaseVerifyResponse, SimpleResourcesServer
     from nemo_gym.verification import JudgeError
 

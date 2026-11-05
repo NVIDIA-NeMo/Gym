@@ -180,7 +180,7 @@ Indic GPQA composed in either order. The explicit
 English GPQA. All six routing cases (Indic alone and both composition orders,
 with strict routing on/off) pass without an automatically generated relay.
 The 29 preparation/routing tests now live in
-`tests/unit_tests/test_indic_gpqa_diamond.py` for normal core CI collection.
+`tests/unit_tests/benchmarks/test_indic_gpqa_diamond.py` for normal core CI collection.
 
 Validation of the follow-up:
 

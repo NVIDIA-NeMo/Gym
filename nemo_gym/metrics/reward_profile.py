@@ -490,6 +490,27 @@ class RewardProfiler:
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
 
+        # A task none of whose rollouts was saved still gets its row, so the per-task report names it rather than
+        # dropping it. It carries only counts: the agent and repeat statistics below come from the saved rollouts.
+        profiled = set(task_idx_to_rollout_infos)
+        for group_key, expected_num_rollouts in expected_rollouts_by_task.items():
+            if group_key in profiled:
+                continue
+            task_idx, agent_name = group_key if per_agent else (group_key, None)
+            missing_group: Dict[str, Any] = {TASK_INDEX_KEY_NAME: task_idx}
+            if per_agent:
+                missing_group[AGENT_REF_KEY_NAME] = {"name": agent_name}
+            missing_group |= {
+                "num_rollouts": 0,
+                "expected_num_rollouts": expected_num_rollouts,
+                "missing_num_rollouts": expected_num_rollouts,
+                "reward_profile_completion_pct": 0.0,
+            }
+            group_level_metrics.append(missing_group)
+        group_level_metrics.sort(
+            key=lambda group: (group[TASK_INDEX_KEY_NAME], (group.get(AGENT_REF_KEY_NAME) or {}).get("name") or "")
+        )
+
         agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
         agent_level_metrics = self.calculate_metrics_single_df(agent_level_df)
         for agent_metrics in agent_level_metrics:

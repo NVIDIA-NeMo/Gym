@@ -17,7 +17,7 @@
 from fastapi import FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from nemo_gym.core.episode import rollout_context
+from nemo_gym.core.episode_context import rollout_context
 
 
 try:

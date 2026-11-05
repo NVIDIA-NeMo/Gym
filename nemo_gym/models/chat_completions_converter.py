@@ -29,6 +29,7 @@ from openai.types.completion_usage import CompletionUsage
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import BaseModel, Field
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
@@ -148,7 +149,7 @@ def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) ->
     )
 
 
-class ResponsesConverterState(BaseModel):
+class ChatCompletionsConverterState(BaseModel):
     return_token_id_information: bool
 
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
@@ -265,7 +266,7 @@ CustomToolStrategy = Literal["passthrough", "function_bridge"]
 _BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
 
-class ResponsesConverter(BaseModel):
+class ChatCompletionsConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
     return_token_id_information: bool
@@ -360,7 +361,7 @@ class ResponsesConverter(BaseModel):
                 "server that passes Responses through."
             )
 
-        state = ResponsesConverterState(return_token_id_information=self.return_token_id_information)
+        state = ChatCompletionsConverterState(return_token_id_information=self.return_token_id_information)
 
         response_input = responses_create_params.pop("input")
         if isinstance(response_input, str):
@@ -564,7 +565,7 @@ class ResponsesConverter(BaseModel):
     def _format_function_call_output(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
         *,
         drop_unrepresentable_request_fields: bool = False,
     ) -> None:
@@ -650,7 +651,7 @@ class ResponsesConverter(BaseModel):
     def _format_message(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
         *,
         drop_unrepresentable_request_fields: bool = False,
     ) -> None:
@@ -787,7 +788,7 @@ class ResponsesConverter(BaseModel):
     def _format_reasoning(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
     ) -> None:
         """
         Collects text from 'reasoning' messages in responses api and appends it to a buffer.
@@ -810,7 +811,7 @@ class ResponsesConverter(BaseModel):
     def _format_function_call(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
     ) -> None:
         state.assistant_item_buffered = True
         assert "call_id" in m
@@ -829,7 +830,7 @@ class ResponsesConverter(BaseModel):
     def _format_custom_tool_call(
         self,
         m: dict,
-        state: ResponsesConverterState,
+        state: ChatCompletionsConverterState,
     ) -> None:
         """Replay a custom tool call in its function-bridged form.
 
@@ -1077,26 +1078,53 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(
-        self, choice: NeMoGymChoice, *, custom_tool_names: Collection[str] = ()
+        self, choice: NeMoGymChoice, *, custom_tool_names: Collection[str] = (), structured_output: bool = False
     ) -> List[NeMoGymResponseOutputItem]:
+        """Lift a chat choice; structured output permits only leading reasoning blocks."""
         return self.postprocess_assistant_message_dict(
             choice.message.model_dump(exclude_none=True),
             logprobs=_chat_logprobs_to_responses(choice.logprobs),
             custom_tool_names=custom_tool_names,
+            structured_output=structured_output,
         )
 
     def postprocess_assistant_message_dict(
-        self, message_dict: Dict[str, Any], *, logprobs: Any = None, custom_tool_names: Collection[str] = ()
+        self,
+        message_dict: Dict[str, Any],
+        *,
+        logprobs: Any = None,
+        custom_tool_names: Collection[str] = (),
+        structured_output: bool = False,
     ) -> List[NeMoGymResponseOutputItem]:
+        """Lift assistant content without interpreting tags inside a structured final answer."""
         response_output = []
 
         content = message_dict.get("content") or ""
         refusal = message_dict.get("refusal") or ""
         if self.uses_reasoning_parser:
-            reasoning_matches, content = self._extract_reasoning_from_content(content)
+            if structured_output:
+                # A JSON string can contain literal think tags. Only completed
+                # leading blocks are reasoning; never rewrite the JSON payload,
+                # including malformed/truncated JSON that the caller must reject.
+                matches = []
+                offset = 0
+                while True:
+                    while offset < len(content) and content[offset].isspace():
+                        offset += 1
+                    match = self.THINK_TAG_PATTERN.match(content, offset)
+                    if match is None:
+                        break
+                    matches.append(match)
+                    offset = match.end()
+                removed = [match.span() for match in matches]
+                reasoning_matches = [match.group(1) for match in matches]
+                for start, end in reversed(removed):
+                    content = content[:start] + content[end:]
+            else:
+                reasoning_matches, content = self._extract_reasoning_from_content(content)
+                removed = [m.span() for m in self.THINK_TAG_PATTERN.finditer(message_dict.get("content") or "")]
             if reasoning_matches:
                 original = message_dict.get("content") or ""
-                removed = [m.span() for m in self.THINK_TAG_PATTERN.finditer(original)]
                 logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
@@ -1254,7 +1282,12 @@ class ResponsesConverter(BaseModel):
                 for tool in (responses_create_params.tools or [])
                 if isinstance(tool, dict) and tool.get("type") == "custom" and tool.get("name")
             )
-        response_output = self.postprocess_chat_response(choice, custom_tool_names=custom_tool_names)
+        text_format = (responses_create_params.text or {}).get("format") or {}
+        response_output = self.postprocess_chat_response(
+            choice,
+            custom_tool_names=custom_tool_names,
+            structured_output=text_format.get("type") in {"json_schema", "json_object"},
+        )
         response_output_dicts = [item.model_dump() for item in response_output]
 
         usage = chat_completion_usage_to_response_usage(chat_completion.usage)
@@ -1385,5 +1418,8 @@ def split_responses_input_output_items(
 
 
 # Backward-compatible aliases
-VLLMConverter = ResponsesConverter
-VLLMConverterResponsesToChatCompletionsState = ResponsesConverterState
+VLLMConverter = ChatCompletionsConverter
+VLLMConverterResponsesToChatCompletionsState = ChatCompletionsConverterState
+
+# Names this module had before ResponsesConverter was renamed ChatCompletionsConverter, with a warning.
+__getattr__ = moved_names_getattr(__name__)

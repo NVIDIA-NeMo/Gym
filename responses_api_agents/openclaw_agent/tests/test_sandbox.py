@@ -19,9 +19,21 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, parse_cleanup_receipt
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    is_harness_termination_failure,
+    parse_cleanup_receipt,
+    raises_agent_failure,
+)
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NgFailureEvent,
+    TaskId,
+)
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
@@ -520,7 +532,7 @@ def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
     with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
         with TestClient(agent.setup_webserver()) as client:
-            with pytest.raises(RuntimeError, match="legacy path reached"):
+            with raises_agent_failure(RuntimeError, match="legacy path reached"):
                 client.post("/v1/responses", json={"input": "task"})
         legacy.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
@@ -684,8 +696,9 @@ async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="harness termination was not confirmed") as failure:
         await task
+    assert is_harness_termination_failure(failure.value)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is None
     sandbox.disconnect.assert_awaited_once()
@@ -1568,7 +1581,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(
 
     import orjson
 
-    import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollouts.rollout_collection as collection
     from environment_servers.single_agent_turn_legacy.app import (
         SingleAgentTurnLegacyEnvironmentServer,
         SingleAgentTurnLegacyEnvironmentServerConfig,
@@ -1907,7 +1920,7 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         patch("responses_api_agents.openclaw_agent.app.AsyncSandbox", return_value=sandbox),
         TestClient(agent.setup_webserver()) as client,
     ):
-        with pytest.raises(RuntimeError) as error:
+        with raises_agent_failure(RuntimeError) as error:
             client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert error.value is original
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
@@ -1932,7 +1945,7 @@ def test_borrow_connection_failure_never_creates_replacement(setup):
         TestClient(agent.setup_webserver()) as client,
     ):
         factory.connect = AsyncMock(side_effect=RuntimeError("borrow failed"))
-        with pytest.raises(RuntimeError, match="borrow failed"):
+        with raises_agent_failure(RuntimeError, match="borrow failed"):
             client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         factory.assert_not_called()
         sandbox.stop.assert_not_awaited()
@@ -2242,8 +2255,7 @@ def test_supervisor_timeout_is_not_a_model_transport_error(setup):
 
 @pytest.mark.parametrize("transcript_available", [False, True])
 async def test_capture_header_owns_rejected_attempts_in_each_session(setup, transcript_available):
-    from nemo_gym.observability.model_calls import ModelCallRecord
-    from nemo_gym.trajectory import join_agent_model_calls
+    from nemo_gym.trajectory import ModelCallRecord, join_agent_model_calls
 
     agent, sandbox = setup
     if not transcript_available:

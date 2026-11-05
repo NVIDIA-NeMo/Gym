@@ -26,7 +26,7 @@ from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.client.http_client import get_response_json
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.models.model_call_capture import (
     CaptureStore,
@@ -34,7 +34,7 @@ from nemo_gym.models.model_call_capture import (
     _CaptureMiddleware,
     install_model_call_capture,
 )
-from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,

@@ -1,7 +1,0 @@
-# Over-Refusal Detection Resources Server
-# Based on XSTest benchmark
-
--e nemo-gym[dev] @ ../../
-fastapi
-uvicorn
-
