@@ -127,7 +127,9 @@ gym eval run --no-serve \
 ### Sessions
 
 Each rollout gets its own Python worker process, which keeps variables between `execute_python` calls. The rollout's
-session cookie keys it, and the first `execute_python` call starts it.
+session cookie keys it, and the first `execute_python` call starts it. Workers use a fresh Python interpreter so they
+do not inherit the server's open sockets. The first call includes interpreter and numerical-library startup time;
+later calls reuse the same worker and variables.
 
 - Under an Environment Server, such as `math_with_code_environment_server` (`single_agent_turn_legacy`),
   `/seed_session` binds the cookie to the `resources_session_id`. `/close_session` stops the worker, even when

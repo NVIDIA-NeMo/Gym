@@ -15,6 +15,7 @@
 import asyncio
 import multiprocessing
 import signal
+import socket
 import time
 from typing import Any, Dict
 from unittest.mock import MagicMock
@@ -373,6 +374,7 @@ class TestResourcesSessions:
 
     def test_worker_busy_in_user_code_is_terminated(self) -> None:
         handle = _SessionHandle(max_execution_time=60)
+        assert handle.exec("2 + 2")[2] == "4"
         # Send the cell without waiting for its reply, so the worker is busy when the close arrives.
         handle._conn.send({"cmd": "exec", "code": "import time\ntime.sleep(60)"})
         time.sleep(0.5)
@@ -385,12 +387,14 @@ class TestResourcesSessions:
 
     def test_forked_worker_does_not_keep_the_servers_sigterm_handler(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Under uvicorn the server has a Python SIGTERM handler, which a forked worker would inherit.
-        monkeypatch.setattr("app.multiprocessing", multiprocessing.get_context("fork"))
+        fork_context = multiprocessing.get_context("fork")
+        monkeypatch.setattr("app.multiprocessing.get_context", lambda method: fork_context)
         previous = signal.signal(signal.SIGTERM, lambda signum, frame: None)
         try:
             handle = _SessionHandle(max_execution_time=60)
         finally:
             signal.signal(signal.SIGTERM, previous)
+        assert handle.exec("2 + 2")[2] == "4"
         handle._conn.send({"cmd": "exec", "code": "import time\ntime.sleep(60)"})
         time.sleep(0.5)
 
@@ -401,6 +405,34 @@ class TestResourcesSessions:
         # join(1) for the close message, then terminate() ends it at once; only SIGKILL would take 5 s more.
         assert time.monotonic() - started < 3
         assert handle._proc.exitcode == -signal.SIGTERM
+
+    def test_worker_does_not_retain_server_sockets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Reproduce Linux's default fork constructors even when the test host defaults to spawn.
+        fork_context = multiprocessing.get_context("fork")
+        monkeypatch.setattr("app.multiprocessing.Pipe", fork_context.Pipe)
+        monkeypatch.setattr("app.multiprocessing.Process", fork_context.Process)
+        server_socket, peer = socket.socketpair()
+        peer.settimeout(1)
+        handle = _SessionHandle(max_execution_time=10)
+
+        def execute(code: str) -> str:
+            handle._conn.send({"cmd": "exec", "code": code})
+            assert handle._conn.poll(15), "Python worker did not reply"
+            reply = handle._conn.recv()
+            assert reply["ok"], reply
+            return reply["res"]
+
+        try:
+            assert execute("value = 40\nvalue") == "40"
+            server_socket.close()
+            # The live worker must not keep the server's connection open after the server closes its copy.
+            assert handle._proc.is_alive()
+            assert peer.recv(1) == b""
+            assert execute("value += 2\nvalue") == "42"
+        finally:
+            server_socket.close()
+            peer.close()
+            handle.close()
 
     def test_worker_that_outlives_sigkill_raises(self) -> None:
         handle = _SessionHandle(max_execution_time=10)

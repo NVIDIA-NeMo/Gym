@@ -129,9 +129,11 @@ class _SessionHandle:
     """Light wrapper around one long-lived worker process."""
 
     def __init__(self, max_execution_time: int):
-        parent_conn, child_conn = multiprocessing.Pipe()
+        # Fork would retain the server's accepted sockets and prevent idle connections from closing.
+        context = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = context.Pipe()
         self._conn = parent_conn
-        self._proc = multiprocessing.Process(
+        self._proc = context.Process(
             target=_session_worker,
             args=(child_conn, max_execution_time),
             daemon=True,
