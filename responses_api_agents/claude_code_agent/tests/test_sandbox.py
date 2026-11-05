@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentSeedRejectedError, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
@@ -129,6 +130,53 @@ async def test_model_only_allows_the_endpoint_the_cli_calls(monkeypatch, setting
     if "anthropic_api_key" in settings:
         # The fallback applies only to the allowlist: the CLI still gets no ANTHROPIC_BASE_URL.
         assert instance._resolve_call_base_url("rollout") == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base_url", "allowed"),
+    [
+        ("https://Direct.Example/anthropic", "direct.example"),
+        ("https://user:secret@direct.example/anthropic", "direct.example"),  # pragma: allowlist secret
+        ("http://[2001:db8::1]:9000/anthropic", "2001:db8::1"),
+    ],
+    ids=["uppercase", "userinfo", "ipv6_literal"],
+)
+async def test_model_only_allows_the_host_however_the_url_writes_it(monkeypatch, base_url, allowed):
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+    instance = agent(
+        sandbox_provider="sandbox",
+        sandbox_config={"workdir": "/app"},
+        network_access="model_only",
+        anthropic_base_url=base_url,
+    )
+    await instance._seed_agent_session_state(seed(borrowed=False))
+    policy = remote.start.await_args.args[0].provider_options["network_policy"]
+    assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": allowed}]}
+
+
+@pytest.mark.asyncio
+async def test_inherit_keeps_a_loopback_model_endpoint_working(monkeypatch):
+    # A local Gym model server must keep working by default: inherit adds no policy and refuses nothing.
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="local", aclose=AsyncMock()))
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+    instance = agent(
+        sandbox_provider="sandbox", sandbox_config={"workdir": "/app"}, anthropic_base_url="http://127.0.0.1:8000"
+    )
+    await instance._seed_agent_session_state(seed(borrowed=False))
+    assert "network_policy" not in (remote.start.await_args.args[0].provider_options or {})
+
+
+def test_an_unknown_network_access_value_is_refused_at_load():
+    with pytest.raises(ValidationError):
+        app.ClaudeCodeAgentConfig(
+            name="claude", host="127.0.0.1", port=8080, entrypoint="app.py", network_access="open"
+        )
 
 
 @pytest.mark.parametrize(
