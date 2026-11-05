@@ -18,7 +18,7 @@ install_nemo_gym_deps
 
 FABRIC_SPEC="${NEMO_FABRIC_SPEC:-nemo-fabric[mini-swe-agent,relay]==0.6.0}"
 # LiteLLM 1.103 and later import mcp 2 types, while nemo-gym pins mcp<2.
-install_python_packages "$FABRIC_SPEC" "litellm<1.103"
+install_python_packages "$FABRIC_SPEC" "litellm>=1.83.0,<1.103"
 if portable_python_can_run; then
     "$DEPS_DIR/bin/python3" -c "from nemo_fabric import Fabric, FabricConfig; print('nemo-fabric OK')"
 fi
