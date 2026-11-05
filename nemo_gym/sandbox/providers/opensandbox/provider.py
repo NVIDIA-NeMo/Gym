@@ -112,6 +112,12 @@ class _SandboxDeathNotice:
     provider_status_reason: str | None = None
 
 
+# The single-pod template names its user container sandbox and its pod <sandbox-id>-0.
+# Pool allocations and aggregate multi-pod failures need a separate identity contract.
+_USER_CONTAINER = "sandbox"
+_LIFECYCLE_SINGLE_POD_SUFFIX = "-0"
+
+
 def _lifecycle_oom_evidence(info: Any, *, sandbox_id: str) -> _SandboxDeathNotice | None:
     """Read the known controller's persisted current-container report from the control plane.
 
@@ -129,12 +135,11 @@ def _lifecycle_oom_evidence(info: Any, *, sandbox_id: str) -> _SandboxDeathNotic
     report = getattr(status, "message", None)
     if not isinstance(report, str) or len(report) > 65536:
         return None
-    # The single-pod template names its owned pod <sandbox-id>-0. Pool allocations
-    # and aggregate multi-pod failures need a separate identity contract.
-    pod = re.escape(f"{sandbox_id}-0")
+    pod = re.escape(f"{sandbox_id}{_LIFECYCLE_SINGLE_POD_SUFFIX}")
+    container = re.escape(_USER_CONTAINER)
     match = re.fullmatch(
         rf"1/1 observed pods failed; primary reason=ContainerFailed; sample pod={pod}; "
-        rf"sample detail=Pod {pod} container sandbox exited with code (?P<exit>\d{{1,3}}) \(OOMKilled\)",
+        rf"sample detail=Pod {pod} container {container} exited with code (?P<exit>\d{{1,3}}) \(OOMKilled\)",
         report,
     )
     if match is None or not 1 <= int(match["exit"]) <= 255:
@@ -170,9 +175,9 @@ def _inspect_oom_evidence(inspect: str) -> str | None:
                 header = re.fullmatch(r"  ([^:\s]+):", line)
                 if header is not None:
                     container = header.group(1)
-                    if container == "sandbox":
+                    if container == _USER_CONTAINER:
                         sandbox_count += 1
-                elif container == "sandbox" and (state := re.fullmatch(r"    State:\s+(.+)", line)):
+                elif container == _USER_CONTAINER and (state := re.fullmatch(r"    State:\s+(.+)", line)):
                     sandbox_states.append(state.group(1))
         if (
             sandbox_count == 1
