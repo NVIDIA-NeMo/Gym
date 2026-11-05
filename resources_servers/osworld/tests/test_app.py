@@ -136,6 +136,19 @@ async def test_a_failed_evaluation_is_recorded_as_a_verifier_failure(tmp_path) -
     assert isinstance(failure.__cause__, RuntimeError)
 
 
+async def test_a_long_evaluation_error_still_yields_a_masked_row(tmp_path) -> None:
+    server = _verify_server(tmp_path, AsyncMock(side_effect=RuntimeError("x" * 2000)))
+
+    with patch("resources_servers.osworld.app.observe_failure") as observed:
+        result = await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "s1"}), _verify_request())
+
+    [failure] = [call.args[0] for call in observed.call_args_list]
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "verifier_error")
+    assert result.failure_reason == failure.failure_reason and len(result.failure_reason) <= 2000
+    assert isinstance(failure.__cause__, RuntimeError)
+    server._manager.close_session.assert_awaited_once_with("s1")
+
+
 # The request accepts extra fields; one that already carries the failure fields still gets a masked result.
 @pytest.mark.parametrize("extra", [{}, {"failure_kind": None, "failure_reason": None}])
 async def test_a_session_missing_at_verify_is_masked_as_lost(tmp_path, extra) -> None:

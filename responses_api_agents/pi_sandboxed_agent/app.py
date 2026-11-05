@@ -232,20 +232,17 @@ class PiSandboxedAgent(PiAgent):
                 timeout_s=timeout,
             )
         except Exception as exc:
-            if not isinstance(exc, TimeoutError) and "timeout" not in type(exc).__name__.lower():
-                # A provider exception does not establish how Pi ended: report it, do not grade a substituted run.
-                raise NgFailureEvent(
-                    boundary="agent",
-                    failure_kind=AGENT_ROUTE_FAILED,
-                    failure_reason=self._agent_sandbox_facts(
-                        sandbox, reason=provider_error_reason(exc), http_status=error_to_http_status(exc)
-                    )
-                    + f"Agent operation agent.sandbox_exec failed: {type(exc).__name__}",
-                    operation="agent.sandbox_exec",
-                    stage="agent",
-                ) from exc
-            error_type = type(exc).__name__
-            LOG.exception("Pi sandbox execution failed")
+            # An exception, including a provider timeout, does not establish how Pi ended: report it, do not grade it.
+            raise NgFailureEvent(
+                boundary="agent",
+                failure_kind=AGENT_ROUTE_FAILED,
+                failure_reason=self._agent_sandbox_facts(
+                    sandbox, reason=provider_error_reason(exc), http_status=error_to_http_status(exc)
+                )
+                + f"Agent operation agent.sandbox_exec failed: {type(exc).__name__}",
+                operation="agent.sandbox_exec",
+                stage="agent",
+            ) from exc
         if result is not None and result.error_type != "timeout" and (result.error_type or result.return_code == -1):
             # A native deadline (or exit 124) is a protocol result; the -1 sentinel or an execution error is not.
             raise NgFailureEvent(

@@ -176,7 +176,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 }
             )
         except Exception as error:
-            reason = f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}"
+            reason = f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}"[:2000]
             # The masked row also goes into the run's failure record, tied to this verifier invocation.
             failure = NgFailureEvent(
                 boundary=FailureBoundary.RESOURCES_SERVER,

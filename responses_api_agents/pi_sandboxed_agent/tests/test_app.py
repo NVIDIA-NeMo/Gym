@@ -216,13 +216,15 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
     if failure:
         sandbox.exec.side_effect = [
             SimpleNamespace(return_code=0, error_type=None),
-            TimeoutError() if failure == "timeout" else SimpleNamespace(return_code=137, error_type=None),
+            SimpleNamespace(return_code=124, error_type="timeout")
+            if failure == "timeout"
+            else SimpleNamespace(return_code=137, error_type=None),
         ]
     if recover:
         result = await server.run(SimpleNamespace(cookies={}), request_body())
         assert result.reward == 0 and result.pi_failed
-        assert result.pi_exit_code == (137 if failure == "exit" else None)
-        assert result.pi_error_type == ("TimeoutError" if failure == "timeout" else None)
+        assert result.pi_exit_code == (137 if failure == "exit" else 124)
+        assert result.pi_error_type == ("timeout" if failure == "timeout" else None)
         tool = next(r for r in result.ng_agent_observations.records if isinstance(r, ToolCallObservation))
         assert tool.started_at == 10 and tool.completed_at == 11
         assert (Path(result.pi_results_dir) / "events.jsonl").read_text().endswith(tail)
@@ -238,7 +240,7 @@ async def test_partial_event_tail_only_recovers_failed_execution(agent, failure,
     assert _RUN.get() is None
 
 
-@pytest.mark.parametrize("failure", ["exit", "timeout", "timeout_result", "timeout_exit", "export", "cancel", "judge"])
+@pytest.mark.parametrize("failure", ["exit", "timeout_result", "timeout_exit", "export", "cancel", "judge"])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure, cleanup_fails):
     server, sandbox = agent
@@ -249,8 +251,6 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
             SimpleNamespace(return_code=0, error_type=None),
             SimpleNamespace(return_code=137, error_type=None),
         ]
-    elif failure == "timeout":
-        sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), TimeoutError()]
     elif failure in {"timeout_result", "timeout_exit"}:
         sandbox.exec.side_effect = [
             SimpleNamespace(return_code=0, error_type=None),
@@ -262,7 +262,7 @@ async def test_failures_preserve_cleanup_and_zero_reward_boundary(agent, failure
         sandbox.exec.side_effect = asyncio.CancelledError()
     else:
         server.server_client.post.side_effect = [response({}), RuntimeError("judge unavailable")]
-    if failure in {"exit", "timeout", "timeout_result", "timeout_exit"}:
+    if failure in {"exit", "timeout_result", "timeout_exit"}:
         result = await server.run(SimpleNamespace(cookies={}), request_body())
         assert result.reward == 0 and result.pi_failed
         observation = next(r for r in result.ng_agent_observations.records if isinstance(r, SandboxObservation))
@@ -402,6 +402,7 @@ async def test_terminal_stop_controls_scoring_without_observations(
     "outcome",
     [
         RuntimeError("provider unavailable"),
+        TimeoutError("command status request timed out"),
         SimpleNamespace(return_code=-1, error_type=None),
         SimpleNamespace(return_code=1, error_type="sandbox_error"),
     ],
