@@ -1,4 +1,6 @@
-# [Vision2Code](https://github.com/image2code/vision2code)
+# Vision2Code
+
+Based on the [Vision2Code GitHub repository](https://github.com/image2code/vision2code).
 
 The goal is to improve a model's visual understanding through image recreation: the model
 studies a reference image, writes Python to recreate it, and learns from a vision judge's
