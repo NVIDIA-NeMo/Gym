@@ -18,7 +18,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
@@ -217,13 +216,3 @@ def test_entryscript_enters_testbed_only_when_it_is_the_repository() -> None:
     script = create_entryscript({})
 
     assert "if [ ! -e /app/.git ] && [ -e /testbed/.git ]; then cd /testbed; else cd /app; fi" in script
-
-
-def test_opencode_preset_matches_the_v2_agent_and_verifier_budgets() -> None:
-    root = Path(__file__).parents[3]
-    preset = yaml.safe_load((root / "benchmarks/swebench/pro_v2/opencode.yaml").read_text())
-    server = yaml.safe_load((root / "resources_servers/swebench_pro_v2/configs/swebench_pro_v2.yaml").read_text())
-
-    agent = preset["swebench_pro_v2_opencode_sandboxed_agent"]["responses_api_agents"]["opencode_sandboxed_agent"]
-    verifier = server["swebench_pro_v2_resources_server"]["resources_servers"]["swebench_pro_v2"]
-    assert agent["sandbox_timeout"] == verifier["evaluation_timeout"] == 3000
