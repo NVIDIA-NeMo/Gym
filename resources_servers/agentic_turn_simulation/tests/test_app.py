@@ -26,9 +26,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
     failure_kinds,
 )
-from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.agentic_turn_simulation.app import (

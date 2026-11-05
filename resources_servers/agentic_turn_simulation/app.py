@@ -29,8 +29,12 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming, failure_kinds
-from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.core import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NgFailureEvent,
+    failure_kinds,
+)
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
