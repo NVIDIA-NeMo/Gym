@@ -788,6 +788,12 @@ class PiAgent(SimpleResponsesAPIAgent):
                         for access in tool_accesses
                         if isinstance(access, MCPToolAccess) and access.name not in problems
                     ],
+                    # A required grant Pi cannot use was refused above, so every one left here is kept.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in tool_accesses
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
                 )
             except BaseException:
                 await provider.aclose()
