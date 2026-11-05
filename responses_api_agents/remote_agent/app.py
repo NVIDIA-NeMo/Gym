@@ -32,21 +32,36 @@ Failures never raise out of ``/run``: every failure (remote endpoint down, timeo
 malformed reply, seed/verify errors) becomes a reward-0 verify response carrying the
 ``_ng_failure_class`` sentinel, which rollout collection routes to the failures
 sidecar and retries on resume.
+
+Under an Environment Server, the agent sessions API runs the same loop as the session's one
+activation. Tool calls go through the session's direct HTTP grant, and the Environment Server
+seeds, verifies and records failures. An activation that fails returns an HTTP error instead of
+a sentinel row: 422 for a failure that will not fix itself on retry, 500 for the others.
 """
 
 import asyncio
 import json
+from dataclasses import dataclass, field
 from traceback import print_exc
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import orjson
 from aiohttp import ClientOSError, ClientTimeout, ServerDisconnectedError
-from fastapi import Body, Request, Response
+from fastapi import Body, HTTPException, Request, Response
 from pydantic import ConfigDict, PrivateAttr, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import (
+    ActivationConflictError,
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    OrderedOperationLedger,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import (
     get_response_json,
@@ -67,7 +82,8 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.rollouts import NG_TERMINAL_KEY
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
@@ -77,6 +93,8 @@ _REMOTE_RETRY_SLEEP_SECS = 0.5
 _FAILURE_PRINT_HEAD = 5
 _FAILURE_PRINT_INTERVAL = 100
 _AGGREGATE_PROXY_TIMEOUT_SECS = 600.0
+# Bound on stopping a session's activation that is still running when the session closes.
+_SESSION_CLOSE_TIMEOUT_SECS = 30.0
 
 # Result/routing keys this server itself produces. Input rows may carry stale copies
 # (e.g. a rollouts or failures JSONL re-fed as a dataset); they must never collide with
@@ -99,9 +117,9 @@ class RemoteAgentError(RuntimeError):
 class RemoteAgentTerminalError(RemoteAgentError):
     """A failure that will not fix itself on retry (e.g. an invalid response shape).
 
-    run() reaches responses() over an HTTP self-post, so this class's NAME is the wire
-    contract: the exception middleware serializes it into the 500 body and run() matches
-    the name string to set the terminal routing flag.
+    responses() answers it with a 422 whose detail starts with this class's NAME. An
+    Environment Server treats the 4xx as terminal. run() reaches responses() over an HTTP
+    self-post and matches the name string to set the terminal routing flag.
     """
 
 
@@ -136,6 +154,8 @@ class RemoteAgentConfig(BaseResponsesAPIAgentConfig):
     # Bound on the whole /run body (seed + the full agent/tool loop + verify), applied after
     # the semaphore is acquired so queue wait does not count against it. The collector's
     # named-agent hop carries no timeout of its own; this is the only whole-rollout bound.
+    # In an agent session it bounds only the activation (the agent/tool loop): the
+    # Environment Server seeds and verifies under its own episode timeout.
     run_timeout_secs: float = 2100.0
     # Maximum loop steps (remote calls) per rollout; None leaves run_timeout_secs as the only bound.
     max_steps: Optional[int] = None
@@ -154,6 +174,15 @@ class RemoteAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+@dataclass
+class RemoteAgentSessionState(AgentSessionState):
+    # The grant Gym-executed tool calls go through; None when the episode grants no tools.
+    tool_access: DirectHTTPToolAccess | None
+    # None means the session holds no resources cookie jar, so close leaves the Environment Server's jar unchanged.
+    resources_cookies: dict[str, str] | None
+    operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
+
+
 class RemoteAgent(SimpleResponsesAPIAgent):
     config: RemoteAgentConfig
     sem: Optional[asyncio.Semaphore] = None
@@ -164,12 +193,108 @@ class RemoteAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = asyncio.Semaphore(self.config.concurrency)
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> RemoteAgentSessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError(
+                "Remote Agent does not support sandbox access: the remote service cannot reach one"
+            )
+        accesses = self.effective_tool_accesses(body)
+        unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
+        if unsupported:
+            raise AgentSeedRejectedError(
+                f"Remote Agent does not support required MCP tool access: {', '.join(unsupported)}"
+            )
+        direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
+        if len(direct_accesses) > 1:
+            raise AgentSeedRejectedError("Remote Agent supports at most one direct HTTP tool access per session")
+        tool_access = direct_accesses[0] if direct_accesses else None
+        return RemoteAgentSessionState(
+            request=body,
+            tool_access=tool_access,
+            resources_cookies=dict(tool_access.cookies) if tool_access is not None else None,
+        )
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, RemoteAgentSessionState):
+            raise TypeError("Expected Remote Agent session state")
+        await state.operations.close(timeout=_SESSION_CLOSE_TIMEOUT_SECS)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=AgentObservationBundle(
+                source=self.config.name,
+                gaps=[
+                    ObservationGap(
+                        code="model_calls_unavailable",
+                        detail="The remote service makes its own model calls and runs its own tools outside Gym.",
+                    )
+                ],
+            ),
+            resources_cookies=state.resources_cookies,
+        )
+
     async def responses(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        try:
+            agent_session_id = self._agent_session_id_from_request(request)
+            if agent_session_id is None:
+                agent_response, resources_server_cookies = await self._run_tool_loop(body, request.cookies)
+                # Resources-server cookies propagate for downstream verification; the service's own
+                # cookies are its private session and deliberately stay out.
+                for k, v in resources_server_cookies.items():
+                    response.set_cookie(k, v)
+                return agent_response
+            state = self._require_agent_session(agent_session_id)
+            if not isinstance(state, RemoteAgentSessionState):
+                raise TypeError("Expected Remote Agent session state")
+            try:
+                return await state.operations.execute(
+                    index=1, request=body, operation=lambda: self._activate_session(state, body)
+                )
+            except ActivationConflictError as error:
+                raise HTTPException(409, str(error)) from error
+        except RemoteAgentTerminalError as error:
+            # A 4xx is final for an Environment Server; run() matches the class name in the detail.
+            raise HTTPException(422, f"{type(error).__name__}: {error}") from error
+
+    async def _activate_session(
+        self, state: RemoteAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        """The session's one activation, under a concurrency slot and run_timeout_secs.
+
+        Only the session path takes the semaphore here: a legacy /run already holds a slot while it
+        self-posts to /v1/responses.
+        """
+        async with self.sem:
+            try:
+                async with asyncio.timeout(self.config.run_timeout_secs):
+                    agent_response, resources_cookies = await self._run_tool_loop(
+                        body, state.resources_cookies or {}, tool_access=state.tool_access, in_session=True
+                    )
+            except TimeoutError:
+                raise RemoteAgentError(
+                    f"the agent/tool loop exceeded run_timeout_secs={self.config.run_timeout_secs}s"
+                ) from None
+        if state.tool_access is not None:
+            state.resources_cookies = resources_cookies
+        return agent_response
+
+    async def _run_tool_loop(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        resources_server_cookies: Any,
+        *,
+        tool_access: DirectHTTPToolAccess | None = None,
+        in_session: bool = False,
+    ) -> Tuple[NeMoGymResponse, Any]:
+        """Call the service until it finishes, executing its unpaired calls; returns the trajectory and cookies.
+
+        The service's own cookies live only within this call. A session reaches the resources
+        server through ``tool_access``; a legacy /run through the configured resources_server.
+        """
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -179,7 +304,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         agent_server_cookies = None  # the service's own cookies, round-tripped so it can keep per-rollout state
-        resources_server_cookies = request.cookies
 
         while True:
             step += 1
@@ -230,15 +354,36 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                     new_outputs.append(tool_response)
                     continue
 
-                api_response = await self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path=f"/{output_function_call.name}",
-                    json=parsed_arguments,
-                    cookies=resources_server_cookies,
-                )
+                if tool_access is not None:
+                    api_response = await http_request(
+                        "POST",
+                        f"{str(tool_access.base_url).rstrip('/')}/{output_function_call.name}",
+                        _internal=True,
+                        json=parsed_arguments,
+                        cookies=resources_server_cookies,
+                        headers=dict(tool_access.headers),
+                    )
+                    resources_server_cookies = {
+                        **resources_server_cookies,
+                        **{k: morsel.value for k, morsel in api_response.cookies.items()},
+                    }
+                elif in_session:
+                    # The Environment Server granted no tools, so nothing can run this call.
+                    raise RemoteAgentTerminalError(
+                        f"the remote service asked Gym to run {output_function_call.name!r}, but this agent "
+                        "session has no direct HTTP tool access; set resources_tool_transports: [direct_http] "
+                        "on the Environment Server"
+                    )
+                else:
+                    api_response = await self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path=f"/{output_function_call.name}",
+                        json=parsed_arguments,
+                        cookies=resources_server_cookies,
+                    )
+                    resources_server_cookies = api_response.cookies
                 # No raise_for_status: a tool error (unknown tool, invalid call) is a valid
                 # result the service should see and react to.
-                resources_server_cookies = api_response.cookies
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",
@@ -250,14 +395,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             if self.config.max_steps and step >= self.config.max_steps:
                 break
 
-        # Resources-server cookies propagate for downstream verification; the service's own
-        # cookies are its private session and deliberately stay out.
-        for k, v in resources_server_cookies.items():
-            response.set_cookie(k, v)
-
         agent_response.output = new_outputs
         agent_response.usage = usage
-        return agent_response
+        return agent_response, resources_server_cookies
 
     async def _post_agent_responses(
         self, new_body: NeMoGymResponseCreateParamsNonStreaming, cookies: Optional[Dict[str, str]]

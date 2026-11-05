@@ -43,4 +43,8 @@ gym env start --resources-server <your_env> # plus this agent's config
 gym eval run --no-serve +agent_name=remote_agent +input_jsonl_fpath=... +output_jsonl_fpath=...
 ```
 
+`configs/remote_agent_single_agent_turn.yaml` runs each task through a `single_agent_turn_legacy` Environment Server
+and the agent sessions API instead: it seeds and verifies, grants this agent direct HTTP access to the resources
+server's tools, and records failures. Name the resources server there too; it must serve resources sessions.
+
 Knobs and the full contract: see the "Drive a Remote Agent" docs page.

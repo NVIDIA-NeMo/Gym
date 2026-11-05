@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 from aiohttp import ClientConnectorError, ClientPayloadError, ClientResponseError, ServerDisconnectedError
-from fastapi import Response
+from fastapi import HTTPException, Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
@@ -252,6 +252,8 @@ def wire_gym(
             fastapi_response = Response()
             try:
                 result = await agent.responses(make_request(dict(cookies or {})), fastapi_response, params)
+            except HTTPException as e:
+                return FakeServerClientResponse({"detail": e.detail}, status=e.status_code)
             except Exception as e:  # noqa: BLE001 -- emulate SimpleServer's exception middleware
                 return FakeServerClientResponse({"error": repr(e)}, status=500)
             out_cookies = SimpleCookie()
@@ -611,7 +613,7 @@ class TestRemoteFailuresBecomeSentinelRows:
             monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(bad)))
         )
         assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
-        # Terminal classification survives the HTTP self-post boundary (exception-name match)
+        # Terminal classification survives the HTTP self-post boundary: the 422 detail names the class.
         assert result[NG_TERMINAL_KEY] is True
         assert "invalid Responses API object" in result["error"]
         assert [c["url_path"] for c in server_client.calls] == ["/seed_session", "/v1/responses"]

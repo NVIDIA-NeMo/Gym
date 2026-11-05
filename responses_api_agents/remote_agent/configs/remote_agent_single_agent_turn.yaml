@@ -1,0 +1,19 @@
+# Remote Agent through the agent sessions API. The Environment Server seeds the resources server, grants the agent
+# direct HTTP access to its tools, runs one activation, then verifies. Name the same resources server here as in
+# remote_agent.yaml; it must serve resources sessions.
+config_paths:
+  - responses_api_agents/remote_agent/configs/remote_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+remote_agent_single_agent_turn:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: ???
+      agent_server:
+        type: responses_api_agents
+        name: remote_agent
+      resources_tool_transports:
+      - direct_http
