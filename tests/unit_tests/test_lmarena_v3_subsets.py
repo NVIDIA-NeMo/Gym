@@ -40,7 +40,7 @@ def test_rejects_unknown_prompt_set(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize("prompt_set", ["super35", "nano35"])
 @pytest.mark.parametrize("glm", [False, True])
 def test_subset_config_resolves(prompt_set: str, glm: bool):
-    suffix = "_glm53_judge" if glm else ""
+    suffix = "_glm53_judge" if glm else "_gemini38flash_judge"
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             skip_load_from_cli=True,
