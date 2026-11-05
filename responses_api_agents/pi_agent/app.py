@@ -37,6 +37,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
@@ -743,7 +744,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "Pi requires direct SandboxAccess")
             if self.config.network_access != "inherit":
-                raise HTTPException(422, "Pi network_access applies only to a sandbox it creates, not a borrowed one")
+                raise AgentSeedRejectedError(
+                    "Pi network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/"):
@@ -777,7 +780,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 spec = restrict_sandbox_network(
                     spec,
                     network_access=self.config.network_access,
-                    provider_name=provider.name,
+                    provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
                     # Only the grants Pi keeps; activation leaves out the optional ones listed in `problems`.
                     tool_urls=[
@@ -831,11 +834,18 @@ class PiAgent(SimpleResponsesAPIAgent):
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
                 reported = (checked.stdout or "").strip()
-                if checked.return_code != 0 or checked.error_type or reported != self.config.pi_version:
-                    details = "\n".join(part for part in (checked.stderr, checked.stdout) if part)
+                details = "\n".join(part for part in (checked.stderr, checked.stdout) if part)
+                if checked.error_type:
+                    # A transport failure or timeout may pass on another attempt.
                     raise RuntimeError(
+                        f"Pi could not check the runtime in {runtime} (error_type={checked.error_type}): "
+                        f"{details[-16000:]}"
+                    )
+                if checked.return_code != 0 or reported != self.config.pi_version:
+                    # A missing runtime or another version fails the same way every time: refuse the seed.
+                    raise AgentSeedRejectedError(
                         f"Pi runtime in {runtime} does not run pi_version {self.config.pi_version} "
-                        f"(exit {checked.return_code}, error_type={checked.error_type}): {details[-16000:]}"
+                        f"(exit {checked.return_code}): {details[-16000:]}"
                     )
             else:
                 # Install only the agent runtime in the existing task sandbox.

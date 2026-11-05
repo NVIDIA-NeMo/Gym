@@ -23,7 +23,16 @@ from omegaconf import OmegaConf
 from nemo_gym.config.config_types import ConfigMissingValuesError
 from nemo_gym.config.global_config import get_first_server_config_dict
 from nemo_gym.environment.agent_registry import discover_agents
-from tests.session_harness_profiles import HARNESSES, HLE_ENVIRONMENT, IMAGE, REPO_ROOT, compose_profile_on_hle
+from tests.session_harness_profiles import (
+    HARNESSES,
+    HLE_ENVIRONMENT,
+    IMAGE,
+    MODEL_ONLY_PROFILES,
+    REPO_ROOT,
+    RUNTIME_DIR,
+    RUNTIME_DIR_PROFILES,
+    compose_profile_on_hle,
+)
 
 
 @pytest.mark.parametrize("agent", HARNESSES)
@@ -45,6 +54,9 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
     assert settings.sandbox_provider == "sandbox"
     assert settings.sandbox_config.image == IMAGE
     assert settings.sandbox_config.ready_timeout_s == 1200
+    # Graded on what the model knows: the sandbox reaches only the model server, from a runtime in the image.
+    assert settings.get("network_access", "inherit") == ("model_only" if agent in MODEL_ONLY_PROFILES else "inherit")
+    assert settings.get("sandbox_runtime_dir") == (RUNTIME_DIR if agent in RUNTIME_DIR_PROFILES else None)
     # Hermes derives its TTL from its own timeouts; the others would get OpenSandbox's 10-minute default.
     assert settings.sandbox_config.get("ttl_s") == (None if agent == "hermes_agent" else 14400)
     if agent == "claude_code_agent":
@@ -64,3 +76,12 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
 def test_profile_without_an_image_fails_at_resolve(agent: str, monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ConfigMissingValuesError, match=rf"hle_equivalence_llm_judge_{agent}\..*sandbox_config\.image"):
         compose_profile_on_hle(agent, monkeypatch, image=False)
+
+
+@pytest.mark.parametrize("agent", sorted(RUNTIME_DIR_PROFILES))
+def test_restricted_profile_without_a_runtime_dir_fails_at_resolve(
+    agent: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A model_only sandbox cannot download the harness, so the runtime location is required before any episode.
+    with pytest.raises(ConfigMissingValuesError, match=rf"hle_equivalence_llm_judge_{agent}\..*sandbox_runtime_dir"):
+        compose_profile_on_hle(agent, monkeypatch, runtime_dir=False)
