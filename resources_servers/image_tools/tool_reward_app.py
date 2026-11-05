@@ -8,7 +8,9 @@ accumulated. Under an Environment Server this resources server does both instead
 - It sends the final assistant message to the verifier the row's ``image_tools_base_agent_ref`` selects, from the
   agent's ``resource_servers_by_agent``. Those verifiers keep no session state, so it does not seed them.
 - It recomputes the tool reward by replaying the rollout's assistant turns through the agent's image tool settings,
-  with the row's own source images, and checks the replay ran as many tools as the agent reports.
+  with the row's own source images, and checks the replay ran as many tools as the agent reports. A rollout from
+  another agent, or one the replay cannot reproduce, fails verification with a terminal 422: running the episode
+  again would not change either.
 - The reward is the verifier's reward plus the tool reward, at most 1.0.
 """
 
@@ -129,6 +131,19 @@ class ImageToolsRewardServer(SimpleResourcesServer):
                 f"No verifier for image_tools_base_agent_ref {base_agent_name!r}; "
                 f"the agent's resource_servers_by_agent names {sorted(self._verifiers)}",
             )
+        files = (body.response.model_extra or {}).get(IMAGE_TOOLS_ROLLOUT_KEY)
+        if not isinstance(files, dict):
+            raise HTTPException(
+                422, f"The response has no {IMAGE_TOOLS_ROLLOUT_KEY}; this server scores image tools agent rollouts"
+            )
+        if files.get("agent") != self.config.agent_server.name:
+            # The replay uses the settings of the agent this server names; another agent's rollout would be scored
+            # with the wrong rewards.
+            raise HTTPException(
+                422,
+                f"The rollout came from agent {files.get('agent')!r}, but this server replays "
+                f"{self.config.agent_server.name!r}'s settings",
+            )
         # The verifier scores the final answer, as it does for the agent's own /run.
         verify_body = body.model_dump(mode="json") | {
             "response": _final_assistant_response(body.response).model_dump(mode="json")
@@ -140,14 +155,15 @@ class ImageToolsRewardServer(SimpleResourcesServer):
         result = await get_response_json(verify_response)
 
         episode = await asyncio.to_thread(self._replay, body)
-        files = (body.response.model_extra or {}).get(IMAGE_TOOLS_ROLLOUT_KEY) or {}
         tool_call_count = int(episode.metadata.get("tool_call_count", 0))
-        reported = files.get("image_tools_output_paths")
-        if reported is not None and len(reported) != tool_call_count:
-            # A replay that ran other tools than the agent did, for example because a source image did not load here,
-            # would score a different rollout.
-            raise RuntimeError(
-                f"Replaying the rollout ran {tool_call_count} image tools, but the agent reports {len(reported)}"
+        reported = files.get("image_tools_output_paths") or []
+        if len(reported) != tool_call_count:
+            # A replay that ran other tools than the agent did would score a different rollout. The usual cause is a
+            # source image this server cannot read, such as a relative path or a file only on the agent's host.
+            raise HTTPException(
+                422,
+                f"Replaying the rollout ran {tool_call_count} image tools, but the agent reports {len(reported)}; "
+                "check that this server can read the row's source images",
             )
 
         base_reward = float(result.get("reward", 0.0))
@@ -161,7 +177,7 @@ class ImageToolsRewardServer(SimpleResourcesServer):
                 "reward": min(1.0, base_reward + episode.aux_reward),
                 "image_tools_call_count": tool_call_count,
                 "image_tools_error_count": int(episode.metadata.get("tool_error_count", 0)),
-                "image_tools_output_paths": reported or [],
+                "image_tools_output_paths": reported,
                 "image_tools_generation_image_paths": files.get("image_tools_generation_image_paths") or [],
                 "image_tools_base_agent_ref": body.image_tools_base_agent_ref,
                 "response": body.response.model_dump(mode="json"),

@@ -130,7 +130,9 @@ Environment Server instead of its own `/run`
 - It recomputes the tool reward by replaying the rollout's assistant turns through
   the same tool logic, with the agent's image tool settings and the row's source
   images, in a temporary crop directory. If the replay runs a different number of
-  tools than the agent reports, verification fails instead of scoring another rollout.
+  tools than the agent reports, for example because this server cannot read a source
+  image, verification fails with a terminal 422 instead of scoring another rollout.
+  So does a rollout from an agent other than the one whose settings it replays.
 - The reward is the verifier's reward plus the tool reward, at most 1.0, as in the
   agent's `/run`.
 

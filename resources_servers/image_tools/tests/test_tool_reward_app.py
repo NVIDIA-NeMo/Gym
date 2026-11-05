@@ -85,7 +85,9 @@ def _server(agent_settings: dict[str, Any], base_reward: float = 0.5) -> tuple[I
     return server, client.post
 
 
-def _request(image: Path, output: list[dict[str, Any]], reported_paths: list[str] | None = None) -> Any:
+def _request(
+    image: Path, output: list[dict[str, Any]], reported_paths: list[str], agent: str = "image_tools_simple_agent"
+) -> Any:
     response = {
         "id": "rollout",
         "created_at": 0,
@@ -96,11 +98,11 @@ def _request(image: Path, output: list[dict[str, Any]], reported_paths: list[str
         "tool_choice": "auto",
         "tools": [],
     }
-    if reported_paths is not None:
-        response[IMAGE_TOOLS_ROLLOUT_KEY] = {
-            "image_tools_output_paths": reported_paths,
-            "image_tools_generation_image_paths": [[], reported_paths],
-        }
+    response[IMAGE_TOOLS_ROLLOUT_KEY] = {
+        "agent": agent,
+        "image_tools_output_paths": reported_paths,
+        "image_tools_generation_image_paths": [[], reported_paths],
+    }
     return ImageToolsRewardVerifyRequest.model_validate(
         {
             "responses_create_params": {
@@ -165,23 +167,56 @@ async def test_settings_the_agent_leaves_unset_take_the_agents_defaults(image: P
     server, _ = _server({}, base_reward=0.0)
     output = [_message(ZOOM), _message("observation", role="user"), _message("A car.")]
 
-    result = (await server.verify(_request(image, output))).model_dump()
+    result = (await server.verify(_request(image, output, reported_paths=["/agent/crop.jpeg"]))).model_dump()
 
     # ImageToolsSettings' default tool_success_reward, as the agent would have used.
     assert result["image_tools_aux_reward"] == pytest.approx(0.02)
 
 
-async def test_a_replay_that_disagrees_with_the_agent_fails_verification(image: Path) -> None:
+async def test_a_replay_that_disagrees_with_the_agent_is_a_terminal_failure(image: Path) -> None:
     server, _ = _server({}, base_reward=1.0)
     output = [_message(ZOOM), _message("observation", role="user"), _message("A car.")]
 
-    with pytest.raises(RuntimeError, match="ran 1 image tools, but the agent reports 2"):
+    with pytest.raises(HTTPException) as error:
         await server.verify(_request(image, output, reported_paths=["/a.jpeg", "/b.jpeg"]))
+
+    assert error.value.status_code == 422
+    assert "ran 1 image tools, but the agent reports 2" in error.value.detail
+
+
+async def test_a_source_image_this_server_cannot_read_is_a_terminal_failure(tmp_path: Path) -> None:
+    server, _ = _server({}, base_reward=1.0)
+    output = [_message(ZOOM), _message("observation", role="user"), _message("A car.")]
+
+    with pytest.raises(HTTPException) as error:
+        await server.verify(_request(tmp_path / "missing.png", output, reported_paths=["/agent/crop.jpeg"]))
+
+    assert error.value.status_code == 422
+    assert "ran 0 image tools, but the agent reports 1" in error.value.detail
+
+
+@pytest.mark.parametrize("agent", ["other_image_tools_agent", None])
+async def test_a_rollout_from_another_agent_is_refused(image: Path, agent: str | None) -> None:
+    server, post = _server({})
+    body = _request(image, [_message("A car.")], reported_paths=[])
+    rollout = body.response.model_extra[IMAGE_TOOLS_ROLLOUT_KEY]
+    if agent is None:
+        del body.response.model_extra[IMAGE_TOOLS_ROLLOUT_KEY]
+    else:
+        rollout["agent"] = agent
+
+    with pytest.raises(HTTPException) as error:
+        await server.verify(body)
+
+    assert error.value.status_code == 422
+    post.assert_not_awaited()
 
 
 async def test_a_row_without_a_known_base_agent_is_refused(image: Path) -> None:
     server, post = _server({})
-    body = _request(image, [_message("A car.")]).model_copy(update={"image_tools_base_agent_ref": {"name": "other"}})
+    body = _request(image, [_message("A car.")], reported_paths=[]).model_copy(
+        update={"image_tools_base_agent_ref": {"name": "other"}}
+    )
 
     with pytest.raises(HTTPException) as error:
         await server.verify(body)

@@ -20,7 +20,7 @@ See `configs/image_tools_agent.yaml` for the available settings.
 The agent also serves the agent sessions API, so a `single_agent_turn` Environment Server can run it
 (`configs/image_tools_agent_single_agent_turn.yaml`). A session takes no granted tools and no sandbox: the image tools
 run in the agent. The session's one activation runs the same tool loop; a retried activation returns the rollout it
-already ran. The response lists the crop files the rollout wrote under `image_tools_rollout`.
+already ran. The response names the agent and lists the crop files the rollout wrote under `image_tools_rollout`.
 
 Under the Environment Server, the `image_tools_reward` resources server verifies instead of `/run`: it routes each row
 by `image_tools_base_agent_ref`, verifies the final answer and adds the tool reward, which it recomputes from the

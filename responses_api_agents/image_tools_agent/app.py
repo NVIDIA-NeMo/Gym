@@ -110,9 +110,10 @@ def _extract_text_from_response(response: NeMoGymResponse) -> str:
     return "\n".join(texts).strip()
 
 
-def _with_rollout_files(response: NeMoGymResponse, rollout_info: dict[str, Any]) -> NeMoGymResponse:
-    """Carry the crop files this rollout wrote on the response, where the tool reward verifier copies them from."""
+def _with_rollout_files(response: NeMoGymResponse, rollout_info: dict[str, Any], agent: str) -> NeMoGymResponse:
+    """Carry the agent's name and the crop files this rollout wrote on the response, for the tool reward verifier."""
     files = {
+        "agent": agent,
         "image_tools_output_paths": rollout_info["image_tools_output_paths"],
         "image_tools_generation_image_paths": rollout_info["image_tools_generation_image_paths"],
     }
@@ -218,7 +219,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             )
             for key, value in model_cookies.items():
                 response.set_cookie(key, value)
-            return _with_rollout_files(result, rollout_info)
+            return _with_rollout_files(result, rollout_info, self.config.name)
         state = self._require_agent_session(agent_session_id)
         if not isinstance(state, _ImageToolsSession):
             raise TypeError("Expected image tools session state")
@@ -227,7 +228,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             result, _, rollout_info = await self._run_image_tools_loop(
                 body=body, row_metadata={}, initial_cookies={}, model_url_path=model_url_path
             )
-            return _with_rollout_files(result, rollout_info)
+            return _with_rollout_files(result, rollout_info, self.config.name)
 
         try:
             return await state.operations.execute(index=1, request=body, operation=activation)

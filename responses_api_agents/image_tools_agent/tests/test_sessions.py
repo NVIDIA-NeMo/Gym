@@ -193,6 +193,7 @@ def test_a_session_activation_runs_the_tool_loop_once(tmp_path: Path, row: dict[
     assert reply.status_code == 200, reply.text
     body = reply.json()
     assert [item["role"] for item in body["output"]] == ["assistant", "user", "assistant"]
+    assert body[IMAGE_TOOLS_ROLLOUT_KEY]["agent"] == "image_tools_simple_agent"
     crops = body[IMAGE_TOOLS_ROLLOUT_KEY]["image_tools_output_paths"]
     assert len(crops) == 1 and Path(crops[0]).exists()
     assert body[IMAGE_TOOLS_ROLLOUT_KEY]["image_tools_generation_image_paths"] == [[], crops]
