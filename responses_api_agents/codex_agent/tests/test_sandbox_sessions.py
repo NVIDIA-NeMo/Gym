@@ -3653,7 +3653,7 @@ async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(
 
     from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
     from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore
-    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
+    from tests.helpers.single_agent_turn import _environment_server, _request, _Response
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     agent, sandbox = setup

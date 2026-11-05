@@ -424,6 +424,7 @@ class TestRunClaudeCode:
             # the staged dir + settings must exist while the subprocess runs
             captured["dir_exists_during_run"] = (Path(config_dir) / "settings.json").is_file()
             captured["sandbox"] = env.get("IS_SANDBOX")
+            captured["background_tasks_disabled"] = env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
             return FakeProc()
 
         with (
@@ -436,6 +437,7 @@ class TestRunClaudeCode:
         assert "--mcp-config" in captured["cmd"]
         assert "be terse" in captured["cmd"]
         assert captured["sandbox"] == "1"
+        assert captured["background_tasks_disabled"] == "1"
         assert captured["dir_exists_during_run"] is True
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()
@@ -1267,7 +1269,7 @@ class TestCaptureFriendlyTranscript:
             )
             served.id = f"resp_{call_id}"
             entry = TokenEntry(
-                rollout_id="rollout",
+                capture_key="rollout",
                 model_call_id=call_id,
                 response_id=served.id,
                 prompt_token_ids=[1],

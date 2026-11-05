@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestServer
 from pydantic import ValidationError
 
 from nemo_gym.client.http_client import raise_boundary_failure
-from nemo_gym.core.episode_types import (
+from nemo_gym.core.failure_records import (
     FailureEvent,
     ModelFailureDetails,
     SandboxFailureDetails,
