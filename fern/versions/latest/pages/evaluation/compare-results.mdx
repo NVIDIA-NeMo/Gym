@@ -290,17 +290,17 @@ gym eval compare-suite \
     --output-dir results/suite-with-health
 ```
 
-Gym checks each rollout JSONL referenced by the suite, together with its own failure and materialized-input siblings. The check covers **all agents in each file**, even when the comparison selects one agent. It scans the saved records afresh rather than reading an existing `quality_summary.json`. `--health-check-workers` must be a positive integer; by default Gym uses up to eight available CPUs.
+Gym checks each rollout JSONL referenced by the suite, together with its run history, failure sidecar, and materialized inputs when available. The check covers **all agents in each file**, even when the comparison selects one agent. For runs with a recovery manifest, it checks only the selected completed attempts; superseded attempts do not count as additional records or affect trajectory verdicts. Loose JSONL files are checked record by record. Gym reads this evidence afresh rather than reusing an existing `quality_summary.json`. `--health-check-workers` must be a positive integer; by default Gym uses up to eight available CPUs.
 
 Gym validates the full comparison and checks that the configured health output directory is writable before starting any health scans.
 
-Suite health checks set both final and retryable failure thresholds to **zero**: any recorded failure that has no later saved result makes the run unhealthy and appears in the warning. Zero failures pass. Evaluating these thresholds requires the rollout file's materialized-input sibling to establish the expected rollout count; without that inventory, failure-fraction checks are unobserved, but known failures still appear in warnings. These suite-specific thresholds replace any saved failure limits.
+Suite health checks set both final and retryable failure thresholds to **zero**: any unresolved failure makes the run unhealthy and appears in the warning. Managed runs select failures from their run history; loose files use the latest sidecar failure for each rollout without a saved result. Zero failures pass. Evaluating these thresholds requires the expected rollout count from the run's inventory; without that inventory, failure-fraction checks are unobserved, but known failures still appear in warnings. These suite-specific thresholds replace any saved failure limits.
 
 During checking, the terminal shows each file when its scan starts, phase changes, record-progress updates approximately every 30 seconds, and final health counts and elapsed time. These progress messages are enabled by default; no `--verbose` flag is needed.
 
 The report's **Warnings** section and terminal output show one summary line per affected source. A source with detected findings is **unhealthy**; missing evidence is **unobserved**, which does not establish that the trajectories are unhealthy. If a source cannot be checked, for example because its rollout file is missing or unreadable, the warning reports health as unavailable. The comparison JSON retains health counts and issue summaries.
 
-`healthy`, `unhealthy`, and `unobserved` count saved records; `failed` counts rollouts without a saved result (`null` when unavailable). Therefore, `failed.total > 0` can coexist with `unhealthy = 0`.
+`healthy`, `unhealthy`, and `unobserved` count checked completed records, using selected attempts for managed runs; `failed` counts unresolved rollout failures (`null` when unavailable). Therefore, `failed.total > 0` can coexist with `unhealthy = 0`.
 
 Health findings are advisory: they do not change comparison scores, weights, or confidence intervals. Without `--check-health`, comparison continues to read aggregate metrics without opening the rollout JSONL. The separate `gym eval compare` command is unchanged.
 

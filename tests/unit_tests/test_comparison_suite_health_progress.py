@@ -14,6 +14,8 @@ import pytest
 import nemo_gym.eval.comparison.suite.health as health
 import nemo_gym.rollouts.rollout_health as rollout_health
 from nemo_gym.rollouts.rollout_health import run_health_checks
+from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.utils.path_utils import failures_path_for, materialized_path_for
 
 
@@ -169,6 +171,46 @@ def test_health_pipeline_reports_progress_in_caller_without_changing_results(tmp
         None,
     )
     assert updates[-1][:3] == ("writing health reports", 3, 3)
+
+
+def test_managed_history_progress_counts_selected_records_without_changing_reports(tmp_path: Path) -> None:
+    path = tmp_path / "rollouts.jsonl"
+    inputs = tmp_path / "tasks.jsonl"
+    rows = [{"agent_ref": {"name": "agent"}, "_ng_task_index": 0, "_ng_rollout_index": i} for i in range(2)]
+    inputs.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    manifest = RunManifest.create(inputs, rows, {}, {"agent": {"responses_api_agents": {"impl": {}}}})
+    response = {"output": [{"type": "message", "role": "assistant", "content": "ok"}]}
+    with RolloutStore.start_or_resume(path, lambda: (rows, manifest), resume=False) as store:
+        pending = store.pending(3)
+        for row in pending:
+            store.record_dispatch(row)
+            store.record_outcome(row | {"response": response})
+        store.allocate_attempt(pending[0])
+        store.record_dispatch(pending[0])
+        store.record_outcome(pending[0] | {"response": response})
+    assert len(path.read_bytes().splitlines()) == 3
+    sources = {file: file.read_bytes() for file in tmp_path.iterdir() if file.is_file()}
+    directory = tmp_path / "reports"
+    without_progress = run_health_checks(path, output_dir=directory, workers=1)
+    expected_reports = (without_progress.summary_path.read_bytes(), without_progress.verdicts_path.read_bytes())
+    updates: list[tuple[str, int, int | None]] = []
+
+    def record_progress(phase: str, completed: int, total: int | None) -> None:
+        updates.append((phase, completed, total))
+
+    with_progress = run_health_checks(path, output_dir=directory, workers=1, progress=record_progress)
+
+    assert with_progress.summary == without_progress.summary
+    assert with_progress.rollouts == without_progress.rollouts
+    assert with_progress.summary["run"]["artifacts"]["records"] == 2
+    assert [(phase, count, total) for phase, count, total in updates if phase == "indexing rollout files"] == [
+        ("indexing rollout files", 0, None),
+        ("indexing rollout files", 1, None),
+        ("indexing rollout files", 2, None),
+    ]
+    assert [(count, total) for phase, count, total in updates if phase == "checking records"][-1] == (2, 2)
+    assert (with_progress.summary_path.read_bytes(), with_progress.verdicts_path.read_bytes()) == expected_reports
+    assert {file: file.read_bytes() for file in sources} == sources
 
 
 def test_health_progress_preserves_serial_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

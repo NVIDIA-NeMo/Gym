@@ -422,6 +422,7 @@ def _index_jsonl(
                     )
                 )
                 ordinal += 1
+                _notify_progress(progress, "indexing rollout files", ordinal, None)
             continue
         with path.open("rb") as handle:
             stat = os.fstat(handle.fileno())

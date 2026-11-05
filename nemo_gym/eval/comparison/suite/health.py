@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
 
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.eval.comparison.suite.schema import SuiteHealthSummary
 
 
@@ -45,10 +46,11 @@ def check_rollout_file_health(
 ) -> SuiteHealthSummary:
     """Check this exact JSONL and its own sibling inventory and failures, without changing source artifacts.
 
-    This checks all agents in the file. It does not resolve merged-run shards, reuse
-    saved quality reports or failure limits, or read separately configured inventories.
+    This checks all agents in the file, using selected completed attempts for managed
+    histories and every saved record for loose files. It does not resolve merged-run
+    shards, reuse saved quality reports or failure limits, or read separately configured inventories.
     Both failure thresholds are zero, flagging any unresolved failure when the expected
-    rollout count is known from the file's own materialized-input sibling.
+    rollout count is known from its run history or materialized-input sibling.
     ``output_dir`` retains the public checker's reports. If omitted, the reports are
     discarded with a temporary directory. Phase changes and periodic record progress
     are logged while the checker processes the file.
@@ -56,7 +58,7 @@ def check_rollout_file_health(
     started = monotonic()
     logger.info("Checking rollout file health: %s", path)
     from nemo_gym.rollouts.health.types import RunHealthLimits
-    from nemo_gym.rollouts.rollout_health import JournalHealthUnavailable, run_health_checks
+    from nemo_gym.rollouts.rollout_health import run_health_checks
 
     directory_context = (
         nullcontext(output_dir) if output_dir is not None else TemporaryDirectory(prefix="gym-suite-health-")
@@ -70,7 +72,7 @@ def check_rollout_file_health(
                 limits=RunHealthLimits(max_not_final_failure_fraction=0, max_final_failure_fraction=0),
                 progress=_log_health_progress(path, started),
             )
-        except (OSError, ValueError, TypeError, JournalHealthUnavailable) as error:
+        except (OSError, ValueError, TypeError, ConfigError) as error:
             reason = " ".join(str(error).split())
             logger.warning(
                 "Rollout file health unavailable: %s (%.1f seconds elapsed): %s", path, monotonic() - started, reason

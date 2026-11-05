@@ -583,7 +583,10 @@ def test_malformed_failure_sidecar_warns_without_losing_comparison_reports(tmp_p
     assert result.warnings[0] in (output / "suite_compare_report.md").read_text()
 
 
-def test_superseded_run_history_warns_without_losing_comparison_reports(tmp_path: Path) -> None:
+@pytest.mark.parametrize("selected_state", ["healthy", "unhealthy"])
+def test_managed_history_checks_selected_attempts_without_changing_comparison(
+    tmp_path: Path, selected_state: str
+) -> None:
     path, _, original_candidate = _suite(tmp_path)
     candidate = tmp_path / "managed-candidate" / "rollouts.jsonl"
     candidate.parent.mkdir()
@@ -599,9 +602,12 @@ def test_superseded_run_history_warns_without_losing_comparison_reports(tmp_path
         for row in pending:
             store.record_dispatch(row)
             repeat = row["_ng_rollout_index"]
-            store.record_outcome(row | _record(repeat) | {"reward": 0.4 + repeat * 0.2})
+            superseded_state = "unhealthy" if selected_state == "healthy" else "healthy"
+            state = superseded_state if repeat == 0 else "healthy"
+            store.record_outcome(row | _record(repeat, state=state) | {"reward": 0.4 + repeat * 0.2})
         store.allocate_attempt(pending[0])
-        store.record_outcome(pending[0] | _record(0) | {"reward": 0.4})
+        store.record_outcome(pending[0] | _record(0, state=selected_state) | {"reward": 0.4})
+    assert len(candidate.read_bytes().splitlines()) == 3
     aggregate_metrics_path_for(candidate).write_bytes(aggregate_metrics_path_for(original_candidate).read_bytes())
     manifest = yaml.safe_load(path.read_text())
     manifest["models"]["model"]["test"]["candidate"] = {"rollouts": str(candidate)}
@@ -609,17 +615,28 @@ def test_superseded_run_history_warns_without_losing_comparison_reports(tmp_path
     sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
     without = _compare(path)
 
-    result = _compare(path, check_health=True)
+    result = _compare(path, check_health=True, health_output_dir=tmp_path / "health-reports")
 
     cell = result.cells[0]
     assert cell.baseline.health.record_count == cell.baseline.health.healthy == 2
     assert rollout_health_warning(cell.baseline.health) is None
-    assert cell.candidate.health.record_count is None
-    assert cell.candidate.health.failed is None
-    assert "superseded outcomes" in cell.candidate.health.unavailable_reason
-    assert "gym eval aggregate" in cell.candidate.health.unavailable_reason
-    assert len(result.warnings) == 1
-    assert "model/test candidate: Rollout file health: unavailable" in result.warnings[0]
+    summary = cell.candidate.health
+    expected_unhealthy = int(selected_state == "unhealthy")
+    assert summary.unavailable_reason is None
+    assert summary.record_count == 2
+    assert summary.healthy == 2 - expected_unhealthy
+    assert summary.unhealthy == expected_unhealthy
+    assert summary.unobserved == 0
+    assert summary.failed.total == 0
+    assert summary.run_healthy is True
+    assert "rollout_duplicate_identity" not in summary.issues
+    if expected_unhealthy:
+        assert summary.issues["model_call_zero_completion_tokens"] == 1
+        assert len(result.warnings) == 1
+        assert "model/test candidate: Rollout file health: 1 healthy, 1 unhealthy" in result.warnings[0]
+    else:
+        assert summary.issues == {}
+        assert result.warnings == []
     assert result.overall == without.overall
     assert result.per_model == without.per_model
     assert cell.statistics == without.cells[0].statistics
@@ -637,9 +654,46 @@ def test_superseded_run_history_warns_without_losing_comparison_reports(tmp_path
     restored = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
     assert restored == result
     markdown = (output / "suite_compare_report.md").read_text()
-    assert "model/test candidate: Rollout file health: unavailable" in markdown
-    assert "superseded outcomes" in markdown
-    assert "gym eval aggregate" in markdown
+    assert "Rollout file health: unavailable" not in markdown
+    assert all(warning in markdown for warning in result.warnings)
+    saved = orjson.loads(summary.summary_path.read_bytes())["run"]
+    assert saved["artifacts"]["records"] == 2
+    assert saved["verdicts"] == {"healthy": 2 - expected_unhealthy, "unhealthy": expected_unhealthy, "unobserved": 0}
+    verdicts = [orjson.loads(line) for line in summary.verdicts_path.read_bytes().splitlines()]
+    assert len(verdicts) == 2
+    assert sum(verdict["verdict"] == "unhealthy" for verdict in verdicts) == expected_unhealthy
+
+
+def test_invalid_recovery_manifest_warns_without_changing_comparison(tmp_path: Path) -> None:
+    path, _, candidate = _suite(tmp_path)
+    _write_rows(failures_path_for(candidate), [])
+    manifest_path_for(candidate).write_text("{invalid recovery manifest")
+    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+    without = _compare(path)
+
+    result = _compare(path, check_health=True)
+
+    cell = result.cells[0]
+    assert cell.baseline.health.record_count == cell.baseline.health.healthy == 2
+    assert rollout_health_warning(cell.baseline.health) is None
+    assert cell.candidate.health.record_count is None
+    assert "Cannot read recovery manifest" in cell.candidate.health.unavailable_reason
+    assert len(result.warnings) == 1
+    assert "model/test candidate: Rollout file health: unavailable" in result.warnings[0]
+    assert result.overall == without.overall
+    assert result.per_model == without.per_model
+    assert cell.statistics == without.cells[0].statistics
+    assert cell.model_weight == without.cells[0].model_weight
+    assert cell.overall_weight == without.cells[0].overall_weight
+    assert cell.candidate.repeat_scores == without.cells[0].candidate.repeat_scores
+    assert cell.candidate.coverage == without.cells[0].candidate.coverage
+    assert {file: file.read_bytes() for file in sources} == sources
+    output = tmp_path / "comparison"
+    written = write_suite_reports(result, output, "both")
+    assert set(written) == {output / "suite_compare_report.md", output / "suite_compare_report.json"}
+    restored = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
+    assert restored == result
+    assert result.warnings[0] in (output / "suite_compare_report.md").read_text()
 
 
 def test_health_summary_contract_errors_are_not_reported_as_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -821,6 +875,28 @@ def test_health_report_symlinks_cannot_overwrite_another_source(tmp_path: Path, 
     with pytest.raises(ConfigError, match="choose another --health-check-output-dir"):
         _compare(path, check_health=True, health_output_dir=output)
     assert {file: file.read_bytes() for file in sources} == before
+
+
+def test_explicit_comparison_inventory_does_not_unprotect_health_sibling_inventory(tmp_path: Path) -> None:
+    path, baseline, _ = _suite(tmp_path)
+    sibling_inventory = materialized_path_for(baseline)
+    explicit_inventory = tmp_path / "comparison-inputs.jsonl"
+    explicit_inventory.write_bytes(sibling_inventory.read_bytes())
+    manifest = yaml.safe_load(path.read_text())
+    manifest["models"]["model"]["test"]["baseline"]["materialized_inputs"] = explicit_inventory.name
+    path.write_text(yaml.safe_dump(manifest))
+    output = tmp_path / "health-output"
+    result = _compare(path, check_health=True, health_output_dir=output)
+    assert result.cells[0].baseline.materialized_inputs == explicit_inventory
+    summary_path = result.cells[0].baseline.health.summary_path
+    summary_path.unlink()
+    summary_path.symlink_to(sibling_inventory)
+    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+
+    with pytest.raises(ConfigError, match="would overwrite source artifacts"):
+        _compare(path, check_health=True, health_output_dir=output)
+
+    assert {file: file.read_bytes() for file in sources} == sources
 
 
 def test_suite_report_cannot_overwrite_retained_health_report(tmp_path: Path) -> None:
