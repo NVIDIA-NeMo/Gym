@@ -107,8 +107,17 @@ from nemo_gym.config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.core import NeMoGymResponse, TaskId, failure_kinds
-from nemo_gym.core.failure_kinds import EPISODE_FAILED
+from nemo_gym.core import (
+    EPISODE_FAILED,
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    FailureBoundary,
+    NeMoGymResponse,
+    NgFailureEvent,
+    TaskId,
+    failure_kinds,
+    sdk_error_details,
+)
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DATASET_FILE,
@@ -136,24 +145,21 @@ from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxAccess, s
 from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
     CleanupContext,
-    FailureBoundary,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     SingleAgentTurnFailure,
     SingleAgentTurnResult,
     ToolAccess,
     dependency_failure,
+    handled_episode_failure,
+    is_handled_episode_failure,
 )
-from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_handled_episode_failure
 from nemo_gym.trajectory import (
     AgentObservationBundle,
     AtifExportError,
     TrajectoryRecord,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

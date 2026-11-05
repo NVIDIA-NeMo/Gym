@@ -20,16 +20,19 @@ from pydantic import BaseModel, Field, TypeAdapter
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
+    HARNESS_TERMINATION_UNCONFIRMED,
+    FailureBoundary,
+    FailureReportRow,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    agent_route_failure,
+    report_for_current_request,
 )
-from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
-from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_runtime import FailureBoundary
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -40,7 +43,6 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, agent_route_failure
 from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets
 
 

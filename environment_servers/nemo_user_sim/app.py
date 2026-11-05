@@ -46,6 +46,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -65,7 +66,6 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,
