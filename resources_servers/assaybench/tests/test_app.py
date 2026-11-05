@@ -30,7 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 from resources_servers.assaybench.app import (
     EXTRACTION_DSPY_ANSWER,
     EXTRACTION_NONE,

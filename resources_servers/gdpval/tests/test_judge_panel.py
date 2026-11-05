@@ -24,7 +24,7 @@ from openai import OpenAI
 
 import nemo_gym.client.http_client
 import nemo_gym.client.server_client
-from nemo_gym import server_utils
+from nemo_gym.server_runtime import base_server
 from resources_servers.gdpval import app as gdpval_app
 from resources_servers.gdpval import setup_libreoffice
 from resources_servers.gdpval.comparison import (
@@ -109,7 +109,7 @@ def test_benchmark_panel_reaches_intended_upstream_models_and_credentials(monkey
         fields.update(host="127.0.0.1", port=12000 + len(proxies), name=name)
         proxy = proxy_app.SimpleModelServer(
             config=proxy_app.SimpleModelServerConfig(**fields),
-            server_client=MagicMock(spec=server_utils.ServerClient, global_config_dict=config),
+            server_client=MagicMock(spec=base_server.ServerClient, global_config_dict=config),
         )
         proxies[f"http://{fields['host']}:{fields['port']}/v1"] = proxy
     monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", lambda: config)

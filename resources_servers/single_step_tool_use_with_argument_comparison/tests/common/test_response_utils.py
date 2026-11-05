@@ -17,11 +17,11 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from resources_servers.single_step_tool_use_with_argument_comparison.common.response_utils import extract_action
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
     FunctionCallAction,

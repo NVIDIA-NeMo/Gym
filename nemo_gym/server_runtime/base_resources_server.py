@@ -24,7 +24,17 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+)
 from starlette.middleware import Middleware
 
 
@@ -37,7 +47,7 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, validate_failure_kind
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -54,10 +64,10 @@ from nemo_gym.server_runtime._checkpoint.resources import (
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
+from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
 from nemo_gym.verification.judge import judge_failsafe
@@ -262,13 +272,24 @@ class ResourcesSeedSessionRequest(BaseModel):
 
 
 class ResourcesSeedSessionResponse(BaseModel):
-    """Confirm resources state and return optional agent access."""
+    """Confirm resources state and return optional agent access and an initial observation."""
 
     model_config = ConfigDict(extra="forbid")
 
     resources_session_id: str
     resources_tools: MCPServerMetadata | None = None
     sandbox_access: SandboxAccess | None = None
+    # The single_agent_turn Environment Server appends this to the agent's input as one user message.
+    observation: str | None = None
+
+    # A return annotation would replace the model's serialization schema with that container schema.
+    @model_serializer(mode="wrap")
+    def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
+        """Preserve the seed wire shape when the server supplies no observation field."""
+        result = handler(self)
+        if "observation" not in self.model_fields_set:
+            result.pop("observation", None)
+        return result
 
 
 VerificationInputT = TypeVar("VerificationInputT")
@@ -499,6 +520,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # Each waits out a checkpoint before its handler runs, needs a rollout prefix,
     # and binds the session to that rollout when it succeeds.
     checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/seed_session",)
+    # True for a server whose /verify may ask a model through a client that notes no request (an external SDK such
+    # as openai or anthropic). Its verifier then saves no grading record of its own, so its trials are observed only
+    # through a recorded grading operation or a saved grading artifact.
+    grading_may_use_uninstrumented_model: ClassVar[bool] = False
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
@@ -546,6 +571,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 observe_verifier(
                     judge_failsafe(self.verify),
                     enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
+                    verifier_name=self.config.name,
+                    uninstrumented_models=self.grading_may_use_uninstrumented_model,
                 ),
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
@@ -736,7 +763,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         session. An app built without session routing, such as one under ``TestClient``, gives a new session a random
         ID instead, so release by ``body.resources_session_id`` to be correct either way.
 
-        ``nemo_gym.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
+        ``nemo_gym.server_runtime.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
         """
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 

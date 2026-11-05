@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from copy import deepcopy
-from types import UnionType
+from types import SimpleNamespace, UnionType
 from typing import (
     Annotated,
     Any,
@@ -103,6 +103,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseMcpListTools,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
@@ -110,7 +111,7 @@ from nemo_gym.core.responses_api_types import (
     accumulate_response_usage,
     training_variant_of,
 )
-from nemo_gym.responses_converter import (
+from nemo_gym.models.chat_completions_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
@@ -179,6 +180,24 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
         assert (
             InputAdditionalTools.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True) == replay_dump
         )
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            NeMoGymResponseOutputMessage(
+                id="msg_1", content=[NeMoGymResponseOutputText(text="hi", annotations=[])], status="completed"
+            ),
+            NeMoGymResponseFunctionToolCall(call_id="call_1", name="get_weather", arguments="{}"),
+            NeMoGymResponseReasoningItem(id="rs_1", summary=[]),
+        ],
+        ids=["message", "function_call", "reasoning"],
+    )
+    def test_typed_output_item_keeps_its_default_tags_on_replay(self, item: Any) -> None:
+        # A typed item left at its default type and role must replay as the same item, not lose those tags.
+        replay = NeMoGymResponseCreateParamsNonStreaming(input=[item])
+
+        assert type(replay.input[0]) is type(item)
+        assert replay.input[0].model_dump(mode="json") == item.model_dump(mode="json")
 
     def test_failed_computer_output_preserved_then_status_removed_for_replay(self) -> None:
         payload = {
@@ -1833,7 +1852,7 @@ def test_gym_union_represents_every_sdk_item_type(tag: str) -> None:
         f"openai {openai.__version__} accepts a {tag!r} item and "
         f"NeMoGymResponseInputItem has no member for it.\n"
         f"Fix: add a NeMoGym* wrapper in nemo_gym/core/responses_api_types.py and list it in "
-        f"NeMoGymResponseInputItem. Then classify it in nemo_gym/responses_converter.py as "
+        f"NeMoGymResponseInputItem. Then classify it in nemo_gym/models/chat_completions_converter.py as "
         f"either _RESPONSE_OUTPUT_BOUNDARY_TYPES (the model generated it) or "
         f"_RESPONSE_NON_BOUNDARY_TYPES (a client-supplied result or bookkeeping).\n"
         f"If Gym should not represent it, add it to GYM_UNREPRESENTABLE_TYPES with the reason."
@@ -1856,7 +1875,7 @@ def test_every_sdk_item_type_is_classified(tag: str) -> None:
     assert is_boundary or is_not_boundary, (
         f"openai {openai.__version__} has an output item type {tag!r} that is in neither "
         f"_RESPONSE_OUTPUT_BOUNDARY_TYPES nor _RESPONSE_NON_BOUNDARY_TYPES "
-        f"(nemo_gym/responses_converter.py).\n"
+        f"(nemo_gym/models/chat_completions_converter.py).\n"
         f"Decide: did the model generate this item (boundary), or did the client supply it as a "
         f"tool result / approval / bookkeeping (not a boundary)? Defaulting is not safe."
     )
@@ -1911,9 +1930,9 @@ def _classes_the_converter_can_emit() -> List[str]:
     import ast
     import inspect
 
-    from nemo_gym import responses_converter
+    from nemo_gym.models import chat_completions_converter
 
-    tree = ast.parse(inspect.getsource(responses_converter))
+    tree = ast.parse(inspect.getsource(chat_completions_converter))
     func = next(
         node
         for node in ast.walk(tree)
@@ -1966,8 +1985,8 @@ def test_every_item_the_converter_can_emit_has_a_training_variant() -> None:
     registered = {cls.__name__ for cls in RESPONSES_TO_TRAIN}
     missing = sorted(set(emitted) - registered)
     assert not missing, (
-        f"ResponsesConverter.postprocess_assistant_message_dict can emit {missing}, and "
-        f"responses_converter.py hands response_output[-1] to training_variant_of(), so a "
+        f"ChatCompletionsConverter.postprocess_assistant_message_dict can emit {missing}, and "
+        f"chat_completions_converter.py hands response_output[-1] to training_variant_of(), so a "
         f"rollout carrying token IDs would fail there.\n"
         f"Fix: declare `class <Name>ForTraining(<Name>, TokenIDLogProbMixin)`, add it to "
         f"NeMoGymResponseInputItem, and register the pair in RESPONSES_TO_TRAIN."
@@ -2312,3 +2331,80 @@ def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> N
 
     assert "provider_specific_fields" not in params.messages[1]
     assert params.messages[1]["tool_calls"][0]["function"]["name"] == "bash"
+
+
+class TestUntypedInputItems:
+    """A replayed input item without a type is classified by its fields; one that fits no item is rejected."""
+
+    @pytest.mark.parametrize(
+        ("item", "tag"),
+        [
+            pytest.param({"name": "f", "arguments": "{}", "call_id": "c1"}, "function_call", id="function-call"),
+            pytest.param({"name": "f", "arguments": "{}"}, "mcp_call", id="call-without-call-id"),
+            pytest.param({"call_id": "c1", "output": "42"}, "function_call_output", id="function-call-output"),
+            pytest.param({"id": "rs_1", "summary": []}, "reasoning", id="reasoning"),
+        ],
+    )
+    def test_fields_name_the_item(self, item: dict, tag: str) -> None:
+        from nemo_gym.core.responses_api_types import _discriminate_response_input_item
+
+        assert _discriminate_response_input_item(item) == tag
+
+    def test_an_object_item_uses_its_own_type(self) -> None:
+        from nemo_gym.core.responses_api_types import _discriminate_response_input_item
+
+        assert _discriminate_response_input_item(SimpleNamespace(type="function_call")) == "function_call"
+
+    def test_an_item_with_a_non_string_type_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [{"type": 7, "content": "x"}]})
+
+
+@pytest.mark.parametrize(
+    ("model", "body"),
+    [
+        pytest.param("responses", "not a request", id="responses-non-object"),
+        pytest.param("chat", "not a request", id="chat-non-object"),
+        pytest.param("chat", {"messages": "not a list"}, id="chat-messages-not-a-list"),
+    ],
+)
+def test_a_malformed_request_body_fails_validation_without_replay_normalization(model: str, body: object) -> None:
+    # The replay normalizers leave a body they cannot normalize alone, so validation reports it.
+    from nemo_gym.core.responses_api_types import NeMoGymChatCompletionCreateParamsNonStreaming
+
+    cls = (
+        NeMoGymResponseCreateParamsNonStreaming
+        if model == "responses"
+        else NeMoGymChatCompletionCreateParamsNonStreaming
+    )
+    with pytest.raises(ValidationError):
+        cls.model_validate(body)
+
+
+def test_sum_from_list_adds_reported_counts() -> None:
+    total = NeMoGymResponseUsage.sum_from_list(
+        [_usage(cached_tokens=2, reasoning_tokens=1), _usage(cached_tokens=3, reasoning_tokens=4)]
+    )
+
+    assert (total.input_tokens, total.output_tokens, total.total_tokens) == (20, 10, 30)
+    assert (total.input_tokens_details.cached_tokens, total.output_tokens_details.reasoning_tokens) == (5, 5)
+
+
+@pytest.mark.parametrize("unknown_first", [True, False])
+def test_sum_from_list_keeps_an_unknown_detail_unknown(unknown_first: bool) -> None:
+    known = _usage(cached_tokens=2, reasoning_tokens=1)
+    unknown = _usage(cached_tokens=None, reasoning_tokens=None)
+
+    total = NeMoGymResponseUsage.sum_from_list([unknown, known] if unknown_first else [known, unknown])
+
+    # The reported totals still add up; a detail one usage did not report is unknown, not a measured zero.
+    assert (total.input_tokens, total.output_tokens, total.total_tokens) == (20, 10, 30)
+    assert total.input_tokens_details.cached_tokens is None
+    assert total.output_tokens_details.reasoning_tokens is None
+
+
+def test_sum_from_list_of_no_usages_is_a_known_zero() -> None:
+    total = NeMoGymResponseUsage.sum_from_list([])
+
+    assert (total.input_tokens, total.output_tokens, total.total_tokens) == (0, 0, 0)
+    assert (total.input_tokens_details.cached_tokens, total.output_tokens_details.reasoning_tokens) == (0, 0)

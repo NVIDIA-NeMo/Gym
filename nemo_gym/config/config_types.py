@@ -14,7 +14,9 @@
 # limitations under the License.
 import warnings
 from argparse import ArgumentParser
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -40,10 +42,29 @@ from rich.text import Text
 ########################################
 
 
+_COMMAND_LINE_IGNORED: ContextVar[bool] = ContextVar("nemo_gym_command_line_ignored", default=False)
+
+
+@contextmanager
+def ignoring_command_line() -> Iterator[None]:
+    """Build CLI config models from their given values alone, for a library caller.
+
+    A CLI config model otherwise reads `--help` from `sys.argv` and prints its help and exits on it. A program that
+    uses Gym as a library has its own command line, which Gym must neither read nor exit on.
+    """
+    token = _COMMAND_LINE_IGNORED.set(True)
+    try:
+        yield
+    finally:
+        _COMMAND_LINE_IGNORED.reset(token)
+
+
 class BaseNeMoGymCLIConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def pre_process(cls, data):
+        if _COMMAND_LINE_IGNORED.get():
+            return data
         parser = ArgumentParser(add_help=False)
         parser.add_argument("-h", "--help", action="store_true")
         args, _ = parser.parse_known_args()
@@ -205,6 +226,10 @@ class AmbiguousEnvironmentServerError(ConfigError, ValueError):
 
 class AmbiguousAgentRenameError(ConfigError, ValueError):
     """An environment server references an agent inherited by several new instances."""
+
+
+class AmbiguousResourcesRenameError(ConfigError, ValueError):
+    """An environment server references resources inherited by several new instances."""
 
 
 class AgentCompositionError(ConfigError, ValueError):
@@ -532,6 +557,8 @@ class DatasetConfig(BaseModel):
     type: DatasetType
     jsonl_fpath: str
     prepare_script: Optional[Path] = None
+    prepare_project: Optional[Path] = None
+    # Optional `uv pip install` arguments, preserved for existing preparation configs.
     prepare_dependencies: List[str] = Field(default_factory=list)
     taskset: Optional[str] = Field(
         default=None,
@@ -558,6 +585,8 @@ class DatasetConfig(BaseModel):
         data = handler(self)
         if self.prepare_script is None:
             data.pop("prepare_script", None)
+        if self.prepare_project is None:
+            data.pop("prepare_project", None)
         if not self.prepare_dependencies:
             data.pop("prepare_dependencies", None)
         return data
@@ -641,6 +670,9 @@ class BenchmarkDatasetConfig(BaseModel):
     )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # Isolated project containing the committed dependency lock for preparation.
+    prepare_project: Optional[Path] = None
+    # Optional `uv pip install` arguments, preserved for existing preparation configs.
     # Catalog metadata, as on `DatasetConfig`. A benchmark needs no license, and in-repo benchmark entries
     # spell theirs freely, so `license` stays an ignored extra here as it always was.
     domain: Optional[Domain] = Field(default=None, exclude_if=lambda value: value is None)
@@ -1024,8 +1056,9 @@ class AggregateMetrics(BaseModel):
 # Model Call Capture
 ########################################
 
-# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
-# the capture middleware in base_responses_api_model.py strips this prefix before routing.
+# Per-rollout model-call correlation.
+# Callers place the rollout id in the model-server URL.
+# The capture middleware in models/model_call_capture.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
 TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
