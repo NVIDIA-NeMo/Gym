@@ -71,6 +71,7 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
         ("deepswe", "deepswe"),
         ("swebench/verified", "swebench_verified"),
         ("swebench/multilingual", "swebench_multilingual"),
+        ("swebench/multimodal", "swebench_multimodal"),
         ("swebench/pro", "swebench_pro"),
         ("terminal_bench_2_1", "terminal_bench_2_1"),
     ],
