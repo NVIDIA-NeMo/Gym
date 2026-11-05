@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
+from copy import deepcopy
 from itertools import takewhile
 from typing import Any, Optional
 
@@ -92,12 +93,52 @@ def _summary_text_only_instruction(min_words: int) -> str:
     )
 
 
-def _summary_rejection_reason(content: Any, sanitized: str, min_words: int) -> str:
+def _summary_rejection_reason(content: Any, sanitized: str) -> str:
     if not isinstance(content, str):
-        return f"non-text content ({type(content).__name__})"
+        return "non_text"
     if not sanitized:
-        return "empty after removing leading reasoning"
-    return f"{len(sanitized.split())} words, below configured minimum {min_words}"
+        return "reasoning_only" if content.strip() else "empty_text"
+    return "below_min_words"
+
+
+class CompactionSummaryError(RuntimeError):
+    """Summary attempts exhausted without replacing the original conversation.
+
+    ``messages`` retains the complete pre-compaction history for the task's
+    episode trajectory, including any turns unwound during summary requests.
+    ``attempts`` contains only response-shape metadata suitable for diagnostics.
+    """
+
+    def __init__(self, *, messages: list[ChatMessage], attempts: list[dict[str, Any]]) -> None:
+        super().__init__("Compaction summarizer produced no usable text after 3 attempts; refusing to erase context")
+        self.messages = list(messages)
+        self.attempts = deepcopy(attempts)
+
+
+def _safe_response_diagnostics(client: Any) -> dict[str, Any]:
+    """Copy only known scalar diagnostics; custom clients cannot inject response text."""
+    value = getattr(client, "last_response_diagnostics", None)
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in ("content_present", "reasoning_present", "inline_think_open", "inline_think_close"):
+        if type(value.get(key)) is bool:
+            result[key] = value[key]
+    for key in ("content_chars", "reasoning_chars", "tool_calls_count"):
+        if type(value.get(key)) is int and value[key] >= 0:
+            result[key] = value[key]
+    finish_reason = value.get("finish_reason")
+    if isinstance(finish_reason, str) and finish_reason in {
+        "stop",
+        "length",
+        "max_tokens",
+        "tool_calls",
+        "function_call",
+        "content_filter",
+        "unknown",
+    }:
+        result["finish_reason"] = finish_reason
+    return result
 
 
 class NeMoUserMessage(UserMessage):
@@ -145,6 +186,8 @@ class NeMoAgent(Agent):
         self._tool_response_as_user = tool_response_as_user
         self._skip_input_file_listing = skip_input_file_listing
         self._min_compaction_summary_words = min_compaction_summary_words
+        self.compaction_events: list[dict[str, Any]] = []
+        self._compaction_count = 0
 
     def _build_system_prompt(self) -> str:
         """Override to optionally skip the input file listing."""
@@ -179,7 +222,11 @@ class NeMoAgent(Agent):
         that field, including think-only responses. Sanitize at the adapter
         boundary and retry bad summaries before replacing any history.
         """
+        original_messages = list(messages)
         current_messages = messages
+        self._compaction_count += 1
+        compaction_index = self._compaction_count
+        attempt_diagnostics: list[dict[str, Any]] = []
         while True:
             try:
                 task_context: list[ChatMessage] = list(
@@ -224,31 +271,50 @@ class NeMoAgent(Agent):
                         if saved_overruns is not sentinel:
                             self._client._truncation_overruns = saved_overruns
                     summary_content = _sanitize_compaction_summary(summary.content)
-                    if _is_meaningful_compaction_summary(
+                    accepted = _is_meaningful_compaction_summary(
                         summary_content,
                         min_words=self._min_compaction_summary_words,
-                    ):
-                        break
+                    )
                     usage = getattr(summary, "token_usage", None)
+                    reasoning = getattr(summary, "reasoning", None)
+                    reasoning_content = getattr(reasoning, "content", None)
+                    diagnostic = {
+                        "event": "summary_accepted" if accepted else "summary_rejected",
+                        "compaction_index": compaction_index,
+                        "attempt": attempt,
+                        "content_present": summary.content is not None,
+                        "content_chars": len(summary.content) if isinstance(summary.content, str) else 0,
+                        "reasoning_present": reasoning is not None,
+                        "reasoning_chars": len(reasoning_content) if isinstance(reasoning_content, str) else 0,
+                        "sanitized_chars": len(summary_content),
+                        "sanitized_words": len(summary_content.split()),
+                        "rejection_reason": None
+                        if accepted
+                        else _summary_rejection_reason(summary.content, summary_content),
+                        "tool_calls_count": len(summary.tool_calls or []),
+                        "usage": {
+                            key: getattr(usage, key, None)
+                            for key in ("input", "answer", "reasoning")
+                            if type(getattr(usage, key, None)) is int
+                        },
+                        "response_diagnostics": _safe_response_diagnostics(self._client),
+                    }
+                    attempt_diagnostics.append(diagnostic)
+                    self.compaction_events.append(diagnostic)
+                    if accepted:
+                        break
                     LOGGER.warning(
                         "Compaction summary attempt %d/%d rejected: %s (input=%s answer=%s reasoning=%s); %s",
                         attempt,
                         len(attempts),
-                        _summary_rejection_reason(
-                            summary.content,
-                            summary_content,
-                            self._min_compaction_summary_words,
-                        ),
+                        diagnostic["rejection_reason"],
                         getattr(usage, "input", None),
                         getattr(usage, "answer", None),
                         getattr(usage, "reasoning", None),
                         "retrying" if attempt < len(attempts) else "no attempts remain",
                     )
                 else:
-                    raise RuntimeError(
-                        "Compaction summarizer produced no usable text after "
-                        f"{len(attempts)} attempts; refusing to erase context"
-                    )
+                    raise CompactionSummaryError(messages=original_messages, attempts=attempt_diagnostics)
 
                 summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_content)
                 summary_bridge = SummaryMessage(content=summary_bridge_prompt)
@@ -259,7 +325,25 @@ class NeMoAgent(Agent):
             except ContextOverflowError:
                 # Preserve Stirrup's recovery contract: discard the latest
                 # completed turn, including its per-turn metadata, and retry.
-                current_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
+                event = {
+                    "compaction_index": compaction_index,
+                    "attempt": attempt,
+                    "history_message_count": len(current_messages),
+                }
+                self.compaction_events.append({"event": "context_overflow", **event})
+                try:
+                    retained_messages, dropped_turn_id = self._unwind_context_overflow(current_messages)
+                except ContextOverflowError:
+                    self.compaction_events.append({"event": "overflow_unwind_blocked", **event})
+                    raise
+                self.compaction_events.append(
+                    {
+                        "event": "overflow_unwind",
+                        **event,
+                        "dropped_message_count": len(current_messages) - len(retained_messages),
+                    }
+                )
+                current_messages = retained_messages
                 run_metadata_by_turn.pop(dropped_turn_id, None)
 
     async def run_tool(self, tool_call: ToolCall, run_metadata: dict[str, list[Any]]) -> ToolMessage:
@@ -301,6 +385,9 @@ class NeMoAgent(Agent):
         """
         sa = await super().__aenter__()
         sa.__class__ = NeMoSessionAgent
+        # SessionAgent clones the parent attributes. Keep diagnostics scoped to this run.
+        sa.compaction_events = []
+        sa._compaction_count = 0
         return sa
 
 

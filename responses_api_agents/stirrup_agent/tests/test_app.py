@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,11 +20,11 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAction, agent_outcome_policy
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import AGENT_RUN_ERROR, MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
@@ -302,6 +303,49 @@ class TestApp:
 
         assert response.error is None
         assert response.usage is None
+
+    @pytest.mark.asyncio
+    async def test_summary_exhaustion_preserves_evidence_and_is_unscored_without_a_provider_status(self) -> None:
+        events = [{"event": "summary_attempt", "attempt": 3, "accepted": False, "reason": "empty_content"}]
+        report = _report(
+            output_items=[{"type": "function_call", "call_id": "c1", "name": "code_exec", "arguments": "{}"}],
+            stop_reason="compaction_summary_exhausted",
+            agent_error="Compaction summarizer produced no usable text after 3 attempts; refusing to erase context",
+            model_error=None,
+            model_error_status=None,
+            compaction_events=events,
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+            usages=[{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}],
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert response.error.message == report["agent_error"]
+        assert response.metadata["stop_reason"] == "compaction_summary_exhausted"
+        assert json.loads(response.metadata["compaction_events"]) == events
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=AGENT_RUN_ERROR
+        )
+        assert agent_outcome_policy(response) == OutcomeAction.FAIL
+        assert [item.type for item in response.output] == ["function_call"]
+        assert response.usage.total_tokens == 15
+
+    @pytest.mark.asyncio
+    async def test_successful_compaction_diagnostics_are_retained_without_an_error(self) -> None:
+        events = [{"event": "summary_attempt", "attempt": 1, "accepted": True}]
+        response, _, _ = await _run_episode(
+            _make_config(),
+            NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"),
+            _report(compaction_events=events),
+        )
+
+        assert response.status == "completed"
+        assert response.error is None
+        assert json.loads(response.metadata["compaction_events"]) == events
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
 
     @pytest.mark.asyncio
     async def test_a_rejected_request_after_responses_that_reported_no_usage_has_unknown_usage(self) -> None:

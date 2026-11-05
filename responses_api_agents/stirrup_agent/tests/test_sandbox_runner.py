@@ -241,6 +241,133 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
     assert [u["total_tokens"] for u in output["usages"]] == [15]
 
 
+@pytest.mark.parametrize("completed_turn", [False, True])
+def test_unrecoverable_context_overflow_is_a_model_rejection_with_partial_history(tmp_path, resources, completed_turn):
+    answers = [_call("code_exec", json.dumps({"cmd": "true"}))] if completed_turn else []
+    model = _ModelServer([*answers, 400], error_code="context_length_exceeded")
+    try:
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
+    finally:
+        model.close()
+
+    assert "error" not in output
+    assert output["stop_reason"] == "model_error"
+    assert "context" in output["model_error"].lower()
+    assert output["model_error_status"] == 400
+    assert output["observations"]["status"] == "failed"
+    assert output["observations"]["model_response_ids"] == (["chatcmpl-1"] if completed_turn else [])
+    assert [tool["tool_name"] for tool in output["observations"]["tool_calls"]] == (
+        ["code_exec"] if completed_turn else []
+    )
+    assert [item["type"] for item in output["output_items"]] == (
+        ["function_call", "function_call_output"] if completed_turn else []
+    )
+    assert [usage["total_tokens"] for usage in output["usages"]] == ([15] if completed_turn else [])
+    assert len(model.requests) == (2 if completed_turn else 1)
+
+
+@pytest.mark.parametrize("earlier_compaction", [False, True])
+def test_summary_exhaustion_preserves_the_just_completed_turn_and_model_observations(
+    tmp_path, resources, earlier_compaction
+):
+    earlier = (
+        [
+            _call("code_exec", json.dumps({"cmd": "echo first"})),
+            {"role": "assistant", "content": "The first command completed."},
+        ]
+        if earlier_compaction
+        else []
+    )
+    model = _ModelServer(
+        [
+            *earlier,
+            _call("code_exec", json.dumps({"cmd": "true"})),
+            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "<think>unfinished reasoning"},
+            {"role": "assistant", "content": "<think>reasoning only</think>"},
+        ]
+    )
+    payload = _payload(model.base_url, resources.base_url, tmp_path)
+    payload["client"]["max_tokens"] = 10
+    try:
+        output = _run_main(tmp_path, payload)
+    finally:
+        model.close()
+
+    assert "error" not in output
+    assert output["stop_reason"] == "compaction_summary_exhausted"
+    assert "no usable text" in output["agent_error"]
+    assert output["model_error"] is None
+    assert output["model_error_status"] is None
+    assert output["observations"]["status"] == "failed"
+    completed_tools = 2 if earlier_compaction else 1
+    request_count = 6 if earlier_compaction else 4
+    assert output["observations"]["model_response_ids"] == [f"chatcmpl-{i}" for i in range(1, request_count + 1)]
+    assert [item["type"] for item in output["output_items"] if item["type"] != "message"] == [
+        "function_call",
+        "function_call_output",
+    ] * completed_tools
+    assert [(t["tool_name"], t["status"]) for t in output["observations"]["tool_calls"]] == [
+        ("code_exec", "completed")
+    ] * completed_tools
+    assert [usage["total_tokens"] for usage in output["usages"]] == [15] * request_count
+    assert len(output["compaction_events"]) >= 3
+    serialized_events = json.dumps(output["compaction_events"])
+    assert "unfinished reasoning" not in serialized_events
+    assert "reasoning only" not in serialized_events
+    assert len(model.requests) == request_count
+
+
+def test_unrelated_summary_runtime_errors_remain_infrastructure_failures(tmp_path, resources, monkeypatch):
+    async def broken_summary(self, messages, run_metadata_by_turn):
+        raise RuntimeError("unexpected summarizer implementation error")
+
+    monkeypatch.setattr(NeMoAgent, "summarize_messages", broken_summary)
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"}))])
+    payload = _payload(model.base_url, resources.base_url, tmp_path)
+    payload["client"]["max_tokens"] = 10
+    try:
+        output = _run_main(tmp_path, payload)
+    finally:
+        model.close()
+
+    assert "unexpected summarizer implementation error" in output["error"]
+    assert "Traceback" in output["traceback"]
+    assert "agent_error" not in output
+    assert output["observations"]["status"] == "failed"
+
+
+def test_successful_run_reports_compaction_events_and_preserves_archived_tool_results(tmp_path, resources):
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "true"})),
+            {"role": "assistant", "content": "The shell command completed."},
+            _call("finish", json.dumps({"reason": "done"})),
+        ]
+    )
+    payload = _payload(model.base_url, resources.base_url, tmp_path)
+    payload["client"]["max_tokens"] = 10
+    try:
+        output = _run_main(tmp_path, payload)
+    finally:
+        model.close()
+
+    assert "error" not in output
+    assert output["observations"]["status"] == "completed"
+    assert output["agent_error"] is None
+    assert [event["event"] for event in output["compaction_events"]] == ["summary_accepted"]
+    compactions = output["observations"]["compactions"]
+    assert len(compactions) == 1
+    assert compactions[0]["outcome"] == "completed"
+    assert compactions[0]["summary"] == "The shell command completed."
+    assert compactions[0]["model_calls"] == [{"response_id": "chatcmpl-2"}]
+    assert [item["name"] for item in output["output_items"] if item["type"] == "function_call"] == [
+        "code_exec",
+        "finish",
+    ]
+    assert len(model.requests) == 3
+
+
 @pytest.mark.parametrize("status", [401, 403, 404])
 def test_a_model_server_error_that_is_not_a_rejected_request_still_fails_the_run(tmp_path, resources, status):
     model = _ModelServer([status])
@@ -297,7 +424,7 @@ def test_a_run_that_uses_all_its_turns_without_finishing_is_incomplete(tmp_path,
     finally:
         model.close()
 
-    assert (output["observations"]["status"], output["stop_reason"]) == ("incomplete", None)
+    assert (output["observations"]["status"], output["stop_reason"]) == ("incomplete", "max_turns")
     assert len(model.requests) == 2
 
 

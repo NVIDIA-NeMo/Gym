@@ -28,7 +28,7 @@ class _ModelServer:
     A ``None`` answer hangs until closed; an ``int`` answer is an HTTP error status.
     """
 
-    def __init__(self, answers: list[dict | int | None]) -> None:
+    def __init__(self, answers: list[dict | int | None], *, error_code: str | None = None) -> None:
         self.answers = answers
         self.blocked = threading.Event()
         self.release = threading.Event()
@@ -42,7 +42,10 @@ class _ModelServer:
                 server.session_ids.append(self.headers.get("x-session-id"))
                 message = server.answers[len(server.requests) - 1]
                 if isinstance(message, int):
-                    body = json.dumps({"error": {"message": "rejected", "type": "stub_error"}}).encode()
+                    error = {"message": "rejected", "type": "stub_error"}
+                    if error_code is not None:
+                        error["code"] = error_code
+                    body = json.dumps({"error": error}).encode()
                     self.send_response(message)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))

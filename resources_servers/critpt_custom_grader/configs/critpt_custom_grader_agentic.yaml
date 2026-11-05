@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Generic agentic recipe. Supply model settings and immutable image references as described in ../README.md.
+# OpenSandbox controls execution networking; Stirrup orchestration must still reach Gym and the model endpoint.
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+critpt_custom_grader:
+  resources_servers:
+    critpt_custom_grader:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      allowed_agents: [stirrup_agent]
+      description: Agentic Python problem solving with offline code execution and local sandboxed grading
+      value: Grade structured submissions to generic CritPt-like tasks
+      answer_source: finish_tool
+      agentic_max_response_bytes: 33554432
+      sandbox_provider: execution_sandbox
+      sandbox_spec:
+        image: ${oc.env:CRITPT_CUSTOM_GRADER_IMAGE}
+        workdir: /work
+        ready_timeout_s: 600
+        ttl_s: 10400
+        resources: {cpu: 1, memory_mib: 4096}
+        provider_options:
+          network_policy: {defaultAction: deny, egress: []}
+      execution:
+        interpreter: /usr/local/bin/python3
+        exec_user: grader
+        job_timeout_s: 9800
+        max_concurrent_jobs: 4
+      comparison:
+        default_rtol: "5e-12"
+        default_atol: "0"
+      startup_probe: true
+      agentic_execution:
+        sandbox_provider: execution_sandbox
+        sandbox_spec:
+          image: ${oc.env:CRITPT_AGENTIC_EXECUTION_IMAGE}
+          workdir: /sandbox
+          user: agent
+          ready_timeout_s: 300
+          ttl_s: 36000
+          resources: {cpu: 4, memory_mib: 8192}
+          env:
+            OMP_NUM_THREADS: "4"
+            OPENBLAS_NUM_THREADS: "4"
+            MKL_NUM_THREADS: "4"
+            MPLBACKEND: Agg
+          provider_options:
+            network_policy: {defaultAction: deny, egress: []}
+        command_timeout_s: 300
+        provider_timeout_margin_s: 60
+        max_command_bytes: 65536
+        max_output_bytes: 1048576
+        max_sessions: 16
+        create_timeout_s: 600
+        close_timeout_s: 60
+      datasets:
+        - name: agentic_example
+          # BenchmarkDatasetConfig carries prompt_config; the example dataset schema does not.
+          type: benchmark
+          taskset: critpt_custom_grader_synthetic
+          jsonl_fpath: resources_servers/critpt_custom_grader/data/agentic_example.jsonl
+          prompt_config: resources_servers/critpt_custom_grader/prompts/agentic.yaml
+          num_repeats: 5
+          license: Apache 2.0
+
+execution_sandbox:
+  _copy: sandbox
+
+orchestration_sandbox:
+  _inherit_from: sandbox
+
+environment_server_routes:
+  critpt_custom_grader_synthetic: critpt_custom_grader_agentic_environment
+
+critpt_custom_grader_stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      agent_max_turns: 50
+      concurrency: 8
+      # Required per-model overlay: context capacity, output capacity, reasoning and sampling.
+      context_window_tokens: ???
+      max_completion_tokens_cap: ???
+      enable_thinking: ???
+      temperature: ???
+      top_p: ???
+      completion_token_buffer: 1000
+      min_completion_tokens: 1024
+      truncation_recovery: false
+      code_exec: false
+      finish_tool_names: [finish]
+      sandbox_provider: orchestration_sandbox
+      sandbox_config:
+        image: ${oc.env:CRITPT_AGENTIC_ORCHESTRATION_IMAGE}
+        workdir: /sandbox
+        ready_timeout_s: 300
+        ttl_s: 36000
+        resources: {cpu: 1, memory_mib: 4096}
+      sandbox_install_timeout_seconds: 900
+      sandbox_runner_timeout_seconds: 21600
+      session_close_timeout_seconds: 60
+
+critpt_custom_grader_agentic_environment:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: critpt_custom_grader
+      agent_server:
+        type: responses_api_agents
+        name: critpt_custom_grader_stirrup_agent
+      resources_tool_transports: [direct_http]
+      max_concurrent_episodes: 8
+      queue_timeout_seconds: 32400
+      # Includes model/command turns, runtime setup, one grading job and cleanup.
+      default_episode_timeout_seconds: 32400
+      cleanup_timeout_seconds: 180

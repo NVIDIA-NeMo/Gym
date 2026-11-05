@@ -35,6 +35,10 @@ MAX_TEXT_BYTES = 16_384
 MAX_INTEGER_DIGITS = 1024
 MAX_DECIMAL_EXPONENT = 1024
 MAX_CASES = 64
+MAX_SEMANTIC_CONFIG_BYTES = 16_384
+MAX_VALIDATOR_SOURCE_BYTES = 262_144
+MAX_SEMANTIC_VALIDATORS = 64
+MAX_VALIDATOR_REGISTRY_BYTES = 2_097_152
 # The statement bound equals the TaskData.problem bound. The byte allowance covers JSON escaping.
 MAX_STATEMENT_CHARS = 131_072
 MAX_STATEMENT_BYTES = 6 * MAX_STATEMENT_CHARS
@@ -208,6 +212,64 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class SemanticValidatorSelection(StrictModel):
+    """Select operator-owned code by ID; a task can supply only bounded inert JSON parameters."""
+
+    id: str = Field(min_length=1, max_length=128)
+    config: dict[str, object] = Field(default_factory=dict)
+
+    @field_validator("id")
+    @classmethod
+    def validator_id(cls, value: str) -> str:
+        return _identifier(value)
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def bounded_config(cls, value: object) -> object:
+        if type(value) is not dict:
+            raise ValueError("validator config must be a JSON object")
+        bounded_json(value, max_bytes=MAX_SEMANTIC_CONFIG_BYTES, max_depth=MAX_DEPTH)
+        return value
+
+
+class SemanticValidatorDefinition(StrictModel):
+    """Operator-owned synchronous predicate source, executed only in the comparator sandbox."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, hide_input_in_errors=True)
+
+    source: str = Field(min_length=1, max_length=MAX_VALIDATOR_SOURCE_BYTES)
+    entrypoint: str = Field(default="validate", min_length=1, max_length=128)
+
+    @field_validator("source")
+    @classmethod
+    def bounded_source(cls, value: str) -> str:
+        if not value.strip() or "\x00" in value or len(value.encode("utf-8")) > MAX_VALIDATOR_SOURCE_BYTES:
+            raise ValueError("validator source must be nonempty bounded UTF-8 text without NUL")
+        return value
+
+    @field_validator("entrypoint")
+    @classmethod
+    def explicit_entrypoint(cls, value: str) -> str:
+        return _identifier(value)
+
+
+def validate_semantic_registry(value: object) -> dict[str, SemanticValidatorDefinition]:
+    """Copy and bound operator definitions without compiling, importing, or executing their source."""
+    if type(value) is not dict or len(value) > MAX_SEMANTIC_VALIDATORS:
+        raise ValueError("validator registry must be a bounded object")
+    definitions = {}
+    for identifier, definition in value.items():
+        if type(identifier) is not str:
+            raise ValueError("validator registry IDs must be strings")
+        _identifier(identifier)
+        definitions[identifier] = SemanticValidatorDefinition.model_validate(definition)
+    bounded_json(
+        {identifier: definition.model_dump(mode="json") for identifier, definition in definitions.items()},
+        max_bytes=MAX_VALIDATOR_REGISTRY_BYTES,
+    )
+    return definitions
+
+
 class WireValue(StrictModel):
     format: Literal["critpt-value-v1"] = WIRE_FORMAT
     value: list[Any]
@@ -360,6 +422,7 @@ class TaskData(ComparisonPolicy):
     problem: str | None = Field(default=None, max_length=MAX_STATEMENT_CHARS)
     code_template: str | None = Field(default=None, max_length=131_072)
     uuid: str | None = Field(default=None, max_length=256)
+    semantic_validator: SemanticValidatorSelection | None = None
     # Per-position input conversions aligned with the positional inputs: null (or a missing position) leaves the
     # argument alone, "symbol" makes a sympy Symbol, "function" a sympy Function. Mirrors the official grader's
     # symbolic_testcases.input_conversions. The runner applies it. This schema only transports it.
@@ -395,6 +458,8 @@ class TaskData(ComparisonPolicy):
 
     @model_validator(mode="after")
     def bounded_task(self) -> "TaskData":
+        if self.semantic_validator is not None and any(case.expected.kind != "value" for case in self.test_cases):
+            raise ValueError("semantic validators require value expectations for every case")
         bounded_json(self.model_dump(mode="json"), max_bytes=MAX_TASK_BYTES, max_depth=3 * MAX_DEPTH + 16)
         return self
 

@@ -23,7 +23,13 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.data.dataset_preparation import TrainDataProcessor
     from nemo_gym.data.gitlab_utils import download_jsonl_dataset
-    from nemo_gym.data.prompt import PromptConfig, apply_prompt_to_row, fill_prompt, load_prompt_config
+    from nemo_gym.data.prompt import (
+        PromptConfig,
+        apply_prompt_to_row,
+        fill_prompt,
+        load_prompt_config,
+        validate_prompt_compatibility,
+    )
     from nemo_gym.data.task_data import (
         TaskDataValidator,
         load_task_data_schema,
@@ -49,6 +55,7 @@ _PUBLIC_API = {
     "materialize_task": "task_materialization",
     "normalize_task_fields": "task_data",
     "validate_jsonl_rows": "task_data",
+    "validate_prompt_compatibility": "prompt",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

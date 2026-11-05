@@ -18,6 +18,7 @@ supervisor. Shell commands run in the sandbox; task tools are the resources serv
 """
 
 import asyncio
+import json
 import time
 from asyncio import Semaphore
 from typing import Any, Dict, List, Mapping, Optional
@@ -41,6 +42,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_RUN_ERROR,
     MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -360,7 +362,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Use the SDK HTTP status retained by the sandbox runner; never infer it from error text."""
+        """Distinguish compaction exhaustion from an explicit upstream model-request rejection."""
+        if native_result.get("agent_error") and native_result.get("stop_reason") == "compaction_summary_exhausted":
+            return AgentOutcome(failure_kind=AGENT_RUN_ERROR)
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
@@ -432,6 +436,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             # The only request was rejected before any processing: a known zero. A request killed in flight may
             # have used tokens, so that case stays unknown.
             usage = _zero_usage()
+        error_message = output.get("model_error") or output.get("agent_error")
         response = NeMoGymResponse(
             id=f"stirrup-{state.request.episode_id.capture_key}",
             created_at=int(time.time()),
@@ -444,9 +449,14 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             metadata={
                 "elapsed_seconds": str(output["elapsed_seconds"]),
                 **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
+                **(
+                    {"compaction_events": json.dumps(output["compaction_events"], separators=(",", ":"))}
+                    if output.get("compaction_events")
+                    else {}
+                ),
             },
             status=output["observations"]["status"],
-            error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
+            error={"code": "server_error", "message": error_message} if error_message else None,
             usage=usage,
         )
         return self.report_outcome(response, output)

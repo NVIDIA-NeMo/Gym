@@ -14,6 +14,11 @@
       "pathspec"
     ]
   },
+  "resources_servers/critpt_custom_grader": {
+    "override-dependencies": [
+      "pillow==12.3.0"
+    ]
+  },
   "resources_servers/gdpval": {
     "include-dependencies": [
       "cryptography"
