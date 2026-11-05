@@ -58,8 +58,10 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     JUDGE_FAILED,
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     verifier_invocation_context,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
@@ -75,10 +77,8 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    FailureBoundary,
+    handled_episode_failure,
 )
-from nemo_gym.server_runtime.base_environment_server import handled_episode_failure
-from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -236,7 +236,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 failure.episode_evidence.update(
                     agent_close=agent_close,
                     agent_observations=agent_close.agent_observations if agent_close else None,
-                    trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    trajectory=agent_close.trajectory if agent_close else None,
                     cleanup_receipts=state.cleanup_receipts,
                 )
                 wire_reply = self.failure_response(request, failure)
@@ -376,7 +376,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(trajectory),
+                        "ng_trajectory": trajectory,
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -399,7 +399,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     "activations": activations,
                     "agent_close": agent_close,
                     "agent_observations": agent_close.agent_observations if agent_close else None,
-                    "trajectory": request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    "trajectory": agent_close.trajectory if agent_close else None,
                     "cleanup_receipts": state.cleanup_receipts,
                     "artifact_directory": str(state.directory),
                     "dependency_error": dependency,

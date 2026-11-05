@@ -37,13 +37,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.typed_exceptions import failure_report_for
 from nemo_gym.models._checkpoint import (
     CheckpointableLedger,
     PolicyAdmissionMiddleware,
@@ -98,7 +99,6 @@ from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -1001,7 +1001,7 @@ _moved_lazy_names = moved_attr_getter(
             ),
             "nemo_gym.rollouts.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode",
+        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode_context",
     },
 )
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
