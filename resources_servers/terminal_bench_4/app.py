@@ -498,7 +498,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         # Retried seeds share provisioning; close fences it, then waits for it before releasing.
         await asyncio.shield(session.execution)
         if session.resources_error is not None:
-            raise HTTPException(*session.resources_error)
+            status, detail = session.resources_error
+            if status == 409:
+                raise ResourcesSessionConflictError(detail)
+            raise HTTPException(status, detail)
         if key in self._fenced_resources:
             raise ResourcesSessionConflictError("Resources session is already closed")
         self._check_expiry(session)

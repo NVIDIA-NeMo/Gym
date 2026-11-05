@@ -10,10 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_runtime import ResourcesSessionConflictError
 from resources_servers.osworld.app import OSWorldResourcesServer
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import OSWorldEvaluateResponse, OSWorldVerifyRequest
-from resources_servers.osworld.session_manager import SessionNotFoundError
+from resources_servers.osworld.session_manager import SessionConflictError, SessionNotFoundError
 
 
 def test_health_is_public_and_session_routes_require_bearer_token(monkeypatch, tmp_path) -> None:
@@ -136,3 +137,13 @@ async def test_a_session_missing_at_verify_is_masked_as_lost(tmp_path, extra) ->
     assert dumped["failure_kind"] == "session_lost"
     assert "s1" in dumped["failure_reason"]
     server._manager.close_session.assert_awaited_once_with("s1")
+
+
+async def test_a_seed_conflict_raises_the_resources_session_conflict_error(tmp_path) -> None:
+    server = _verify_server(tmp_path, AsyncMock())
+    server._manager.seed_session = AsyncMock(side_effect=SessionConflictError("session s1 already owns task t1"))
+
+    with pytest.raises(ResourcesSessionConflictError) as raised:
+        await server.seed_session(SimpleNamespace(session={SESSION_ID_KEY: "s1"}), MagicMock())
+
+    assert (raised.value.status_code, raised.value.detail) == (409, "session s1 already owns task t1")
