@@ -967,6 +967,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
+    recorded = []
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append((summary, run_id)))
 
     async def post(**kwargs):
         row = kwargs["json"]
@@ -1015,6 +1017,7 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/missing_outcomes": 0,
         "coverage/failure_budget_exhausted": 0,
     }
+    assert recorded == [(exported[-1], report["run_id"])]  # The same run summary goes to OTel.
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
     assert progress["progress/my_agent/masked_pct"] == 100.0
     assert progress["progress/my_agent/failed"] == 1

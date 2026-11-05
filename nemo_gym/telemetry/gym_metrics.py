@@ -174,6 +174,7 @@ HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.qu
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
 RUN_METRIC_PREFIX = "gym.run."
 RUN_ID_ATTRIBUTE = "nemo.gym.run.id"
+RUN_INFO_INSTRUMENT = "gym.run.info"
 # The last segment of a three-part run metric, such as the failure class in `coverage/failed/<class>`.
 RUN_METRIC_BUCKET_ATTRIBUTE = "nemo.gym.run.bucket"
 ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
@@ -435,8 +436,10 @@ def record_http_connection_pool_connect_duration(duration_ms: float, *, outcome:
     )
 
 
-def record_run_summary(summary: Mapping[str, float], *, run_id: str) -> None:
+def record_run_summary(summary: Mapping[str, float], *, run_id: Optional[str]) -> None:
     """Record a finished run's coverage and retry counts as gauges, one per key, under its run id.
+
+    ``run_id`` is left off for a merge of several shards; the job's ``nemo.run.id`` resource attribute identifies it.
 
     ``coverage/scored`` becomes ``gym.run.coverage.scored``. A three-part key such as ``coverage/failed/<class>`` or
     ``retries/by_kind/<kind>`` becomes ``gym.run.coverage.failed`` with the last part as the bucket attribute; those
@@ -445,9 +448,16 @@ def record_run_summary(summary: Mapping[str, float], *, run_id: str) -> None:
     meter = _meter()
     if meter is None:
         return
+    run: dict[str, Any] = {RUN_ID_ATTRIBUTE: run_id} if run_id else {}
+    try:
+        # One series per finished run, for dashboards to list runs and join the gauges on.
+        info = _get_or_create(meter, RUN_INFO_INSTRUMENT, lambda: meter.create_gauge(RUN_INFO_INSTRUMENT, unit="1"))
+        info.set(1, attributes=run)
+    except Exception:
+        logger.debug("nemo-lens: failed to record %s", RUN_INFO_INSTRUMENT, exc_info=True)
     for key, value in summary.items():
         parts = key.split("/")
-        attributes: dict[str, Any] = {RUN_ID_ATTRIBUTE: run_id}
+        attributes = dict(run)
         if len(parts) > 2:
             attributes[RUN_METRIC_BUCKET_ATTRIBUTE] = "/".join(parts[2:])
         name = RUN_METRIC_PREFIX + ".".join(parts[:2])
