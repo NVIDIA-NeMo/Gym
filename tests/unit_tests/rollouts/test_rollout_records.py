@@ -684,6 +684,34 @@ async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_pa
     assert "scores may be partial" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("tracker", [False, True])
+async def test_aggregation_records_the_run_summary_for_otel_with_or_without_a_tracker(tmp_path, monkeypatch, tracker):
+    import nemo_gym.rollouts.rollout_collection as collection
+
+    output = tmp_path / "legacy.jsonl"
+    output.write_bytes(orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0}) + b"\n")
+
+    async def aggregate(*args, raise_on_error=True):
+        return None
+
+    exported, recorded = [], []
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    monkeypatch.setattr(collection, "get_exporters", lambda: tracker)
+    monkeypatch.setattr(collection, "is_metrics_exporter_active", lambda: True)
+    monkeypatch.setattr(collection, "export_metrics", exported.append)
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append((summary, run_id)))
+    await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=str(output), output_jsonl_fpath=str(tmp_path / "merged.jsonl"), disable_health_check=True
+        )
+    )
+    assert len(recorded) == 1
+    summary, run_id = recorded[0]
+    assert run_id is None  # No shard history to take a run id from; the job's resource attribute identifies it.
+    assert (summary["coverage/scored"], summary["coverage/known"], summary["retries/attempts"]) == (1, 0, 0)
+    assert exported == ([summary] if tracker else [])
+
+
 @pytest.mark.parametrize("merge_shards", [False, True])
 async def test_legacy_repeated_explicit_ids_remain_aggregatable(tmp_path, monkeypatch, merge_shards):
     import nemo_gym.rollouts.rollout_collection as collection

@@ -32,6 +32,7 @@ def collected(monkeypatch):
 
     yield collect
     provider.shutdown()
+    gym_metrics._reset_for_testing()
 
 
 def test_each_run_summary_key_becomes_a_gauge_under_the_run_id(collected) -> None:
@@ -43,9 +44,18 @@ def test_each_run_summary_key_becomes_a_gauge_under_the_run_id(collected) -> Non
     run = (gym_metrics.RUN_ID_ATTRIBUTE, "run-1")
     assert metrics["gym.run.coverage.scored"] == {frozenset({run}): 8}
     assert metrics["gym.run.retries.at_cap"] == {frozenset({run}): 1}
+    assert metrics["gym.run.info"] == {frozenset({run}): 1}
     assert metrics["gym.run.coverage.failed"] == {
         frozenset({run, (gym_metrics.RUN_METRIC_BUCKET_ATTRIBUTE, "judge_error")}): 2
     }
+
+
+def test_a_merge_of_several_shards_is_recorded_without_a_run_id(collected) -> None:
+    gym_metrics.record_run_summary({"coverage/scored": 3}, run_id=None)
+
+    metrics = collected()
+    assert metrics["gym.run.coverage.scored"] == {frozenset(): 3}
+    assert metrics["gym.run.info"] == {frozenset(): 1}
 
 
 def test_nothing_is_recorded_without_a_metrics_exporter(monkeypatch) -> None:
