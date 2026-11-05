@@ -67,6 +67,7 @@ from nemo_gym.models import (
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
+from nemo_gym.models.model_call_capture import AGENT_INSTANCE_STATE_KEY
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -80,6 +81,7 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
     token_capture_config,
 )
+from nemo_gym.models.token_capture.records import ModelRef
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
@@ -754,7 +756,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ):
             refuse = getattr(context.lineage_store, "refuse_call", None)
             if refuse is not None:
-                await refuse(context.capture_key, context.model_call_id)
+                await refuse(context.capture_key, context.model_call_id, identity=context.identity)
                 context.refused = True
         if source_history or self.config.propagate_context_overflow_errors:
             code = _mark_propagated_overflow(error)
@@ -892,6 +894,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             lineage_store=self._capture_lineage,
             external_staging=True,
             parent_resolution_mode="source_history",
+            # The same identity a generation call of this agent instance on this server resolves under.
+            agent_instance=request.scope.get("state", {}).get(AGENT_INSTANCE_STATE_KEY),
+            model_ref=ModelRef(name=self.config.name),
         )
         token = set_token_sink(context)
         try:
