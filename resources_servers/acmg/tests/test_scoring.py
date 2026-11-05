@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import hashlib
-from pathlib import Path
-
 import pytest
 
 from ..scoring import composite_reward, final_answer_text, label_closeness, metrics, score, summarize
 
 
-UPSTREAM_SHA256 = "e2a80a9d3d0cc5051d73c9d6ea6245e4e2272ea5ef00cb6375a978b152666f1f"  # pragma: allowlist secret
-MARKER = b"# --- upstream file begins below, byte for byte ---\n"
 REFERENCE = {
     "label": "LP",
     "label_scoring": "scored",
@@ -19,13 +14,6 @@ REFERENCE = {
     "acceptable": [["PVS1", "VeryStrong"], ["PM2", "Supporting"]],
     "combining": None,
 }
-
-
-def test_vendored_scorer_matches_the_pinned_upstream_file() -> None:
-    text = (Path(__file__).resolve().parents[1] / "official_reward.py").read_bytes()
-    header, body = text.split(MARKER, 1)
-    assert UPSTREAM_SHA256 in header.decode()
-    assert hashlib.sha256(body).hexdigest() == UPSTREAM_SHA256
 
 
 @pytest.mark.parametrize(

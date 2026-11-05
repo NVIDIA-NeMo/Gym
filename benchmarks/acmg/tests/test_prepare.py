@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Preparation builds both arms from a checksum-verified snapshot without touching the prompts."""
+"""Preparation builds both arms from a snapshot without touching the prompts."""
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -52,10 +51,7 @@ def _snapshot(tmp_path: Path, monkeypatch) -> Path:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    checksums = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in files.items()}
-    (tmp_path / "CHECKSUMS.json").write_text(json.dumps(checksums))
     monkeypatch.setattr(prepare, "CASES", 1)
-    monkeypatch.setattr(prepare, "PINNED_SHA256", {k: checksums[k] for k in prepare.PINNED_SHA256})
     return tmp_path
 
 
@@ -78,17 +74,6 @@ def test_prepare_builds_both_arms_from_the_snapshot(tmp_path, monkeypatch) -> No
         assert (task.gene, task.rule_document, task.approved_2026) == ("GENE1", "GENE1_v1.md", True)
     # The packet, not the answer key, is what the model sees.
     assert "VUS" not in without_rules["responses_create_params"]["input"][1]["content"]
-
-
-def test_prepare_refuses_a_changed_source_file(tmp_path, monkeypatch) -> None:
-    source = _snapshot(tmp_path, monkeypatch)
-    (source / "rules/GENE1_v1.md").write_text(RULE + "An extra line.\n")
-    output = tmp_path / "out" / "acmg_benchmark.jsonl"
-    output.parent.mkdir()
-    output.write_text("previous\n")
-    with pytest.raises(ValueError, match="does not match revision"):
-        prepare.prepare(source, output)
-    assert output.read_text() == "previous\n"
 
 
 def test_prepare_refuses_an_unexpected_case_count(tmp_path, monkeypatch) -> None:

@@ -1,57 +1,79 @@
-# acmg resources server
+# ACMG Resources Server
 
-Deterministic verifier for ACMG/AMP variant classification answers, used by the [`acmg` benchmark](../../benchmarks/acmg/README.md).
+Deterministic verifier for ACMG/AMP variant classification, used by the
+[`acmg` benchmark](../../benchmarks/acmg/README.md). The model receives an evidence packet for a real variant
+curated by a ClinGen expert panel and must return the ACMG/AMP criteria it applies and a classification. The
+verifier is pure Python with no LLM judge.
 
-## Scoring
+- **Tasks**: 790 = 395 variants x 2 arms. `with_rules` gives the model the gene's ClinGen rule document,
+  `without_rules` does not. Text only, no tools or browsing; one fresh context per task.
+- **Reward**: deterministic, in [0, 1]; combines how close the predicted label is to the reference with how close the
+  predicted criteria are, and is zero when the classification does not follow from the model's own criteria.
+- **Metrics**: `acmg/<arm>/reward`, `label_accuracy`, `criterion_f1` and `self_consistency` are the key numbers.
 
-`official_reward.py` is the `nvidia/acmg_variant_benchmark` dataset's standalone `training/reward.py`, vendored byte
-for byte from revision `59fb412e7e39e8b209f431fce522458587ca8fec` (upstream SHA-256
-`e2a80a9d3d0cc5051d73c9d6ea6245e4e2272ea5ef00cb6375a978b152666f1f`). The same file is `scripts/acmg_reward.py` at commit
-`94dd961` of the benchmark's source repository, https://gitlab-master.nvidia.com/caof/acmg_classification_benchmark, whose
-`docs/acmg_anchor_benchmark.md` defines the metrics below. It is excluded from ruff in `pyproject.toml` and
-`tests/test_scoring.py` checks the checksum of everything below the provenance header. Change `scoring.py`, not the
-vendored file.
-
-`verify()` takes the final assistant text (`response.output_text` with `<think>`/`<thinking>` blocks removed; nothing
-is ever read from reasoning), parses the `CRITERIA:` and `CLASSIFICATION:` lines tolerantly (markdown, `PM2_Supporting`,
-`PM2 (Supporting)`, full label names or a JSON answer), and returns:
-
-- `reward`: `gate x (0.5 x label_closeness + 0.5 x evidence_score)`, as defined in the team's grading recipe
-  (sdg-pipelines `recipes/acmg-grading/composite.py`). `gate` is 1 when a classification was given and follows
-  from the response's own criteria (the scorer's `self_consistent`), else 0, so an unanswered or inconsistent
-  response scores 0. `label_closeness` is 1 for an accepted label, 0.5 one step from the nearest accepted label on
-  B-LB-VUS-LP-P, else 0. `evidence_score` is the scorer's `max(0, 1 - evidence_distance / 8)`: a missing required
-  criterion costs its points, an unaccepted one twice its points, a matched one its strength gap. When
-  `label_scoring` is `excluded` only the evidence half is used: `gate x evidence_score`;
-- `gate`, `label_closeness` (None when the label is excluded);
-- `components`: `answered`, `label` (None when excluded), `criterion_precision`, `criterion_recall`, `criterion_f1`,
-  `exact_criteria`, `self_consistent`, `evidence_distance`, `evidence_score`;
-- `predicted_label`, `predicted_criteria`, and the pooled counts (`returned_n`, `returned_acceptable`, `required_n`,
-  `required_hit`, `self_consistency_assessable`) that `compute_metrics` aggregates into `acmg/<arm>/<metric>`.
-
-The two arms (`with_rules`, `without_rules`) are reported separately and never pooled. Self-consistency uses the rule
-document's combining rules (`reference.combining`) in the with-rules arm and any standard ACMG/AMP system otherwise.
-
-## Task data
-
-`verifier_metadata` follows `task_data.TaskData`: `record_id` (`<case_id>:<arm>`), `case_id`, `arm`, `reference`
-(`label`, `label_scoring`, `accepted_labels`, `required`, `acceptable`, `combining`) and case metadata (`gene`,
-`role`, `skill`, `consequence`, `approved_2026`, `version_status`, `confirmation`, `rule_document`).
-`data/example.jsonl` holds six synthetic rows (three invented cases, both arms) with a short synthetic system prompt
-and rule document; it contains no benchmark cases, prompts or rule documents, which are canary-marked and private.
-
-## Validation
+## Prepare benchmark data
 
 ```bash
-gym env test --resources-server acmg
-gym dataset collate --config resources_servers/acmg/configs/acmg.yaml \
-    --output-dir /tmp/acmg-example --mode example_validation
+gym eval prepare --benchmark acmg
 ```
 
-The tests cover the verifier fixture, the vendored-scorer checksum, exact and partial answers, excluded labels,
-reasoning removal, output failures, pooled per-arm metrics and the committed examples.
+Downloads the pinned dataset revision and writes `benchmarks/acmg/data/acmg_benchmark.jsonl` (790 rows).
 
-## Licensing
+## Running servers
 
-Gym integration code: Apache-2.0. The vendored scorer and the dataset are NVIDIA-authored; the dataset card declares
-`license: other`, and the dataset is private. Dependency: `nemo-gym` (Apache-2.0).
+```bash
+gym env start --benchmark acmg --model-type vllm_model
+```
+
+Requires `policy_base_url` / `policy_api_key` / `policy_model_name` in `env.yaml` (or passed as CLI overrides).
+
+## Collect rollouts
+
+```bash
+gym eval run --no-serve --benchmark acmg --model-type vllm_model \
+    --output results/acmg/rollouts.jsonl
+```
+
+Rows already carry their `responses_create_params.input`, so do not pass `--prompt-config`.
+
+## Metrics
+
+Metrics are reported both pooled over all tasks (`mean/reward` and friends) and separately per arm as
+`acmg/<arm>/<metric>` for `with_rules` and `without_rules`. Self-consistency is checked against the gene's rule
+document in the with-rules arm and against the standard ACMG/AMP combining rules in the without-rules arm.
+
+| Metric | Definition |
+|---|---|
+| `reward` | Mean reward |
+| `label_accuracy` | Share of the label-scored cases whose classification is correct |
+| `criterion_precision` / `recall` / `f1` | Over (criterion, strength) pairs: the model's predicted pairs against the expert's accepted ones for precision, the expert's required ones for recall. Counted over all responses in the arm |
+| `exact_criteria` | Share of responses returning every required criterion and nothing unacceptable |
+| `self_consistency` | Share of responses whose classification follows from their own criteria |
+| `output_failure_rate` | Share of responses with no classification |
+| `gate`, `label_closeness`, `evidence_score` | Means of the reward's three terms |
+| `label_scorable`, `self_consistency_assessable` | Denominators of `label_accuracy` and `self_consistency` |
+
+### Reward
+
+The model generates a `CRITERIA:` line (code and strength pairs) and a `CLASSIFICATION:` line
+(P, LP, VUS, LB or B). The verifier reads the final assistant text (`<think>`/`<thinking>` blocks removed), parses
+those two lines (handles cases like markdown, `PM2_Supporting`, `PM2 (Supporting)`, full label names or a JSON
+answer) and computes
+
+```text
+reward = gate x (0.5 x label_closeness + 0.5 x evidence_score)
+```
+
+- `gate` is 1 when the model's classification follows from its own predicted criteria, else 0.
+- `label_closeness` is 1 for a correctly predicted label, 0.5 when the prediction is one step from the correct
+  label on B-LB-VUS-LP-P, else 0.
+- `evidence_score` measures how close the predicted criteria are to the reference. Start a penalty at 0 and compare
+  the model's criteria with the expert's:
+  - the model left out one of the expert's required criteria: penalty += that criterion's points
+  - the model used a criterion the expert does not accept: penalty += 2 x that criterion's points
+  - the model used the right criterion at the wrong strength: penalty += the point difference between the two
+    strengths
+
+  Score = 1 - penalty / 8, floored at 0. Points by strength are the usual Supporting 1, Moderate 2, Strong 4,
+  Very Strong 8.
+- For the cases with no reference label, the reward is `gate x evidence_score`.

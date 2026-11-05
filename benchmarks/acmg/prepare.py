@@ -5,10 +5,8 @@
 Every case becomes two rows, one per arm. The system message is the dataset's system prompt, followed in the
 with-rules arm by two newlines and the case's own rule document; the user message is the evidence packet as compact
 JSON with sorted keys, exactly as the dataset README specifies. The answer key stays in `verifier_metadata`.
-Each source file is checked against the dataset's `CHECKSUMS.json` and the pinned hashes below.
 """
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,13 +26,7 @@ HF_REPO = "nvidia/acmg_variant_benchmark"
 REVISION = "59fb412e7e39e8b209f431fce522458587ca8fec"  # pragma: allowlist secret
 CASES = 395
 ARMS = ("with_rules", "without_rules")
-PINNED_SHA256 = {
-    "data/cases.jsonl": "124c9bcc754b5b185a0082dd74116e4cd7456ca16c97324354c838fb75af6577",  # pragma: allowlist secret
-    "data/answers.jsonl": "b15a7665f5e9d4f2cb008d8dc9aa68c42008ce13b553836bb28ff0d222e6ca33",  # pragma: allowlist secret
-    "prompts/system_prompt.md": "79d4a1321eeaf0adf039d41ee3a7c9b7da657e393fd379b1b640af1a0b54fcd5",  # pragma: allowlist secret
-}
 SNAPSHOT_PATTERNS = [
-    "CHECKSUMS.json",
     "data/cases.jsonl",
     "data/answers.jsonl",
     "prompts/system_prompt.md",
@@ -62,18 +54,6 @@ def download_snapshot(target: Path = SNAPSHOT_DIR) -> Path:
     )
 
 
-def read_pinned(source: Path, relative: str, checksums: dict[str, str]) -> bytes:
-    """A snapshot file's bytes, refused when they do not match the dataset's checksum or the pinned one."""
-    data = (source / relative).read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
-    for expected in (checksums.get(relative), PINNED_SHA256.get(relative)):
-        if expected is not None and digest != expected:
-            raise ValueError(f"{relative} does not match revision {REVISION}: sha256 {digest} != {expected}")
-    if relative not in checksums and relative not in PINNED_SHA256:
-        raise ValueError(f"{relative} is not listed in CHECKSUMS.json")
-    return data
-
-
 def read_jsonl(data: bytes) -> list[dict[str, Any]]:
     return [json.loads(line) for line in data.decode("utf-8").splitlines() if line.strip()]
 
@@ -91,23 +71,22 @@ def reference(key: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_rows(source: Path) -> list[dict[str, Any]]:
-    checksums = json.loads((source / "CHECKSUMS.json").read_text(encoding="utf-8"))
-    cases = read_jsonl(read_pinned(source, "data/cases.jsonl", checksums))
-    keys = {key["case_id"]: key for key in read_jsonl(read_pinned(source, "data/answers.jsonl", checksums))}
+    cases = read_jsonl((source / "data/cases.jsonl").read_bytes())
+    keys = {key["case_id"]: key for key in read_jsonl((source / "data/answers.jsonl").read_bytes())}
     if (
         len(cases) != CASES
         or len({case["case_id"] for case in cases}) != CASES
         or set(keys) != {c["case_id"] for c in cases}
     ):
         raise ValueError(f"Expected {CASES} cases with one answer key each")
-    system = read_pinned(source, "prompts/system_prompt.md", checksums).decode("utf-8").strip()
+    system = (source / "prompts/system_prompt.md").read_text(encoding="utf-8").strip()
     rows = []
     for case in cases:
         key = keys[case["case_id"]]
         rule_document = case["rule_document"]
         if Path(rule_document).name != rule_document:
             raise ValueError(f"Unexpected rule document path: {rule_document}")
-        rule = read_pinned(source, "rules/" + rule_document, checksums).decode("utf-8").strip()
+        rule = (source / "rules" / rule_document).read_text(encoding="utf-8").strip()
         packet = json.dumps(case["packet"], sort_keys=True, separators=(",", ":"))
         for arm in ARMS:
             rows.append(

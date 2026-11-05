@@ -3,8 +3,7 @@
 ## Measurement contract
 
 **Source.** [`nvidia/acmg_variant_benchmark`](https://huggingface.co/datasets/nvidia/acmg_variant_benchmark)
-(private, NVIDIA-authored; card license `other`), revision `59fb412e7e39e8b209f431fce522458587ca8fec`. Evaluation code and
-metric definitions: https://gitlab-master.nvidia.com/caof/acmg_classification_benchmark (commit `94dd961`). The benchmark
+(private, NVIDIA-authored; card license `other`), revision `59fb412e7e39e8b209f431fce522458587ca8fec`. The benchmark
 folders (`data/`, `rules/`, `prompts/`) are byte-identical to the earlier revision `f656c889` used for the team's
 SFT and RL evaluations. The dataset is 395 real variants classified by ClinGen variant curation expert panels, each
 rewritten as an evidence packet with identifiers, citations and criterion codes blocked. Answer keys are
@@ -26,12 +25,11 @@ metadata live in `verifier_metadata` and never reach the model. The model reason
 `CRITERIA:` line (code and strength pairs) and a `CLASSIFICATION:` line (P, LP, VUS, LB or B).
 
 **Scoring.** The resources server runs the dataset's own standalone scorer (`training/reward.py`, vendored byte for
-byte with its SHA-256 pinned and tested) on the final assistant text only; inline `<think>` blocks are removed first.
-Gym's per-rollout `reward` is `gate x (0.5 x label_closeness + 0.5 x evidence_score)`, as defined in the team's
-grading recipe (sdg-pipelines `recipes/acmg-grading/composite.py`): the gate is 1 only when a classification was
-given and follows from the response's own criteria, label closeness gives half credit one step away on
-B-LB-VUS-LP-P, and the evidence score is the scorer's evidence-point closeness `max(0, 1 - distance / 8)`. For the
-141 cases whose label is `excluded` the reward is `gate x evidence_score`. Metrics are reported per arm:
+byte) on the final assistant text only; inline `<think>` blocks are removed first.
+Gym's per-rollout `reward` is `gate x (0.5 x label_closeness + 0.5 x evidence_score)`: the gate is 1 only when a
+classification was given and follows from the response's own criteria, label closeness gives half credit one step
+away on B-LB-VUS-LP-P, and the evidence score is the scorer's evidence-point closeness `max(0, 1 - distance / 8)`.
+For the 141 cases whose label is `excluded` the reward is `gate x evidence_score`. Metrics are reported per arm:
 
 | Metric | Definition |
 |---|---|
@@ -63,10 +61,8 @@ gym env test acmg
 gym env test --resources-server acmg
 ```
 
-Preparation downloads the pinned revision's benchmark folders into `benchmarks/acmg/data/source/`, checks every file
-against the dataset's `CHECKSUMS.json` and the hashes pinned in `prepare.py`, and atomically writes
-`benchmarks/acmg/data/acmg_benchmark.jsonl` (790 rows, SHA-256
-`63a07224509dd943bd6d0b91d357d29c8acf835b1c238b119bd25d588809f2ce`). Everything under `data/` is gitignored. To
+Preparation downloads the pinned revision's benchmark folders into `benchmarks/acmg/data/source/` and atomically
+writes `benchmarks/acmg/data/acmg_benchmark.jsonl` (790 rows). Everything under `data/` is gitignored. To
 reuse an existing snapshot: `python -m benchmarks.acmg.prepare --source /path/to/snapshot`.
 
 ## Evaluate

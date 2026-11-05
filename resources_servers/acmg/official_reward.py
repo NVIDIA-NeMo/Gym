@@ -2,13 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Vendored byte for byte from the `nvidia/acmg_variant_benchmark` Hugging Face dataset, file `training/reward.py`,
-# revision 59fb412e7e39e8b209f431fce522458587ca8fec. Upstream file SHA-256:
-# e2a80a9d3d0cc5051d73c9d6ea6245e4e2272ea5ef00cb6375a978b152666f1f
+# revision 59fb412e7e39e8b209f431fce522458587ca8fec.
 # Source: https://huggingface.co/datasets/nvidia/acmg_variant_benchmark/blob/59fb412e7e39e8b209f431fce522458587ca8fec/training/reward.py
-# Authored in https://gitlab-master.nvidia.com/caof/acmg_classification_benchmark as `scripts/acmg_reward.py`; byte-identical
-# at commit 94dd961 ("Reward: add the evidence score and the rules scheme").
 # The dataset is NVIDIA-authored and private; its card declares `license: other`. This file is excluded from ruff in
-# pyproject.toml so the checksum keeps holding, and resources_servers/acmg/tests/test_scoring.py verifies it.
+# pyproject.toml so that it stays identical to upstream.
 # Do not edit anything below the marker line; change `scoring.py` instead.
 # --- upstream file begins below, byte for byte ---
 #!/usr/bin/env python3

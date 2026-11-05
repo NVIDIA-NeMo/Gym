@@ -12,9 +12,8 @@ THINK_BLOCK = re.compile(r"<(think|thinking)\b[^>]*>.*?(?:</\1\s*>|$)", re.IGNOR
 THINK_END = re.compile(r"</(?:think|thinking)\s*>", re.IGNORECASE)
 ARMS = ("with_rules", "without_rules")
 COMPONENT_MEANS = ("exact_criteria", "self_consistent", "evidence_score")
-# The composite reward of the team's grading recipe (sdg-pipelines `recipes/acmg-grading/composite.py`): the answer
-# must follow from its own criteria to score at all, a label one step off on the ordered scale earns half credit, and
-# the criteria half is the scorer's evidence-point closeness.
+# The composite reward: the answer must follow from its own criteria to score at all, a label one step off on the
+# ordered scale earns half credit, and the criteria half is the scorer's evidence-point closeness.
 LABEL_ORDER = {"B": 0, "LB": 1, "VUS": 2, "LP": 3, "P": 4}
 ADJACENT_CREDIT = 0.5
 LABEL_SHARE = 0.5
