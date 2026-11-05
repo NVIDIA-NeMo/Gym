@@ -8,7 +8,8 @@ Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
 - SWE Bench Multimodal (`benchmarks/swebench/multimodal/opencode.yaml`): the dev split of
   `SWE-bench/SWE-bench_Multimodal`, 100 JavaScript tasks. The prepare script downloads each
   issue's images and attaches them to the prompt, and stores the test patch's reference images
-  for the verifier, so it needs internet access; rollouts and verification do not. See
+  for the verifier. Preparation needs internet access; task and verifier sandboxes do not
+  need to download those assets. See
   [SWE Bench Multimodal grading](../../resources_servers/swebench/README.md#swe-bench-multimodal-grading).
   This recipe uses `single_agent_turn` and `opencode_agent`; SWE-bench resources own the
   task sandbox and OpenCode borrows it. The agent instance is
