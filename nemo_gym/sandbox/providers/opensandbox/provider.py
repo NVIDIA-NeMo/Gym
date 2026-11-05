@@ -2464,18 +2464,29 @@ class OpenSandboxProvider:
         status_failure_deadline: float | None = None
         diagnostic_remaining_s = 0.0
         status_failure_error: NgFailureEvent | None = None
+        last_observed_running: bool | None = None
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
             limits = [value for value in (deadline, status_failure_deadline) if value is not None]
             remaining = min(limits) - loop.time() if limits else None
             if remaining is not None and remaining <= 0:
+                if status_failure_error is not None:
+                    failure_kind = PROVIDER_STATUS_UNAVAILABLE
+                    reason = (
+                        "OpenSandbox command status unavailable beyond recovery deadline; command outcome is unknown"
+                    )
+                else:
+                    failure_kind = PROVIDER_COMMAND_OUTCOME_UNKNOWN
+                    reason = "OpenSandbox client wait expired; command completion is unknown"
+                    if last_observed_running:
+                        reason += "; last observed running=True"
                 raise opensandbox_failure(
                     operation="command status",
                     sandbox_id=handle.sandbox_id,
                     execution_id=execution_id,
-                    failure_kind=PROVIDER_STATUS_UNAVAILABLE,
+                    failure_kind=failure_kind,
                     cause=status_failure_error,
-                    reason="OpenSandbox command status unavailable beyond recovery deadline; command outcome is unknown",
+                    reason=reason,
                 ) from status_failure_error
             try:
                 status = await self._await_sdk_call(
@@ -2536,6 +2547,7 @@ class OpenSandboxProvider:
                         failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
                         reason="OpenSandbox command status has missing or invalid running/exit_code fields",
                     )
+                last_observed_running = status.running
                 if status.running is False:
                     break
             limits = [value for value in (deadline, status_failure_deadline) if value is not None]

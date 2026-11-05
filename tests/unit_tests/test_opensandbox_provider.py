@@ -4983,3 +4983,113 @@ async def test_orphan_delete_permission_and_missing_semantics(monkeypatch, statu
     assert [item["id"] for item in result] == (["owned-id"] if status == 404 else [])
     service.kill_sandbox.assert_awaited_once()
     assert any(event.http_status == status for event in log.report.events.values()) is (status != 404)
+
+
+@pytest.mark.parametrize("read_recovers", [False, True])
+async def test_background_client_wait_expiry_preserves_last_running_observation(
+    monkeypatch: pytest.MonkeyPatch, read_recovers: bool
+) -> None:
+    """A successful Running observation is not exhausted status-read recovery."""
+    clock = [0.0]
+    calls = []
+
+    class Commands:
+        async def run(self, command, *, opts):
+            calls.append("submit")
+            return SimpleNamespace(id="still-running")
+
+        async def get_command_status(self, execution_id):
+            calls.append("status")
+            if read_recovers and calls.count("status") == 1:
+                raise TimeoutError("one failed read")
+            return SimpleNamespace(running=True, exit_code=None)
+
+        async def get_background_command_logs(self, execution_id):
+            pytest.fail("no logs without a final command status")
+
+    provider, handle = _background_provider(monkeypatch, Commands())
+    provider._operations = replace(provider._operations, command_timeout_headroom_s=0.0)
+    monkeypatch.setattr(provider, "_sandbox_death_evidence", AsyncMock(return_value=None))
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", lambda: clock[0])
+
+    async def advance(delay):
+        clock[0] += delay
+
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    with raises_failure(PROVIDER_COMMAND_OUTCOME_UNKNOWN) as caught:
+        await provider.exec(handle, "long command", timeout_s=0.05)
+
+    assert calls.count("submit") == 1
+    assert calls.count("status") >= 2
+    assert "client wait expired" in caught.value.failure_reason
+    assert "last observed running=True" in caught.value.failure_reason
+    assert caught.value.__cause__ is None  # A recovered read is not this expiry's cause.
+    assert caught.value.http_status is None
+    assert caught.value.details.execution_id == "still-running"
+
+
+@pytest.mark.parametrize("fail_on_probe_kind,expected_attempts", [(False, 3), (True, 1)])
+async def test_create_probe_policy_uses_current_kind_not_http_status_of_lifecycle_cause(
+    monkeypatch: pytest.MonkeyPatch, fail_on_probe_kind: bool, expected_attempts: int
+) -> None:
+    """Probe expiry is a distinct readiness observation above the failed request and lifecycle evidence."""
+
+    class Backend410Error(Exception):
+        status_code = 410
+
+    class DeadSandbox(FakeSandbox):
+        attempts = 0
+        request_errors = []
+
+        def __init__(self):
+            super().__init__(f"dead-{type(self).attempts}")
+            self.commands = SimpleNamespace(run=self.run)
+
+        @classmethod
+        async def create(cls, **kwargs):
+            cls.attempts += 1
+            return cls()
+
+        async def run(self, command, *, opts):
+            error = Backend410Error("sandbox has ended")
+            type(self).request_errors.append(error)
+            raise error
+
+        async def get_info(self):
+            return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="ContainerFailed"))
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (DeadSandbox, FakeConnectionConfig, dict, FakePlatformSpec, object),
+    )
+    rules = {"by_status_code": {410: "fail"}}
+    if fail_on_probe_kind:
+        rules["by_failure_kind"] = {"provider_not_ready": "fail"}
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={
+            "retries": 2,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+            "connect_poll_s": 0.02,
+            "outcome_policy": rules,
+        },
+        probe={"command": "readiness", "deadline_s": 0.01},
+    )
+    cleanup = AsyncMock()
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+
+    with raises_failure("provider_not_ready") as caught:
+        await provider.create(SandboxSpec(image="image:tag"))
+
+    assert DeadSandbox.attempts == expected_attempts
+    assert cleanup.await_count == expected_attempts
+    probe = caught.value
+    lifecycle = probe.__cause__
+    request = lifecycle.__cause__
+    assert probe.http_status is None
+    assert lifecycle.failure_kind == PROVIDER_UNAVAILABLE
+    assert lifecycle.http_status is None
+    assert request.http_status == 410
+    assert request.__cause__ is DeadSandbox.request_errors[-1]

@@ -128,9 +128,10 @@ PROVIDER_REQUEST_FAILED = "provider_request_failed"
 PROVIDER_IO_TIMEOUT = "provider_io_timeout"
 # Gym observed its own command-session deadline expire; cleanup is handled separately.
 PROVIDER_COMMAND_TIMEOUT = "provider_command_timeout"
-# Command outcome fields are absent/contradictory, or the PTY ended before command completion.
+# Command outcome fields are absent/contradictory, the client wait expired without a final outcome,
+# or the PTY ended before command completion. None establishes remote process termination.
 PROVIDER_COMMAND_OUTCOME_UNKNOWN = "provider_command_outcome_unknown"
-# The budget for obtaining an already-submitted command's status expired.
+# Failed status reads exhausted the recovery budget for an already-submitted command.
 PROVIDER_STATUS_UNAVAILABLE = "provider_status_unavailable"
 # A transport failure, unavailable-backend HTTP response or structured endpoint-unavailability report.
 PROVIDER_UNAVAILABLE = "provider_unavailable"
