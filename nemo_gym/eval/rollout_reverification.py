@@ -63,6 +63,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core.outcome_policy import is_policy_counted_zero
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -951,7 +952,14 @@ def _run_verification_payloads(
             request_row = {
                 key: value
                 for key, value in row.items()
-                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                if key
+                not in (
+                    ATIF_PROVENANCE_KEY,
+                    _SOURCE_RUN_ID_KEY,
+                    _SOURCE_ANSWER_KEY,
+                    "ng_verifier_invocation_id",
+                    "ng_verifier_invocations",
+                )
                 and key not in _IDENTITY_KEYS
             }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
@@ -1641,7 +1649,7 @@ def _ungraded_reverification(result: Dict[str, Any]) -> bool:
     return (
         result.get(NG_FAILURE_CLASS_KEY) is not None
         or bool(result.get("mask_sample"))
-        or result.get("evaluation_completed") is False
+        or (result.get("evaluation_completed") is False and not is_policy_counted_zero(result))
         or type(reward) not in (int, float)
         or not math.isfinite(reward)
     )

@@ -11,7 +11,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
-from typing import ParamSpec, TypeVar
+from typing import Literal, ParamSpec, TypeVar
 from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
@@ -20,15 +20,17 @@ from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse, Response
 
 from nemo_gym.core.episode_context import (
-    current_rollout_id,
+    current_verifier_invocation_id,
     verifier_invocation_context,
     verifier_model_requests,
 )
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure
+from nemo_gym.core.outcome_policy import OutcomeAction, OutcomeDecision
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.trajectory.trajectory_record import (
+    NG_VERIFIER_INVOCATION_ID_KEY,
     NG_VERIFIER_INVOCATIONS_KEY,
     GradingOperationObservation,
     ModelCallRef,
@@ -46,6 +48,58 @@ T = TypeVar("T")
 
 
 _active_verifier: ContextVar[VerifierInvocation | None] = ContextVar("active_verifier_grading", default=None)
+
+
+def verification_outcome(
+    status: Literal["completed", "failed", "incomplete", "unknown"], *, failure_kind: str | None = None
+) -> dict[str, object]:
+    """Report the outcome of grading just performed, including without optional capture.
+
+    Call from the verifier, not when loading historical rows. The invocation reference
+    identifies exactly which grading operation produced the returned result.
+    """
+    invocation = VerifierInvocation(
+        invocation_id=current_verifier_invocation_id() or f"verify-{uuid4().hex}",
+        status=status,
+        failure_kind=failure_kind,
+        capture_enabled=_active_verifier.get() is not None,
+    )
+    return {
+        NG_VERIFIER_INVOCATIONS_KEY: [invocation.model_dump(mode="json")],
+        NG_VERIFIER_INVOCATION_ID_KEY: invocation.invocation_id,
+    }
+
+
+async def apply_zero_score(result: Mapping[str, object], *, decision: OutcomeDecision) -> dict[str, object]:
+    """Execute an explicit zero-score decision as an observed local grading operation.
+
+    Earlier verifier attempts and the agent's failure remain evidence. Merely selecting
+    a policy action, or loading a saved result, never creates this invocation.
+    """
+    if decision.action != OutcomeAction.COUNT_AS_ZERO:
+        raise ValueError("apply_zero_score requires a count_as_zero decision")
+
+    async def grade() -> dict[str, object]:
+        outcome = verification_outcome("completed")
+        components = result.get("reward_components")
+        return {
+            **result,
+            "reward": 0.0,
+            **({"reward_components": {key: 0.0 for key in components}} if isinstance(components, Mapping) else {}),
+            "mask_sample": False,
+            "failure_outcome_action": decision.action,
+            "failure_outcome_attribution": decision.attribution,
+            **outcome,
+            NG_VERIFIER_INVOCATIONS_KEY: [
+                *result.get(NG_VERIFIER_INVOCATIONS_KEY, []),
+                *outcome[NG_VERIFIER_INVOCATIONS_KEY],
+            ],
+        }
+
+    if current_verifier_invocation_id() is not None:
+        # Already executing inside a verifier: its outcome owns the local policy grading too.
+        return await grade()
+    return await observe_verifier(grade, enabled=True, verifier_name="count_as_zero")()
 
 
 def observe_verifier_sandbox(observation: SandboxObservation | Mapping[str, object]) -> None:
@@ -169,19 +223,47 @@ def _finish(
         except (ValueError, AttributeError):
             return
     else:
-        data = result.model_dump() if isinstance(result, BaseModel) else result
+        data = (
+            result.model_dump(
+                include={
+                    NG_VERIFIER_INVOCATION_ID_KEY,
+                    NG_VERIFIER_INVOCATIONS_KEY,
+                    "failure_kind",
+                    "_ng_failure_class",
+                    "evaluation_completed",
+                    "mask_sample",
+                }
+            )
+            if isinstance(result, BaseModel)
+            else result
+        )
     if not isinstance(data, Mapping):
         return
     failure_kind = data.get("failure_kind")
     invocation.failure_kind = failure_kind if isinstance(failure_kind, str) else None
-    if data.get("_ng_failure_class"):
+    selected = data.get(NG_VERIFIER_INVOCATION_ID_KEY)
+    if selected is not None:
+        matches = [item for item in data.get(NG_VERIFIER_INVOCATIONS_KEY, []) if item.get("invocation_id") == selected]
+        # A historical or foreign selection cannot certify this new execution.
+        if selected != invocation.invocation_id or len(matches) != 1:
+            return
+        reported = VerifierInvocation.model_validate(matches[0])
+        invocation.status = reported.status
+        invocation.failure_kind = reported.failure_kind
+    elif data.get("_ng_failure_class"):
         invocation.status = "failed"
     elif data.get("evaluation_completed") is False:
         invocation.status = "incomplete"
+    elif data.get("mask_sample") and data.get("evaluation_completed") is not True:
+        # A legacy masked reply does not establish whether grading finished.
+        invocation.status = "unknown"
     else:
         invocation.status = "completed"
     if invocation.status != "completed" or not verifier_name or not graded_in_process:
         return
+    # Full serialization is needed only when capture binds a grading record to the response.
+    if isinstance(result, BaseModel):
+        data = result.model_dump()
     # The verifier graded without asking any model, so its returned grade is its own grading record.
     try:
         binding = grading_result_binding(dict(data))
@@ -213,16 +295,12 @@ def observe_verifier(
     HTTP failures keep their status and carry evidence in the error body. Cancellation
     still propagates; a cancelled or lost response cannot deliver in-memory evidence.
     """
-    if not enabled:
-        return verify_fn
 
     @functools.wraps(verify_fn)
     async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T | Response:
-        if current_rollout_id() is None:
-            return await verify_fn(*args, **kwargs)
-        invocation = VerifierInvocation(invocation_id=f"verify-{uuid4().hex}")
+        invocation = VerifierInvocation(invocation_id=f"verify-{uuid4().hex}", capture_enabled=enabled)
         with verifier_invocation_context(invocation.invocation_id):
-            token = _active_verifier.set(invocation)
+            token = _active_verifier.set(invocation if enabled else None)
             try:
                 result = await verify_fn(*args, **kwargs)
             except Exception as error:
@@ -260,12 +338,27 @@ def observe_verifier(
                     invocation,
                     result,
                     verifier_name=verifier_name,
-                    graded_in_process=not uninstrumented_models and not verifier_model_requests(),
+                    graded_in_process=enabled and not uninstrumented_models and not verifier_model_requests(),
                 )
             finally:
                 _active_verifier.reset(token)
 
-        evidence = [invocation.model_dump(mode="json")]
+        def attach(data: Mapping) -> dict:
+            # Only a producer explicitly reporting this execution's identity can supply its history.
+            # Legacy scorers sometimes echo request fields, which are not new verifier observations.
+            native = data.get(NG_VERIFIER_INVOCATION_ID_KEY) == invocation.invocation_id
+            evidence = [
+                item
+                for item in (data.get(NG_VERIFIER_INVOCATIONS_KEY, []) if native else [])
+                if item["invocation_id"] != invocation.invocation_id
+            ] + [invocation.model_dump(mode="json")]
+            return {
+                **data,
+                NG_VERIFIER_INVOCATIONS_KEY: evidence,
+                NG_VERIFIER_INVOCATION_ID_KEY: invocation.invocation_id,
+                "evaluation_completed": invocation.evaluation_completed,
+            }
+
         if isinstance(result, Response):
             # Preserve the original status, headers, cookies and background cleanup.
             # Non-JSON responses cannot carry structured observations.
@@ -275,14 +368,27 @@ def observe_verifier(
                 return result
             if not isinstance(data, dict):
                 return result
-            data[NG_VERIFIER_INVOCATIONS_KEY] = evidence
+            data = attach(data)
             result.body = JSONResponse(jsonable_encoder(data)).body
             result.headers["content-length"] = str(len(result.body))
             return result
         if isinstance(result, BaseModel):
-            return result.model_copy(update={NG_VERIFIER_INVOCATIONS_KEY: [invocation]})
+            data = attach(
+                result.model_dump(mode="json", include={NG_VERIFIER_INVOCATION_ID_KEY, NG_VERIFIER_INVOCATIONS_KEY})
+            )
+            # Copy runtime state without revalidating the answer/trajectory after grading.
+            updates = {
+                NG_VERIFIER_INVOCATIONS_KEY: [
+                    VerifierInvocation.model_validate(v) for v in data[NG_VERIFIER_INVOCATIONS_KEY]
+                ],
+                NG_VERIFIER_INVOCATION_ID_KEY: invocation.invocation_id,
+            }
+            if "evaluation_completed" not in type(result).model_computed_fields:
+                updates["evaluation_completed"] = data["evaluation_completed"]
+            return result.model_copy(update=updates)
+
         if isinstance(result, Mapping):
-            return {**result, NG_VERIFIER_INVOCATIONS_KEY: evidence}
+            return attach(result)
         return result
 
     return wrapped

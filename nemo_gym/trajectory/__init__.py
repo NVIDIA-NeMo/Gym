@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         NG_AGENT_OBSERVATIONS_KEY,
         NG_AGENT_SANDBOX_OBSERVATION_KEY,
         NG_TRAJECTORY_KEY,
+        NG_VERIFIER_INVOCATION_ID_KEY,
         NG_VERIFIER_INVOCATIONS_KEY,
         AgentEpisode,
         AgentInvocation,
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
         grading_result_binding,
         join_agent_model_calls,
         join_assistant_message_calls,
+        selected_verifier_completion,
     )
 
 
@@ -64,6 +66,7 @@ _PUBLIC_API = {
     "NG_AGENT_SANDBOX_OBSERVATION_KEY": "trajectory_record",
     "NG_TRAJECTORY_KEY": "trajectory_record",
     "NG_VERIFIER_INVOCATIONS_KEY": "trajectory_record",
+    "NG_VERIFIER_INVOCATION_ID_KEY": "trajectory_record",
     "ObservationGap": "trajectory_record",
     "SandboxObservation": "trajectory_record",
     "ToolCallObservation": "trajectory_record",
@@ -73,6 +76,7 @@ _PUBLIC_API = {
     "TrajectoryTokenStats": "trajectory_record",
     "TrajectoryToolCall": "trajectory_record",
     "TrajectoryTurn": "trajectory_record",
+    "selected_verifier_completion": "trajectory_record",
     "VerifierInvocation": "trajectory_record",
     "build_model_call_record": "model_call_record",
     "encode_atif_trajectory": "atif_export",

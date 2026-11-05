@@ -39,6 +39,83 @@ class VerifyInput(BaseModel):
     response: dict = {}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,completed", [("completed", True), ("failed", False), ("incomplete", False), ("unknown", None)]
+)
+async def test_explicit_invocation_status_owns_completion(status, completed):
+    from nemo_gym.server_runtime.verifier_observability import verification_outcome
+
+    async def verify():
+        return {"reward": 0.0, "mask_sample": False, "evaluation_completed": True, **verification_outcome(status)}
+
+    result = await observe_verifier(verify, enabled=False)()
+    assert result["evaluation_completed"] is completed
+    assert result["reward"] == 0.0 and result["mask_sample"] is False
+
+
+@pytest.mark.asyncio
+async def test_policy_zero_is_a_real_selected_grading_operation_and_keeps_failed_attempt():
+    from nemo_gym.core.outcome_policy import OutcomeDecision
+    from nemo_gym.server_runtime.verifier_observability import apply_zero_score
+
+    old = {"invocation_id": "previous", "status": "failed", "failure_kind": "verifier_error"}
+    result = await apply_zero_score(
+        {
+            "response": {"id": "answer", "status": "incomplete", "output": []},
+            "failure_kind": "agent_timeout",
+            "reward_components": {"correctness": 1.0, "format": 0.5},
+            "evaluation_completed": False,
+            "ng_verifier_invocations": [old],
+        },
+        decision=OutcomeDecision(action="count_as_zero", attribution="model"),
+    )
+    assert result["response"]["status"] == "incomplete"
+    assert result["failure_kind"] == "agent_timeout"
+    assert result["failure_outcome_action"] == "count_as_zero"
+    assert result["failure_outcome_attribution"] == "model"
+    assert result["evaluation_completed"] is True and result["reward"] == 0.0
+    assert result["reward_components"] == {"correctness": 0.0, "format": 0.0}
+    previous, grading = result["ng_verifier_invocations"]
+    assert previous == old
+    assert result["ng_verifier_invocation_id"] == grading["invocation_id"] != "previous"
+    assert grading["status"] == "completed"
+    assert grading["grading_record"]["verifier"] == "count_as_zero"
+    assert grading["grading_record"]["result_binding_sha256"] == grading_result_binding(result)
+
+
+@pytest.mark.asyncio
+async def test_zero_policy_inside_verify_uses_that_execution_without_a_phantom_outer_attempt():
+    from nemo_gym.core.outcome_policy import OutcomeDecision
+    from nemo_gym.server_runtime.verifier_observability import apply_zero_score
+
+    async def verify():
+        return await apply_zero_score(
+            {"response": {"id": "r", "output": []}},
+            decision=OutcomeDecision(action="count_as_zero", attribution="model"),
+        )
+
+    result = await observe_verifier(verify, enabled=True, verifier_name="resource")()
+    (invocation,) = result["ng_verifier_invocations"]
+    assert result["ng_verifier_invocation_id"] == invocation["invocation_id"]
+    assert invocation["status"] == "completed" and result["evaluation_completed"] is True
+    assert invocation["grading_record"]["verifier"] == "resource"
+
+
+@pytest.mark.asyncio
+async def test_echoed_historical_selection_does_not_certify_a_new_execution():
+    async def verify():
+        return {
+            "reward": 1.0,
+            "ng_verifier_invocation_id": "old",
+            "ng_verifier_invocations": [{"invocation_id": "old", "status": "completed"}],
+        }
+
+    result = await observe_verifier(verify, enabled=False)()
+    assert result["evaluation_completed"] is None
+    assert result["ng_verifier_invocation_id"] != "old"
+
+
 def collected(path: Path, rollout_id: str, result: dict) -> dict:
     record = {**result, "_ng_rollout_id": rollout_id}
     merge_model_call_capture_into_record(record, [path], include_payloads=True)
@@ -200,19 +277,31 @@ async def test_judge_failsafe_preserves_shared_failure_kind(tmp_path):
     [
         ({"reward": 0.0}, "completed"),
         ({"reward": 0.0, "evaluation_completed": False}, "incomplete"),
-        ({"reward": 0.0, "failure_kind": SESSION_LOST, "mask_sample": True}, "completed"),
+        ({"reward": 0.0, "failure_kind": SESSION_LOST, "mask_sample": True}, "unknown"),
+        ({"reward": 0.0, "mask_sample": True, "evaluation_completed": True}, "completed"),
     ],
 )
-async def test_returned_grade_does_not_infer_failure_from_reward_or_mask(tmp_path, result, status):
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_returned_grade_does_not_infer_failure_from_reward_or_mask(tmp_path, result, status, enabled):
     async def verify():
         return result
 
     with rollout_context("grade"):
-        returned = await observe_verifier(verify, enabled=True)()
-    assert {key: value for key, value in returned.items() if key != "ng_verifier_invocations"} == result
+        returned = await observe_verifier(verify, enabled=enabled)()
+    assert {
+        key: value
+        for key, value in returned.items()
+        if key not in {"ng_verifier_invocations", "ng_verifier_invocation_id", "evaluation_completed"}
+    } == {key: value for key, value in result.items() if key != "evaluation_completed"}
+    assert returned["evaluation_completed"] is (None if status == "unknown" else status == "completed")
     (invocation,) = returned["ng_verifier_invocations"]
     assert invocation["status"] == status
     assert invocation["failure_kind"] == result.get("failure_kind")
+    if status == "unknown":
+        from nemo_gym.rollouts.rollout_recovery import masked_kept_answer_kind
+
+        saved = returned | {"response": {"id": "r", "object": "response", "output": [], "status": "completed"}}
+        assert masked_kept_answer_kind(saved) == SESSION_LOST
 
 
 def test_resources_route_observes_programmatic_verify_without_benchmark_changes(tmp_path):
@@ -252,14 +341,15 @@ def test_resources_route_observes_programmatic_verify_without_benchmark_changes(
 
 
 @pytest.mark.asyncio
-async def test_observability_disabled_leaves_execution_unchanged(tmp_path):
+async def test_observability_disabled_keeps_completion_without_capture(tmp_path):
     async def verify():
-        assert current_verifier_invocation_id() is None
+        assert current_verifier_invocation_id() is not None
         return {"reward": 1.0}
 
-    assert observe_verifier(verify, enabled=False) is verify
-    with rollout_context("disabled"):
-        assert await verify() == {"reward": 1.0}
+    result = await observe_verifier(verify, enabled=False)()
+    assert result["evaluation_completed"] is True
+    assert result["ng_verifier_invocation_id"] == result["ng_verifier_invocations"][0]["invocation_id"]
+    assert "grading_record" not in result["ng_verifier_invocations"][0]
     assert list(tmp_path.iterdir()) == []
 
 
@@ -556,7 +646,7 @@ _GRADED = {"response": {"id": "graded-response", "output": []}, "reward": 0.25}
 @pytest.mark.asyncio
 @pytest.mark.parametrize("masked,verdict", [(False, "scored"), (True, "masked")])
 async def test_an_in_process_verify_saves_its_own_grading_record(tmp_path, masked, verdict):
-    result = {**_GRADED, "mask_sample": masked}
+    result = {**_GRADED, "mask_sample": masked, "evaluation_completed": True}
 
     async def verify():
         return result
@@ -750,3 +840,43 @@ def _class_attribute(source: Path, class_name: str, attribute: str) -> object:
 def test_the_servers_that_judge_through_an_external_sdk_are_listed(app, name):
     source = Path(__file__).resolve().parents[3] / app
     assert _class_attribute(source, name, "grading_may_use_uninstrumented_model") is True
+
+
+@pytest.mark.asyncio
+async def test_custom_serializer_preserves_success_and_runtime_state():
+    from pydantic import PrivateAttr, model_serializer
+
+    class CustomResponse(BaseVerifyResponse):
+        _state: object = PrivateAttr(default_factory=object)
+
+        @model_serializer(mode="wrap")
+        def serialize(self, handler):
+            return handler(self)
+
+    response = CustomResponse.model_validate(
+        {
+            "responses_create_params": {"input": []},
+            "response": {
+                "id": "r",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+            "reward": 0.0,
+        }
+    )
+    assert response.model_dump().get("evaluation_completed") is None
+
+    async def grade():
+        return response
+
+    result = await observe_verifier(grade, enabled=True, verifier_name="custom")()
+    assert result.evaluation_completed is True
+    assert result.ng_verifier_invocations[0].status == "completed"
+    assert result.ng_verifier_invocations[0].grading_record.score == 0.0
+    assert result._state is response._state and result.response is response.response
+    assert CustomResponse.model_validate_json(result.model_dump_json()).evaluation_completed is True

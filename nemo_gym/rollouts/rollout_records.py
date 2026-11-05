@@ -42,6 +42,7 @@ from nemo_gym.core.failure_kinds import (
     ROLLOUT_ALLOCATION_ENDED,
     FailureClassificationConfig,
 )
+from nemo_gym.core.outcome_policy import is_policy_counted_zero
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
@@ -514,7 +515,7 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
         and result.get("_ng_failure_class") is None
         and type(result.get("reward")) in (int, float)
         and math.isfinite(result["reward"])
-        and result.get("evaluation_completed") is not False
+        and (result.get("evaluation_completed") is not False or is_policy_counted_zero(result))
         and not result.get("mask_sample")
         and result.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and result.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)

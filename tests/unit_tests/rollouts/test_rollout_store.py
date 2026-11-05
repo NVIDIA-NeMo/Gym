@@ -1573,7 +1573,8 @@ def test_rejudge_cold_binding_is_shared_and_read_only(prepared_run, mutation):
     assert cold._state.failure_count("0-0") == 1
 
 
-def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run):
+@pytest.mark.parametrize("recovered_attempt", [False, True])
+def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run, recovered_attempt):
     output, prepare = prepared_run
     old = {
         "task_id": "t",
@@ -1610,10 +1611,18 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
                 store.record_rejudgment(failure, result | {"ng_verifier_invocations": invocations})
             assert snapshot(output) == before
         result["ng_verifier_invocations"] = [{"invocation_id": "new-verifier", "status": "completed"}]
+        if recovered_attempt:
+            result["ng_verifier_invocations"].insert(0, {"invocation_id": "failed-retry", "status": "failed"})
+            result["ng_verifier_invocation_id"] = "missing"
+            with pytest.raises(ConfigError, match="fresh observed verifier"):
+                store.record_rejudgment(failure, result)
+            assert snapshot(output) == before
+            result["ng_verifier_invocation_id"] = "new-verifier"
         assert store.record_rejudgment(failure, result)
         assert not store.record_rejudgment(failure, result)
     (selected,) = RolloutStore.read(output).selected("success")
     assert selected["_ng_rejudged_failure_observations"]["ng_trajectory"] == old
-    assert selected["_ng_rejudge_verifier_invocation_ids"] == ["new-verifier"]
-    assert [v["invocation_id"] for v in selected["ng_trajectory"]["verifier_invocations"]] == ["new-verifier"]
+    ids = ["failed-retry", "new-verifier"] if recovered_attempt else ["new-verifier"]
+    assert selected["_ng_rejudge_verifier_invocation_ids"] == ids
+    assert [v["invocation_id"] for v in selected["ng_trajectory"]["verifier_invocations"]] == ids
     assert selected["response"] == failure["response"] and selected["reward"] == 0.0

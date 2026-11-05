@@ -777,16 +777,17 @@ class TestOwnGradingRecord:
         assert "partial_credit" in body["failure_reason"]
         [invocation] = body["ng_verifier_invocations"]
         assert invocation["failure_kind"] == "verifier_error"
-        assert invocation["grading_record"]["verdict"] == "masked"
+        assert invocation["status"] == "unknown"
+        assert "grading_record" not in invocation
 
     def test_a_rubric_that_may_ask_a_model_is_not_observed(self) -> None:
-        """No invocation at all, as before: one without a record would read as ungraded and be re-verified."""
+        """Compact completion evidence does not claim captured programmatic grading."""
 
         async def judge(state, **kwargs) -> float:
             return 1.0
 
         body = self._run([judge])
-        assert not body.get("ng_verifier_invocations")
+        assert body["ng_verifier_invocations"][0]["capture_enabled"] is False
         assert body["reward"] == 1.0 and body.get("mask_sample") is False
 
     def test_observability_off_returns_no_verifier_invocation(self) -> None:
@@ -794,7 +795,7 @@ class TestOwnGradingRecord:
             return 1.0
 
         body = self._run([aa_headline], observability=False)
-        assert not body.get("ng_verifier_invocations")
+        assert body["ng_verifier_invocations"][0]["capture_enabled"] is False
         assert body["reward"] == 1.0
 
 

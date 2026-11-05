@@ -41,6 +41,7 @@ NG_AGENT_SANDBOX_OBSERVATION_KEY = "ng_agent_sandbox_observation"
 # collector's canonical projection.
 NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_VERIFIER_INVOCATIONS_KEY = "ng_verifier_invocations"
+NG_VERIFIER_INVOCATION_ID_KEY = "ng_verifier_invocation_id"
 
 
 class ObservationModel(BaseModel):
@@ -286,6 +287,14 @@ class VerifierInvocation(ObservationModel):
     invocation_id: str
     status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown"
     failure_kind: Optional[str] = None
+
+    @property
+    def evaluation_completed(self) -> bool | None:
+        """Whether this grading operation completed; unknown is not a failed evaluation."""
+        return None if self.status == "unknown" else self.status == "completed"
+
+    # False means only completion was observed; absent grading details then prove nothing.
+    capture_enabled: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     model_calls: list[ModelCallRef] = Field(default_factory=list)
     grading_operations: list[GradingOperationObservation] | None = Field(
         default=None,
@@ -306,6 +315,12 @@ class VerifierInvocation(ObservationModel):
     @classmethod
     def validate_failure_kind(cls, value: Optional[str]) -> Optional[str]:
         return validate_failure_kind(value)
+
+
+def selected_verifier_completion(invocations: Iterable[VerifierInvocation], invocation_id: str) -> bool | None:
+    """Completion is available only when exactly one observed invocation owns the verdict."""
+    matches = [invocation for invocation in invocations if invocation.invocation_id == invocation_id]
+    return matches[0].evaluation_completed if len(matches) == 1 else None
 
 
 def exclude_verifier_model_calls(
@@ -843,6 +858,9 @@ def failure_observations(value: Any) -> dict[str, Any]:
             ]
         except (ValidationError, TypeError, ValueError):
             pass
+    selected = value.get(NG_VERIFIER_INVOCATION_ID_KEY)
+    if isinstance(selected, str):
+        result[NG_VERIFIER_INVOCATION_ID_KEY] = selected
     if isinstance(value.get("verification_skipped"), bool):
         result["verification_skipped"] = value["verification_skipped"]
     return result

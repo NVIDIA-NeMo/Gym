@@ -438,7 +438,11 @@ class RolloutStore:
                 old_ids = {item.invocation_id for item in prior.verifier_invocations}
                 if not actual or len(ids) != len(set(ids)) or old_ids.intersection(ids):
                     raise ValueError("missing or reused verifier invocation")
-                if not result.get("_ng_failure_class") and any(item.status != "completed" for item in actual):
+                selected_id = result.get("ng_verifier_invocation_id")
+                grading = [item for item in actual if item.invocation_id == selected_id] if selected_id else actual
+                if selected_id and len(grading) != 1:
+                    raise ValueError("result does not select one observed verifier invocation")
+                if not result.get("_ng_failure_class") and any(item.status != "completed" for item in grading):
                     raise ValueError("successful rejudge lacks completed verifier evidence")
                 prior_judge_calls = {
                     ref.model_call_id for item in prior.verifier_invocations for ref in item.model_calls

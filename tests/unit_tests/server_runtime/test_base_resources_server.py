@@ -556,6 +556,8 @@ class TestRefusalsAndLostSessions:
         assert verified.mask_sample is True
         assert verified.failure_kind == SESSION_LOST
         assert verified.failure_reason == "sandbox gone"
+        assert verified.evaluation_completed is False
+        assert verified.ng_verifier_invocations[0].status == "incomplete"
         # The warning makes a systematic loss, such as a cookie that never reaches /verify, visible in the logs.
         assert [record.getMessage() for record in caplog.records] == [
             "Masking the verify of a session this server no longer holds (session_lost): sandbox gone"

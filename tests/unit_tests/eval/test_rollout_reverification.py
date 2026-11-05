@@ -1629,6 +1629,29 @@ class TestRunVerificationPayloads:
 
         assert result == {"reward": 1.0, "_ng_failure_events_omitted": True}
 
+    async def test_reverification_does_not_send_previous_invocation_selection(self, monkeypatch):
+        from nemo_gym.server_runtime.verifier_observability import observe_verifier
+
+        row = self._make_row("agent_a") | {
+            "ng_verifier_invocation_id": "old",
+            "ng_verifier_invocations": [{"invocation_id": "old", "status": "failed"}],
+        }
+        client = MagicMock(global_config_dict={})
+        client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+        [(_, result)] = await self._collect(_run_verification_payloads([row]))
+        request = client.post.call_args.kwargs["json"]
+        assert "ng_verifier_invocation_id" not in request
+        assert "ng_verifier_invocations" not in request
+        assert row["ng_verifier_invocation_id"] == "old"
+
+        async def echoing_verifier():
+            return request | {"reward": 1.0}
+
+        graded = await observe_verifier(echoing_verifier, enabled=True, verifier_name="echo")()
+        assert graded["evaluation_completed"] is True
+        assert graded["ng_verifier_invocation_id"] != "old"
+
     async def test_posts_to_resources_server_matching_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row_a = self._make_row("agent_a")
         row_b = self._make_row("agent_b")
@@ -3892,3 +3915,35 @@ class TestVerifyAggregationRoutingConsistency:
         await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
 
         assert posted == ["math_rs"]
+
+
+@pytest.mark.parametrize(
+    "action,reward,masked,accepted",
+    [
+        ("count_as_zero", 0.0, False, True),
+        ("verify", 0.0, False, False),
+        ("count_as_zero", 1.0, False, False),
+        ("count_as_zero", 0.0, True, False),
+    ],
+)
+def test_saved_zero_policy_survives_legacy_incomplete_grading(action, reward, masked, accepted):
+    from nemo_gym.eval.rollout_reverification import _ungraded_reverification
+    from nemo_gym.rollouts.rollout_records import is_rejudgment_of
+
+    failure = {
+        "_ng_failure_class": "judge_failed",
+        "_ng_failure_id": "old-judge",
+        "_ng_run_id": "run",
+        "response": {"id": "answer", "object": "response", "output": [{"type": "message", "content": []}]},
+    }
+    result = {
+        "_ng_rejudged_failure_id": "old-judge",
+        "_ng_run_id": "run",
+        "response": failure["response"],
+        "evaluation_completed": False,
+        "failure_outcome_action": action,
+        "reward": reward,
+        "mask_sample": masked,
+    }
+    assert _ungraded_reverification(result) is not accepted
+    assert is_rejudgment_of(failure, result) is accepted
