@@ -2369,14 +2369,16 @@ async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest
         sandbox_id="sandbox-slowpolls", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
     )
 
-    with raises_failure(PROVIDER_STATUS_UNAVAILABLE) as exc_info:
+    with raises_failure(PROVIDER_COMMAND_OUTCOME_UNKNOWN) as exc_info:
         await provider.exec(handle, "echo ok", timeout_s=0.01)
 
-    # The poll-budget failure surfaced with its own message (after using its
-    # retry budget), not relabeled as the wall-clock hard cap tripping.
+    # The client deadline ends the wait before status recovery could finish;
+    # keep the failed read as its cause, without claiming the hard cap tripped.
     assert commands.status_calls >= 1
     assert commands.run_calls == 1
-    assert "command status" in str(exc_info.value)
+    assert exc_info.value.operation == "command status"
+    assert "client wait expired" in exc_info.value.failure_reason
+    assert exc_info.value.__cause__.failure_kind == PROVIDER_IO_TIMEOUT
     assert "hard cap" not in str(exc_info.value)
 
 
@@ -4993,13 +4995,14 @@ async def test_orphan_delete_permission_and_missing_semantics(monkeypatch, statu
     assert any(event.http_status == status for event in log.report.events.values()) is (status != 404)
 
 
-@pytest.mark.parametrize("read_recovers", [False, True])
+@pytest.mark.parametrize("read_case", ["running", "recovered", "client-deadline-read"])
 async def test_background_client_wait_expiry_preserves_last_running_observation(
-    monkeypatch: pytest.MonkeyPatch, read_recovers: bool
+    monkeypatch: pytest.MonkeyPatch, read_case: str
 ) -> None:
     """A successful Running observation is not exhausted status-read recovery."""
     clock = [0.0]
     calls = []
+    real_sleep = asyncio.sleep
 
     class Commands:
         async def run(self, command, *, opts):
@@ -5008,31 +5011,47 @@ async def test_background_client_wait_expiry_preserves_last_running_observation(
 
         async def get_command_status(self, execution_id):
             calls.append("status")
-            if read_recovers and calls.count("status") == 1:
+            if read_case == "recovered" and calls.count("status") == 1:
                 raise TimeoutError("one failed read")
+            if read_case == "client-deadline-read" and calls.count("status") == 3:
+                # The real request timer clips this slow read at the client
+                # deadline, before a status-recovery window could run.
+                clock[0] = 0.05
+                await real_sleep(0)
+                await asyncio.Event().wait()
             return SimpleNamespace(running=True, exit_code=None)
 
         async def get_background_command_logs(self, execution_id):
             pytest.fail("no logs without a final command status")
 
     provider, handle = _background_provider(monkeypatch, Commands())
-    provider._operations = replace(provider._operations, command_timeout_headroom_s=0.0)
+    provider._operations = replace(
+        provider._operations,
+        command_timeout_headroom_s=0.0,
+        status_recovery_timeout_s=0.015 if read_case == "recovered" else 300.0,
+    )
     monkeypatch.setattr(provider, "_sandbox_death_evidence", AsyncMock(return_value=None))
     loop = asyncio.get_running_loop()
-    monkeypatch.setattr(loop, "time", lambda: clock[0])
 
     async def advance(delay):
         clock[0] += delay
 
-    monkeypatch.setattr(asyncio, "sleep", advance)
-    with raises_failure(PROVIDER_COMMAND_OUTCOME_UNKNOWN) as caught:
-        await provider.exec(handle, "long command", timeout_s=0.05)
+    with monkeypatch.context() as timers:
+        timers.setattr(loop, "time", lambda: clock[0])
+        timers.setattr(asyncio, "sleep", advance)
+        with raises_failure(PROVIDER_COMMAND_OUTCOME_UNKNOWN) as caught:
+            await provider.exec(handle, "long command", timeout_s=0.05)
 
     assert calls.count("submit") == 1
     assert calls.count("status") >= 2
     assert "client wait expired" in caught.value.failure_reason
     assert "last observed running=True" in caught.value.failure_reason
-    assert caught.value.__cause__ is None  # A recovered read is not this expiry's cause.
+    if read_case == "client-deadline-read":
+        assert caught.value.__cause__.failure_kind == PROVIDER_IO_TIMEOUT
+        assert isinstance(caught.value.__cause__.__cause__, TimeoutError)
+    else:
+        assert caught.value.__cause__ is None  # A recovered read is not this expiry's cause.
+    assert clock[0] == pytest.approx(0.05)
     assert caught.value.http_status is None
     assert caught.value.details.execution_id == "still-running"
 

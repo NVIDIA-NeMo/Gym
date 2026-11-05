@@ -2517,13 +2517,13 @@ class OpenSandboxProvider:
         status_failure_deadline: float | None = None
         diagnostic_remaining_s = 0.0
         status_failure_error: NgFailureEvent | None = None
-        last_observed_running: bool | None = None
+        seen_running = False
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
             limits = [value for value in (deadline, status_failure_deadline) if value is not None]
             remaining = min(limits) - loop.time() if limits else None
             if remaining is not None and remaining <= 0:
-                if status_failure_error is not None:
+                if status_failure_deadline is not None and (deadline is None or status_failure_deadline < deadline):
                     failure_kind = PROVIDER_STATUS_UNAVAILABLE
                     reason = (
                         "OpenSandbox command status unavailable beyond recovery deadline; command outcome is unknown"
@@ -2531,7 +2531,7 @@ class OpenSandboxProvider:
                 else:
                     failure_kind = PROVIDER_COMMAND_OUTCOME_UNKNOWN
                     reason = "OpenSandbox client wait expired; command completion is unknown"
-                    if last_observed_running:
+                    if seen_running:
                         reason += "; last observed running=True"
                 raise opensandbox_failure(
                     operation="command status",
@@ -2611,9 +2611,9 @@ class OpenSandboxProvider:
                         failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
                         reason="OpenSandbox command status has missing or invalid running/exit_code fields",
                     )
-                last_observed_running = status.running
                 if status.running is False:
                     break
+                seen_running = True
             limits = [value for value in (deadline, status_failure_deadline) if value is not None]
             # Retry caps must not shorten the configured polling cadence, even when the cap is zero.
             delay = max(
