@@ -31,21 +31,16 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import RETRY_ERROR_CODES, SESSION_ID_KEY, request
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    RETRY_ERROR_CODES,
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY, request
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -577,7 +572,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
         if judge_error is not None:
-            raise JudgeError(judge_error)
+            raise judge_error
         return response
 
     ###### UTILITY FUNCTIONS ######
@@ -649,7 +644,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _verify_answer_with_judge(
         self, question: str, ground_truth: str, response: str
-    ) -> tuple[JudgeEvaluation, Optional[str]]:
+    ) -> tuple[JudgeEvaluation, Optional[Exception]]:
         async def _get_judge_response(
             question: str, ground_truth: str, response: str
         ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
@@ -693,8 +688,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         try:
             judge_create_params, judge_response = await _get_judge_response(question, ground_truth, response)
-        except JudgeError as e:
-            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), str(e)
+        except JUDGE_FAILURES as e:
+            if not is_judge_failure(e):
+                raise
+            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), e
         judge_evaluation = _grade_sample(judge_create_params, judge_response)
         return judge_evaluation, None
 

@@ -10,6 +10,7 @@ import hashlib
 import json
 import sys
 import tempfile
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
@@ -22,7 +23,25 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
+from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
+    SESSION_LOST,
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -30,12 +49,9 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,
     DeepSWETaskStore,
@@ -60,6 +76,12 @@ def _resolve_repo_path(path: Path) -> Path:
     return (NEMO_GYM_ROOT / expanded).resolve()
 
 
+# The longest failure_reason a failure event accepts.
+_MAX_FAILURE_REASON_CHARS = 2000
+# What the verifier reports when it ran but left no verdict file: a fresh sandbox may still produce one.
+_NO_VERDICT_FILE = "Verifier did not produce /logs/verifier/reward.json"
+
+
 class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE = ReverifyMode.UNSUPPORTED
 
@@ -77,6 +99,11 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
     include_model_patch_in_response: bool = True
+    # A verifier attempt that produced no verdict (no reward.json, or a sandbox that could not be created or run) is
+    # run again on a fresh sandbox with the same collected patch, at most this many more times. A malformed verdict,
+    # a timeout and a conclusive result are the verifier's answer and are not run again; a patch that breaks the
+    # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
+    inconclusive_verification_retries: int = Field(default=2, ge=0)
 
 
 class DeepSWEInstanceRequest(BaseModel):
@@ -98,6 +125,10 @@ class DeepSWESeedSessionResponse(BaseSeedSessionResponse):
 
 class DeepSWEVerifyRequest(DeepSWEInstanceRequest, BaseVerifyRequest):
     sandbox_handle: str | None = None
+    # A re-verification of a saved result whose verifier produced no verdict: the workspace patch that verifier was
+    # given, with its saved sha256. It is verified on a fresh sandbox only when no agent session exists.
+    saved_model_patch: str | None = None
+    saved_model_patch_sha256: str | None = None
 
 
 class DeepSWEVerifyResponse(BaseVerifyResponse):
@@ -124,6 +155,12 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     patch_collection_time_s: float
     sandbox_start_time_s: float
     verification_time_s: float
+    # How many verifier attempts ran (0 when the patch was never collected), and why each one before the last
+    # produced no verdict (``inconclusive_verification_retries``).
+    verification_attempts: int = 0
+    inconclusive_attempts: list[str] = Field(default_factory=list)
+    # Whether the verified patch is a saved one, re-verified without its agent session.
+    replayed_saved_patch: bool = False
 
 
 class VerifierResult(BaseModel):
@@ -161,6 +198,19 @@ def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
     if not isinstance(task_id, str) or not task_id:
         raise ValueError("DeepSWE requests must provide verifier_metadata.task_id or task_id")
     return task_id
+
+
+def _inconclusive_reason(result: VerifierResult, error: Exception | None) -> str | None:
+    """Why a verifier attempt produced no verdict that a fresh sandbox could still produce, or None.
+
+    A sandbox that could not be created or run, and a verifier that left no reward.json, are run again. A malformed
+    verdict and a timeout are the verifier's own answer about this patch, and a completed evaluation is a verdict.
+    """
+    if error is not None:
+        return f"{type(error).__name__}: {error}"
+    if result.evaluation_completed or result.verifier_error != _NO_VERDICT_FILE:
+        return None
+    return result.verifier_error
 
 
 def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) -> Task:
@@ -360,7 +410,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 evaluation_completed=False,
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
-                verifier_error="Verifier did not produce /logs/verifier/reward.json",
+                verifier_error=_NO_VERDICT_FILE,
                 test_output=combined_output,
             )
         try:
@@ -374,8 +424,18 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 test_output=combined_output,
             )
 
-        reward = float(reward_data.get("reward", 0.0))
-        if reward not in (0.0, 1.0):
+        if not isinstance(reward_data, dict) or "reward" not in reward_data:
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error="Verifier reward.json is missing its reward field",
+                test_output=combined_output,
+            )
+        reward = reward_data["reward"]
+        # Only a real 0 or 1 is a verdict: a bool is an int, and a numeric string is not a number, so
+        # neither may become a pass (or a fail) through float().
+        if type(reward) not in (int, float) or reward not in (0.0, 1.0):
             return VerifierResult(
                 evaluation_completed=False,
                 reward=0.0,
@@ -383,6 +443,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 verifier_error=f"Verifier returned non-binary reward: {reward!r}",
                 test_output=combined_output,
             )
+        reward = float(reward)
         if not present["ctrf.json"]:
             return VerifierResult(
                 evaluation_completed=False,
@@ -455,14 +516,28 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox_handle = body.sandbox_handle
         patch_collection_time_s = 0.0
         patch_error: str | None = None
+        failure_kind = VERIFIER_ERROR
+        failure_cause: Exception | None = None
+        replayed = False
 
         if self.config.is_verifying_golden_patch:
             model_patch = task_solution_patch_path(task).read_bytes()
         else:
             model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
-            if agent_session is None:
+            if agent_session is None and body.saved_model_patch is not None:
+                # A re-verification: the saved patch is verified as itself, never collected again.
+                saved = body.saved_model_patch.encode("utf-8")
+                if hashlib.sha256(saved).hexdigest() != body.saved_model_patch_sha256:
+                    patch_error = "The saved DeepSWE model patch does not match its saved sha256"
+                    failure_kind = SESSION_LOST
+                else:
+                    model_patch = saved
+                    replayed = True
+                    session_id = f"replay-{body.saved_model_patch_sha256[:16]}-{uuid.uuid4().hex[:8]}"
+            elif agent_session is None:
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
+                failure_kind = SESSION_LOST
             else:
                 sandbox_handle = agent_session.sandbox_handle
                 started = monotonic()
@@ -484,6 +559,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                         file=sys.stderr,
                     )
                     patch_error = f"{type(error).__name__}: {error}"
+                    failure_kind = ENVIRONMENT_SERVER_FAILED
+                    failure_cause = error
                 finally:
                     patch_collection_time_s = monotonic() - started
                     await self._stop_sandbox(agent_session.sandbox, task_id=current_task_id, phase="agent")
@@ -491,42 +568,102 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         patch_sha256 = hashlib.sha256(model_patch).hexdigest()
         log_dir = _resolve_repo_path(self.config.logs_dir) / current_task_id / session_id
 
-        sandbox: AsyncSandbox | None = None
         sandbox_start_time_s = 0.0
         verification_time_s = 0.0
+        verification_attempts = 0
+        inconclusive_attempts: list[str] = []
         result = VerifierResult(evaluation_completed=False, reward=0.0, verifier_error=patch_error)
+        # One verification operation, however many attempts it takes; outside a verifier invocation it gets its own id.
+        operation_id = current_verifier_invocation_id() or uuid.uuid4().hex
         if patch_error is None:
-            try:
-                started = monotonic()
-                phase = "golden-verifier" if self.config.is_verifying_golden_patch else "verifier"
-                sandbox = await self._create_sandbox(task, phase=phase)
-                sandbox_start_time_s = monotonic() - started
-                started = monotonic()
-                result = await self._run_verifier(sandbox, task, model_patch, log_dir)
-                verification_time_s = monotonic() - started
-            except Exception as error:
-                print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
-                result = VerifierResult(
-                    evaluation_completed=False,
-                    reward=0.0,
-                    verifier_error=f"{type(error).__name__}: {error}",
+            # The same collected patch is verified on a fresh sandbox each time; an attempt without a verdict is run
+            # again within the bound (``_inconclusive_reason``), and the last attempt's result stands.
+            attempts = 1 + self.config.inconclusive_verification_retries
+            phase = "golden-verifier" if self.config.is_verifying_golden_patch else "verifier"
+            for attempt in range(1, attempts + 1):
+                verification_attempts = attempt
+                sandbox: AsyncSandbox | None = None
+                attempt_error: Exception | None = None
+                try:
+                    started = monotonic()
+                    sandbox = await self._create_sandbox(task, phase=phase)
+                    sandbox_start_time_s = monotonic() - started
+                    started = monotonic()
+                    result = await self._run_verifier(sandbox, task, model_patch, log_dir)
+                    verification_time_s = monotonic() - started
+                except Exception as error:
+                    print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
+                    attempt_error = error
+                    result = VerifierResult(
+                        evaluation_completed=False,
+                        reward=0.0,
+                        verifier_error=f"{type(error).__name__}: {error}",
+                    )
+                finally:
+                    if sandbox is not None:
+                        await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
+                reason = _inconclusive_reason(result, attempt_error)
+                if reason is None or attempt == attempts:
+                    failure_cause = attempt_error
+                    break
+                inconclusive_attempts.append(bounded_text(reason, _MAX_FAILURE_REASON_CHARS))
+                # An attempt that is run again is observed as its own failure, as swebench_pro observes its
+                # verification attempts, so every infrastructure retry is visible in the run's facts. Only an
+                # exception before a sandbox was assigned names allocation as the failing operation.
+                allocation_failed = attempt_error is not None and sandbox is None
+                observed = NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason=(
+                        "Verifier sandbox allocation failed"
+                        if allocation_failed
+                        else "Verification produced no conclusive verdict"
+                    ),
+                    operation="verify.sandbox.allocate" if allocation_failed else "verify",
+                    operation_id=operation_id,
+                    attempt_id=f"{operation_id}:{attempt}",
+                    stage="verification",
+                    exception_type=type(attempt_error).__name__ if attempt_error is not None else None,
                 )
-            finally:
-                if sandbox is not None:
-                    await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
+                observed.__cause__ = attempt_error
+                observe_failure(observed)
+                print(
+                    f"Retrying DeepSWE verification for {current_task_id} on a fresh sandbox "
+                    f"(attempt {attempt}/{attempts} was inconclusive: {reason})",
+                    file=sys.stderr,
+                )
 
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
 
+        if not result.evaluation_completed:
+            # A lost session or failed patch collection happens before verification. Keep that
+            # boundary and its cause distinct from an inconclusive verifier result.
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=failure_kind,
+                # The event field is bounded; a long provider diagnostic must not cost the result and patch.
+                failure_reason=bounded_text(
+                    result.verifier_error or "DeepSWE verification did not complete", _MAX_FAILURE_REASON_CHARS
+                ),
+                operation="collect_model_patch" if patch_error is not None else "verify",
+                operation_id=operation_id,
+                # The last of the attempts that ran; the earlier ones were observed as they were run again.
+                attempt_id=f"{operation_id}:{verification_attempts}" if verification_attempts else None,
+                stage="verification",
+            )
+            failure.__cause__ = failure_cause
+            observe_failure(failure)
+
         return DeepSWEVerifyResponse.model_validate(
-            body.model_dump()
+            body.model_dump(exclude={"saved_model_patch", "saved_model_patch_sha256"})
             | result.model_dump()
             | {
                 "task_id": current_task_id,
                 "sandbox_handle": sandbox_handle,
                 "model_patch": model_patch.decode("utf-8", errors="replace")
-                if self.config.include_model_patch_in_response
+                if self.config.include_model_patch_in_response and patch_error is None
                 else None,
                 "model_patch_sha256": patch_sha256,
                 "model_patch_bytes": len(model_patch),
@@ -534,7 +671,14 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "patch_collection_time_s": patch_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
+                "verification_attempts": verification_attempts,
+                "inconclusive_attempts": inconclusive_attempts,
+                "replayed_saved_patch": replayed,
+                "mask_sample": not result.evaluation_completed,
+                "failure_kind": None if result.evaluation_completed else failure_kind,
+                "failure_reason": None if result.evaluation_completed else result.verifier_error,
             }
+            | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})
         )
 
 

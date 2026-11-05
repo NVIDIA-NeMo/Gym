@@ -13,15 +13,16 @@ import pytest
 from nemo_fabric import Fabric
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    ModelServerRef,
+    ResourcesServerRef,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nemo_fabric_agent.app import (
     NeMoFabricAgent,
     NeMoFabricAgentConfig,
@@ -782,7 +783,7 @@ def test_atif_skips_copied_context_steps() -> None:
 
 
 def test_atif_keeps_relay_structured_tool_results() -> None:
-    fixture = Path(__file__).parents[3] / "tests/unit_tests/fixtures/relay_atif_v1_7_tool_trajectory.json"
+    fixture = Path(__file__).parents[3] / "tests/unit_tests/trajectory/fixtures/relay_atif_v1_7_tool_trajectory.json"
     items = _atif_output_items([json.loads(fixture.read_text())], "answer")
 
     calls = [item for item in items if item.type == "function_call"]

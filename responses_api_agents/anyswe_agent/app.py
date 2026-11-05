@@ -32,14 +32,19 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxCreateError,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 class SWEBenchMetrics(BaseModel):
@@ -397,11 +402,14 @@ class GymAgentHarnessProcessor(BaseModel):
         sources = (
             scripts / f"{self._agent_key}_deps.sh",
             scripts / "_portable_python.sh",
-            PARENT_DIR / "responses_api_agents" / self._agent_key / "requirements.txt",
+            PARENT_DIR / "responses_api_agents" / self._agent_key / "pyproject.toml",
+            PARENT_DIR / "responses_api_agents" / self._agent_key / "uv.lock",
             *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
             # The bundle carries its own copy of nemo_gym, so library changes must rebuild it too.
             *sorted((PARENT_DIR / "nemo_gym").rglob("*.py")),
             PARENT_DIR / "pyproject.toml",
+            PARENT_DIR / "uv.lock",
+            PARENT_DIR / "setup.py",
         )
         return hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
 

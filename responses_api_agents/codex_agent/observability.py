@@ -6,19 +6,44 @@
 import json
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+)
+
+
+# Compaction format compatibility: tested with Codex 0.144.4.
+# This covers native compacted records and summary wrappers here, plus request
+# metadata and completed SSE responses in sandbox_transport.py; revalidate them together.
+# Source: https://github.com/openai/codex/tree/rust-v0.144.4/codex-rs/core/src
+# (compact.rs and responses_metadata.rs).
+# The prefix below wraps the persisted summary. Strip it only after a structured
+# compacted event; helper requests are identified separately by native metadata.
+_COMPACTION_PREFIX = (
+    "Another language model started to solve this problem and produced a summary of its thinking process. "
+    "You also have access to the state of the tools that were used by that language model. "
+    "Use this to build on the work that has already been done and avoid duplicating work. "
+    "Here is the summary produced by the other language model, use the information in this summary "
+    "to assist with your own analysis:\n"
+)
 
 
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)
@@ -98,6 +123,7 @@ def parse_codex_observations(
 ) -> AgentObservationBundle:
     """Parse a transcript, using the caller's final outcome and gaps when supplied."""
     conversation = []
+    compactions = []
     tools = {}
     patch_outcomes = {}
     gaps = list(gaps or [])
@@ -119,6 +145,21 @@ def parse_codex_observations(
                     _token_usage(payload)
                 if payload.get("type") == "patch_apply_end" and type(payload.get("success")) is bool:
                     patch_outcomes[payload["call_id"]] = payload["success"]
+                continue
+            if event.get("type") == "compacted":
+                native_event = True
+                message = event["payload"]["message"]
+                if not isinstance(message, str) or not message.startswith(_COMPACTION_PREFIX):
+                    raise ValueError("unsupported Codex compaction summary")
+                compactions.append(
+                    ContextCompactionObservation(
+                        invocation_id=invocation_id,
+                        observed_at=datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp(),
+                        trigger="automatic",
+                        outcome="completed",
+                        summary=message.removeprefix(_COMPACTION_PREFIX),
+                    )
+                )
                 continue
             if event.get("type") != "response_item":
                 if event.get("type") not in {"session_meta", "turn_context", "compacted", "world_state"}:
@@ -190,6 +231,60 @@ def parse_codex_observations(
                 error_type=error_type,
             ),
             *tools.values(),
+            *compactions,
         ],
         gaps=gaps,
     )
+
+
+def associate_codex_compaction_calls(
+    bundle: AgentObservationBundle,
+    attempts: list[dict[str, JsonValue]],
+    *,
+    model_ref: ModelServerRef | None,
+) -> AgentObservationBundle:
+    """Attach session-local helper identities before returning the agent's bundle.
+
+    The session transport records only completed responses to explicit compaction
+    requests. The native compacted event must independently confirm the summary.
+    """
+    result = bundle.model_copy(deep=True)
+    events = [record for record in result.records if isinstance(record, ContextCompactionObservation)]
+    invocations = [record for record in result.records if isinstance(record, AgentInvocation)]
+    previous_refs = [ref for event in events for ref in event.model_calls]
+    for invocation in invocations:
+        invocation.model_calls = [ref for ref in invocation.model_calls if ref not in previous_refs]
+    result.gaps = [gap for gap in result.gaps if gap.code != "compaction_model_call_reference_unavailable"]
+    helpers = []
+    for attempt in attempts:
+        helper = attempt.get("compaction_response")
+        if (
+            attempt.get("status") == 200
+            and not attempt.get("transport_error")
+            and isinstance(helper, dict)
+            and isinstance(helper.get("response_id"), str)
+            and helper["response_id"]
+            and isinstance(helper.get("summary"), str)
+        ):
+            helpers.append(helper)
+    candidates = [
+        [i for i, helper in enumerate(helpers) if event.summary and helper["summary"] == event.summary]
+        for event in events
+    ]
+    counts = Counter(index for matches in candidates for index in matches)
+    identities = Counter(helper["response_id"] for helper in helpers)
+    for event, matches in zip(events, candidates):
+        event.model_calls = []
+        owners = [inv for inv in invocations if inv.invocation_id == event.invocation_id]
+        if model_ref is not None and len(matches) == 1 and counts[matches[0]] == 1 and len(owners) == 1:
+            helper = helpers[matches[0]]
+            if identities[helper["response_id"]] == 1:
+                reference = ModelCallRef(model_ref=model_ref, response_id=helper["response_id"])
+                event.model_calls = [reference]
+                if reference not in owners[0].model_calls:
+                    owners[0].model_calls.append(reference)
+                continue
+        result.gaps.append(
+            ObservationGap(code="compaction_model_call_reference_unavailable", invocation_id=event.invocation_id)
+        )
+    return result

@@ -170,6 +170,26 @@ def test_sampling_overrides_reach_openhands_llm_without_mutating_model_info(tmp_
     assert model_info == {"max_input_tokens": 65536, "max_output_tokens": 32768}
 
 
+@pytest.mark.parametrize(
+    "settings,expected", [({}, (3600, 5)), ({"llm_timeout_s": 900, "llm_num_retries": 2}, (900, 2))]
+)
+def test_the_llm_request_timeout_and_retries_reach_openhands(tmp_path, monkeypatch, settings, expected):
+    agent = SkillsBenchOpenHands(
+        logs_dir=tmp_path, model_name="test-policy", api_base="http://model.example/v1", **settings
+    )
+    received = {}
+
+    def capture_llm(**kwargs):
+        received.update(kwargs)
+        raise RuntimeError("stop after LLM construction")
+
+    monkeypatch.setattr(openhands_agent, "LLM", capture_llm)
+    with pytest.raises(RuntimeError, match="stop after LLM construction"):
+        agent._run_openhands("task", None, None, "id", "/root", _RunControl())
+    # OpenHands' own default is a 300 s request timeout, shorter than a slow but healthy policy needs.
+    assert (received["timeout"], received["num_retries"]) == expected
+
+
 @pytest.mark.asyncio
 async def test_timeout_waits_for_worker_before_verifier_can_start() -> None:
     started = threading.Event()
@@ -297,7 +317,14 @@ async def test_docker_deadline_discards_detached_processes(tmp_path, completed):
     environment = _make_environment(
         tmp_path,
         sandbox_provider={"docker": {}},
-        task_env_config=EnvironmentConfig(docker_image="ubuntu:24.04", cpus=1, memory_mb=512),
+        # Docker's official ubuntu:24.04 index, pulled from its ECR Public copy: CI runners pull Docker Hub
+        # anonymously and hit its rate limit (HTTP 429). The digest is the one Docker Hub serves for the tag.
+        task_env_config=EnvironmentConfig(
+            docker_image="public.ecr.aws/docker/library/ubuntu:24.04"
+            "@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852",
+            cpus=1,
+            memory_mb=512,
+        ),
     )
     finished = threading.Event()
     waiting = threading.Event()

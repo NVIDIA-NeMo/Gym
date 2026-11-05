@@ -54,8 +54,13 @@ from PIL import Image, ImageDraw
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.agents.utils.verify_call import verify_with_transport_retry
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.core import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+)
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
@@ -110,6 +115,14 @@ class GdpPdfAgentConfig(SimpleAgentConfig):
         default=True,
         description="Remove base64 input_image blocks from serialized rollout artifacts.",
     )
+    regenerate_on_incomplete_output: bool = Field(
+        default=False,
+        description="Regenerate the answer with a smaller image footprint when the policy response comes back "
+        "incomplete. Off by default: an incomplete response means the model spent its output budget, so it is "
+        "the row's result and goes to the verifier as is; regenerating would re-sample a model result. Turn it "
+        "on only to reproduce the earlier behaviour for comparison. Each regeneration is counted in "
+        "document_delivery.output_truncation_regenerations.",
+    )
 
 
 class DocumentDelivery:
@@ -138,6 +151,16 @@ class DocumentDelivery:
             "image_coverage_end_page": self.image_coverage_end_page,
             "text_only_fallback": self.text_only_fallback,
             "limit": limit,
+        }
+
+    def adaptation_counts(self) -> dict[str, int]:
+        """Rejected requests by kind: input-limit rejections (the endpoint refused the request's size, a
+        delivery negotiation) and regenerations of an incomplete answer (only with
+        ``regenerate_on_incomplete_output``)."""
+        regenerations = sum(attempt["limit"] == "output_truncated" for attempt in self.attempts)
+        return {
+            "input_limit_rejections": len(self.attempts) - regenerations,
+            "output_truncation_regenerations": regenerations,
         }
 
     def adapt(self, limit: str, image_cap: Optional[int], *, min_dpi: int) -> bool:
@@ -564,15 +587,13 @@ class GdpPdfAgent(SimpleAgent):
                     model_response = _terminal_failure_response(self.config.model_server.name)
                     break
                 else:
-                    # vLLM doesn't always reject an oversized request outright -- it can accept
-                    # it and simply run out of room mid-generation instead (status=incomplete),
-                    # which raises nothing for the except clauses above to catch. That's the same
-                    # underlying problem as a rejected request (not enough room in the context
-                    # window), so it gets the same reactive response: free up room by shrinking
-                    # the image footprint and retry, rather than silently keeping the truncated
-                    # answer. Only worth trying when images are actually part of the payload.
+                    # An incomplete response means the model spent its output budget: an input that
+                    # does not fit is rejected up front (handled above), so this is the model's
+                    # result and is verified as is. Regenerating it with a smaller image footprint
+                    # re-samples a model result, so it only happens when explicitly enabled.
                     if (
                         model_response.status == "incomplete"
+                        and self.config.regenerate_on_incomplete_output
                         and self.config.include_images
                         and delivery.adapt("output_truncated", None, min_dpi=self.config.min_dpi)
                     ):
@@ -595,27 +616,41 @@ class GdpPdfAgent(SimpleAgent):
                 verification_skipped=True,
             )
         else:
-            try:
+            request = result
+
+            async def verify() -> dict[str, Any]:
                 verified = await self.server_client.post(
-                    server_name=self.config.resources_server.name, url_path="/verify", json=result, cookies=cookies
+                    server_name=self.config.resources_server.name, url_path="/verify", json=request, cookies=cookies
                 )
                 await raise_for_status(verified)
-                result = await get_response_json(verified)
-            except Exception as error:  # noqa: BLE001
-                # Same reasoning as the model-call retry loop above: a /verify-side failure
-                # (upstream judge outage, a malformed row tripping a resources-server bug, etc.)
-                # must not take the whole evaluation run down over one row either. Score it as
-                # a zero attempt and keep going -- the warning below is what makes a real
-                # verifier bug (as opposed to a one-off transient failure) visible for follow-up.
-                print(f"[gdp_pdf_agent] WARNING: /verify failed on {manifest_relpath}: {error!r}", flush=True)
-                terminal_limit = terminal_limit or f"verify_failed_{type(error).__name__}"
-                result["reward"] = 0.0
+                return await get_response_json(verified)
 
-        result["document_delivery"] = delivery.record(terminal_limit) | {"rejected_attempts": delivery.attempts}
+            try:
+                # A reply lost in transport is tried again before the row is masked (verify_with_transport_retry).
+                result = await verify_with_transport_retry(
+                    verify, server_client=self.server_client, server_name=self.config.resources_server.name
+                )
+            except NgFailureEvent as failure:
+                # Return the real generated answer on the established masked-failure path. Raising
+                # here would discard it at the HTTP boundary and make a resume generate again. Every
+                # attempt was observed as its own agent route failure of operation verify.
+                result.update(
+                    reward=0.0,
+                    mask_sample=True,
+                    failure_kind=failure.failure_kind,
+                    failure_reason=failure.failure_reason,
+                )
+
+        adaptations = delivery.adaptation_counts()
+        result["document_delivery"] = (
+            delivery.record(terminal_limit) | {"rejected_attempts": delivery.attempts} | adaptations
+        )
+        # The generic per-row counts the run's failure facts sum (recovery.failure_facts).
+        result["agent_adaptations"] = adaptations
         if pages_truncated:
             print(f"[gdp_pdf_agent] WARNING: truncated {pages_truncated} page(s) of {manifest_relpath} (max_pages)")
             result.setdefault("verifier_metadata", meta)["pages_truncated"] = pages_truncated
-        if terminal_limit:
+        if terminal_limit and not result.get("mask_sample"):
             result["failure_reason"] = f"GDP.pdf terminal input limit: {terminal_limit}"
         if trajectory is not None:
             result["ng_trajectory"] = trajectory.model_dump(mode="json")

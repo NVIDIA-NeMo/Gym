@@ -86,7 +86,7 @@ jobs:
           HARNESS: ${{ matrix.harness }}
         run: |
           .venv/bin/python -m pytest -o addopts= --import-mode=importlib -q \
-            scripts/harness_conformance/tests tests/unit_tests/harness_capabilities \
+            scripts/harness_conformance/tests tests/unit_tests/rollouts/harness_capabilities \
             "responses_api_agents/${HARNESS}_agent/tests" 2>&1 | tee "$RESULTS/tests.log"
       - name: Run full scenario suite
         id: probes

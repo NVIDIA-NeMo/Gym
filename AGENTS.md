@@ -73,6 +73,19 @@ BaseServer (Pydantic model with config + server_client)
     └── SimpleResponsesAPIAgent  →  implement responses(), run()
 ```
 
+`BaseServer` and `SimpleServer` live in `nemo_gym/server_runtime/base_server.py`, `SimpleResourcesServer` in
+`nemo_gym/server_runtime/base_resources_server.py`, `SimpleResponsesAPIModel` in
+`nemo_gym/models/base_responses_api_model.py`, and `SimpleResponsesAPIAgent` in
+`nemo_gym/agents/base_responses_api_agent.py`.
+
+`nemo_gym/` is split into layered packages. From top to bottom: `cli`, `environment`, `eval`, `orchestration`,
+`rollouts`, `data`, `agents`, `models`, `server_runtime`, `artifacts`, `metrics`, `verification`, `trajectory`,
+`sandbox`, `client`, `telemetry`, `core`, `utils`, `config`. A package imports only packages below it. The
+import-linter contract in `pyproject.toml` enforces the order; its `ignore_imports` list holds the known exceptions,
+which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sits outside the layers: it runs inside
+Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
+(`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
+
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
 ## Creating Environments
@@ -99,7 +112,7 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
 
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
+- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.client.http_client.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
 - **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
@@ -130,7 +143,7 @@ Servers and agent harnesses run tasks in remote sandboxes through `nemo_gym.sand
 
 - **Keep the `nemo_gym.sandbox` public API minimal and lifecycle-only**: create/start, exec, upload/download, stop
   (and provider capabilities such as pause/resume or endpoints). Put utilities and helpers built on top of it outside
-  `nemo_gym.sandbox`, for example in `nemo_gym/agent_utils/` or the server that uses them.
+  `nemo_gym.sandbox`, for example in `nemo_gym/agents/utils/` or the server that uses them.
 - **Resolve providers from config** with `resolve_provider_config(sandbox_provider, global_config_dict)` and merge
   `resolve_provider_metadata(...)` into `SandboxSpec.metadata`. Do not hard-code a provider or parse provider blocks by
   hand. Merge metadata as provider defaults, then `sandbox_config.metadata`, then per-task labels, and keep label
@@ -170,7 +183,7 @@ gym env test --all
 pytest tests/unit_tests/ -x
 
 # Run a single test file
-pytest tests/unit_tests/test_openai_utils.py -x
+pytest tests/unit_tests/client/test_openai_client.py -x
 
 # Lint and format
 ruff check --fix .
@@ -188,6 +201,48 @@ gym dev test
 # Dump merged config
 gym env resolve --config ...
 ```
+
+## Where code and tests go
+
+- New library code goes into the package of `nemo_gym/` whose job it is, never at the `nemo_gym/` root. The root
+  holds only package-wide modules: `__init__.py`, `package_info.py`, `_public_api.py` and `_moved_paths.py`. A
+  helper that imports nothing from `nemo_gym` goes into `nemo_gym/utils/`.
+- Core unit tests mirror the package they test: a test of `nemo_gym/<package>/<module>.py` goes in
+  `tests/unit_tests/<package>/`, and a subpackage gets its own folder where it has many tests
+  (`tests/unit_tests/data/tasks/harbor/`). Put a test with the module it is about; when it exercises several, pick
+  the one the test is named for.
+- Two folders have no `nemo_gym` package. `tests/unit_tests/tooling/` holds tests of `scripts/`, `docker/`, packaging
+  and CI configuration; it cannot be named `scripts/`, because pytest's `norecursedirs` skips that name and the tests
+  would silently stop running. `tests/unit_tests/benchmarks/` holds core-suite tests of benchmark and resources server
+  code.
+- Only tests of the `nemo_gym/` root modules and repository-wide checks stay flat in `tests/unit_tests/`.
+- `tests/` itself holds only the suites (`unit_tests/`, `functional_tests/`, `e2e/`), the shared `conftest.py`, and
+  `tests/helpers/`: setup and assertions that tests in several places import, such as core unit tests and server
+  tests, or the tests of several servers. A helper used by one folder's tests stays beside them.
+- Every folder of test modules has an `__init__.py`, so pytest imports each test under its package name and test
+  modules in different folders can share a file name.
+- A fixture lives in a `fixtures/` folder beside the tests that read it. A fixture that tests in several packages
+  read stays in `tests/unit_tests/fixtures/`.
+- Tests find the repository root with `Path(__file__).resolve().parents[N]`, where N is the test's folder depth
+  under the repository root. When you move a test, update N, the test's imports from other tests, its fixture paths,
+  its key in `scripts/ci/core_test_durations.json`, and any path built from separate segments, such as
+  `root / "tests" / "unit_tests" / "fixtures"`.
+
+## Imports from nemo_gym
+
+- Code outside `nemo_gym/` and its tests (servers and their tests, benchmarks, scripts, and code samples in docs
+  and skills) imports public names from the package's public API: `from nemo_gym.<package> import Name`. If such
+  code needs a name the package does not export, add it to the package's `_PUBLIC_API` in its `__init__.py` rather
+  than importing the submodule. `scripts/migrate_imports.py` writes this form, and a unit test checks it.
+- A subpackage that is a namespace of its own, such as a task format (`nemo_gym.data.tasks.harbor`), has its own
+  public API. Code outside `nemo_gym/` imports that format's names from the subpackage, not from the parent
+  package, so a name such as `load_task` keeps the format in its import and cannot collide with another format's.
+- Code inside `nemo_gym/` and its tests (`tests/`) imports from the module that defines each name
+  (`from nemo_gym.<package>.<module> import Name`), never a package's public API, so the import-linter contract in
+  `pyproject.toml` sees every dependency and a test reads what it patches. A package imports only packages below it.
+- A `mock.patch` or `monkeypatch.setattr` target names the module the code under test looks the name up in: the
+  module that defines it, or the module that imports it by name and calls it. Never a package's public API or an
+  old path.
 
 ## Code Style
 
