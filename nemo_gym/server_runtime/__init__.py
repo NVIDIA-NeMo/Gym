@@ -87,6 +87,7 @@ if TYPE_CHECKING:
         ReverifyMode,
         SimpleResourcesServer,
         lost_session_verification,
+        reject_partial_typed_seed,
     )
     from nemo_gym.server_runtime.base_server import (
         SimpleServer,
@@ -205,6 +206,7 @@ _PUBLIC_API = {
     "lost_session_verification": "base_resources_server",
     "maybe_auto_expose": "mcp_auto_exposure",
     "next_attempt": "_checkpoint.control",
+    "reject_partial_typed_seed": "base_resources_server",
     "observe_llm_judge_grading": "verifier_observability",
     "observe_programmatic_grading": "verifier_observability",
     "observe_verifier": "verifier_observability",
