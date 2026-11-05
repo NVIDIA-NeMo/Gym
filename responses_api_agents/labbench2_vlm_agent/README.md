@@ -7,7 +7,7 @@ image/PDF files from disk, base64-encode them, and inject `input_image` blocks
 into `responses_create_params` before sending the request to the model.
 
 Agent sessions read the media from the row's `agent_context` (`artifacts.media`, `values.tag`), embed it in
-`responses()`, and remove the images from the session's observations and trajectory. A session whose row
+the session's episode, and remove the images from the session's observations and trajectory. A session whose row
 has no `agent_context`, or whose media directory is missing under `media_base_dir`, is refused with HTTP 422.
 
 See `resources_servers/labbench2_vlm/README.md` for full documentation.

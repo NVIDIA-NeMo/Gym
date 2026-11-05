@@ -24,18 +24,18 @@ for figqa2/tableqa2). Non-protocol rows always use the image path when
 ``media_mode=text`` is set.
 
 An agent session gets the same media from the task's ``agent_context`` (``artifacts.media`` and ``values.tag``)
-and embeds it in ``responses()``.
+and embeds it in the episode it creates; the agent loop stays Simple Agent's.
 """
 
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from fastapi import Request, Response
+from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agents import AgentSeedSessionRequest, Body, resolve_agent_context_artifact
+from nemo_gym.agents import AgentSeedSessionRequest, resolve_agent_context_artifact
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import AgentContextArtifact
 from nemo_gym.trajectory import ObservationGap, TrajectoryRecord
@@ -155,14 +155,9 @@ class LabbenchVLMAgent(SimpleAgent):
             **{field.name: getattr(state, field.name) for field in fields(state)}, media_dir=media_dir, tag=context.tag
         )
 
-    async def responses(
-        self,
-        request: Request,
-        response: Response,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> NeMoGymResponse:
-        agent_session_id = self._agent_session_id_from_request(request)
-        state = self._session_state(agent_session_id) if agent_session_id is not None else None
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         if isinstance(state, LabbenchVLMSessionState) and state.media_dir is not None:
             # The same media for the same request, so a retried activation sends the model the same input.
             row = {
@@ -176,12 +171,11 @@ class LabbenchVLMAgent(SimpleAgent):
                 media_mode=_effective_media_mode(self.config.media_mode, {"tag": state.tag}),
             )
             body = NeMoGymResponseCreateParamsNonStreaming.model_validate(enriched["responses_create_params"])
-        return await super().responses(request, response, body)
-
-    async def _create_episode(self, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any) -> tuple:
-        model_response, trajectory, model_cookies, resources_cookies = await super()._create_episode(body, **kwargs)
+        model_response, trajectory, model_cookies, resources_cookies = await super()._create_session_episode(
+            state, body, **kwargs
+        )
         # A session's trajectory reaches its observations and the rollout record; keep the base64 images out of both.
-        if trajectory is not None and kwargs.get("in_session") and self.config.strip_images_from_output:
+        if trajectory is not None and self.config.strip_images_from_output:
             trajectory = _strip_trajectory_images(trajectory)
         return model_response, trajectory, model_cookies, resources_cookies
 

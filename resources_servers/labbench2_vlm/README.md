@@ -40,7 +40,7 @@ sending the request to the model. Other tags always keep image rendering even if
 
 Under an agent session (`single_agent_turn` or `single_agent_turn_legacy`), the agent reads the same
 media from the row's `agent_context` instead: `artifacts.media` is the media directory and `values.tag`
-the subtask tag. It resolves the directory at seed, embeds the media in `responses()`, and refuses a
+the subtask tag. It resolves the directory at seed, embeds the media in the session's episode, and refuses a
 session whose row has no `agent_context` or whose media directory is missing (HTTP 422), so a session
 never runs without its images. Images are removed from the session's observations and trajectory when
 `strip_images_from_output` is on.
