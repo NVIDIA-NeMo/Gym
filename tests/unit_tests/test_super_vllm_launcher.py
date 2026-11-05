@@ -915,7 +915,10 @@ sleep() { "$TEST_SLEEP" 0.01; }
                             port = 8001 + index
                             self.assertEqual(
                                 recorded[f"trigger-{gpu}"],
-                                [f"http://node0:{port}/health", f"http://node0:{port}/start_profile"],
+                                [
+                                    "http://node0:8000/health",
+                                    f"http://node0:{port}/start_profile",
+                                ],
                             )
                             args = recorded[f"profile-{gpu}"]
                             output = args[args.index("--output") + 1]
@@ -1132,15 +1135,15 @@ nsys() {
                             config = json.loads(args[args.index("--profiler-config") + 1])
                             self.assertEqual(config, {"profiler": "cuda", "max_iterations": 7})
 
-    def test_prefill_profile_automatically_waits_for_health_and_warmup(self) -> None:
+    def test_prefill_profile_automatically_waits_for_router_and_warmup(self) -> None:
         _, command = self.generate_commands()
         setup = command.split('\nmooncake_pid=""', 1)[0]
         stubs = r"""
 hostname() { echo node1; }
 curl() {
-    if [[ "${*: -1}" == http://node1:8001/health ]]; then
-        echo health
-        if [[ ! -f ready ]]; then touch ready; return 22; fi
+    if [[ "${*: -1}" == http://node0:8000/health ]]; then
+        echo router-health
+        if [[ ! -f router-ready ]]; then touch router-ready; return 22; fi
     else
         [[ "${*: -3}" == '-X POST http://node1:8001/start_profile' ]] || return 99
         echo post
@@ -1151,7 +1154,7 @@ sleep() { echo sleep >> events; SECONDS=$((SECONDS + 1)); }
 """
         for post_status in ("0", "22"):
             with self.subTest(post_status=post_status):
-                for name in ("ready", "events"):
+                for name in ("router-ready", "events"):
                     (Path(self.workdir) / name).unlink(missing_ok=True)
                 status, _, stderr = self.run_shell(
                     stubs + setup + "\nprofile_delay=2\nprofile_port=8001\nsteps=20\ntrigger_prefill_profile\n",
@@ -1160,9 +1163,32 @@ sleep() { echo sleep >> events; SECONDS=$((SECONDS + 1)); }
                 self.assertEqual(status, 0 if post_status == "0" else 1, stderr)
                 self.assertEqual(
                     (Path(self.workdir) / "events").read_text().splitlines(),
-                    ["health", "sleep", "health", "sleep", "sleep", "post"],
+                    ["router-health", "sleep", "router-health", "sleep", "sleep", "post"],
                 )
                 self.assertIn("capture started" if post_status == "0" else "Could not start", stderr)
+
+    def test_prefill_profile_readiness_timeout_does_not_start_capture(self) -> None:
+        _, command = self.generate_commands(env={"ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS": "2"})
+        setup = command.split('\nmooncake_pid=""', 1)[0]
+        stubs = r"""
+hostname() { echo node1; }
+curl() {
+    local url="${*: -1}"
+    echo "$url" >> urls
+    return 22
+}
+sleep() { SECONDS=$((SECONDS + 1)); }
+"""
+        status, _, stderr = self.run_shell(
+            stubs + setup + "\nprofile_delay=0\nprofile_port=8001\nsteps=20\ntrigger_prefill_profile\n",
+        )
+        self.assertEqual(status, 1, stderr)
+        self.assertIn("Timed out waiting for http://node0:8000/health", stderr)
+        self.assertNotIn("capturing in", stderr)
+        self.assertEqual(
+            (Path(self.workdir) / "urls").read_text().splitlines(),
+            ["http://node0:8000/health"] * 3,
+        )
 
     def test_prefill_profile_autotrigger_only_runs_on_api_workers(self) -> None:
         _, command = self.generate_commands()
@@ -1191,7 +1217,8 @@ curl() {
                 self.assertEqual(urls.exists(), delay == "0" and not headless)
                 if urls.exists():
                     self.assertEqual(
-                        [url.rsplit("/", 1)[1] for url in urls.read_text().splitlines()], ["health", "start_profile"]
+                        [url.rsplit("/", 1)[1] for url in urls.read_text().splitlines()],
+                        ["health", "start_profile"],
                     )
 
     def test_prefill_profile_rejects_invalid_steps_or_missing_nsys(self) -> None:

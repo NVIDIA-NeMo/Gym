@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Prefill profiling (set here via environment or in VLLM_CONFIG):
-# PROFILE_PREFILL=1 captures 20 worker steps, 300 seconds after API readiness.
+# PROFILE_PREFILL=1 captures 20 worker steps, 300 seconds after router readiness.
 # PREFILL_PROFILE_STEPS, PREFILL_PROFILE_DELAY_SECONDS (or manual), and
 # PREFILL_PROFILE_DIR (default: results/nsys under SLURM_SUBMIT_DIR) override this.
 # Detailed tracing adds overhead; use separate runs for throughput measurements.
@@ -465,15 +465,18 @@ cleanup_prefill_profile() {
 
 trigger_prefill_profile() {
     local url="http://\$this_node_hostname:\$profile_port"
-    local deadline=\$(( SECONDS + 1200 ))
-    until curl --noproxy '*' --silent --fail --max-time 5 "\$url/health" >/dev/null; do
+    local router_url="http://\${nodes[0]}:$ROUTER_SERVER_PORT"
+    local deadline=\$(( SECONDS + $ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS ))
+    # A prefill engine may become ready well before decode. Wait for the main
+    # router to report healthy workers before starting the profiling delay.
+    until curl --noproxy '*' --silent --fail --max-time 5 "\$router_url/health" >/dev/null; do
         if (( SECONDS >= deadline )); then
-            echo "WARNING: Timed out waiting for \$url/health; no prefill profile captured." >&2
+            echo "WARNING: Timed out waiting for \$router_url/health; no prefill profile captured." >&2
             return 1
         fi
         sleep 1
     done
-    echo "Prefill profiling: \$url ready; capturing in \$profile_delay seconds." >&2
+    echo "Prefill profiling: router \$router_url ready; capturing in \$profile_delay seconds." >&2
     # Short sleeps let teardown cancel the trigger without leaving a long-lived sleep process.
     deadline=\$(( SECONDS + 10#\$profile_delay ))
     while (( SECONDS < deadline )); do sleep 1; done
