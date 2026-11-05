@@ -113,44 +113,37 @@ class _SandboxDeathNotice:
     exit_code: int | None = None
 
 
-def _ended_report_evidence(
-    error: BaseException, *, sandbox_id: str, via_server_proxy: bool, log_unrecognized: bool = True
-) -> _SandboxDeathNotice | None:
-    """Accept only the observed ended-report format on an identified SDK HTTP 410.
+def _lifecycle_oom_evidence(info: Any, *, sandbox_id: str) -> _SandboxDeathNotice | None:
+    """Read the known controller's persisted current-container report from the control plane.
 
-    This is compatibility with a deployed provider report, not a supported
-    upstream structured termination API. Unknown/ambiguous layouts fail closed.
-    Call only with explicit operator-confirmed report-contract opt-in. The
-    server-proxy route is also required; it alone does not prove the report
-    emitter. Direct execd endpoints can be controlled by sandbox code. Never
-    search exception prose or arbitrary causal chains for OOM markers.
+    Command-status 410 bodies can come from the sandbox's exec daemon, even through
+    the server proxy. Only GET /sandboxes/{id} supplies this lifecycle evidence.
+    Unknown layouts, mismatched identities and ambiguous container reports fail closed.
     """
-    from opensandbox.exceptions import SandboxApiException
-
-    if not via_server_proxy:
+    status = getattr(info, "status", None)
+    if (
+        getattr(info, "id", None) != sandbox_id
+        or getattr(status, "state", None) != "Failed"
+        or getattr(status, "reason", None) != "FAILED"
+    ):
         return None
-    cause = error.__cause__ if isinstance(error, NgFailureEvent) else error
-    if not isinstance(cause, SandboxApiException) or cause.status_code != 410:
+    report = getattr(status, "message", None)
+    if not isinstance(report, str) or len(report) > 65536:
         return None
-    report = cause.error.message
-    if cause.error.code != "SANDBOX::ENDED" or not isinstance(report, str) or len(report) > 65536:
-        return None
-    # The fixed report identifies this sandbox and one current user-container
-    # termination. Do not match sidecar, stale, multi-pod or contradictory text.
+    # The single-pod template names its owned pod <sandbox-id>-0. Pool allocations
+    # and aggregate multi-pod failures need a separate identity contract.
+    pod = re.escape(f"{sandbox_id}-0")
     match = re.fullmatch(
-        rf"Sandbox {re.escape(sandbox_id)} has ended \(OOMKilled\): "
-        r"1/1 observed pods failed; primary reason=ContainerFailed; sample pod=(?P<pod>[^;\s]{1,253}); "
-        r"sample detail=Pod (?P=pod) container sandbox exited with code (?P<exit>\d{1,3}) \(OOMKilled\)",
+        rf"1/1 observed pods failed; primary reason=ContainerFailed; sample pod={pod}; "
+        rf"sample detail=Pod {pod} container sandbox exited with code (?P<exit>\d{{1,3}}) \(OOMKilled\)",
         report,
     )
-    if match is None or int(match["exit"]) > 255:
-        if log_unrecognized:
-            LOGGER.warning("Unrecognized OpenSandbox ended-report format; no OOM inferred: %.256s", report)
+    if match is None or not 1 <= int(match["exit"]) <= 255:
         return None
     return _SandboxDeathNotice(
-        f"Sandbox was OOM-killed; provider ended report: {report}",
+        f"Sandbox was OOM-killed; lifecycle status confirms {report}",
         failure_kind=PROVIDER_OOM_KILLED,
-        provider_status_reason="OOMKilled",
+        provider_status_reason=status.reason,
         exit_code=int(match["exit"]),
     )
 
@@ -618,7 +611,7 @@ class OpenSandboxConnectionConfig:
     With the explicit legacy combination ``transport_backend=httpx``,
     ``keepalive_expiry_s=None`` and ``tls_verify=True`` (pooling enabled), the
     SDK owns its default transport. SDK 0.1.15 then discards command-status 410
-    bodies, so ended-report inference is unavailable in that configuration.
+    bodies; lifecycle evidence remains available independently of that response.
     ``tls_verify`` applies to every connection the provider opens (SDK transport
     and PTY sockets) and is off by
     default; set it for endpoints whose certificate the client can verify.
@@ -838,10 +831,6 @@ class OpenSandboxDiagnosticsConfig:
     """
 
     inspect_oom: bool = False
-    # Enable only after the deployment operator verifies that SANDBOX::ENDED
-    # is an authoritative gateway report, not forwarded user-controlled text.
-    # The deployed emitter/format is not a verified supported upstream API.
-    ended_report_oom: bool = False
     timeout_s: float = 5.0
     request_timeout_s: float = 2.0
     poll_interval_s: float = 0.5
@@ -851,9 +840,8 @@ class OpenSandboxDiagnosticsConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"diagnostics.{name} must be finite and > 0")
-        for name in ("inspect_oom", "ended_report_oom"):
-            if not isinstance(getattr(self, name), bool):
-                raise TypeError(f"diagnostics.{name} must be a bool")
+        if not isinstance(self.inspect_oom, bool):
+            raise TypeError("diagnostics.inspect_oom must be a bool")
 
 
 @dataclass(frozen=True)
@@ -2356,6 +2344,7 @@ class OpenSandboxProvider:
                     failure_kind=evidence.failure_kind,
                     reason=evidence.message,
                     provider_status_reason=evidence.provider_status_reason,
+                    exit_code=evidence.exit_code,
                 ) from error
             if isinstance(error, NgFailureEvent):
                 raise
@@ -2371,8 +2360,8 @@ class OpenSandboxProvider:
         """One evidence path for exec and PTY, bounded by the caller's existing deadline.
 
         Lifecycle reasons do not identify the affected container, so even OOMKilled
-        establishes only unavailability. Optional inspect confirms OOM only from the
-        current user container, never message text, historical state, or sidecars.
+        establishes only unavailability. A recognized control-plane container report
+        or optional inspect can confirm OOM for the current user container.
         """
         loop = asyncio.get_running_loop()
         terminal_notice = None
@@ -2383,6 +2372,8 @@ class OpenSandboxProvider:
                 try:
                     async with asyncio.timeout(min(self._diagnostics.request_timeout_s, remaining)):
                         info = await get_info()
+                    if evidence := _lifecycle_oom_evidence(info, sandbox_id=handle.sandbox_id):
+                        return evidence
                     status = getattr(info, "status", None)
                     state, reason = getattr(status, "state", None), getattr(status, "reason", None)
                     if _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
@@ -2464,6 +2455,7 @@ class OpenSandboxProvider:
             failure_kind=evidence.failure_kind if evidence is not None else PROVIDER_COMMAND_OUTCOME_UNKNOWN,
             reason=evidence.message if evidence is not None else "PTY connection lost; command outcome is unknown",
             provider_status_reason=evidence.provider_status_reason if evidence is not None else None,
+            exit_code=evidence.exit_code if evidence is not None else None,
         )
 
     async def _exec_background(
@@ -2576,22 +2568,12 @@ class OpenSandboxProvider:
                     if deadline is not None:
                         status_failure_deadline = min(status_failure_deadline, deadline)
                     diagnostic_remaining_s = self._diagnostics.timeout_s
-                first_status_failure = status_failure_error is None
                 status_failure_error = failure
                 # Keep the unused diagnostic budget for later status failures:
                 # lifecycle/inspect evidence may arrive after the first lookup.
                 diagnostic_started = loop.time()
                 diagnostic_deadline = min(status_failure_deadline, diagnostic_started + diagnostic_remaining_s)
-                evidence = None
-                if self._diagnostics.ended_report_oom:
-                    evidence = _ended_report_evidence(
-                        failure,
-                        sandbox_id=handle.sandbox_id,
-                        via_server_proxy=self._connection.use_server_proxy,
-                        log_unrecognized=first_status_failure,
-                    )
-                if evidence is None:
-                    evidence = await self._sandbox_death_evidence(handle, deadline=diagnostic_deadline, poll=False)
+                evidence = await self._sandbox_death_evidence(handle, deadline=diagnostic_deadline, poll=False)
                 diagnostic_remaining_s = max(0.0, diagnostic_remaining_s - (loop.time() - diagnostic_started))
                 if evidence is not None:
                     raise opensandbox_failure(
