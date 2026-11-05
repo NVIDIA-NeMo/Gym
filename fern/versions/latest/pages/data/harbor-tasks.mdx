@@ -498,6 +498,38 @@ tasks stay listed in `skipped.json`. Tasks that declare GPUs run on the environm
 block when one is configured. The run's rows, generated configuration and outputs are the same artifacts every
 other `gym eval run` produces, so `gym eval aggregate`, `gym eval export` and the health check apply unchanged.
 
+### A benchmark config that names a target
+
+A benchmark config can hand `gym eval prepare --benchmark` and `gym eval run --benchmark` to a task target: it sets
+`harbor_target` (any target above) and defines the one agent instance the benchmark runs by default, with its
+benchmark settings. The run is the target's run with that harness: the per-taskset environment server, rows and
+outputs are the same, and `--sandbox`, `--only-tasks`, `--exclude-tasks` and `--skip-unloadable` apply as above.
+
+```yaml
+# benchmarks/my_benchmark/config.yaml
+harbor_target: terminal_bench_4
+config_paths:
+- responses_api_agents/miniswe_sandboxed_agent/configs/miniswe_sandboxed_agent.yaml
+miniswe_sandboxed_agent:
+  responses_api_agents:
+    miniswe_sandboxed_agent:
+      harness:
+        step_limit: 500
+```
+
+```bash
+gym eval run --benchmark my_benchmark --sandbox opensandbox --model-type vllm_model --model <model> --model-url <url>
+gym eval run --benchmark my_benchmark --agent-type hermes_agent --sandbox opensandbox ...
+```
+
+`--agent-type NAME[/FLAVOR]` runs another harness's shipped config on the same tasks, without the benchmark's harness
+settings; the dataset's `[gym] allowed_agents` still decides whether it may. `--agent` is refused here: it names the
+harness of a positional target. Besides its agent instance the config may set top-level keys, including the shipped
+`harbor_environment_server` instance's settings; another server instance is refused, since it would start beside the
+taskset's. Such a benchmark runs on its own (not with a second `--benchmark`), `gym eval plan` does not plan it, and
+`gym list benchmarks` does not list it, since it declares no dataset of its own; its manifest sets the same
+`harbor_target` (refer to [Environment Manifest](/main/contribute/environments/new-environment#field-reference)).
+
 ### Run summary and verbosity
 
 Both commands leave a per-run summary beside the rollouts, `rollouts_run_summary.json` (`<stem>_run_summary.json`

@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""`gym eval prepare/run --benchmark` for a benchmark config that names a Harbor target."""
+
+import argparse
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+from pytest import MonkeyPatch
+
+import nemo_gym.cli.eval as cli_eval
+import nemo_gym.cli.main as cli_main
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
+from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+from nemo_gym.environment.assets import asset_config_path
+
+
+MINISWE_CONFIG = "responses_api_agents/miniswe_sandboxed_agent/configs/miniswe_sandboxed_agent.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_extra_roots_env(monkeypatch: MonkeyPatch):
+    monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+
+
+def _harbor_config(**extra) -> dict:
+    return {
+        "harbor_target": "terminal_bench_4",
+        "config_paths": [MINISWE_CONFIG],
+        "miniswe_sandboxed_agent": {
+            "responses_api_agents": {"miniswe_sandboxed_agent": {"harness": {"step_limit": 500}}}
+        },
+        **extra,
+    }
+
+
+def _benchmark(root: Path, name: str, config: dict) -> Path:
+    path = root / "benchmarks" / name / "config.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    return path
+
+
+def _main(monkeypatch: MonkeyPatch, argv: list[str]) -> None:
+    monkeypatch.setattr(sys, "argv", ["gym", *argv])
+    cli_main.main()
+
+
+class TestHarborBenchmarkConfig:
+    def test_names_the_target_and_the_benchmarks_own_harness(self, tmp_path: Path) -> None:
+        path = _benchmark(tmp_path, "tb", _harbor_config())
+        benchmark = harbor_benchmark(path)
+        assert benchmark.target == "terminal_bench_4"
+        assert benchmark.config_path == path.resolve()
+        assert (benchmark.agent.config_path, benchmark.agent.instance_name, benchmark.agent.impl_name) == (
+            path.resolve(),
+            "miniswe_sandboxed_agent",
+            "miniswe_sandboxed_agent",
+        )
+        assert benchmark.agent.runs_in_sandbox
+
+    def test_a_config_without_a_target_composes_its_own_servers(self, tmp_path: Path) -> None:
+        config = _harbor_config()
+        config.pop("harbor_target")
+        assert harbor_benchmark(_benchmark(tmp_path, "tb", config)) is None
+
+    def test_the_shipped_harbor_server_settings_may_ride_along(self, tmp_path: Path) -> None:
+        overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": 54000}}}
+        assert harbor_benchmark(_benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay)))
+
+    @pytest.mark.parametrize(
+        "extra,message",
+        [
+            ({"harbor_target": " "}, "must name a Harbor task folder"),
+            (
+                {"second": {"responses_api_agents": {"simple_agent": {}}}},
+                "exactly one responses_api_agents instance",
+            ),
+            ({"verifier": {"resources_servers": {"demo": {}}}}, "cannot define verifier"),
+            ({"relay": {"environment_servers": {"legacy_agent": {}}}}, "cannot define relay"),
+        ],
+    )
+    def test_refuses_what_the_run_could_not_honor(self, tmp_path: Path, extra: dict, message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            harbor_benchmark(_benchmark(tmp_path, "tb", _harbor_config(**extra)))
+
+
+class TestEvalRunDelegation:
+    def test_run_hands_the_target_and_the_harness_to_run_target(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        path = _benchmark(tmp_path, "tb", _harbor_config())
+        captured = []
+        monkeypatch.setattr(
+            cli_eval, "run_target", lambda args, overrides, **kwargs: captured.append((overrides, kwargs))
+        )
+        _main(monkeypatch, ["eval", "run", "--search-dir", str(tmp_path), "--benchmark", "tb", "+limit=3"])
+        ((overrides, kwargs),) = captured
+        assert kwargs["benchmark"].config_path == path.resolve()
+        assert kwargs["benchmark"].target == "terminal_bench_4"
+        assert "+limit=3" in overrides
+
+    def test_task_selection_reaches_a_harbor_backed_benchmark(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        _benchmark(tmp_path, "tb", _harbor_config())
+        captured = []
+        monkeypatch.setattr(cli_eval, "run_target", lambda args, overrides, **kwargs: captured.append(args.only_tasks))
+        _main(monkeypatch, ["eval", "run", "--search-dir", str(tmp_path), "--benchmark", "tb", "--only-tasks", "a,b"])
+        assert captured == ["a,b"]
+
+    def test_a_benchmark_that_composes_its_own_servers_is_unchanged(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        config = _harbor_config()
+        config.pop("harbor_target")
+        path = _benchmark(tmp_path, "plain", config)
+        monkeypatch.setattr(cli_eval, "run_target", lambda *args, **kwargs: pytest.fail("not a Harbor benchmark"))
+        dispatched = []
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: dispatched.append((target, overrides)))
+        _main(monkeypatch, ["eval", "run", "--search-dir", str(tmp_path), "--benchmark", "plain"])
+        ((target, overrides),) = dispatched
+        assert target == "nemo_gym.cli.eval:e2e_rollout_collection"
+        assert overrides == [f"+config_paths=[{path.resolve()}]"]
+
+    def test_a_harbor_backed_benchmark_runs_alone(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
+        _benchmark(tmp_path, "tb", _harbor_config())
+        plain = _harbor_config()
+        plain.pop("harbor_target")
+        _benchmark(tmp_path, "plain", plain)
+        monkeypatch.setattr(cli_eval, "run_target", lambda *args, **kwargs: pytest.fail("must be refused"))
+        with pytest.raises(SystemExit):
+            _main(
+                monkeypatch,
+                ["eval", "run", "--search-dir", str(tmp_path), "--benchmark", "plain", "--benchmark", "tb"],
+            )
+        assert "select it on its own" in capsys.readouterr().err
+
+
+class _Stop(Exception):
+    pass
+
+
+class TestRunTargetWithABenchmark:
+    """`run_target` with a Harbor-backed benchmark, stopped at preparation."""
+
+    def _run(self, monkeypatch: MonkeyPatch, tmp_path: Path, **flags) -> tuple[dict, argparse.Namespace]:
+        path = _benchmark(tmp_path, "tb", _harbor_config())
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+        seen: dict = {}
+
+        def fake_prepare(target, **kwargs):
+            seen.update(target=target, **kwargs)
+            raise _Stop
+
+        monkeypatch.setattr(cli_eval, "prepare_target", fake_prepare)
+        parser = argparse.ArgumentParser()
+        args = argparse.Namespace(
+            **{"_parser": parser, "target": None, "sandbox": None, "agent": None, "agent_type": None, **flags}
+        )
+        loaded = [f"+config_paths=[{path.resolve()}]"]
+        if args.agent_type:
+            loaded.append(f"+config_paths=[{asset_config_path('agent-type', args.agent_type)}]")
+        with pytest.raises(_Stop):
+            cli_eval.run_target(args, [*loaded, "+limit=3"], benchmark=harbor_benchmark(path))
+        return seen, args
+
+    def test_the_benchmarks_harness_runs_by_default(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        seen, args = self._run(monkeypatch, tmp_path)
+        assert seen["target"] == args.target == "terminal_bench_4"
+        assert seen["agent"] == "miniswe_sandboxed_agent"
+        assert seen["rows_name"] == "tasks_miniswe_sandboxed_agent.jsonl"
+
+    def test_agent_type_swaps_the_harness(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        seen, _ = self._run(monkeypatch, tmp_path, agent_type="hermes_agent")
+        assert seen["agent"] == "hermes_agent"
+        assert seen["rows_name"] == "tasks_hermes_agent.jsonl"
+
+    def test_agent_is_refused_rather_than_ignored(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
+        path = _benchmark(tmp_path, "tb", _harbor_config())
+        monkeypatch.setattr(cli_eval, "prepare_target", lambda *args, **kwargs: pytest.fail("must be refused"))
+        args = argparse.Namespace(
+            _parser=argparse.ArgumentParser(), target=None, sandbox=None, agent="hermes_agent", agent_type=None
+        )
+        with pytest.raises(SystemExit):
+            cli_eval.run_target(args, [], benchmark=harbor_benchmark(path))
+        assert "pass `--agent-type <harness>`" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+def test_the_configs_chosen_for_the_benchmark_leave_the_overrides(tmp_path: Path, monkeypatch, agent_type) -> None:
+    """`build_run` loads the selected agent's config; the CLI's own copies would add a second agent instance."""
+    path = _benchmark(tmp_path, "tb", _harbor_config())
+    other = tmp_path / "overlay.yaml"
+    loaded = [f"+config_paths=[{path},{other}]"]
+    if agent_type:
+        loaded.append(f"+config_paths=[{asset_config_path('agent-type', agent_type)}]")
+        loaded.append("+_selected_langgraph_config=x")
+    args = argparse.Namespace(target=None, agent=None, agent_type=agent_type)
+    agent, overrides = cli_eval._benchmark_agent(args, [*loaded, "+limit=3"], harbor_benchmark(path))
+    assert agent.impl_name == (agent_type or "miniswe_sandboxed_agent")
+    assert overrides == [f"+config_paths=[{other}]", "+limit=3"]
+
+
+class TestEvalPrepareDelegation:
+    def test_prepare_writes_the_targets_rows(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        _benchmark(tmp_path, "tb", _harbor_config())
+        captured = []
+        monkeypatch.setattr(
+            cli_eval,
+            "prepare_harbor_benchmark",
+            lambda args, overrides, benchmark: captured.append(benchmark.target),
+        )
+        monkeypatch.setattr(cli_main, "dispatch", lambda *args: pytest.fail("not the dataset preparation"))
+        _main(monkeypatch, ["eval", "prepare", "--search-dir", str(tmp_path), "--benchmark", "tb"])
+        assert captured == ["terminal_bench_4"]
+
+    def test_other_benchmarks_prepare_their_datasets_as_before(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        config = _harbor_config()
+        config.pop("harbor_target")
+        path = _benchmark(tmp_path, "plain", config)
+        dispatched = []
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: dispatched.append((target, overrides)))
+        _main(monkeypatch, ["eval", "prepare", "--search-dir", str(tmp_path), "--benchmark", "plain"])
+        assert dispatched == [("nemo_gym.cli.eval:prepare_benchmark", [f"+config_paths=[{path.resolve()}]"])]
+
+
+@pytest.mark.parametrize("command", ["prepare_benchmark", "plan_benchmark"])
+def test_dataset_commands_point_a_harbor_config_to_its_target(monkeypatch: MonkeyPatch, capsys, command) -> None:
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda **kwargs: {"harbor_target": "terminal_bench_4"})
+    with pytest.raises(SystemExit):
+        getattr(cli_eval, command)()
+    captured = capsys.readouterr()
+    assert "terminal_bench_4" in captured.out + captured.err
