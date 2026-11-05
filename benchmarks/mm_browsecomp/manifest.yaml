@@ -1,0 +1,30 @@
+name: mm_browsecomp
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: MM-BrowseComp multimodal web research (400 questions, 224-question paper subset also scored)
+  with search, browse and view_image tools; judged on the final answer and a reasoning checklist.
+modality: multimodal
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: mm_browsecomp
+agent_server: browsecomp_agent
+datasets:
+- name: mm_browsecomp
+  type: benchmark
+  jsonl_fpath: benchmarks/mm_browsecomp/data/mm_browsecomp_benchmark.jsonl
+  prepare_script: benchmarks/mm_browsecomp/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

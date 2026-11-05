@@ -1,0 +1,31 @@
+name: mm_browsecomp/config_no_tools
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: MM-BrowseComp's 224 paper questions without tools (question and images in one call), graded
+  by the upstream answer + checklist judge; checks data and judge against published tool-free scores.
+modality: multimodal
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_no_tools.yaml
+resources_server: mm_browsecomp
+agent_server: simple_agent
+datasets:
+- name: mm_browsecomp_paper_no_tools
+  type: benchmark
+  jsonl_fpath: benchmarks/mm_browsecomp/data/mm_browsecomp_paper_no_tools.jsonl
+  prepare_script: benchmarks/mm_browsecomp/prepare_no_tools.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

@@ -1,0 +1,60 @@
+# Tool-free MM-BrowseComp: upstream's setting for the tool-free rows of paper Table 1, on the paper's
+# 224 questions. One model call per question (question then images, no system prompt, no tools),
+# graded by the same checklist judge as the search benchmark. Use it to check the data and the judge
+# against a published tool-free score; it does not measure the search harness.
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      model: nvidia/zai-org/glm-5.1
+      api_key: ${oc.select:inference_api_key,null}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+mm_browsecomp_no_tools_resources_server:
+  resources_servers:
+    mm_browsecomp:
+      allowed_agents: [simple_agent]
+      entrypoint: app.py
+      domain: agent
+      debug: false
+      # No tool reaches the model, so no search or fetch happens; the harness config still needs a
+      # provider key and an exclusion list to start.
+      search_provider: exa
+      exa_api_key: unused-no-tools
+      exclude_domains_file_path: ../../benchmarks/mm_browsecomp/no_exclusions.json
+      use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+      verified: false
+
+mm_browsecomp_no_tools_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: mm_browsecomp_no_tools_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: mm_browsecomp_paper_no_tools
+        type: benchmark
+        jsonl_fpath: benchmarks/mm_browsecomp/data/mm_browsecomp_paper_no_tools.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/mm_browsecomp/prepare_no_tools.py
+        num_repeats: 1
+
+mm_browsecomp_no_tools_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mm_browsecomp_no_tools_simple_agent

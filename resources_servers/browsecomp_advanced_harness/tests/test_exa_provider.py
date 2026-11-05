@@ -23,7 +23,7 @@ honored. Per-call metering records provider + function for the cost/latency summ
 import json
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pytest import fixture
@@ -101,6 +101,19 @@ class TestExaProvider:
                 entrypoint="",
                 name="",
                 search_provider="tavily",
+                exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
+            )
+
+    def test_config_refuses_image_links_without_exa(self) -> None:
+        with pytest.raises(ValueError, match="exa_browse_image_links"):
+            TavilySearchResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                search_provider="tavily",
+                tavily_api_key="test_tavily_key",  # pragma: allowlist secret
+                exa_browse_image_links=5,
                 exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
             )
 
@@ -186,6 +199,42 @@ class TestExaProvider:
         browse_files = list((Path(tmp_path) / "test_session_id" / "pages").glob("*browse*"))
         assert len(browse_files) == 1
         assert "PAGE CONTENT" in browse_files[0].read_text()
+
+    async def test_exa_browse_lists_no_images_by_default(self, server: TavilySearchResourcesServer) -> None:
+        mock = MagicMock()
+        mock.get_contents = AsyncMock(return_value={"results": [{"url": "https://x.com", "text": "BODY"}]})
+        server._exa_clients = [mock]
+
+        resp = await server.browse(self._req(), BrowseRequest(urls=["https://x.com"]))
+        assert mock.get_contents.call_args.kwargs["image_links"] == 0
+        assert "[Images]" not in resp.results_string
+
+    async def test_exa_browse_lists_page_images(self, tmp_path) -> None:
+        server = self._exa_server_per_session(str(tmp_path))
+        server.config.exa_browse_image_links = 5
+        images = [
+            {"url": "https://x.com/a.png", "alt": "A  red\ntower"},
+            {"url": "https://x.com/b.jpg"},
+            {"alt": "no url"},
+        ]
+        mock = MagicMock()
+        mock.get_contents = AsyncMock(
+            return_value={"results": [{"url": "https://x.com", "text": "BODY", "extras": {"richImageLinks": images}}]}
+        )
+        server._exa_clients = [mock]
+        server._get_page_writer("test_session_id")
+
+        resp = await server.browse(self._req(), BrowseRequest(urls=["https://x.com"]))
+        assert mock.get_contents.call_args.kwargs["image_links"] == 5
+        assert "[Images]:\n- https://x.com/a.png (alt: A red tower)\n- https://x.com/b.jpg\n" in resp.results_string
+
+    async def test_exa_get_contents_requests_rich_image_links_only_when_asked(self) -> None:
+        client = ExaAIOHTTPClient(headers={})
+        with patch.object(ExaAIOHTTPClient, "_post", new=AsyncMock(return_value={})) as post:
+            await client.get_contents(["https://x.com"], max_characters=100)
+            assert "extras" not in post.call_args.args[1]
+            await client.get_contents(["https://x.com"], max_characters=100, image_links=3)
+            assert post.call_args.args[1]["extras"] == {"richImageLinks": 3}
 
     async def test_exa_browse_excluded_urls(self, server: TavilySearchResourcesServer) -> None:
         resp = await server.browse(self._req(), BrowseRequest(urls=["https://blacklisteddomain.com/page"]))
