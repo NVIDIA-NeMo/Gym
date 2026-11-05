@@ -377,7 +377,8 @@ class _RolloutRoutingMiddleware:
                 path = match.group("rest")
                 if path in _OBSERVED_PATHS and ("POST", path) not in self._non_generating_requests:
                     rollout_id = match.group("rollout_id")
-                    if await self._router.route(rollout_id, scope, receive, send):
+                    receive = await self._router.route(rollout_id, scope, receive, send)
+                    if receive is None:
                         return
                     # Hold ownership through admission, inference, streaming, and
                     # capture finalization, even if this request's history is evicted.

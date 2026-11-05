@@ -3,15 +3,19 @@
 """History reconstruction, protocol validation and client resynchronization tests."""
 
 import asyncio
+import errno
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from aiohttp import ClientConnectorError, ServerDisconnectedError, ServerTimeoutError
 from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from openai import ConflictError
@@ -81,7 +85,12 @@ def model_apps():
 
 
 @pytest.fixture
-def make_client(read_events, received_headers, worker_socket_dir, model_apps):
+def worker_lifetimes():
+    return {}
+
+
+@pytest.fixture
+def make_client(read_events, received_headers, worker_socket_dir, model_apps, worker_lifetimes):
     """Echo requests through the real middleware; record when the body is consumed."""
     with ExitStack() as stack:
 
@@ -121,7 +130,9 @@ def make_client(read_events, received_headers, worker_socket_dir, model_apps):
 
                 await app(scope, read, send)
 
-            return stack.enter_context(TestClient(record_reads))
+            lifetime = stack.enter_context(ExitStack())
+            worker_lifetimes[model_name] = lifetime
+            return lifetime.enter_context(TestClient(record_reads))
 
         yield make
 
@@ -172,6 +183,182 @@ def test_reconnected_requests_are_forwarded_to_the_rollout_owner(
     assert other_response.status_code == 200
     assert other_response.headers["x-test-worker"] == "worker-b"
     assert claims.claimant("rollout-2") is None
+
+
+def test_append_after_owner_shutdown_resyncs_before_dispatch(make_client, worker_lifetimes, envelope, read_events):
+    client_a = make_client(num_workers=2, model_name="worker-a")
+    client_b = make_client(num_workers=2, model_name="worker-b")
+    url = "/ng-rollout/recover/v1/responses"
+    headers = {"x-gym-history-transport": "v1"}
+    user = {"role": "user", "content": "task"}
+    assistant = {"role": "assistant", "content": "answer"}
+    first = envelope([user], identity="first", field="input")
+    assert client_a.post(url, json=first, headers=headers).status_code == 200
+    worker_lifetimes["worker-a"].close()
+    read_events.clear()
+    delta = envelope([user, assistant], identity="next", base="first", mode="append", field="input")
+    delta["input"] = [assistant]
+
+    rejected = client_b.post(url, json=delta, headers=headers)
+
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "gym_history_resync"
+    assert "dispatch" not in read_events
+
+    full_retry = envelope([user, assistant], identity="full-retry", field="input")
+    recovered = client_b.post(url, json=full_retry, headers=headers)
+
+    assert recovered.status_code == 200
+    assert recovered.headers["x-test-worker"] == "worker-b"
+    assert recovered.json()["input"] == [user, assistant]
+    assert read_events.count("dispatch") == 1
+
+
+def test_full_history_request_recovers_after_owner_shutdown(make_client, worker_lifetimes, envelope, read_events):
+    client_a = make_client(num_workers=2, model_name="worker-a")
+    client_b = make_client(num_workers=2, model_name="worker-b")
+    url = "/ng-rollout/recover/v1/responses"
+    first = envelope([], identity="first", field="input")
+    assert client_a.post(url, json=first, headers={"x-gym-history-transport": "v1"}).status_code == 200
+    worker_lifetimes["worker-a"].close()
+    read_events.clear()
+
+    recovered = client_b.post(url, json={"input": "complete ordinary request"})
+
+    assert recovered.status_code == 200
+    assert recovered.headers["x-test-worker"] == "worker-b"
+    assert recovered.json() == {"input": "complete ordinary request"}
+    assert read_events.count("dispatch") == 1
+
+
+def test_concurrent_requests_after_worker_loss_share_one_owner(
+    make_client, model_apps, worker_lifetimes, envelope, worker_socket_dir
+):
+    client_a = make_client(num_workers=3, model_name="worker-a")
+    client_b = make_client(num_workers=3, model_name="worker-b")
+    client_c = make_client(num_workers=3, model_name="worker-c")
+    url = "/ng-rollout/recover/v1/responses"
+    headers = {"x-gym-history-transport": "v1"}
+    assert client_a.post(url, json=envelope([], identity="first", field="input"), headers=headers).status_code == 200
+    worker_lifetimes["worker-a"].close()
+    start = threading.Barrier(2)
+
+    def post(client, conversation):
+        start.wait(timeout=5)
+        return client.post(
+            url, json=envelope([], identity="first", conversation=conversation, field="input"), headers=headers
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        request_b = executor.submit(post, client_b, "child-b")
+        request_c = executor.submit(post, client_c, "child-c")
+        response_b = request_b.result(timeout=10)
+        response_c = request_c.result(timeout=10)
+
+    assert response_b.status_code == response_c.status_code == 200
+    assert response_b.headers["x-test-worker"] == response_c.headers["x-test-worker"]
+    winner = response_b.headers["x-test-worker"]
+    observer = SessionClaims(str(worker_socket_dir), "0" * 32, holds=lambda _: False)
+    assert observer.claimant("recover") == model_apps[winner].state.nemo_gym_rollout_router.claims.routing_id
+    assert len(list((worker_socket_dir / "session-claims").iterdir())) == 1
+
+
+def test_competing_owner_replacements_choose_one_worker(worker_socket_dir):
+    original = SessionClaims(str(worker_socket_dir), "a" * 32, holds=lambda _: True)
+    contender_b = SessionClaims(str(worker_socket_dir), "b" * 32, holds=lambda _: True)
+    contender_c = SessionClaims(str(worker_socket_dir), "c" * 32, holds=lambda _: True)
+    original.claim("recover")
+    start = threading.Barrier(2)
+
+    def replace(claims):
+        start.wait(timeout=5)
+        return claims.replace_if_owner("recover", original.routing_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replacement_b = executor.submit(replace, contender_b)
+        replacement_c = executor.submit(replace, contender_c)
+        owner_b = replacement_b.result(timeout=5)
+        owner_c = replacement_c.result(timeout=5)
+
+    observer = SessionClaims(str(worker_socket_dir), "0" * 32, holds=lambda _: False)
+    assert owner_b == owner_c == observer.claimant("recover")
+    assert owner_b in {contender_b.routing_id, contender_c.routing_id}
+    assert sum(claims.mine("recover") for claims in [contender_b, contender_c]) == 1
+
+
+def test_owner_replacement_does_not_overwrite_a_newer_restore(worker_socket_dir):
+    original = SessionClaims(str(worker_socket_dir), "a" * 32, holds=lambda _: True)
+    restored = SessionClaims(str(worker_socket_dir), "b" * 32, holds=lambda _: True)
+    recovery = SessionClaims(str(worker_socket_dir), "c" * 32, holds=lambda _: True)
+    original.claim("recover")
+    restored.rewrite("recover")
+
+    owner = recovery.replace_if_owner("recover", original.routing_id)
+
+    assert owner == restored.routing_id
+    assert not recovery.mine("recover")
+
+
+@pytest.mark.parametrize(
+    "error,status",
+    [
+        pytest.param(ServerDisconnectedError("response lost"), 502, id="uncertain-execution"),
+        pytest.param(ServerTimeoutError("response timed out"), 502, id="timeout"),
+        pytest.param(
+            ClientConnectorError(Mock(), PermissionError(errno.EACCES, "permission denied")),
+            410,
+            id="permission-error",
+        ),
+    ],
+)
+async def test_uncertain_or_non_dead_owner_errors_do_not_transfer_or_retry(worker_socket_dir, error, status):
+    original = SessionClaims(str(worker_socket_dir), "a" * 32, holds=lambda _: True)
+    original.claim("recover")
+    router = RolloutRouter(str(worker_socket_dir), holds=lambda _: False)
+    client = Mock()
+    client.request = AsyncMock(side_effect=error)
+    router._client = Mock(return_value=client)
+    scope = {"type": "http", "method": "POST", "path": "/ng-rollout/recover/v1/responses", "headers": []}
+    receive = AsyncMock(return_value={"type": "http.request", "body": b'{"input":[]}', "more_body": False})
+    send = AsyncMock()
+
+    local_receive = await router.route("recover", scope, receive, send)
+
+    assert local_receive is None
+    assert send.await_args_list[0].args[0]["status"] == status
+    assert client.request.await_count == 1
+    assert not router.claims.mine("recover")
+    assert router.claims.claimant("recover") == original.routing_id
+
+
+async def test_interrupted_forwarded_stream_does_not_retry_or_transfer_ownership(worker_socket_dir):
+    original = SessionClaims(str(worker_socket_dir), "a" * 32, holds=lambda _: True)
+    original.claim("recover")
+    router = RolloutRouter(str(worker_socket_dir), holds=lambda _: False)
+
+    async def chunks():
+        yield b"first response chunk"
+        raise ServerDisconnectedError("stream interrupted")
+
+    response = MagicMock(status=200, raw_headers=[])
+    response.__aenter__.return_value = response
+    response.__aexit__.return_value = False
+    response.content.iter_any = chunks
+    client = Mock()
+    client.request = AsyncMock(return_value=response)
+    router._client = Mock(return_value=client)
+    scope = {"type": "http", "method": "POST", "path": "/ng-rollout/recover/v1/responses", "headers": []}
+    receive = AsyncMock(return_value={"type": "http.request", "body": b'{"input":[]}', "more_body": False})
+    send = AsyncMock()
+
+    with pytest.raises(ServerDisconnectedError, match="stream interrupted"):
+        await router.route("recover", scope, receive, send)
+
+    assert client.request.await_count == 1
+    assert send.await_args_list[0].args[0]["status"] == 200
+    assert send.await_args_list[1].args[0]["body"] == b"first response chunk"
+    assert router.claims.claimant("recover") == original.routing_id
+    assert not router.claims.mine("recover")
 
 
 def test_unprefixed_model_request_does_not_claim_a_rollout(make_client, worker_socket_dir):
