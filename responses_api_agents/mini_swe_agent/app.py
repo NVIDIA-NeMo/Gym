@@ -372,9 +372,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             for grant in grants
         ]
         required = [grant.name for grant in grants if grant.required]
+        granted = {grant.name for grant in grants}
         for server in task_context.get("mcp_servers") or []:
             if not isinstance(server, dict) or not isinstance(server.get("name"), str):
                 raise RuntimeError("The task declares an MCP server without a name")
+            if server["name"] in granted:
+                # A Harbor environment server can also grant the task's own server, under its own name.
+                required.extend([server["name"]] if server["name"] not in required else [])
+                continue
             servers.append(server)
             required.append(server["name"])
         names = [server["name"] for server in servers]

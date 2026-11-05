@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     SandboxSession,
@@ -231,12 +232,27 @@ async def test_an_owned_seed_starts_a_sandbox_with_a_ttl_and_never_reads_task_co
     sandbox.task_context.assert_not_awaited()
 
 
-async def test_mcp_server_names_must_not_collide(agent, sandbox) -> None:
-    sandbox.task_context.return_value = {"mcp_servers": [{"name": "task_tools", "url": "http://x/mcp"}]}
-    sandbox.box.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+async def test_a_task_server_that_harbor_also_grants_is_connected_once_and_required(agent, sandbox) -> None:
+    sandbox.task_context.return_value = {
+        "mcp_servers": [{"name": "task_tools", "transport": "streamable-http", "url": "http://x/mcp"}]
+    }
 
-    with pytest.raises(Exception, match="MCP server names collide: task_tools"):
-        await agent._seed_agent_session_state(seed(tool_accesses=[mcp_grant()]))
+    state = await agent._seed_agent_session_state(seed(tool_accesses=[mcp_grant(required=False)]))
+
+    assert [server["name"] for server in state.mcp_servers] == ["task_tools"]
+    assert state.mcp_servers[0]["headers"] == {"Authorization": "Bearer t"}
+    assert state.required_mcp_servers == ["task_tools"]
+
+
+async def test_mcp_server_names_must_not_collide(agent, sandbox, monkeypatch) -> None:
+    sandbox.task_context.return_value = {"mcp_servers": [{"name": "browser", "url": "a"}, {"name": "browser"}]}
+    close = AsyncMock()
+    monkeypatch.setattr(MiniSWESession, "close", close)
+
+    with pytest.raises(AgentSeedRejectedError, match="MCP server names collide: browser"):
+        await agent._seed_agent_session_state(seed())
+    # The refusal comes after the sandbox was set up, so the setup is released before the seed fails.
+    close.assert_awaited_once()
 
 
 async def test_a_failed_install_releases_the_sandbox_and_raises(agent, sandbox, monkeypatch) -> None:
