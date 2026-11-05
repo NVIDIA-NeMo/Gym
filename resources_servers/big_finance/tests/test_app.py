@@ -43,6 +43,7 @@ from resources_servers.big_finance.app import (
     BigFinanceResourcesServer,
     BigFinanceResourcesServerConfig,
     BigFinanceVerifyRequest,
+    _answer_judge_prompt,
     extract_final_answer,
     format_trace,
 )
@@ -1005,6 +1006,15 @@ async def test_answer_match_judges_only_question_reference_and_answer(correct: b
     prompt = params.input[1].content
     assert "What was revenue?" in prompt and "$10 million" in prompt and "$10.0 million" in prompt
     assert "trace-only" not in prompt and "TRACE-ONLY" not in prompt and "Finds revenue." not in prompt
+
+
+def test_answer_match_grades_at_the_question_precision_without_a_numeric_tolerance() -> None:
+    prompt = _answer_judge_prompt(BigFinanceVerifyRequest.model_construct(query="Q", reference_answer="R"), "A")
+
+    assert "compare it with the reference at that\n  precision" in prompt
+    assert "more coarsely than the required precision is incorrect" in prompt
+    assert "sign\n  convention the question specifies" in prompt
+    assert "within 1%" not in prompt and "0.1 percentage points" not in prompt
 
 
 @pytest.mark.asyncio

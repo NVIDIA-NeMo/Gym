@@ -400,9 +400,14 @@ Decide whether the agent's final answer is correct. Rules:
   answer incorrect.
 - Accept mathematically equivalent forms (0.5 = 50% = 1:2) and equivalent units and dates
   ($1M = $1,000,000 = $1 million; Q1 2023 = January-March 2023).
-- Allow only rounding differences: percentages within 0.1 percentage points, all other
-  numbers (amounts, ratios, multiples, per-share values) within 1% of the reference.
-- Sign and direction must match: a 5% decrease equals -5%, not 5%.
+- If the question specifies a unit or precision (decimal places, nearest million, basis
+  points, etc.), convert the answer to that unit and compare it with the reference at that
+  precision. Any different digit at the required precision makes the answer incorrect, even
+  if it is close. An answer reported more coarsely than the required precision is incorrect.
+- If the question does not specify a precision, the answer must be numerically equivalent to
+  the reference; only differences in formatting or units are acceptable.
+- Sign and direction must match: a 5% decrease equals -5%, not 5%. Follow any sign
+  convention the question specifies (for example, losses reported as negative).
 - If the reference is a range or a set, the answer must lie within the range or be a member
   of the set.
 - If the reference says the answer cannot be determined, only an equivalent statement is

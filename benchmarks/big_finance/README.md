@@ -78,8 +78,10 @@ and the judge's raw text. Reverification is stateless.
 `big_finance_reward_mode=answer_match` is for rows with a reference answer but
 no rubric, such as RL training data. A separate judge prompt sees only the
 question, the reference answer, and the final answer (not the trace) and applies
-fixed equivalence and rounding rules: percentages within 0.1 percentage points,
-other numbers within 1%, matching sign, and every requested part present. The
+fixed equivalence rules: numbers converted to the unit the question asks for must
+match the reference at the precision it asks for, with no further tolerance;
+without a stated precision they must be numerically equivalent. Sign and any
+stated sign convention must match, and every requested part must be present. The
 reward is its binary `correct` verdict. A rollout with no final answer scores 0
 without a judge call, and a reply without a boolean verdict is a judge failure.
 
