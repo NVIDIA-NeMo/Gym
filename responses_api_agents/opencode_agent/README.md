@@ -78,7 +78,7 @@ allowed host is open on every port. The OpenSandbox policy is set when the sandb
 is created, so a session that borrows a task sandbox rejects any value other than
 `inherit` (the default, the provider's network), and it cannot be combined with
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download
-the runtime: see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity).
+the runtime: see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity). A borrowed sandbox relies on its owner's network policy.
 
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with

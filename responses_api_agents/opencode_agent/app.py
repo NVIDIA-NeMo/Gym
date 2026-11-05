@@ -40,6 +40,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentContinuationCapabilities,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
@@ -762,8 +763,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "OpenCode requires direct SandboxAccess")
             if self.config.network_access != "inherit":
-                raise HTTPException(
-                    422, "OpenCode network_access applies only to a sandbox it creates, not a borrowed one"
+                raise AgentSeedRejectedError(
+                    "OpenCode network_access applies only to a sandbox it creates, not a borrowed one"
                 )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
@@ -820,7 +821,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 spec = restrict_sandbox_network(
                     spec,
                     network_access=self.config.network_access,
-                    provider_name=provider.name,
+                    provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
                     tool_urls=[
                         str(access.connection.url)
