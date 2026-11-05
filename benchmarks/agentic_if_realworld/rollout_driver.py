@@ -16,7 +16,6 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
 from resources_servers.agentic_if_realworld.benchmark.core import (
-    PHASES,
     Dataset,
     digest,
     indexed,
@@ -159,9 +158,9 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             nonlocal writing_failed
             identifier = row["task_id"]
 
-            async def generate(prepared, seed, cap, receipt_id):
+            async def generate(prepared, seed, cap, receipt_id, attempt_index):
                 attempt = copy.deepcopy(by_id[prepared["task_id"]])
-                attempt[ATTEMPT_INDEX_KEY_NAME] = PHASES.index((seed, cap))
+                attempt[ATTEMPT_INDEX_KEY_NAME] = attempt_index
                 attempt["responses_create_params"].update(
                     max_output_tokens=cap,
                     metadata={"seed": str(seed), "receipt_id": receipt_id},

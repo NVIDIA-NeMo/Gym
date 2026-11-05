@@ -122,8 +122,13 @@ after this recovery fix; start a new run directory rather than migrating them.
 Each delivery attempt has its own Gym capture identity. The main rollout retains
 the selected attempt's actual request settings and trajectory; all earlier
 attempts remain in the private journal and capture sidecars.
+Gym's attempt index counts dispatches, including explicit connection retries;
+it is independent of the seed/token-limit schedule phase. A connection retry
+keeps that phase's settings and the same logical task/repeat inventory row.
 Completed resume also revalidates the saved policy and judge HTTP bytes and the
-derived grade. It cannot generate a missing cached judgement. Both execution
+derived grade. Fresh request-local verifier observations are excluded from grade
+comparison; the original saved observations remain attached to the result.
+It cannot generate a missing cached judgement. Both execution
 profiles reject judge receipt directories inside Git.
 
 The adaptive driver saves the actual resolved configuration beside the output

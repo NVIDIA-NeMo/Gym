@@ -5,6 +5,25 @@ tasks and the bounded real-task run below. Real traces, per-item criteria, origi
 outputs, registry access instructions and raw receipts remain in approved private
 systems. The public repository contains no real benchmark examples.
 
+## Observed resume and connection recovery
+
+The HTTP integration regressions reproduce both completed-resume rejection from
+fresh verifier observations and capture reuse after a connection failure. With
+the fixes, all **263 component tests pass**. Coverage includes observability on
+and off, one or two connection failures, later schedule phases, pass/fail answers,
+unchanged earlier receipts/captures, one-row inventory accounting, P0 ownership
+checks, and rejection of changed grades, responses and cache bindings.
+
+A one-task synthetic `gym eval run` used GLM-5.3/max and GPT-6.1 Sol/medium with
+observability enabled. Both requests returned HTTP 200 on their first attempt.
+The answer omitted required punctuation and was correctly graded fail, with no
+masked result. Preparation, environment validation, health and no-tools P0 checks
+passed. Completed resume made zero model calls and preserved the saved result,
+receipts, captures and verifier observations. This is integration evidence, not
+a benchmark score or judge calibration; no private benchmark tasks were sent.
+All-files pre-commit and the secrets scan passed; the private guardword catalog
+was unavailable locally. Hosted CI remains a separate gate for the new commit.
+
 ## October 28 review validation
 
 Runtime `4d5e18b55ffccd0444dd6cbdb03369be9bd90d03` passed 248 focused

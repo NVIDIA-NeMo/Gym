@@ -17,7 +17,7 @@ async def run_cell(
     *,
     directory: Path,
     settings: dict,
-    generate: Callable[[dict, int, int, str], Awaitable[dict]],
+    generate: Callable[[dict, int, int, str, int], Awaitable[dict]],
     verify: Callable[..., Awaitable[dict]],
     resume: bool = False,
     validate_only: bool = False,
@@ -77,9 +77,12 @@ async def run_cell(
         raise ValueError("Saved result changed")
     if state.get("result", {}).get("scoring_status") == "scored":
         result = await verify(state["selected"], dataset.criteria[identifier], cached_only=True)
-        if result != state["result"]:
+        # HTTP verification creates fresh invocation observations even when the grade is cached.
+        if {k: v for k, v in result.items() if k != "ng_verifier_invocations"} != {
+            k: v for k, v in state["result"].items() if k != "ng_verifier_invocations"
+        }:
             raise ValueError("Saved result differs from validated cached judge result")
-        return result
+        return state["result"]
     if validate_only:
         if "selected" in state:
             await verify(state["selected"], dataset.criteria[identifier], validate_only=True)
@@ -108,7 +111,9 @@ async def run_cell(
             state["attempts"].append(started)
         write(path, state)
         row = dataset.prepared_row(identifier)
-        attempt = await generate(row, seed, cap, receipt_id)
+        # Connection recovery repeats the schedule phase but must own a separate Gym capture.
+        attempt_index = stage + len(state.get("transport_failures", []))
+        attempt = await generate(row, seed, cap, receipt_id, attempt_index)
         state["attempts"][stage].update(attempt, status="settled")
         if attempt.get("complete"):
             state["selected"] = attempt

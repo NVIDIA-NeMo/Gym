@@ -162,7 +162,7 @@ def test_scoring_requires_explicit_nonempty_policy_prompt(dataset, tmp_path):
 def test_adaptive_first_complete_and_judge_only_resume(dataset, tmp_path):
     calls, judges = [], []
 
-    async def generate(row, seed, cap, receipt_id):
+    async def generate(row, seed, cap, receipt_id, attempt_index):
         calls.append((seed, cap))
         return {
             "complete": len(calls) == 2,
@@ -205,7 +205,7 @@ def test_adaptive_first_complete_and_judge_only_resume(dataset, tmp_path):
 def test_exhaustion_and_ambiguous_dispatch(dataset, tmp_path):
     calls = []
 
-    async def incomplete(row, seed, cap, receipt_id):
+    async def incomplete(row, seed, cap, receipt_id, attempt_index):
         calls.append((seed, cap))
         return {"complete": False}
 
@@ -269,7 +269,7 @@ def test_connect_failure_stops_and_explicit_resume_retries_same_phase(dataset, t
             raise ClientConnectorError(None, ConnectionRefusedError())
         return Response(200, {"choices": [{"finish_reason": "stop", "message": {"content": "OK."}}]})
 
-    async def generate(row, seed, cap, receipt_id):
+    async def generate(row, seed, cap, receipt_id, attempt_index):
         receipt_ids.append(receipt_id)
         path = tmp_path / "model" / (receipt_id + ".json")
         receipt = await wire_call(
