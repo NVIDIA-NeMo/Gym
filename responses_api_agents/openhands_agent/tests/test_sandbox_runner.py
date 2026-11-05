@@ -30,9 +30,22 @@ note(imported_with=os.environ.get("OH_PERSISTENCE_DIR"))
 
 class Event:
     def __init__(self, kind, **fields):
+        self.kind = kind
         self.fields = {"kind": kind, **fields}
     def model_dump_json(self):
         return json.dumps(self.fields)
+
+class _Part:
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+class _Message:
+    # The tool message OpenHands sends the model: the output plus its own notes; an image part has no text.
+    content = [_Part(text="out"), _Part(image_urls=["data:x"]), _Part(text="\\n[Command finished with exit code 0]")]
+
+class Observation(Event):
+    def to_llm_message(self):
+        return _Message()
 
 class LLM:
     def __init__(self, **settings):
@@ -78,6 +91,8 @@ class Conversation:
         for callback in self.callbacks:
             callback(Event("ActionEvent", tool_call_id="c1", llm_response_id="r1"))
         if mode == "finish":
+            for callback in self.callbacks:
+                callback(Observation("ObservationEvent", tool_call_id="c1", observation={"content": "out"}))
             _State.execution_status.value = "finished"
         elif mode == "error":
             try:
@@ -153,8 +168,16 @@ def test_finished_run_records_events_result_and_the_harness_configuration(tmp_pa
         "1.59.0",
     )
     recorded = events(session)
-    assert [event["kind"] for _, event in recorded] == ["MessageEvent", "ActionEvent"]
+    assert [event["kind"] for _, event in recorded] == ["MessageEvent", "ActionEvent", "ObservationEvent"]
     assert all(isinstance(seen_at, float) for seen_at, _ in recorded)
+    # A tool result keeps OpenHands' own JSON and adds the text of the tool message the model read.
+    assert recorded[2][1] == {
+        "kind": "ObservationEvent",
+        "tool_call_id": "c1",
+        "observation": {"content": "out"},
+        "tool_message_text": "out\n[Command finished with exit code 0]",
+    }
+    assert "tool_message_text" not in recorded[1][1]
     log = notes(tmp_path)
     terminal = next(entry["agent"]["tools"][0] for entry in log if "agent" in entry)
     # The subprocess terminal keeps tool shells in the supervised process tree; history stays in the session.

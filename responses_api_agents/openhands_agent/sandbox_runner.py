@@ -21,6 +21,10 @@ from pathlib import Path
 
 
 RESULT_VERSION = 1
+# Events that become the tool message answering a tool call. OpenHands builds that message from the tool's output
+# plus its own notes (exit code, working directory, no-output timeouts, truncation, rejections), so the runner
+# records the message's text with the event.
+TOOL_RESULT_EVENTS = ("ObservationEvent", "AgentErrorEvent", "UserRejectObservation")
 
 
 class Terminated(BaseException):
@@ -99,8 +103,13 @@ def main(argv: list[str]) -> int:
     events = open(config["events_path"], "a", encoding="utf-8")
 
     def record(event: object) -> None:
+        payload = event.model_dump_json()  # type: ignore[attr-defined]
+        if getattr(event, "kind", None) in TOOL_RESULT_EVENTS:
+            content = event.to_llm_message().content  # type: ignore[attr-defined]
+            text = "".join(part.text for part in content if isinstance(getattr(part, "text", None), str))
+            payload = json.dumps({**json.loads(payload), "tool_message_text": text})
         # OpenHands timestamps are naive local times; record when each event was seen as epoch seconds.
-        line = f"[{time.time()!r}, {event.model_dump_json()}]\n"  # type: ignore[attr-defined]
+        line = f"[{time.time()!r}, {payload}]\n"
         with lock:
             events.write(line)
             events.flush()

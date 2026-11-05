@@ -249,6 +249,7 @@ FINISHED_EVENTS = [
         "tool_name": "terminal",
         "tool_call_id": "c1",
         "observation": {"content": [{"type": "text", "text": "built"}], "exit_code": 0},
+        "tool_message_text": "built\n[Command finished with exit code 0]",
     },
     {
         "kind": "ActionEvent",
@@ -262,6 +263,7 @@ FINISHED_EVENTS = [
         "tool_name": "finish",
         "tool_call_id": "c2",
         "observation": {"content": [{"type": "text", "text": "done"}]},
+        "tool_message_text": "done",
     },
 ]
 
@@ -588,7 +590,13 @@ async def test_a_stopped_rollout_is_graded_and_marked(monkeypatch):
 @pytest.mark.asyncio
 async def test_tool_errors_the_harness_tolerates_leave_the_response_completed(monkeypatch):
     events = [
-        {"kind": "AgentErrorEvent", "tool_name": "terminal", "tool_call_id": "bad", "error": "invalid arguments"},
+        {
+            "kind": "AgentErrorEvent",
+            "tool_name": "terminal",
+            "tool_call_id": "bad",
+            "error": "invalid arguments",
+            "tool_message_text": "invalid arguments",
+        },
         {
             "kind": "ActionEvent",
             "tool_name": "terminal",
@@ -601,6 +609,7 @@ async def test_tool_errors_the_harness_tolerates_leave_the_response_completed(mo
             "tool_name": "terminal",
             "tool_call_id": "c1",
             "observation": {"content": [{"type": "text", "text": ""}], "exit_code": 1},
+            "tool_message_text": "\n[Command finished with exit code 1]",
         },
         *FINISHED_EVENTS[2:],
     ]
@@ -613,7 +622,7 @@ async def test_tool_errors_the_harness_tolerates_leave_the_response_completed(mo
     assert (response.status, response.error) == ("completed", None)
     assert [item.output for item in response.output if item.type == "function_call_output"][:2] == [
         "invalid arguments",
-        "",
+        "\n[Command finished with exit code 1]",
     ]
     tools = {r.tool_call_id: r.status for r in state.observations.records if isinstance(r, ToolCallObservation)}
     assert tools == {"c1": "failed", "c2": "completed"}

@@ -119,8 +119,11 @@ observation bundle, with an `agent_activation_interrupted` gap when no activatio
 
 ## Responses and outcomes
 
-The response holds the agent's messages, reasoning, tool calls and tool results in order. OpenHands
-delivers its final answer through the `finish` tool; that answer is also added as an assistant message.
+The response holds the agent's messages, reasoning, tool calls and tool results in order. Each tool
+result is the tool message the model read: OpenHands adds its own notes to a tool's output, such as the
+exit code, the working directory, a no-output timeout or truncation, and the runner records that text.
+OpenHands delivers its final answer through the `finish` tool; that answer is also added as an assistant
+message.
 Status follows OpenHands' own rule at 1.59.0: `conversation.run()` raises only for errors that end the run.
 
 | OpenHands outcome | Response |

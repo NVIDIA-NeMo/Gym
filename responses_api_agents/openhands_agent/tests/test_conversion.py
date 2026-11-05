@@ -41,7 +41,10 @@ def action(call_id, response_id, *, tool="terminal", command="ls", thought="", r
     }
 
 
-def observation(call_id, text, *, tool="terminal", exit_code=0, is_error=False):
+def observation(call_id, text, *, tool="terminal", exit_code=0, is_error=False, model_read=None):
+    # The runner adds the tool message the model read; OpenHands' terminal appends its exit-code line.
+    if model_read is None:
+        model_read = f"{text}\n[Command finished with exit code {exit_code}]" if tool == "terminal" else text
     return {
         "kind": "ObservationEvent",
         "source": "environment",
@@ -53,6 +56,7 @@ def observation(call_id, text, *, tool="terminal", exit_code=0, is_error=False):
             "exit_code": exit_code,
             "kind": "TerminalObservation" if tool == "terminal" else "FinishObservation",
         },
+        "tool_message_text": model_read,
     }
 
 
@@ -107,6 +111,7 @@ def test_output_items_keep_order_and_turn_the_finish_message_into_text():
             "tool_name": "terminal",
             "tool_call_id": "c2",
             "error": "bad arguments",
+            "tool_message_text": "bad arguments",
         },
         action("c3", "r2", tool="finish"),
         observation("c3", "done", tool="finish"),
@@ -123,9 +128,35 @@ def test_output_items_keep_order_and_turn_the_finish_message_into_text():
         "message",
     ]
     assert items[2].call_id == "c1" and json.loads(items[2].arguments) == {"command": "ls"}
-    assert items[3].output == "file.txt\n"
+    assert items[3].output == "file.txt\n\n[Command finished with exit code 0]"
     assert items[4].output == "bad arguments"
     assert items[-1].content[0].text == "done"
+
+
+def test_tool_results_hold_the_text_the_model_read():
+    # OpenHands 1.59.0 TerminalObservation content and to_llm_message text for a command that was still running.
+    notice = (
+        "[Below is the output of the previous command.]\n\n[The command has no new output after 30 seconds.]"
+        "\n[Current working directory: /app]"
+    )
+    events = recorded(
+        action("c1", "r1", command="apt-get install -y python3"),
+        observation("c1", "", exit_code=-1, model_read=notice),
+        {
+            "kind": "UserRejectObservation",
+            "tool_name": "terminal",
+            "tool_call_id": "c2",
+            "rejection_reason": "not allowed",
+            "tool_message_text": "Action rejected: not allowed",
+        },
+        action("c3", "r2", tool="finish"),
+        observation("c3", "All done", tool="finish", model_read="All done (as a tool message)"),
+    )
+    items = output_items(events)
+    outputs = [item.output for item in items if item.type == "function_call_output"]
+    assert outputs == [notice, "Action rejected: not allowed", "All done (as a tool message)"]
+    # The final answer is the agent's own finish message, not the tool message built from it.
+    assert items[-1].content[0].text == "All done"
 
 
 def test_agent_message_becomes_assistant_text():

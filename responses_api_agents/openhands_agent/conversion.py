@@ -3,7 +3,8 @@
 """Convert the OpenHands SDK 1.59.0 events and run result that the sandbox runner writes into Gym records.
 
 The runner writes each event as ``[seen_at, event]``, where ``event`` is the SDK's own JSON for one event
-(``kind`` names its class). Nothing here imports OpenHands: the runtime exists only inside the task sandbox.
+(``kind`` names its class). A tool result also carries ``tool_message_text``, the text of the tool message the
+model read. Nothing here imports OpenHands: the runtime exists only inside the task sandbox.
 """
 
 import json
@@ -92,17 +93,17 @@ def _arguments(event: dict[str, Any]) -> str:
 
 
 def _tool_result(event: dict[str, Any]) -> tuple[str, bool]:
-    """The text OpenHands returned to the model for a tool call, and whether the call failed."""
-    kind = event["kind"]
-    if kind == "AgentErrorEvent":
-        return str(event.get("error") or ""), True
-    if kind == "UserRejectObservation":
-        return str(event.get("rejection_reason") or ""), True
+    """The text of the tool message the model read for a tool call, and whether the call failed."""
+    text = event.get("tool_message_text")
+    output = text if isinstance(text, str) else ""
+    if event["kind"] != "ObservationEvent":
+        # An argument error or a rejection: the tool never ran.
+        return output, True
     observation = event.get("observation") or {}
     exit_code = observation.get("exit_code")
     # A shell command that exits nonzero failed, although OpenHands reports the call itself as successful.
     failed = observation.get("is_error") is True or (type(exit_code) is int and exit_code != 0)
-    return text_of(observation.get("content")), failed
+    return output, failed
 
 
 def output_items(events: Iterable[tuple[float, dict[str, Any]]]) -> list[Any]:
@@ -142,7 +143,7 @@ def output_items(events: Iterable[tuple[float, dict[str, Any]]]) -> list[Any]:
             items.append(NeMoGymFunctionCallOutput(call_id=str(event["tool_call_id"]), output=output))
             if kind == "ObservationEvent" and event.get("tool_name") == "finish":
                 # OpenHands delivers its final answer through the finish tool.
-                add_message(output)
+                add_message(text_of((event.get("observation") or {}).get("content")))
         elif kind == "MessageEvent" and event.get("source") == "agent":
             message = event.get("llm_message") or {}
             add_reasoning(message.get("reasoning_content"))
