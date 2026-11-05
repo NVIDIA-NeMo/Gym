@@ -639,6 +639,36 @@ def test_a_chain_stopped_at_the_walltime_cap_exits_non_zero_and_marks_the_run_in
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_chain_stop_names_the_open_rollouts_from_the_coverage_report(tmp_path):
+    _write_inventory(tmp_path)
+    (tmp_path / ".gym_accumulated_walltime").write_text("3590")
+    # atomic_write_json writes two-space indented JSON: top-level scalars are the lines the script reads.
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    (tmp_path / "artifacts" / "rollouts_coverage.json").write_text(
+        '{\n  "expected": 8,\n  "successful": 5,\n  "open": 3,\n  "complete": false\n}\n'
+    )
+
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), "TIMEOUT")
+
+    assert result.returncode == 1, result.stdout
+    assert "Run incomplete: 3 of 8 rollouts open (no final result)" in result.stdout
+    assert "walltime cap" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    # The marker keeps the reason alone, as its readers match it.
+    assert "rollouts open" not in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_chain_stop_without_a_coverage_report_says_the_open_count_is_unknown(tmp_path):
+    _write_inventory(tmp_path)
+    (tmp_path / ".gym_accumulated_walltime").write_text("3590")
+
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), "TIMEOUT")
+
+    assert result.returncode == 1, result.stdout
+    assert "Run incomplete: the open rollout count is unknown" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.parametrize("state", ["CANCELLED", "CANCELLED by 1234"])
 def test_a_chain_stopped_after_a_cancel_exits_non_zero_and_marks_the_run_incomplete(tmp_path, state):
     result = _run_prologue(tmp_path, ResumeConfig(), state)

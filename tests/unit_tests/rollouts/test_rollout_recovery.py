@@ -1010,9 +1010,11 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/masked": 1,
         "coverage/unscored": 0,
         "coverage/failed": 1,
+        "coverage/failed_masked": 0,
         "coverage/omitted": 1,
         "coverage/not_started": 0,
         "coverage/missing_outcomes": 0,
+        "coverage/open": 2,
         "coverage/failure_budget_exhausted": 0,
     }
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
