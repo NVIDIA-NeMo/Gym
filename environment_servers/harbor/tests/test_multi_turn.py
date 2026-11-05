@@ -1904,7 +1904,7 @@ async def test_a_steps_workdir_is_merged_into_the_working_directory_before_its_a
     # The one root exec clears a link the previous turn's agent planted at any shipped name before it extracts, so
     # a BusyBox tar (which follows a link at a directory member's path) lands the merge where GNU tar and Harbor's
     # docker cp do: the listing loop precedes the extraction in the same shell line (the real tars are exercised in
-    # tests/unit_tests/test_sandbox_transfer.py).
+    # tests/unit_tests/sandbox/test_sandbox_transfer.py).
     extraction = sandbox.execs[index]["command"]
     assert 'if [ -L /app/"$m" ]; then rm -- /app/"$m"; fi; done; tar -xzf' in extraction
     assert extraction.index("tar -tzf") < extraction.index("tar -xzf")
@@ -2664,7 +2664,7 @@ async def test_a_collection_the_sandbox_cannot_serve_masks_the_turn_as_an_outage
 
 
 SLOPCODEBENCH_TASK = (
-    Path(__file__).parents[3] / "tests" / "unit_tests" / "fixtures" / "harbor_slopcodebench" / "code_search"
+    Path(__file__).parents[3] / "tests/unit_tests/data/tasks/harbor/fixtures/harbor_slopcodebench/code_search"
 )
 
 

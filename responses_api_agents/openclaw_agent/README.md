@@ -310,3 +310,24 @@ other than `inherit` (the default, the provider's network), and it cannot be com
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out,
 and setup checks the version its package declares instead of installing.
+
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `openclaw_agent.responses_api_agents.openclaw_agent.sandbox_config`.
+
+The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
+APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
+fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
+model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+
+```yaml
+hle_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports: []
+```

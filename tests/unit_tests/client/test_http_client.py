@@ -48,6 +48,7 @@ from aiohttp import (
     RequestInfo,
     ServerDisconnectedError,
     TCPConnector,
+    web,
 )
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import DictConfig
@@ -364,6 +365,41 @@ class TestHTTPClient:
         assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
         await asyncio.sleep(0)
         assert client.closed
+
+    def test_global_aiohttp_client_is_not_reused_by_a_later_event_loop(self, monkeypatch: MonkeyPatch) -> None:
+        """A second ``asyncio.run`` in one process, as the end-of-run re-judge after collection, gets its own client."""
+        for name in ("_GLOBAL_AIOHTTP_CLIENT", "_GLOBAL_AIOHTTP_CLIENT_LOOP", "_GLOBAL_AIOHTTP_CONTROL_CLIENT"):
+            monkeypatch.setattr(f"nemo_gym.client.http_client.{name}", None)
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="ok")
+
+        async def get_once() -> tuple[ClientSession, str]:
+            app = web.Application()
+            app.router.add_get("/", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = runner.addresses[0][1]
+            try:
+                session = nemo_gym.client.http_client.get_global_aiohttp_client()
+                async with session.get(f"http://127.0.0.1:{port}/") as response:
+                    return session, await response.text()
+            finally:
+                await runner.cleanup()
+
+        try:
+            first, first_text = asyncio.run(get_once())
+            # Outside a running loop nothing can be made or closed: the cached client is returned as before.
+            assert nemo_gym.client.http_client.get_global_aiohttp_client() is first
+            second, second_text = asyncio.run(get_once())
+        finally:
+            nemo_gym.client.http_client.global_aiohttp_client_exit()
+
+        assert (first_text, second_text) == ("ok", "ok")
+        assert second is not first
+        assert first.closed
 
     def test_global_aiohttp_client_exit_closes_control_client_on_owner_loop(self, monkeypatch: MonkeyPatch) -> None:
         owner_loop = asyncio.new_event_loop()
