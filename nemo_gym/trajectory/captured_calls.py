@@ -17,7 +17,10 @@ from nemo_gym.trajectory.trajectory_record import (
 
 
 CAPTURE_UNREADABLE_GAP = "model_call_capture_unreadable"
-CAPTURE_INCOMPLETE_GAPS = frozenset({"model_call_capture_pending", "model_call_capture_incomplete"})
+CAPTURE_RECORDS_UNREADABLE_GAP = "model_call_capture_records_unreadable"
+CAPTURE_INCOMPLETE_GAPS = frozenset(
+    {"model_call_capture_pending", "model_call_capture_incomplete", CAPTURE_RECORDS_UNREADABLE_GAP}
+)
 
 # Token fields summed per call role, named as in ``ng_perf``.
 _CAPTURED_CALL_TOKEN_FIELDS: tuple[tuple[str, str], ...] = (
@@ -32,9 +35,9 @@ _CAPTURED_CALL_TOKEN_FIELDS: tuple[tuple[str, str], ...] = (
 def build_captured_calls(result: dict[str, Any]) -> Optional[CapturedCallSummary]:
     """Summarize every captured model call of a rollout by role.
 
-    ``None`` without ``ng_trajectory`` (capture off) and when the capture could not be read at all: those calls are
-    unknown, not zero. A capture with writes still pending or incomplete is summarized with
-    ``capture_complete=False``, so its totals read as a lower bound.
+    ``None`` without ``ng_trajectory`` (capture off), and when the capture could not be read at all or none of its
+    records could: those calls are unknown, not zero. A capture with writes still pending or incomplete, or with some
+    unreadable records, is summarized with ``capture_complete=False``, so its totals read as a lower bound.
     """
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if not isinstance(raw_trajectory, dict):
@@ -44,11 +47,12 @@ def build_captured_calls(result: dict[str, Any]) -> Optional[CapturedCallSummary
     except Exception:
         return None
     gap_codes = {gap.code for gap in trajectory.gaps}
-    if CAPTURE_UNREADABLE_GAP in gap_codes:
+    calls = len(trajectory.model_calls)
+    # Unreadable as a whole, or every record in it unreadable: those calls are unknown, not zero.
+    if CAPTURE_UNREADABLE_GAP in gap_codes or (CAPTURE_RECORDS_UNREADABLE_GAP in gap_codes and not calls):
         return None
     roles = _call_roles(trajectory)
     by_role = _totals_by_role(trajectory.model_calls, roles)
-    calls = len(trajectory.model_calls)
     return {
         "calls": calls,
         "calls_without_usage": sum(totals["calls_without_usage"] for totals in by_role.values()),

@@ -90,6 +90,14 @@ def test_an_unreadable_capture_has_no_summary_rather_than_zero_calls() -> None:
     assert build_captured_calls(unreadable) is None
 
 
+def test_corrupt_capture_records_make_the_summary_incomplete_or_absent() -> None:
+    corrupt = [{"code": "model_call_capture_records_unreadable", "detail": "count=1"}]
+
+    partly = build_captured_calls(_three_call_trajectory(gaps=corrupt))
+    assert partly["calls"] == 3 and partly["capture_complete"] is False
+    assert build_captured_calls(_three_call_trajectory(model_calls=[], gaps=corrupt)) is None
+
+
 def test_a_pending_capture_is_summarized_as_incomplete() -> None:
     pending = _three_call_trajectory(gaps=[{"code": "model_call_capture_pending"}])
 
