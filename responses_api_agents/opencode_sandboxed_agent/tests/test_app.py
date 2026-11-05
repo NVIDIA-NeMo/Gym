@@ -116,7 +116,7 @@ class TestOpenCodeSandboxedAgent:
             opencode_version="",
             sandbox_provider="",
             sandbox_config=dict(),
-            sandbox_timeout=0,
+            sandbox_timeout=60,
             opencode_max_context_window=0,
             token_id_capture=True,
         )
@@ -393,7 +393,7 @@ class TestOpenCodeSandboxedAgent:
         client.global_config_dict = {"observability_enabled": observability_enabled}
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
 
-        sandbox_mock = MagicMock()
+        sandbox_mock = MagicMock(sandbox_id="test-sandbox")
         sandbox_mock.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -625,7 +625,7 @@ class TestOpenCodeSandboxedAgent:
 
     def _mock_sandbox(self, monkeypatch: MonkeyPatch, server: OpenCodeSandboxedAgent) -> MagicMock:
         """A sandbox whose run, session list and export succeed; the export file is read as empty."""
-        sandbox_mock = MagicMock()
+        sandbox_mock = MagicMock(sandbox_id="test-sandbox")
         sandbox_mock.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -844,6 +844,7 @@ class TestOpenCodeSandboxedAgent:
             download=AsyncMock(side_effect=download_export),
         )
         sandbox._handle = SandboxHandle(sandbox_id="upload-retry-sandbox", provider_name="opensandbox", raw=None)
+        sandbox.sandbox_id = "upload-retry-sandbox"
         server._sandbox_id_to_sandbox[""] = sandbox
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
         monkeypatch.setattr(app_module, "uniform", lambda *_: 0.0)
@@ -904,6 +905,7 @@ class TestOpenCodeSandboxedAgent:
 
         sandbox = MagicMock(upload=AsyncMock(side_effect=upload))
         sandbox._handle = SandboxHandle(sandbox_id="concurrency-test-sandbox", provider_name="opensandbox", raw=None)
+        sandbox.sandbox_id = "concurrency-test-sandbox"
         tasks = [asyncio.create_task(server._stage_ripgrep(sandbox, binary)) for _ in range(3)]
         try:
             await asyncio.wait_for(two_uploads_started.wait(), timeout=1)
@@ -1114,7 +1116,7 @@ class TestOpenCodeSandboxedAgent:
 
     @mark.parametrize("via_stdin", [False, True], ids=("argv", "stdin"))
     async def test_responses_builds_opencode_command(
-        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, via_stdin: bool
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, via_stdin: bool, tmp_path: Path
     ) -> None:
         """The `opencode run` command carries opencode_env, and stdin mode delivers the query verbatim.
 
@@ -1124,11 +1126,12 @@ class TestOpenCodeSandboxedAgent:
         """
         question = 'Which "Company A" was founded after 2002? Say "unknown" if unsure.'
         config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
         config.opencode_env = {"OPENCODE_ENABLE_EXA": "true", "EXA_API_KEYS": "k0:k1"}
         config.opencode_query_via_stdin = via_stdin
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
-        sandbox_mock = MagicMock()
+        sandbox_mock = MagicMock(sandbox_id="test-sandbox")
 
         # Dispatch on the command rather than a fixed side_effect list. The export path issues
         # several execs (install, session list, export, pwd) and a positional list silently
@@ -1136,6 +1139,10 @@ class TestOpenCodeSandboxedAgent:
         # be handed "" and died in json.loads, surfacing as an unrelated assertion about
         # await_args further down.
         async def _exec(command: str = "", **_kwargs: Any) -> SimpleNamespace:
+            if "opencode run" in command:
+                return SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                )
             if "session list" in command:
                 return SimpleNamespace(
                     stdout=json.dumps([{"id": "ses_123"}]), stderr="", return_code=0, error_type=None
@@ -1145,7 +1152,13 @@ class TestOpenCodeSandboxedAgent:
             return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
 
         sandbox_mock.exec = AsyncMock(side_effect=_exec)
-        sandbox_mock.download = AsyncMock()
+
+        async def _download(remote: str, local: Path, **_kwargs: Any) -> None:
+            if remote == "/tmp/opencode_export.json":
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_text(json.dumps(opencode_export_test_data))
+
+        sandbox_mock.download = AsyncMock(side_effect=_download)
         # Maps sandbox_id -> sandbox. responses() runs opencode through `sandbox.exec`, so every
         # command -- install, the run itself, `session list`, `export` -- lands on the same mock
         # and is told apart by its text. An earlier version of this test stored a
@@ -1944,8 +1957,10 @@ class TestBenchmarkLifecycle:
         body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
 
         if failure_phase == "setup_oom":
-            with raises(NgFailureEvent):
+            with raises(NgFailureEvent) as caught:
                 await server.responses(request, body)
+            assert caught.value is failure
+            assert caught.value.failure_kind == PROVIDER_OOM_KILLED
             assert server._sandbox_id_to_run_result == {}
         else:
             with raises(type(failure), match=str(failure)):
@@ -1997,9 +2012,9 @@ class TestBenchmarkLifecycle:
             assert caught.value is failure
         else:
             assert caught.value.__cause__ is failure
-            assert caught.value.boundary == "agent"
+            assert caught.value.boundary == "harness"
             assert caught.value.failure_kind == "agent_route_failed"
-            assert caught.value.operation == "agent.sandbox_exec"
+            assert caught.value.operation == "opencode.execute"
         assert sandbox.exec.await_count == 2
         assert "opencode run" in sandbox.exec.await_args_list[1].kwargs["command"]
         sandbox.download.assert_not_awaited()
@@ -2560,12 +2575,12 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
 
     with raises(NgFailureEvent) as caught:
         await server.responses(request, body)
-    # Reported at the agent boundary with the provider's error as its cause; the kind is unchanged.
+    # Report the harness operation and retain the provider error as its cause.
     assert caught.value.__cause__ is error
-    assert caught.value.failure_kind == "agent_route_failed" and caught.value.operation == "agent.sandbox_exec"
+    assert caught.value.failure_kind == "agent_route_failed" and caught.value.operation == "opencode.execute"
     assert caught.value.failure_reason == (
         f"[sandbox phase=agent reason={type(error).__name__} command=opencode_run] "
-        f"Agent operation agent.sandbox_exec failed: {type(error).__name__}"
+        f"Harness operation opencode.execute failed: {type(error).__name__}"
     )
     sandbox.exec.assert_awaited_once()
     sandbox.download.assert_not_awaited()
@@ -2603,7 +2618,7 @@ async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_pa
     assert caught.value.operation == "opencode.execute"
     reason = f" reason={error_type}" if error_type else ""
     assert caught.value.failure_reason == (
-        f"[sandbox phase=agent{reason} command=opencode_run] Sandbox command outcome cannot be classified"
+        f"[sandbox phase=agent{reason} exit=-1 command=opencode_run] Sandbox command outcome cannot be classified"
     )
     sandbox.exec.assert_awaited_once()
     sandbox.download.assert_not_awaited()
@@ -2688,3 +2703,27 @@ async def test_agent_preflight_failure_is_typed_and_cannot_reach_agent_or_gradin
     sandbox.download.assert_not_awaited()
     server.server_client.post.assert_not_called()
     assert server._sandbox_id_to_run_result == {}
+
+
+async def test_ripgrep_queue_shares_the_existing_setup_budget(tmp_path, monkeypatch):
+    binary = tmp_path / "rg"
+    binary.write_bytes(b"binary")
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.sandbox_timeout = 60
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    server._ripgrep_upload_sem = asyncio.Semaphore(0)
+    sandbox = SimpleNamespace(sandbox_id="queued-sandbox", upload=AsyncMock())
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    elapsed = 0.0
+    with monkeypatch.context() as patch:
+        patch.setattr(loop, "time", lambda: real_time() + elapsed)
+        task = asyncio.create_task(server._stage_ripgrep(sandbox, binary))
+        await asyncio.sleep(0)
+        elapsed = 61.0
+        with raises(NgFailureEvent, match="setup budget") as caught:
+            await asyncio.wait_for(task, timeout=90)
+    assert caught.value.boundary == "harness"
+    assert caught.value.operation == "opencode.setup"
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    sandbox.upload.assert_not_awaited()

@@ -564,6 +564,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    # Opt-in mode gives setup and agent execution separate sandbox_timeout budgets.
     report_agent_sandbox_oom: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
@@ -807,47 +808,59 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
         """Retry an ambiguous upload timeout without reusing its remote path."""
         size_bytes = source_path.stat().st_size
-        sandbox_id = sandbox._handle.sandbox_id
-        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
-            remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
-            try:
-                async with self._ripgrep_upload_sem:
+        sandbox_id = sandbox.sandbox_id
+        budget = asyncio.timeout(self.config.sandbox_timeout)
+        try:
+            async with budget:
+                for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
+                    remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
                     started = monotonic()
-                    await sandbox.upload(source_path, remote_path)
-            except (TimeoutError, NgFailureEvent) as error:
-                if isinstance(error, NgFailureEvent) and (
-                    error.boundary != "sandbox" or error.failure_kind != PROVIDER_IO_TIMEOUT
-                ):
-                    raise
-                if isinstance(error, NgFailureEvent):
-                    observe_failure(error)
-                LOGGER.warning(
-                    "OpenCode ripgrep upload timed out; sandbox_id=%s remote_path=%s "
-                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
-                    sandbox_id,
-                    remote_path,
-                    attempt,
-                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
-                    size_bytes,
-                    monotonic() - started,
-                )
-                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
-                    raise
-                await asyncio.sleep(uniform(15.0, 30.0))
-            else:
-                LOGGER.info(
-                    "OpenCode ripgrep upload completed; sandbox_id=%s remote_path=%s "
-                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
-                    sandbox_id,
-                    remote_path,
-                    attempt,
-                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
-                    size_bytes,
-                    monotonic() - started,
-                )
-                return remote_path
+                    try:
+                        async with self._ripgrep_upload_sem:
+                            await sandbox.upload(source_path, remote_path)
+                    except (TimeoutError, NgFailureEvent) as error:
+                        if isinstance(error, NgFailureEvent) and (
+                            error.boundary != "sandbox" or error.failure_kind != PROVIDER_IO_TIMEOUT
+                        ):
+                            raise
+                        if isinstance(error, NgFailureEvent):
+                            observe_failure(error)
+                        LOGGER.warning(
+                            "OpenCode ripgrep upload timed out; sandbox_id=%s remote_path=%s "
+                            "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                            sandbox_id,
+                            remote_path,
+                            attempt,
+                            _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                            size_bytes,
+                            monotonic() - started,
+                        )
+                        if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                            raise
+                        await asyncio.sleep(uniform(15.0, 30.0))
+                    else:
+                        LOGGER.info(
+                            "OpenCode ripgrep upload completed; sandbox_id=%s remote_path=%s "
+                            "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                            sandbox_id,
+                            remote_path,
+                            attempt,
+                            _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                            size_bytes,
+                            monotonic() - started,
+                        )
+                        return remote_path
 
-        raise RuntimeError("OpenCode ripgrep upload retry loop did not run")
+                raise RuntimeError("OpenCode ripgrep upload retry loop did not run")
+        except TimeoutError as error:
+            if not budget.expired():
+                raise
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.setup",
+                failure_reason=f"OpenCode ripgrep staging exceeded its setup budget; sandbox_id={sandbox_id}",
+            ) from error
 
     def _plugin_uploads(self) -> list[tuple[Path, str]]:
         """Every opencode plugin this rollout ships, as (local file, sandbox path), in load order.
@@ -1375,7 +1388,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         "OpenCode setup failed before agent execution", setup_result
                     ),
                 )
-            command = f'echo "Shell: $SHELL" && export PATH=$HOME/.opencode/bin:$PATH && {agent_command}'
+            command = f'echo "Shell: $SHELL" && export PATH="$HOME/.opencode/bin:$PATH" && {agent_command}'
         else:
             command = f"{setup_command.strip()} && {agent_command.strip()}"
 
@@ -1447,16 +1460,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             fields = verification_failure_fields()
             return response.model_copy(update=fields) if fields["failure_report"] is not None else response
         except Exception as error:
-            # A provider exception does not establish how the command ended: report it at the agent boundary, with
+            # A foreign exec exception leaves the outcome unknown; report the failed harness operation with
             # the sandbox facts known here, rather than grade a substituted partial run.
             raise NgFailureEvent(
-                boundary="agent",
+                boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 failure_reason=self._agent_sandbox_facts(
                     sandbox, reason=provider_error_reason(error), http_status=error_to_http_status(error)
                 )
-                + f"Agent operation agent.sandbox_exec failed: {type(error).__name__}",
-                operation="agent.sandbox_exec",
+                + f"Harness operation opencode.execute failed: {type(error).__name__}",
+                operation="opencode.execute",
                 stage="agent",
             ) from error
 
@@ -1465,7 +1478,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 failure_reason=self._agent_sandbox_facts(
-                    sandbox, reason=result.error_type if isinstance(result.error_type, str) else None
+                    sandbox,
+                    exit_code=result.return_code,
+                    reason=result.error_type if isinstance(result.error_type, str) else None,
                 )
                 + "Sandbox command outcome cannot be classified",
                 operation="opencode.execute",
@@ -1753,13 +1768,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # Hard-fail only when we actually captured a transcript and the marker is still absent
             # — that is a genuine silent plugin failure and must never be scored.
             #
-            # An EMPTY transcript proves nothing either way. A row killed at the sandbox timeout
-            # comes back with no captured output (and sometimes an export from the partial
-            # session), so gating on the export instead of the output rejected those rows too:
-            # the 2026-10-07 bc400 lost 71 and then 67 of 400 that way. Dropping them removes them
-            # from the denominator rather than scoring them zero, which inflates the benchmark
-            # instead of protecting it. They fall through and score normally, with
-            # plugins_loaded=False recorded for the babysitter to surface.
+            # Missing launch output or capture already raises an ungraded harness failure above.
+            # A confirmed command deadline does not establish a usable capture. With an intact capture,
+            # the verifier and its configured policy own grading after a timeout.
             # Carry a slice of the transcript into the exception. The failures sidecar keeps only
             # the exception body -- no response, no trajectory -- so without this a rejected row
             # records WHICH question failed and nothing about why, leaving the affected rows of
@@ -1785,11 +1796,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_failed": bool(run_error_type or getattr(result, "error_type", None))
             or getattr(result, "return_code", None) != 0
             or not opencode_finished
-            or not opencode_export_found
             or length_limited,
             "opencode_exit_code": getattr(result, "return_code", None),
             "opencode_error_type": run_error_type or getattr(result, "error_type", None),
-            "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
+            "opencode_results_fpath": str(results_local_fpath),
             "opencode_run_stdout": result_stdout,
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
