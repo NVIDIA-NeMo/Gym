@@ -14,6 +14,8 @@
 # limitations under the License.
 """The IPI server serves the typed resources sessions API through its real routes, next to an Agent's /run seed."""
 
+import asyncio
+import copy
 import json
 import time
 from pathlib import Path
@@ -21,10 +23,11 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from omegaconf import DictConfig
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -32,7 +35,13 @@ from nemo_gym.server_runtime import (
     check_resources_session_contract,
     maybe_auto_expose,
 )
-from resources_servers.indirect_prompt_injection.app import IPIResourcesServer, IPIResourcesServerConfig
+from resources_servers.indirect_prompt_injection.app import (
+    IPIResourcesServer,
+    IPIResourcesServerConfig,
+    IPISeedSessionRequest,
+    IPIVerifyRequest,
+    ToolCallRequest,
+)
 
 
 EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
@@ -242,6 +251,35 @@ def test_a_failed_environment_copy_leaves_no_binding_and_can_be_retried() -> Non
     assert client.post("/send_message", json=MESSAGE).status_code == 200
 
 
+async def test_typed_sessions_seeded_from_one_task_data_object_share_no_environment() -> None:
+    # Over HTTP every seed parses its own task_data. In process, seeds copied from one request share one task_data.
+    server = make_server()
+    seed_a = ResourcesSeedSessionRequest(
+        resources_session_id="session-a", episode_id=EPISODE, task_id=TASK, task_data=TASK_DATA
+    )
+    seed_b = seed_a.model_copy(
+        update={"resources_session_id": "session-b", "episode_id": EpisodeId(rollout_id="other", attempt=0)}
+    )
+    assert seed_b.task_data is seed_a.task_data
+    original = copy.deepcopy(seed_a.task_data)
+    request_a = Request({"type": "http", "session": {}})
+    await server.seed_session(request_a, seed_a)
+    await server.seed_session(Request({"type": "http", "session": {}}), seed_b)
+
+    await server.route_tool_call("send_message", ToolCallRequest(**MESSAGE), request_a)
+    environment = server.session_id_to_env["session-a"]
+    assert environment["messages"][-1]["to"] == MESSAGE["recipient"]
+    # Tool handlers change nested records in place, so change every nested dict and list of the session too.
+    for value in environment.values():
+        if isinstance(value, dict):
+            value["changed"] = True
+        elif isinstance(value, list):
+            value.append("changed")
+
+    assert server.session_id_to_env["session-b"] == original["environment"]
+    assert seed_a.task_data == original
+
+
 def test_checkpoint_wait_verify_leaves_no_untracked_environment() -> None:
     server = make_server(checkpoint=True)
     client = make_client(server)
@@ -329,6 +367,37 @@ def test_next_run_keeps_its_cookie_and_replaces_the_finished_environment() -> No
     second = client.post("/verify", json=verify_json()).json()
     assert (first["reward"], second["reward"]) == (1.0, 1.0)
     assert server.session_id_to_env == {}
+
+
+async def test_a_run_seed_racing_a_verify_waits_for_the_release_and_the_retry_record() -> None:
+    server = make_server()
+    request = Request({"type": "http", "session": {SESSION_ID_KEY: "run-session"}})
+    run_seed = IPISeedSessionRequest.model_validate(ROW)
+    await server.seed_session(request, run_seed)
+    await server.route_tool_call("send_message", ToolCallRequest(**MESSAGE), request)
+    released = []
+    release = IPIResourcesServer.release_session_state
+
+    async def release_after_io(self: IPIResourcesServer, session_id: str) -> None:
+        # The server's own release never waits. One that waits on I/O lets the next run's seed run in mid-verify.
+        await asyncio.sleep(0)
+        released.append(session_id)
+        await release(self, session_id)
+
+    with patch.object(IPIResourcesServer, "release_session_state", release_after_io):
+        verified, _ = await asyncio.gather(
+            server.verify(request, IPIVerifyRequest.model_validate(verify_json())),
+            server.seed_session(request, run_seed),
+        )
+
+    assert (verified.reward, verified.mask_sample) == (1.0, False)
+    # The verify released the finished run through the hook, and the next run's seed replaced it only afterwards.
+    assert released == ["run-session"]
+    assert server.session_id_to_env["run-session"] == ROW["environment"]
+    assert "run-session" not in server._verified_sessions
+    # The next run's environment then goes away without a verify: its verify is masked, not answered from the record.
+    await server.retire_session_state("run-session")
+    assert (await server.verify(request, IPIVerifyRequest.model_validate(verify_json()))).mask_sample is True
 
 
 @pytest.mark.parametrize("mcp", [False, True])
