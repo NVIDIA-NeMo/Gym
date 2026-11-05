@@ -214,6 +214,7 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
+    instance_request_cls = SWEBenchProInstanceRequest
     config: SWEBenchProResourcesServerConfig
     # Subclasses (e.g. SWE-bench Pro v2) swap in their own verifier workspace.
     workspace_assembler = staticmethod(assemble_workspace_files)
@@ -388,7 +389,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 request.session[SESSION_ID_KEY] = session_id
                 return response
             try:
-                task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+                task = self.instance_request_cls.model_validate(body.task_data)
             except ValidationError as error:
                 raise ResourcesSeedRejectedError(f"task_data is not a SWE-bench Pro instance: {error}") from error
             if body.task_id.task_id != task.instance_id:
@@ -405,14 +406,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return response
 
     async def _typed_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
+        sandbox = self._session_id_to_sandbox[session_id]
         return ResourcesSeedSessionResponse(
             resources_session_id=session_id,
             sandbox_access=SandboxAccess(
                 connection=DirectSandboxConnection(
                     provider_config_ref=self.config.sandbox_provider,
-                    descriptor=await self._session_id_to_sandbox[session_id].serialize(),
+                    descriptor=await sandbox.serialize(),
                 ),
-                workdir="/app",
+                workdir=await self._repository_dir(sandbox),
             ),
         )
 
@@ -470,10 +472,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         except Exception:
             print(f"Failed to normalize sandbox environment for {instance_id}", format_exc(), file=sys.stderr)
 
+    async def _repository_dir(self, sandbox: AsyncSandbox) -> str:
+        """The directory holding the task's git repository."""
+        return "/app"
+
     async def pristine_untracked_files(self, sandbox: AsyncSandbox) -> frozenset[str]:
-        """List the untracked files ``/app`` holds before the agent touches it."""
+        """List the untracked files the repository holds before the agent touches it."""
         try:
-            result = await sandbox.exec("git -C /app ls-files --others --exclude-standard")
+            repo_dir = await self._repository_dir(sandbox)
+            result = await sandbox.exec(f"git -C {quote(repo_dir)} ls-files --others --exclude-standard")
             if result.return_code != 0:
                 print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
                 return frozenset()
@@ -487,8 +494,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
         patch_path = f"/tmp/nemo-gym-swebench-pro-{uuid4().hex}.diff"
         try:
+            repo_dir = quote(await self._repository_dir(original_sandbox))
             result = await original_sandbox.exec(
-                f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                f"umask 077; git -C {repo_dir} add -N . && git -C {repo_dir} --no-pager diff {quote(base_commit)}"
                 f" > {quote(patch_path)}"
             )
             if result.return_code != 0:
