@@ -316,6 +316,11 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             NEMO_GYM_FASTAPI_NUM_WORKERS
             """,
         ),
+        **_names(
+            "nemo_gym.server_runtime.request_handling.session_routing",
+            "0.8.0",
+            "SESSION_ACQUIRE_SCOPE_KEY SESSION_ID_SCOPE_KEY",
+        ),
         # Moved, and still imported by server_utils for its own use, so these old paths do not warn yet.
         **_names(
             "nemo_gym.client.http_client",
