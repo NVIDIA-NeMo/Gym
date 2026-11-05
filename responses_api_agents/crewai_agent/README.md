@@ -246,6 +246,7 @@ every call that carried the session header to the invocation, including failed a
 | `sandbox_provider` | `null` | Provider block for the agent's own sandbox, used only when the Environment Server lends none. |
 | `sandbox_config` | `{}` | `SandboxSpec` fields for that sandbox; `workdir` defaults to `/app`, `ttl_s` to `sandbox_install_timeout_seconds` plus `timeout` plus 600. |
 | `sandbox_install_timeout_seconds` | 900 | Time limit for installing the runtime at seed. |
+| `network_access` | `inherit` | Egress of the agent's own sandbox: `inherit` (the provider's network), `model_only` (the model server's host) or `model_and_tools` (also each MCP grant's host), applied through `restrict_sandbox_network`. A seed that lends a sandbox refuses any other value than `inherit`, and so does a provider without network policies. The runtime is uploaded from the Agent Server, so a restricted sandbox still gets it. |
 | `session_close_timeout_seconds` | 60 | Budget for each close step. |
 
 ## Limitations
