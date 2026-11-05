@@ -298,10 +298,11 @@ class RolloutLineage:
         The caller materializes tokens for the single winner.
         """
         fingerprint = assistant_fingerprint(messages)
-        if not fingerprint:
-            return ParentResolutionStatus.ROOT, None, ""
         # dict.fromkeys: a call id indexed twice (e.g. by racing refreshes) is one candidate.
         call_ids = list(dict.fromkeys(self.by_fingerprint.get(fingerprint) or []))
+        if not fingerprint and not call_ids:
+            # No model-authored history, and no recorded call without any either: a root.
+            return ParentResolutionStatus.ROOT, None, ""
         candidates = [
             node
             for call_id in call_ids
@@ -318,6 +319,20 @@ class RolloutLineage:
             digests = {(node.digest, node.cum_len) for node in candidates}
             if len(digests) == 1 and candidates[0].digest:
                 candidates = [min(candidates, key=lambda node: node.call_id)]
+        if len(candidates) > 1:
+            # Reasoning is not fingerprinted, so a call whose output was reasoning only (a model that never closed
+            # its <think>) shares its parent's continuation fingerprint, and both continue the request. Their
+            # contexts both prefix the request, so the longer one extends the shorter: the request continues the
+            # most recent call, whose tokens include its ancestors', whatever the harness echoed of that turn.
+            # Calls with equal contexts are siblings (two answers to one request) and stay ambiguous.
+            longest = max(node.context_len for node in candidates)
+            most_recent = [node for node in candidates if node.context_len == longest]
+            if len(most_recent) == 1:
+                candidates = most_recent
+        if not fingerprint and not candidates:
+            # It extends no recorded call that had no model-authored history either (a first reply that was all
+            # reasoning): a conversation of its own, a root, as it always was.
+            return ParentResolutionStatus.ROOT, None, ""
         if len(candidates) != 1:
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
         return ParentResolutionStatus.RESOLVED, candidates[0], reason
@@ -346,7 +361,8 @@ class RolloutLineage:
     def resolve(self, messages: list[dict]) -> LineageResolution:
         """Return the immutable parent decision for this request.
 
-        A request without model-authored history is a root.
+        A request without model-authored history is a root, unless it extends a recorded call that had none either
+        (a first reply that was all reasoning).
         A request with unverified history is unresolved.
         Calls with identical cumulative tokens resolve to the smallest call ID.
         """
@@ -379,7 +395,8 @@ class RolloutLineage:
         if not node.context_digest:
             # Fail closed when no context digest is available.
             return False
-        if len(messages) < node.context_len:
+        if len(messages) <= node.context_len:
+            # A request that is a call's whole recorded context repeats that call (a retry); it does not continue it.
             return False
         return conversation_digest(messages[: node.context_len]) == node.context_digest
 
@@ -388,7 +405,9 @@ class RolloutLineage:
 
         ``store_tokens=False`` keeps token arrays in the durable log.
         """
-        if not entry.continuation_fingerprint:
+        if not entry.continuation_fingerprint and entry.fingerprint_version is None:
+            # Unstamped: invisible to resolution. A stamped entry without a fingerprint is a call with no
+            # model-authored history or output (a first reply that was all reasoning), which a request may continue.
             return
         if entry.fingerprint_version is not None and entry.fingerprint_version != FINGERPRINT_VERSION:
             # A different algorithm produced this fingerprint; matching it would be luck.
@@ -459,9 +478,9 @@ class RolloutLineage:
             return
         self.total_tokens += node.cum_len
         self.by_call_id[call_id] = node
-        fingerprint = assistant_fingerprint(messages)
-        if fingerprint:
-            self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
+        # "" too: a call with no model-authored history or output (a first reply that was all reasoning) is still a
+        # call a request may continue.
+        self.by_fingerprint.setdefault(assistant_fingerprint(messages), []).append(call_id)
         self._index_tool_call_turn(call_id, list((messages or [])[node.context_len :]))
 
 
@@ -1058,8 +1077,12 @@ class FileLineageStore(IncrementalLineageStore):
 
     def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         resolution = super()._resolve(rollout_id, request_items)
-        if resolution.status != ParentResolutionStatus.UNRESOLVED or resolution.reason != "no_match":
+        if resolution.status == ParentResolutionStatus.RESOLVED or (
+            resolution.status == ParentResolutionStatus.UNRESOLVED and resolution.reason != "no_match"
+        ):
             return resolution
+        # A root by the entry index (no model-authored history) may still continue a row that had none either:
+        # under external staging the index holds no entries, the ledger rows do.
         return self._resolve_row(rollout_id, request_items)
 
     def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
@@ -1070,10 +1093,14 @@ class FileLineageStore(IncrementalLineageStore):
         ``_read`` refreshes appended rows, including their new optional column.
         """
         with self._locked(rollout_id):
+            # Failure rows carry no fingerprint and can never resolve as parents. A call row recorded with no
+            # model-authored history or output (a first reply that was all reasoning) carries "", as does a request
+            # continuing it.
             records = {
                 str(record["model_call_id"]): record
                 for record in self._read(rollout_id)
-                if record.get("fingerprint") and record.get("fingerprint_version") == FINGERPRINT_VERSION
+                if isinstance(record.get("fingerprint"), str)
+                and record.get("fingerprint_version") == FINGERPRINT_VERSION
             }
         lineage = RolloutLineage()
         for call_id, record in records.items():

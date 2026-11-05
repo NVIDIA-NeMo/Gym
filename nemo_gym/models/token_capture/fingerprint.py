@@ -47,7 +47,9 @@ import orjson
 # Resolvers ignore entries stamped with a different version.
 # 4: custom_tool_call items are assistant-authored tool calls and
 #    custom_tool_call_output items are tool results.
-FINGERPRINT_VERSION = 4
+# 5: an assistant turn that carries nothing the key covers (no content, no tool call) adds nothing to it,
+#    so turns that are all empty hash as no turns: "".
+FINGERPRINT_VERSION = 5
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -60,23 +62,27 @@ def assistant_fingerprint(messages: list[dict]) -> str:
     The fingerprint identifies the call that produced the last model-authored turn.
     User and tool content is excluded from the lookup key.
     Dialect-specific tool-call shapes normalize to the same hash input.
+    An assistant turn with no content and no tool call adds nothing, so a list whose assistant turns are all
+    empty has no fingerprint (""), as a list with none: the empty message a harness echoes for a reply that was
+    all reasoning.
     """
     hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
-    count = 0
+    hashed = False
     for message in messages or []:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
         if not _is_assistant_authored(message):
             continue
-        count += 1
         for content_type, payload in _content_of(message.get("content")):
             _update_field(hasher, b"\x00", content_type)
             _update_field(hasher, b"\x01", payload)
+            hashed = True
         for call_id, name, arguments in _tools_of(message):
             _update_field(hasher, b"\x02", call_id)
             _update_field(hasher, b"\x03", name)
             _update_field(hasher, b"\x04", arguments)
-    if count == 0:
+            hashed = True
+    if not hashed:
         return ""
     return hasher.hexdigest()
 
@@ -152,7 +158,10 @@ def _is_assistant_authored(message: dict) -> bool:
     # Reasoning is deliberately excluded.
     # A harness need not echo standalone reasoning items.
     # Including reasoning would make fingerprints depend on the dialect and echo behavior.
-    # Reasoning-only collisions resolve as ambiguous and fall back.
+    # A reasoning-only call so shares its parent's fingerprint; lineage resolves that collision to the more recent
+    # call (RolloutLineage.resolve_node), and calls with equal contexts stay ambiguous. A reasoning-only first call
+    # has no fingerprint at all (""), nor has the request that continues it; lineage looks such a request up under
+    # "" before calling it a root.
     return message.get("type") in ("function_call", "custom_tool_call")
 
 

@@ -3,10 +3,15 @@
 
 """Token-free evidence from the response actually served by the model gateway."""
 
+import hashlib
 from typing import Any
 
 from nemo_gym.models.chat_completions_converter import ResponsesConverter
-from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+from nemo_gym.models.token_capture.fingerprint import (
+    _FINGERPRINT_DOMAIN,
+    _is_assistant_authored,
+    assistant_fingerprint,
+)
 from nemo_gym.models.token_capture.records import response_to_output_items, strip_token_fields
 from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.models.token_capture.staging.records import CompletionStatus, OutputValidationItem
@@ -76,6 +81,10 @@ def output_item_fingerprint(item: dict[str, Any]) -> str:
     if item.get("type") == "reasoning":
         return replay_context([item]).items[0].digest
     result = assistant_fingerprint([item])
+    if not result and _is_assistant_authored(item):
+        # A served turn with no content and no tool call adds nothing to a fingerprint, but is still an item:
+        # its evidence is the empty turn's digest.
+        result = hashlib.sha256(_FINGERPRINT_DOMAIN).hexdigest()
     if not result:
         raise ValueError("Expected a model-authored output item")
     return result

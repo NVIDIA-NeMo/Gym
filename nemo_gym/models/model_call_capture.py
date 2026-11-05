@@ -60,7 +60,7 @@ from nemo_gym.models.token_capture.protocols import (
     installed_lineage_store,
     installed_token_sink,
 )
-from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.records import REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
@@ -692,15 +692,23 @@ def _record(
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
 
 
-async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
-    """Record a failure when an admitted worker call returns without commit coordinates.
+def _is_refusal(status: int | None) -> bool:
+    """A client error the route answered: the request was refused (408 and 429 are retryable, not refusals)."""
+    return status is not None and 400 <= status < 500 and status not in (408, 429)
 
+
+async def _fail_uncommitted_external_call(context: CaptureContext | None, status: int | None = None) -> None:
+    """Record a failure for an externally staged call that did not commit.
+
+    A call the route refused (``status`` a 4xx client error) records ``REFUSED_CALL_REASON``, admitted or not, which
+    poisons the rollout: the harness never got this completion, and a refusal before admission otherwise left no row,
+    so a rollout whose harness died on it trained as a shorter valid one. An admitted call that returned without
+    commit coordinates otherwise records ``UNCOMMITTED_CALL_REASON``, which does not poison.
     A call the engine refused is skipped: ``capture_engine_refusal`` already wrote its definite reason.
     """
     if (
         context is None
         or not context.external_staging
-        or context.capture_admission is None
         or context.committed
         or context.refused
         or (context.parent_resolution_mode == "source_history" and not context.intent_registered)
@@ -710,6 +718,9 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or context.engine_refusal_recorded
         or context.lineage_store is None
     ):
+        return
+    refused = _is_refusal(status)
+    if context.capture_admission is None and not refused:
         return
     ledger = context.lineage_store
     if not isinstance(ledger, CaptureLedger):
@@ -722,7 +733,11 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
     try:
         # A disconnected caller must not cancel the write before it reaches the ledger.
         await asyncio.shield(
-            ledger.record_failure(context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
+            ledger.record_failure(
+                context.capture_key,
+                context.model_call_id,
+                REFUSED_CALL_REASON if refused else UNCOMMITTED_CALL_REASON,
+            )
         )
     except Exception:
         logger.exception(
@@ -929,11 +944,13 @@ class _CaptureMiddleware:
         # Persist capture failure before forwarding a terminal event or finishing a JSON response.
         if self._store is None:
             streaming = False
+            served_status: int | None = None
             sse_event_buffer = bytearray()
 
             async def _send_training_only(message: dict[str, Any]) -> None:
-                nonlocal streaming
+                nonlocal streaming, served_status
                 if message.get("type") == "http.response.start":
+                    served_status = message.get("status")
                     streaming = _headers_content_type(message.get("headers") or []).startswith(b"text/event-stream")
                 elif message.get("type") == "http.response.body":
                     terminal = None
@@ -941,14 +958,14 @@ class _CaptureMiddleware:
                         sse_event_buffer.extend(message.get("body", b"") or b"")
                         terminal = _consume_terminal_sse_event(sse_event_buffer, dialect)
                     if terminal is not None or not message.get("more_body", False):
-                        await _fail_uncommitted_external_call(capture_context)
+                        await _fail_uncommitted_external_call(capture_context, served_status)
                 await send(message)
 
             try:
                 with rollout_context(rollout_id):
                     await self._app(scope, receive, _send_training_only)
             finally:
-                await _fail_uncommitted_external_call(capture_context)
+                await _fail_uncommitted_external_call(capture_context, served_status)
                 if sink_token is not None:
                     reset_token_sink(sink_token)
             return
@@ -1049,12 +1066,12 @@ class _CaptureMiddleware:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
                 self._store.clear_pending(rollout_id, model_call_id)
-                await _fail_uncommitted_external_call(capture_context)
+                await _fail_uncommitted_external_call(capture_context, state["status"])
                 await _flush_deferred_response()
             raise
         finally:
             # The sink is only needed while the model server produces the response.
-            await _fail_uncommitted_external_call(capture_context)
+            await _fail_uncommitted_external_call(capture_context, state["status"])
             if sink_token is not None:
                 reset_token_sink(sink_token)
 

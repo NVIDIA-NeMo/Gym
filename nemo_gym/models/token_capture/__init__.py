@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     from nemo_gym.models.token_capture.records import (
         CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
         ENGINE_REFUSED_CALL_REASON,
+        REFUSED_CALL_REASON,
         TOKEN_ENTRY_MIN_SCHEMA_VERSION,
         TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
         TOKEN_FIELDS,
@@ -162,6 +163,7 @@ _PUBLIC_API = {
     "NG_CAPTURE_FIELD": "sink",
     "NG_COMMIT_COORDS_FIELD": "sink",
     "ParentResolutionStatus": "records",
+    "REFUSED_CALL_REASON": "records",
     "RolloutLineage": "lineage",
     "RolloutRemovalPayload": "protocols",
     "RolloutRetiredError": "protocols",
