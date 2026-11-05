@@ -153,6 +153,13 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
                 await session.sandbox.stop()
             self._sessions.pop(session_id)
 
+    async def retire_session_state(self, session_id: str) -> None:
+        async with self._locks.locked(session_id):
+            session = self._sessions.get(session_id)
+            if session is not None:
+                self._fences.fence(session_id, session.seed.episode_id)
+            await self._stop(session_id)
+
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):

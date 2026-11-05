@@ -11,8 +11,9 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
+    check_resources_session_contract,
 )
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.gdp_pdf import sandbox_app as module
 from resources_servers.gdp_pdf.tests.test_app import config  # noqa: F401
 
@@ -99,3 +100,19 @@ async def test_shutdown_waits_for_session_operation(setup):
     await asyncio.wait_for(shutdown, timeout=1)
     sandbox.stop.assert_awaited_once()
     assert not server._sessions
+
+
+async def test_retirement_releases_sandbox_and_retries_failed_stop(setup):
+    server, sandbox, body, _ = setup
+    request = Request({"type": "http", "session": {}})
+    await server.seed_session(request, body)
+    sandbox.stop.side_effect = [RuntimeError("stop failed"), None]
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await server.retire_session_state(body.resources_session_id)
+    assert body.resources_session_id in server._sessions
+    with pytest.raises(ResourcesSessionConflictError):
+        await server.seed_session(request, body)
+    await server.retire_session_state(body.resources_session_id)
+    await server.retire_session_state(body.resources_session_id)
+    assert not server._sessions
+    assert sandbox.stop.await_count == 2
