@@ -35,7 +35,7 @@ from nemo_gym.sandbox import (
     SandboxAccess,
 )
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent
+from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent, DeepAgentsAgentConfig
 from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (
     ReasoningSearchDeepAgent,
     ReasoningSearchDeepAgentConfig,
@@ -46,24 +46,51 @@ from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge 
 )
 
 
-def _config(**kwargs) -> ReasoningSearchDeepAgentConfig:
+def _config(**kwargs) -> DeepAgentsAgentConfig:
+    kwargs.setdefault("tool_profile", "tavily_search")
     kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name="reasoning_gym"))
     kwargs.setdefault("model_server", ModelServerRef(type="responses_api_models", name="policy_model"))
     kwargs.setdefault("tavily_api_key", "test-tavily-key")
     kwargs.setdefault("max_input_tokens", 202800)
-    return ReasoningSearchDeepAgentConfig(host="0.0.0.0", port=8080, entrypoint="", name="", **kwargs)
+    return DeepAgentsAgentConfig(host="0.0.0.0", port=8080, entrypoint="", name="", **kwargs)
 
 
-def _make_agent(**kwargs) -> ReasoningSearchDeepAgent:
-    return ReasoningSearchDeepAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+def _make_agent(**kwargs) -> DeepAgentsAgent:
+    return DeepAgentsAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
-# --- build_agent abstractness / concreteness --------------------------------------------------------
+# --- shared entrypoint and tool profiles -------------------------------------------------------------
 
 
-def test_base_class_build_agent_is_abstract():
-    with pytest.raises(NotImplementedError):
-        DeepAgentsAgent.build_agent(MagicMock(), MagicMock())
+def test_builtin_profile_does_not_build_a_search_graph(monkeypatch):
+    build = MagicMock(side_effect=AssertionError("search graph must not be built for a sandbox session"))
+    monkeypatch.setattr(DeepAgentsAgent, "build_agent", build)
+    agent = _make_agent(tool_profile="builtin", tavily_api_key=None, resources_server=None)
+    assert agent.agent is None
+    build.assert_not_called()
+
+
+def test_legacy_search_class_uses_the_shared_implementation():
+    config = ReasoningSearchDeepAgentConfig.model_validate(
+        _config().model_dump(exclude_none=True, exclude={"tool_profile"})
+    )
+    agent = ReasoningSearchDeepAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    assert agent.config.tool_profile == "tavily_search"
+    assert agent.agent is not None
+    assert ReasoningSearchDeepAgent.responses is DeepAgentsAgent.responses
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"tavily_api_key": None}, "tavily_api_key is required"),
+        ({"tool_profile": "builtin"}, "tavily_api_key requires tool_profile=tavily_search"),
+        ({"sandbox_provider": "runtime"}, "sandbox_provider requires tool_profile=builtin"),
+    ],
+)
+def test_tool_profile_rejects_incompatible_configuration(overrides, message):
+    with pytest.raises(ValidationError, match=message):
+        _config(**overrides)
 
 
 def test_concrete_agent_builds_successfully():
@@ -314,7 +341,7 @@ async def test_responses_result_is_what_verify_receives_for_a_tool_using_rollout
     used to discard the whole tool-call/tool-result trace.
 
     Deliberately does not assert on resources-server session state/metrics: this agent's tools (e.g.
-    TavilySearch in reasoning_search_agent.py; `ls` here, deepagents' built-in filesystem tool, so this
+    TavilySearch in app.py; `ls` here, deepagents' built-in filesystem tool, so this
     test needs no network) execute inside the agent harness and never touch a resources server's own
     session — there is nothing on that side for a test at this level to observe. See README.md's "Tool
     ownership" section."""
@@ -568,7 +595,7 @@ def test_config_rejects_execute_tools_false():
                     workdir="/work",
                 )
             },
-            "DeepAgents agent runs in process and cannot use a task sandbox; use the sandbox_agent.py entrypoint",
+            "DeepAgents agent runs in process and cannot use a task sandbox; use tool_profile=builtin",
         ),
     ],
 )

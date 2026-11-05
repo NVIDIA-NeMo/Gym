@@ -14,6 +14,7 @@ from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Response
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -42,10 +43,10 @@ from nemo_gym.sandbox import (
     register_provider,
 )
 from nemo_gym.server_runtime import DirectHTTPToolAccess
-from responses_api_agents.langchain_deepagents_agent import sandbox, sandbox_agent
-from responses_api_agents.langchain_deepagents_agent.sandbox_agent import (
-    SandboxedDeepAgent,
-    SandboxedDeepAgentConfig,
+from responses_api_agents.langchain_deepagents_agent import app, sandbox
+from responses_api_agents.langchain_deepagents_agent.app import (
+    DeepAgentsAgent,
+    DeepAgentsAgentConfig,
     _usage,
 )
 from responses_api_agents.langchain_deepagents_agent.tests.fakes import USAGE, ModelServer, call, text
@@ -55,8 +56,8 @@ linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Gym's process s
 _EPISODE = EpisodeId(rollout_id="rollout")
 
 
-def _agent(**overrides) -> SandboxedDeepAgent:
-    config = SandboxedDeepAgentConfig(
+def _agent(**overrides) -> DeepAgentsAgent:
+    config = DeepAgentsAgentConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -65,7 +66,7 @@ def _agent(**overrides) -> SandboxedDeepAgent:
         max_input_tokens=100_000,
         **overrides,
     )
-    return SandboxedDeepAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    return DeepAgentsAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 def _seed(**fields) -> AgentSeedSessionRequest:
@@ -118,9 +119,9 @@ def test_a_seed_the_agent_cannot_serve_is_refused(seed, reason):
 
 
 def test_a_loopback_model_url_is_refused_for_a_remote_sandbox(monkeypatch):
-    monkeypatch.setattr(sandbox_agent, "get_global_config_dict", lambda: {"lender": {"opensandbox": {}}})
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"lender": {"opensandbox": {}}})
     monkeypatch.setattr(
-        SandboxedDeepAgent, "resolve_model_base_url", lambda self, *args, **kwargs: "http://127.0.0.1:8000/v1"
+        DeepAgentsAgent, "resolve_model_base_url", lambda self, *args, **kwargs: "http://127.0.0.1:8000/v1"
     )
 
     reason = check_agent_seed_rejected(_agent().setup_webserver(), _seed(sandbox_access=_access()))
@@ -193,11 +194,11 @@ def runtime(tmp_path, monkeypatch) -> Path:
 async def lent_sandbox(tmp_path, monkeypatch):
     """A running task sandbox owned by the test (the Resources Server's role), with a task file in its workdir."""
     register_provider("lendable_local", _LendableLocalProvider, override=True)
-    monkeypatch.setattr(sandbox_agent, "get_global_config_dict", lambda: {"lender": {"lendable_local": {}}})
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"lender": {"lendable_local": {}}})
     # The lendable provider shares the host's network as the local one does.
-    monkeypatch.setattr(sandbox_agent, "assert_model_url_reachable_from_sandbox", lambda url, *, provider_name: None)
+    monkeypatch.setattr(app, "assert_model_url_reachable_from_sandbox", lambda url, *, provider_name: None)
     # Episodes that call the model point this at their stub Model Server.
-    monkeypatch.setattr(SandboxedDeepAgent, "resolve_model_base_url", lambda self, *args, **kwargs: "http://model/v1")
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda self, *args, **kwargs: "http://model/v1")
     workdir = tmp_path / "task"
     workdir.mkdir()
     (workdir / "input.txt").write_text("from the task image\n")
@@ -214,7 +215,7 @@ async def lent_sandbox(tmp_path, monkeypatch):
 
 def _model(monkeypatch, answers) -> ModelServer:
     model = ModelServer(answers)
-    monkeypatch.setattr(SandboxedDeepAgent, "resolve_model_base_url", lambda self, *args, **kwargs: model.base_url)
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda self, *args, **kwargs: model.base_url)
     return model
 
 
@@ -244,7 +245,7 @@ async def test_an_episode_runs_the_graph_in_the_lent_sandbox_and_close_leaves_it
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
         body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.", temperature=0.5)
-        response = await asyncio.wait_for(agent.responses(request, body), 120)
+        response = await asyncio.wait_for(agent.responses(request, Response(), body), 120)
         close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
     finally:
         model.close()
@@ -279,7 +280,7 @@ async def test_a_run_past_the_task_timeout_answers_with_its_partial_run_as_incom
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
         body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.", metadata={"agent_timeout_sec": "5"})
-        response = await asyncio.wait_for(agent.responses(request, body), 120)
+        response = await asyncio.wait_for(agent.responses(request, Response(), body), 120)
         close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
     finally:
         model.close()
@@ -299,7 +300,7 @@ async def test_close_stops_a_running_graph_before_releasing_the_lent_sandbox(len
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
         activation = asyncio.create_task(
-            agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Do the task."))
+            agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="Do the task."))
         )
         assert await asyncio.to_thread(model.blocked.wait, 60), "the graph never called the model"
         close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
@@ -322,7 +323,7 @@ async def test_a_rollout_stop_ends_the_run_as_a_marked_timeout(lent_sandbox, run
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
         activation = asyncio.create_task(
-            agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Do the task."))
+            agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="Do the task."))
         )
         assert await asyncio.to_thread(model.blocked.wait, 60), "the graph never called the model"
         stop = await agent.stop_rollout(_EPISODE.capture_key)
@@ -340,7 +341,7 @@ async def test_a_rollout_stop_ends_the_run_as_a_marked_timeout(lent_sandbox, run
 async def test_a_started_sandbox_is_stopped_at_close(tmp_path, runtime, monkeypatch):
     workdir = tmp_path / "owned"
     workdir.mkdir()
-    monkeypatch.setattr(sandbox_agent, "get_global_config_dict", lambda: {"sandbox": {"local": {}}})
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"sandbox": {"local": {}}})
     model = _model(monkeypatch, [[text("done")]])
     agent = _agent(sandbox_provider="sandbox", sandbox_config={"workdir": str(workdir)})
     try:

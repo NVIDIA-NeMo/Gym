@@ -4,7 +4,8 @@
 langchain_deepagents_sandbox_agent:
   responses_api_agents:
     langchain_deepagents_agent:
-      entrypoint: sandbox_agent.py
+      entrypoint: app.py
+      tool_profile: builtin
       resources_server: null
       model_server:
         type: responses_api_models

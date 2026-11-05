@@ -12,50 +12,78 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""In-tree agent-server for wrapping any LangChain `deepagents` graph as a native Gym `responses_api_agents` server.
+"""DeepAgents adapter with one entrypoint for its sandbox and Tavily search profiles.
 
-Generic base for wrapping any LangChain `deepagents` graph as a native Gym `responses_api_agents` server
-(model calls go through Gym's own `model_server`, on-policy, instead of the agent bringing its own model).
-Concrete instances subclass `DeepAgentsAgent` and implement `build_agent(model)` — see
-`reasoning_search_agent.py` for the one used by this repo's reasoning_gym/tavily_search comparison.
-
-See `responses_langchain_bridge.py` for the LangChain <-> Gym Responses API bridge (`GymResponsesChatModel`
-and the message-conversion helpers) and why it can't just be `langchain_openai.ChatOpenAI`.
-
-The compiled deepagents graph is built once, in `__init__`, and stored as `self.agent` — not per-request,
-and named to match how `deepagents`' own docs/examples name the object `create_deep_agent()` returns
-(`agent = create_deep_agent(...)`), rather than `langgraph_agent`'s `self.graph`. This graph runs in process; a
-benchmark that lends its task sandbox runs deepagents through `SandboxedDeepAgent` (sandbox_agent.py) instead.
+The builtin profile runs deepagents in a borrowed or agent-owned sandbox. The tavily_search profile preserves
+our in-process search graph and legacy /run integration. Both use the same agent-session endpoints and bridge.
+Custom in-process graphs may still override build_agent(model).
 """
 
 import asyncio
-from abc import abstractmethod
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from pathlib import PurePosixPath
+from typing import Any, Literal, Optional
+from uuid import uuid4
 
+from deepagents import create_deep_agent
 from fastapi import Body, HTTPException, Request, Response
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import SystemMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables import RunnableConfig
-from pydantic import Field, model_validator
+from langchain_tavily import TavilySearch
+from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
+    SandboxSession,
+    assert_model_url_reachable_from_sandbox,
+    resolve_agent_timeout,
 )
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
+)
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, resolve_provider_config
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
     to_langchain,
     to_responses,
 )
-from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentSessionState
+from responses_api_agents.langchain_deepagents_agent.sandbox import DeepAgentsSandboxSession
+from responses_api_agents.simple_agent.app import (
+    SimpleAgent,
+    SimpleAgentConfig,
+    SimpleAgentRunRequest,
+    SimpleAgentSessionState,
+    SimpleAgentVerifyResponse,
+)
 
 
 OBSERVATION_SOURCE = "langchain_deepagents_agent"
+# How the graph's run ended, as the runner reports it, for the sandbox record of the close bundle.
+# A run that hit the graph's step limit ended on its own, so its sandbox work completed.
+_SANDBOX_OUTCOMES = {
+    "completed": "completed",
+    "max_iterations": "completed",
+    "failed": "failed",
+    "wall_time": "timeout",
+    "cancelled": "cancelled",
+}
 
 
 @dataclass
@@ -71,14 +99,54 @@ class DeepAgentsSessionState(SimpleAgentSessionState):
 
 
 class DeepAgentsAgentConfig(SimpleAgentConfig):
-    """No tool-specific fields — those belong on a concrete subclass's config (see reasoning_search_agent.py).
+    """Select the graph's tools while sharing model routing and agent-session configuration."""
 
-    `max_steps` (inherited from SimpleAgentConfig) is rejected, not merely unused: deepagents runs its own
-    internal tool loop, so there's no per-model-call step counter here for it to bound (SimpleAgent.max_steps
-    counts internal model round-trips; LangChain's own `recursion_limit` counts LangGraph super-steps —
-    neither is what a caller setting `max_steps` on this agent would actually get). Silently accepting and
-    ignoring it would let a caller believe it's enforced when it isn't.
-    """
+    tool_profile: Literal["builtin", "tavily_search"] = Field(
+        default="builtin",
+        description="Built-in file/shell tools in a task sandbox, or the existing Tavily search graph in process.",
+    )
+    tavily_api_key: Optional[str] = None
+    max_search_results: int = 5
+    # Required, no default: without it, deepagents' SummarizationMiddleware falls back to a hardcoded,
+    # model-agnostic threshold (170k tokens, keep last 6 messages) unrelated to the real model.
+    max_input_tokens: int = Field(
+        gt=0, description="The model's context window, which sets when deepagents summarizes"
+    )
+    system_prompt: Optional[str] = Field(default=None, description="Added to deepagents' own system prompt")
+    shell_timeout_seconds: int = Field(
+        default=120, gt=0, description="Default time limit of one `execute` command; the model may pass its own"
+    )
+    concurrency: int = Field(default=32, gt=0, description="Maximum concurrent runs")
+    sandbox_provider: Optional[str] = Field(
+        default=None, description="Sandbox provider config to start a sandbox from when the session lends none."
+    )
+    sandbox_config: dict[str, Any] = Field(
+        default_factory=dict, description="SandboxSpec fields for a sandbox started from sandbox_provider."
+    )
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    sandbox_runner_timeout_seconds: float = Field(
+        default=12600,
+        gt=0,
+        allow_inf_nan=False,
+        description="Time limit of one run; a task's shorter metadata.agent_timeout_sec applies instead.",
+    )
+
+    @model_validator(mode="after")
+    def validate_tool_profile(self) -> "DeepAgentsAgentConfig":
+        if self.tool_profile == "tavily_search":
+            if not self.tavily_api_key:
+                raise ValueError("tavily_api_key is required for tool_profile=tavily_search")
+            if self.sandbox_provider is not None:
+                raise ValueError(
+                    "tool_profile=tavily_search runs in process; sandbox_provider requires tool_profile=builtin"
+                )
+        elif self.tavily_api_key is not None:
+            raise ValueError("tavily_api_key requires tool_profile=tavily_search")
+        if self.sandbox_provider is not None:
+            workdir = self.sandbox_config.get("workdir")
+            if not isinstance(workdir, str) or not PurePosixPath(workdir).is_absolute():
+                raise ValueError("sandbox_config.workdir must be an absolute path when sandbox_provider is set")
+        return self
 
     @model_validator(mode="after")
     def reject_max_steps(self) -> "DeepAgentsAgentConfig":
@@ -102,30 +170,120 @@ class DeepAgentsAgentConfig(SimpleAgentConfig):
         return self
 
 
+def _usage(output: Mapping[str, Any]) -> Optional[NeMoGymResponseUsage]:
+    """The run's total usage, or None unless every model call returned with usage."""
+    usages = output.get("usages") or []
+    if len(usages) != output.get("model_calls") or any(usage is None for usage in usages):
+        return None
+    total = None
+    for usage in usages:
+        total = accumulate_response_usage(total, NeMoGymResponseUsage.model_validate(usage))
+    return total
+
+
+def _model_error_type(output: Mapping[str, Any]) -> Optional[str]:
+    if not output.get("model_error"):
+        return None
+    return "ModelTransportError" if output.get("model_transport_error") else "ModelRequestError"
+
+
 class DeepAgentsAgent(SimpleAgent):
-    """Inherits SimpleAgent.run() unchanged (seed_session -> self-POST /v1/responses -> verify) and SimpleAgent's
-    agent-session endpoints. Overrides responses() with everything true of any deepagents-based agent wired into
-    Gym, and narrows the session seed to what the graph actually uses.
+    """Dispatch DeepAgents sessions to the configured sandbox or in-process tool profile.
 
-    Does not build a TrajectoryRecord (per-tool-call/model-call observability) — see README.md's "Known
-    limitation" section. That's deliberately deferred, not an oversight; a session reports it as a gap."""
+    The graph cannot export a partial activation, so checkpoint recovery restarts it from the input.
+    Close reports the observation gaps of both profiles and the sandbox outcome when applicable.
+    """
 
-    # The graph's state lives inside one ainvoke() call, which a checkpoint cannot export. Checkpointing
-    # therefore restarts an unfinished rollout from its input instead of resuming it (GYMINT-357).
     checkpoint_mode = "restart_only"
-
     config: DeepAgentsAgentConfig
     agent: Any = Field(default=None, exclude=True)
+    _sem: asyncio.Semaphore = PrivateAttr()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.agent = self.build_agent(GymResponsesChatModel(agent=self))
+        self._sem = asyncio.Semaphore(self.config.concurrency)
+        if self.config.tool_profile == "tavily_search":
+            self.agent = self.build_agent(GymResponsesChatModel(agent=self))
 
-    @abstractmethod
     def build_agent(self, model: BaseChatModel) -> Any:
-        """Return a compiled deepagents graph, e.g. create_deep_agent(model=model, tools=[...], ...).
-        Called once, from __init__ — not per-request."""
-        raise NotImplementedError
+        """Build the in-process graph once; subclasses may still provide their own graph."""
+        model.profile = {"max_input_tokens": self.config.max_input_tokens}
+        return create_deep_agent(
+            model=model,
+            tools=[
+                TavilySearch(max_results=self.config.max_search_results, tavily_api_key=self.config.tavily_api_key)
+            ],
+            system_prompt=self.config.system_prompt,
+        )
+
+    async def _seed_agent_session_state(
+        self, body: AgentSeedSessionRequest
+    ) -> DeepAgentsSessionState | DeepAgentsSandboxSession:
+        if self.config.tool_profile == "tavily_search":
+            return self._new_session_state(body)
+        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required:
+            # The graph runs only deepagents' own tools, so a required grant would go unused.
+            raise AgentSeedRejectedError(
+                f"Sandboxed DeepAgents does not support required tool access: {', '.join(required)}"
+            )
+        access = body.sandbox_access
+        if access is None:
+            if self.config.sandbox_provider is None:
+                raise AgentSeedRejectedError("Sandboxed DeepAgents requires sandbox_access or a sandbox_provider")
+            provider_ref, workdir = self.config.sandbox_provider, self.config.sandbox_config["workdir"]
+        else:
+            if access.user is not None:
+                raise AgentSeedRejectedError("Sandboxed DeepAgents does not support a sandbox user override")
+            if not PurePosixPath(access.workdir).is_absolute():
+                raise AgentSeedRejectedError("Sandboxed DeepAgents requires an absolute sandbox workdir")
+            provider_ref, workdir = access.connection.provider_config_ref, access.workdir
+        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        try:
+            # The runner calls the Model Server from inside the sandbox, which cannot reach a loopback address.
+            assert_model_url_reachable_from_sandbox(
+                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+                provider_name=next(iter(provider_config), None),
+            )
+        except ValueError as error:
+            raise AgentSeedRejectedError(str(error)) from error
+        provider = create_provider(provider_config)
+        try:
+            if access is None:
+                sandbox = AsyncSandbox(provider)
+                sandbox_config = dict(self.config.sandbox_config)
+                # Provider TTLs outlive this server; reserve ten minutes for setup and cleanup.
+                sandbox_config.setdefault(
+                    "ttl_s",
+                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
+                )
+                await sandbox.start(SandboxSpec(**sandbox_config))
+            else:
+                sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        state = DeepAgentsSandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox,
+                workdir=workdir,
+                session_dir=f"/tmp/nemo-gym-deepagents-sessions/{uuid4().hex}",
+                owns_sandbox=access is None,
+                harness="DeepAgents",
+            ),
+            sandbox_provider=sandbox.provider_name,
+            sandbox_id=sandbox.sandbox_id,
+        )
+        try:
+            await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
+        except BaseException as error:
+            try:
+                await state.close(self.config.session_close_timeout_seconds)
+            except BaseException:
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
+        return state
 
     def _new_session_state(self, body: AgentSeedSessionRequest) -> DeepAgentsSessionState:
         """Accept a session only for what the graph uses: its own tools, in process.
@@ -133,11 +291,11 @@ class DeepAgentsAgent(SimpleAgent):
         The graph never calls a granted Resources tool, so a required grant is refused rather than silently
         dropped. An optional grant is skipped. The session holds no Resources cookie jar, so close leaves the
         Environment Server's jar for /verify unchanged. A lent task sandbox is refused: this graph runs in the
-        Agent Server, and `SandboxedDeepAgent` runs deepagents in the sandbox.
+        Agent Server, and the builtin profile runs deepagents in the sandbox.
         """
         if body.sandbox_access is not None:
             raise AgentSeedRejectedError(
-                "DeepAgents agent runs in process and cannot use a task sandbox; use the sandbox_agent.py entrypoint"
+                "DeepAgents agent runs in process and cannot use a task sandbox; use tool_profile=builtin"
             )
         required = [access.name for access in self.effective_tool_accesses(body) if access.required]
         if required:
@@ -163,6 +321,11 @@ class DeepAgentsAgent(SimpleAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Stop the activation. A close whose activation does not stop in time raises, which keeps the session for the
         Environment Server's close retry."""
+        if isinstance(state, DeepAgentsSandboxSession):
+            await state.close(self.config.session_close_timeout_seconds)
+            return AgentCloseSessionResponse(
+                agent_session_id=state.request.agent_session_id, agent_observations=self._observations(state)
+            )
         if not isinstance(state, DeepAgentsSessionState):
             raise TypeError("Expected a DeepAgents session state")
         activation = state.activation
@@ -172,6 +335,101 @@ class DeepAgentsAgent(SimpleAgent):
             if not activation.done():
                 raise TimeoutError("DeepAgents activation did not stop within session_close_timeout_seconds")
         return await super()._close_agent_session_state(state)
+
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, DeepAgentsSandboxSession) else None
+
+    @staticmethod
+    def _observations(state: DeepAgentsSandboxSession) -> AgentObservationBundle:
+        """The sandbox the graph ran in and how its run ended; the graph itself reports no invocation records."""
+        output = state.session.artifacts or {}
+        ending = output.get("stop_reason") or output.get("status")
+        record = SandboxObservation(
+            role="agent",
+            provider=state.sandbox_provider,
+            sandbox_id=state.sandbox_id,
+            # A session closed before its run reported anything was cancelled.
+            outcome=_SANDBOX_OUTCOMES.get(ending, "unknown") if output else "cancelled",
+            error_type=_model_error_type(output),
+        )
+        return AgentObservationBundle(
+            source=OBSERVATION_SOURCE,
+            records=[record],
+            gaps=[
+                ObservationGap(
+                    code="agent_transcript_unavailable",
+                    detail="the deepagents graph reports no invocation or tool-call records",
+                ),
+                ObservationGap(code="model_call_ownership_unavailable"),
+            ],
+        )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """The Model Server's HTTP status, or a transport failure, that ended the run, as the runner reported it."""
+        status = native_result.get("model_error_status")
+        if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("model_transport_error"):
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return super().classify_outcome(native_result)
+
+    async def _run_in_sandbox(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, state: DeepAgentsSandboxSession
+    ) -> NeMoGymResponse:
+        if body.tools:
+            raise HTTPException(
+                422, "Sandboxed DeepAgents runs only deepagents' own tools; the request declares tools"
+            )
+        input_items = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
+        )
+        messages = to_langchain(input_items)
+        if body.instructions:
+            messages.insert(0, SystemMessage(content=body.instructions))
+        capture_key = state.request.episode_id.capture_key
+        sampling = {
+            "temperature": body.temperature,
+            "top_p": body.top_p,
+            "max_output_tokens": body.max_output_tokens,
+            "reasoning": body.reasoning,
+        }
+        access = state.request.sandbox_access
+        payload = {
+            "messages": messages_to_dict(messages),
+            # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
+            "model_url": f"{self.resolve_model_base_url(self.config.model_server.name, capture_key)}/responses",
+            "request_defaults": {name: value for name, value in sampling.items() if value is not None},
+            "max_input_tokens": self.config.max_input_tokens,
+            "system_prompt": self.config.system_prompt,
+            "shell_timeout_seconds": self.config.shell_timeout_seconds,
+            "workdir": state.session.workdir,
+            "task_env": dict(access.env) if access is not None else {},
+            "rollout_id": capture_key,
+            "stop_request_path": state.session.stop_request_path,
+        }
+        try:
+            output = await state.execute(
+                payload,
+                timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds),
+                close_timeout=self.config.session_close_timeout_seconds,
+            )
+        except TimeoutError:
+            # The runner normally stops at the deadline and writes its partial report. If the supervisor overran
+            # too, the episode is still a timeout when that report is there, and an infrastructure failure when not.
+            output = state.session.artifacts
+            if not (isinstance(output, dict) and output.get("stop_reason") == "wall_time"):
+                raise
+        response = to_responses(messages_from_dict(output["messages"]), self.config.model_server.name)
+        response.update(
+            id=f"deepagents-{capture_key}",
+            created_at=int(time.time()),
+            status=output["status"],
+            usage=_usage(output),
+            metadata={"stop_reason": output["stop_reason"]} if output["stop_reason"] else None,
+            error={"code": "server_error", "message": output["model_error"]} if output["model_error"] else None,
+        )
+        response = self.report_rollout_stop(NeMoGymResponse.model_validate(response), state.session)
+        return self.report_outcome(response, output)
 
     async def responses(
         self,
@@ -185,6 +443,8 @@ class DeepAgentsAgent(SimpleAgent):
         model_url_path = self.url_path_for_request("/v1/responses", request)
         agent_session_id = self._agent_session_id_from_request(request)
         if agent_session_id is None:
+            if self.config.tool_profile == "builtin":
+                raise HTTPException(409, "Sandboxed DeepAgents runs only in agent sessions; use an environment server")
             # Legacy self-dispatch from run(). Different servers have different session-middleware keys
             # (get_session_middleware_key() is f"{class_name}___{server_name}"), so a cookie from the resources
             # server's /seed_session does not automatically ride through to /verify unless re-set here.
@@ -195,16 +455,21 @@ class DeepAgentsAgent(SimpleAgent):
         # An activation of a seeded session: the Environment Server holds the Resources cookies and sends them to
         # /verify itself, so nothing is mirrored back. An unknown or closing session answers 409.
         state = self._require_agent_session(agent_session_id)
-        if not isinstance(state, DeepAgentsSessionState):
+        if not isinstance(state, (DeepAgentsSessionState, DeepAgentsSandboxSession)):
             raise TypeError("Expected a DeepAgents session state")
         if rollout_id != state.request.episode_id.capture_key:
             raise HTTPException(409, "Activation rollout does not match the seeded agent session")
         if state.activation is None:
             # Bound before the first await, so a retry that arrives meanwhile joins this run.
             state.activation_request = body.model_copy(deep=True)
-            state.activation = asyncio.create_task(
-                self._run_graph(body, model_url_path=model_url_path, rollout_id=rollout_id)
-            )
+
+            async def activate() -> NeMoGymResponse:
+                if isinstance(state, DeepAgentsSandboxSession):
+                    async with self._sem:
+                        return await self._run_in_sandbox(body, state)
+                return await self._run_graph(body, model_url_path=model_url_path, rollout_id=rollout_id)
+
+            state.activation = asyncio.create_task(activate())
         elif body != state.activation_request:
             raise HTTPException(409, "DeepAgents sessions run one activation; retry the same request")
         # A disconnected HTTP client must not cancel the shared run; only close cancels it.
@@ -261,3 +526,15 @@ class DeepAgentsAgent(SimpleAgent):
         response_body = to_responses(new_messages, self.config.model_server.name)
         response_body["usage"] = model_usage["usage"]
         return NeMoGymResponse.model_validate(response_body)
+
+    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
+        """Keep legacy /run for the search profile; sandbox episodes require an Environment Server."""
+        if self.config.tool_profile == "builtin":
+            raise HTTPException(409, "Sandboxed DeepAgents runs only in agent sessions; use an environment server")
+        return await super().run(request, body)
+
+
+if __name__ == "__main__":
+    DeepAgentsAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = DeepAgentsAgent.run_webserver()

@@ -20,7 +20,8 @@ reasoning_gym:
 reasoning_gym_langchain_deepagents_agent_model_server:
   responses_api_agents:
     langchain_deepagents_agent:
-      entrypoint: reasoning_search_agent.py
+      entrypoint: app.py
+      tool_profile: tavily_search
       resources_server:
         type: resources_servers
         name: reasoning_gym

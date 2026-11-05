@@ -3,21 +3,19 @@
 Runs a [LangChain DeepAgents](https://python.langchain.com/docs/experimental/deep_agents/) agent as a
 native NeMo Gym agent server.
 
-`app.py`'s `DeepAgentsAgent` is the generic base that should be used by your LangChain DeepAgent. 
-This base class does not define a `deepagents` graph by design, since every developer's DeepAgent 
-is different. 
+`app.py` is the shared entrypoint for both tool profiles of `DeepAgentsAgent`:
 
-Use `reasoning_search_agent.py` as a concrete
-subclass example and follow a similar pattern to run
-run a different `deepagents` graph. Subclass `DeepAgentsAgent` the same way rather than modifying
-`reasoning_search_agent.py`.
+- `tool_profile: builtin` runs deepagents' built-in file and shell tools inside a task sandbox.
+- `tool_profile: tavily_search` preserves the in-process Tavily search graph used by the bundled reasoning_gym
+  and tavily_search configurations. It requires `tavily_api_key`.
 
-`DeepAgentsAgent` runs its graph in the agent server process. For benchmarks whose resources server lends a task
-sandbox, such as Terminal-Bench 2.1, `sandbox_agent.py`'s `SandboxedDeepAgent` runs deepagents' own graph inside
-that sandbox instead; see [Sandboxed agent](#sandboxed-agent-sandbox_agentpy).
+Both profiles use the same session endpoints. `sandbox.py` installs and manages the sandbox session, and
+`sandbox_runner.py` runs the graph inside the sandbox. `reasoning_search_agent.py` preserves the old search class
+names and entrypoint for existing callers; all bundled configs now select `app.py`. Custom in-process graphs can
+still override `build_agent(model)` using the search-profile configuration.
 
-Both run deepagents 0.6.12 (`deepagents<0.7.0` in `pyproject.toml`, resolved in `uv.lock`) at the Evaluation
-capability level: they return responses for verification, and their close bundles record the missing invocation
+The adapter runs deepagents 0.6.12 (`deepagents<0.7.0` in `pyproject.toml`, resolved in `uv.lock`) at the Evaluation
+capability level: it returns responses for verification, and its close bundles record the missing invocation
 and tool-call evidence as gaps.
 
 ## Quick start
@@ -95,7 +93,8 @@ Expect `mean/reward: 1.0` over those 5 rows — `reasoning_gym` scores determini
 
 ## Environment Server and agent sessions
 
-Both bundled configs run this agent behind `single_agent_turn_legacy`, so the commands above are unchanged.
+Both bundled search configs select `app.py` with `tool_profile: tavily_search` behind `single_agent_turn_legacy`,
+so the commands above are unchanged.
 The Environment Server seeds the resources server, opens an agent session, runs the graph once, closes the
 session, and then calls `/verify`. The agent's side of that contract:
 
@@ -103,7 +102,7 @@ session, and then calls `/verify`. The agent's side of that contract:
   optional grant is skipped. Keep `resources_tool_transports: []`, including on a `single_agent_turn_legacy`
   Environment Server you swap this agent into with `--agent-type`.
 - **Task sandbox.** Seed refuses `sandbox_access` with HTTP 422: the graph runs in the agent server, its files
-  live in graph state, and it has no `execute` tool. Use the [sandboxed agent](#sandboxed-agent-sandbox_agentpy)
+  live in graph state, and it has no `execute` tool. Use the [builtin profile](#sandboxed-execution-tool_profile-builtin)
   for a benchmark that lends its task sandbox.
 - **Activation** runs the graph once per session. An identical retry joins that run, and a different request or
   a request for another rollout answers 409. A client that disconnects does not cancel the run.
@@ -118,13 +117,15 @@ session, and then calls `/verify`. The agent's side of that contract:
 - **`skip_verification: true`** skips `/verify` on the session path, including the Tavily judge. Set it on the
   Environment Server, or on the agent when the Environment Server leaves it unset.
 
-## Sandboxed agent (`sandbox_agent.py`)
+## Sandboxed execution (`tool_profile: builtin`)
 
-`SandboxedDeepAgent` runs deepagents' own graph, `create_deep_agent()` with its built-in tools (`write_todos`, `ls`,
+`DeepAgentsAgent` with `tool_profile: builtin` runs deepagents' own graph, `create_deep_agent()` with its built-in
+tools (`write_todos`, `ls`,
 `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `execute` and `task` subagents), inside a task sandbox. It
 adds no tools of its own, so it has no Tavily search. It runs only in agent sessions:
-[`configs/langchain_deepagents_sandbox_agent.yaml`](configs/langchain_deepagents_sandbox_agent.yaml) sets
-`resources_server: null`, and an Environment Server composes it with a benchmark. For Terminal-Bench 2.1, follow
+[`configs/langchain_deepagents_sandbox_agent.yaml`](configs/langchain_deepagents_sandbox_agent.yaml) selects `app.py` with
+`tool_profile: builtin` and `resources_server: null`, and an Environment Server composes it with a benchmark.
+For Terminal-Bench 2.1, follow
 [Configure a run](../../benchmarks/terminal_bench_2_1/README.md#configure-a-run) with this config import, the agent
 name `langchain_deepagents_sandbox_agent` and `resources_tool_transports: []`. The benchmark's `allowed_agents` does
 not list this agent yet, so start its servers with `--allow-unsupported-pairing`.
@@ -172,10 +173,10 @@ not list this agent yet, so start its servers with `--allow-unsupported-pairing`
 
 ## Tool ownership: agent vs. resources server
 
-In this implementation, tools belong to the agent in the agent server, not the resources server. A subclass
-of `DeepAgentsAgent` (e.g. `reasoning_search_agent.py`'s `ReasoningSearchDeepAgent`) declares its tools by
-passing them into `create_deep_agent(tools=[...])` inside `build_agent()` — `reasoning_search_agent.py`
-wires `TavilySearch` this way, calling the Tavily API directly with `tavily_api_key`. The `tavily_search`
+Tools belong to the harness, not the resources server. The search profile declares its tools by
+passing them into `create_deep_agent(tools=[...])` inside `build_agent()`. It wires `TavilySearch` this way,
+calling the Tavily API directly with `tavily_api_key`. The builtin profile creates its graph in the sandbox runner.
+The `tavily_search`
 resources server it can pair with does define its own `web_search` endpoint, but this agent never calls it. Only its `verify()` endpoint is used for verification. In short, the agent works with any resource-server for
 task data and verification functionality, but ignores other functionality of the resource server like tools. 
 

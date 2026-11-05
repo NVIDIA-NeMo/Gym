@@ -40,7 +40,7 @@ class DeepAgentsSandboxSession(AgentSessionState):
     sandbox_provider: str | None = None
     sandbox_id: str | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
-    task: asyncio.Task[NeMoGymResponse] | None = field(default=None)
+    activation: asyncio.Task[NeMoGymResponse] | None = field(default=None)
 
     async def install_runtime(self, *, timeout: float) -> None:
         """Reuse or install the deepagents runtime and stage the harness files."""
@@ -86,10 +86,10 @@ class DeepAgentsSandboxSession(AgentSessionState):
     async def close(self, timeout: float) -> None:
         """Stop the graph and release the sandbox before cancelling the HTTP activation."""
         await self.session.close(timeout=timeout)
-        if self.task is not None and not self.task.done():
-            self.task.cancel()
+        if self.activation is not None and not self.activation.done():
+            self.activation.cancel()
             try:
-                await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
+                await asyncio.wait_for(asyncio.shield(self.activation), timeout=timeout)
             except (asyncio.CancelledError, Exception):
-                if not self.task.done():
+                if not self.activation.done():
                     raise

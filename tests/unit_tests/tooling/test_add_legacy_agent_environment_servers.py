@@ -251,7 +251,7 @@ def test_deepagents_sandbox_template_composes_with_one_environment(tmp_path: Pat
     resolved = _parse(config, composition, strict=True)
     assert _environment_servers_by_agent(resolved) == {"langchain_deepagents_sandbox_agent": ["session_environment"]}
     agent = resolved.langchain_deepagents_sandbox_agent.responses_api_agents.langchain_deepagents_agent
-    assert (agent.entrypoint, agent.resources_server) == ("sandbox_agent.py", None)
+    assert (agent.entrypoint, agent.resources_server, agent.tool_profile) == ("app.py", None, "builtin")
 
 
 def test_session_openclaw_template_composes_with_one_environment(tmp_path: Path) -> None:
