@@ -221,6 +221,7 @@ def test_pants_failure_preserves_status_environment_and_cleans_only_owned_files(
         target = parsed.body[1].value
         fields = {kw.arg: ast.literal_eval(kw.value) for kw in target.keywords}
         assert fields["cache_scope"] == "session"
+        assert fields["workspace_invalidation_sources"] == []
         assert "GITHUB_ENV" in fields["extra_env_vars"]
         assert "UV_PYTHON_INSTALL_DIR" in fields["extra_env_vars"]
         assert "GITHUB_TOKEN" not in fields["extra_env_vars"]
@@ -229,12 +230,48 @@ def test_pants_failure_preserves_status_environment_and_cleans_only_owned_files(
 
     monkeypatch.setattr(full_ci, "run_logged", emulate_pants)
     env = {"PATH": os.environ["PATH"], "GITHUB_ENV": str(tmp_path / "env"), "UV_PYTHON_INSTALL_DIR": "/python"}
-    assert full_ci.run_pants(script=script, output=output, env=env, sources=["tracked.yaml"]) == 9
+    assert full_ci.run_pants(script=script, output=output, env=env) == 9
     assert not Path("BUILD.pants-full-ci").exists()
     assert Path("pants.toml").exists() == existing_config
     if existing_config:
         assert Path("pants.toml").read_text() == "# existing configuration\n"
     assert "expected failure" in (output / "runner.log").read_text()
+
+
+@pytest.mark.parametrize("change_content", [False, True])
+def test_workspace_rewrite_keeps_input_digest_and_rejects_content_changes(tmp_path, monkeypatch, change_content):
+    repository(tmp_path, monkeypatch)
+    # The real-Pants probe separately checks watcher scheduling. Here, assert the
+    # generated process contract and exercise the actual post-execution guard.
+    Path("scripts/ci/lint.sh").write_text(
+        "echo execution >> results/executions\n"
+        + ("echo changed >> tracked.yaml\n" if change_content else "touch tracked.yaml\n")
+    )
+    Path("scripts/ci/lint.sh").chmod(0o755)
+    _, original_digest = full_ci.source_snapshot()
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    actual_run = full_ci.run_logged
+
+    def execute_generated_command(command, *, log, env):
+        parsed = ast.parse(Path("BUILD.pants-full-ci").read_text())
+        fields = {kw.arg: ast.literal_eval(kw.value) for kw in parsed.body[1].value.keywords}
+        assert fields["cache_scope"] == "session"
+        assert fields["workspace_invalidation_sources"] == []
+        assert "GYM_PANTS_INPUT_DIGEST" in fields["extra_env_vars"]
+        assert env["GYM_PANTS_INPUT_DIGEST"] == original_digest
+        return actual_run(
+            ["bash", "-c", fields["command"].replace("{chroot}", str(sandbox))],
+            log=log,
+            env=env,
+        )
+
+    monkeypatch.setattr(full_ci, "run_logged", execute_generated_command)
+    assert invoke(monkeypatch, engine="pants", job="lint") == int(change_content)
+    metadata = json.loads(Path("results/full-ci/metadata.json").read_text())
+    assert metadata["command_exit_code"] == 0
+    assert metadata["source_changed"] is change_content
+    assert Path("results/executions").read_text().splitlines() == ["execution"]
 
 
 def test_pants_launcher_exception_records_failure_and_cleans_bootstrap(tmp_path, monkeypatch):

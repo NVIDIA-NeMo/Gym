@@ -11,7 +11,10 @@ package_shell_command(
     # Existing CI has mutable package indexes, system tools, and mounted fixtures.
     # Never replay a successful result across invocations without pinning those.
     cache_scope="session",
-    workspace_invalidation_sources=__SOURCES__,
+    # CI hooks may rewrite tracked files with identical bytes. Watching their
+    # mtimes can restart this very command. The adapter supplies the complete
+    # GYM_PANTS_INPUT_DIGEST and rejects source changes after execution.
+    workspace_invalidation_sources=[],
     extra_env_vars=__ENVIRONMENT__,
     path_env_modify="off",
     output_files=["command-status.txt"],

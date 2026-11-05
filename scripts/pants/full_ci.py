@@ -301,7 +301,7 @@ def run_native(*, job: str, shard: int, shards: int, output: Path, env: dict[str
     return 0
 
 
-def run_pants(*, script: Path, output: Path, env: dict[str, str], sources: list[str]) -> int:
+def run_pants(*, script: Path, output: Path, env: dict[str, str]) -> int:
     """Execute the identical command under the shared CI job deadline and restore its status."""
     build_path = Path("BUILD.pants-full-ci")
     if build_path.exists():
@@ -316,9 +316,6 @@ def run_pants(*, script: Path, output: Path, env: dict[str, str], sources: list[
     template = (HERE / "full_ci.BUILD").read_text()
     substitutions = {
         "__COMMAND__": repr(shell_command),
-        # Pants globs resolve symlinks, and reject dangling links. Their exact
-        # Git identity is carried by GYM_PANTS_INPUT_DIGEST instead.
-        "__SOURCES__": repr([path for path in sources if not Path(path).is_symlink()]),
         "__ENVIRONMENT__": repr(sorted(env)),
     }
     for token, value in substitutions.items():
@@ -425,7 +422,7 @@ def main() -> int:
         if native:
             command_code = run_native(job=args.job, shard=args.shard, shards=args.shards, output=output, env=env)
         elif args.engine == "pants":
-            command_code = run_pants(script=script, output=output, env=env, sources=sources)
+            command_code = run_pants(script=script, output=output, env=env)
         else:
             command_code = run_logged(["bash", str(script)], log=output / "runner.log", env=env)
         source_changed = bool(git("status", "--porcelain", "--untracked-files=no"))
