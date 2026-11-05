@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The observed provider-ended report must survive the real SDK status adapter."""
+"""Control-plane lifecycle evidence confirms OOM; command-status bodies retain only request facts."""
 
 import gzip
 import json
@@ -96,8 +96,9 @@ def test_lifecycle_report_requires_current_unambiguous_control_plane_evidence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_action", ["fail", "retry"])
 @pytest.mark.parametrize("body", ["oom", "sidecar", "oversized", "direct", "spoofed", "wrong-id", "delayed"])
-async def test_command_status_410_uses_control_plane_confirmation_through_real_sdk(body, monkeypatch):
+async def test_command_status_410_uses_control_plane_confirmation_through_real_sdk(body, status_action, monkeypatch):
     from opensandbox.adapters.command_adapter import CommandsAdapter
     from opensandbox.exceptions import SandboxApiException
     from opensandbox.models.sandboxes import SandboxEndpoint
@@ -116,7 +117,13 @@ async def test_command_status_410_uses_control_plane_confirmation_through_real_s
         connection={"use_server_proxy": body != "direct"},
         probe={"command": None},
         diagnostics={"poll_interval_s": 0.001},
-        operations={"background_exec": True, "retries": 0},
+        operations={
+            "background_exec": True,
+            "retries": 0,
+            "background_poll_initial_s": 0.001,
+            "background_poll_interval_s": 0.001,
+            "outcome_policy": {"by_status_code": {410: status_action}},
+        },
     )
     monkeypatch.setattr(provider, "_build_transport", lambda: httpx.MockTransport(respond))
     adapter = CommandsAdapter(provider._connection_config(), SandboxEndpoint(endpoint="sandbox.test"))
@@ -166,7 +173,9 @@ async def test_command_status_410_uses_control_plane_confirmation_through_real_s
             assert failure.details.exit_code is None  # The command status was not observed.
             assert "container sandbox exited with code 137" in failure.failure_reason
             assert failure.details.provider_status_reason == "FAILED"
-        assert len(requests) == 1
+        # RETRY returns to command status between diagnostic reads; FAIL spends
+        # its remaining diagnostic budget awaiting the final lifecycle report.
+        assert len(requests) == (2 if body == "delayed" and status_action == "retry" else 1)
         assert requests[0].url.path == "/command/status/exec-1"
         assert submitted == ["allocate memory"]
         assert lifecycle_reads == ["read"] * (2 if body == "delayed" else 1)

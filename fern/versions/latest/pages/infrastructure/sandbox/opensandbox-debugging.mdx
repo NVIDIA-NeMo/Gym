@@ -90,7 +90,8 @@ Gym confirms OOM when the control-plane response identifies the current sandbox 
 single-pod report of its `sandbox` container terminating with `OOMKilled`. The report must describe the
 current container state; sidecars, init containers, historical states and ambiguous reports do not qualify.
 
-A confirmed OOM becomes a `provider_oom_killed` event with the evidence source and observed exit code.
+A confirmed OOM becomes a `provider_oom_killed` event. Its diagnostic reason retains the evidence source
+and any reported container exit code. `details.exit_code` stays unset because the command's own exit was not observed.
 The controller can retain this report after the pod disappears, so a later pod lookup returning 404 does not
 erase the recorded cause. Command-status HTTP 410 bodies alone never establish OOM: even through the server
 proxy, a response body can originate in the sandbox's exec daemon.
