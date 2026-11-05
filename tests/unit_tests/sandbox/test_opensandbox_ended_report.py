@@ -90,7 +90,7 @@ def test_lifecycle_report_requires_current_unambiguous_control_plane_evidence(
     assert (evidence is not None) == confirmed
     if evidence is not None:
         assert evidence.failure_kind == PROVIDER_OOM_KILLED
-        assert evidence.exit_code == 137
+        assert "container sandbox exited with code 137" in evidence.message
         assert evidence.provider_status_reason == "FAILED"
         assert "lifecycle status confirms" in evidence.message
 
@@ -163,7 +163,8 @@ async def test_command_status_410_uses_control_plane_confirmation_through_real_s
         assert isinstance(failure.__cause__.__cause__, SandboxApiException)
         assert failure.__cause__.__cause__.request_id == "request-410"
         if confirmed:
-            assert failure.details.exit_code == 137
+            assert failure.details.exit_code is None  # The command status was not observed.
+            assert "container sandbox exited with code 137" in failure.failure_reason
             assert failure.details.provider_status_reason == "FAILED"
         assert len(requests) == 1
         assert requests[0].url.path == "/command/status/exec-1"
@@ -195,7 +196,8 @@ async def test_lifecycle_confirmation_is_shared_by_foreground_exec_and_pty(opera
     else:
         failure = await provider._pty_failure(handle, error)
     assert failure.failure_kind == PROVIDER_OOM_KILLED
-    assert failure.details.exit_code == 137
+    assert failure.details.exit_code is None  # The command status was not observed.
+    assert "container sandbox exited with code 137" in failure.failure_reason
     assert failure.details.provider_status_reason == "FAILED"
     assert failure.stage is None  # The provider establishes the cause, not who owns this execution.
     raw.get_info.assert_awaited_once()
