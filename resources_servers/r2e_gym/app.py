@@ -268,7 +268,7 @@ class R2EGymResourcesServer(SandboxSessionResourcesServer):
                 await self._start_task_sandbox(session_id, body)
             except BaseException:
                 # A sandbox that leaked hidden tests must not be handed out or left running.
-                await self._stop_task_sandbox(session_id)
+                await self._stop_failed_seed_sandbox(session_id)
                 raise
             return R2EGymSeedSessionResponse(
                 sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id), workdir=REPO_DIRECTORY
@@ -337,15 +337,16 @@ class R2EGymResourcesServer(SandboxSessionResourcesServer):
         if self.config.is_verifying_golden_patch:
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
-            try:
-                capture = await self.capture_task_sandbox_patch(
-                    session_id, lambda: self._extract_model_patch(session_id, REPO_DIRECTORY)
-                )
-            except Exception as exc:
-                capture = PatchCapture.static("", mode, "none")
-                extraction_error = f"Failed to extract model patch: {exc}"
-            # Failed teardown remains retryable; the captured patch is already retained by the typed session.
-            await self._stop_task_sandbox(session_id)
+
+            async def capture_or_fallback() -> tuple[PatchCapture, str | None]:
+                try:
+                    return await self._extract_model_patch(session_id, REPO_DIRECTORY), None
+                except Exception as exc:
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
+
+            # The fallback is saved with the session too, so a retry after the task sandbox stopped grades it again.
+            capture, extraction_error = await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
+            await self.stop_task_sandbox_after_capture(session_id)
 
         inputs = self._inputs(body, capture.patch)
         if not inputs.expected:
