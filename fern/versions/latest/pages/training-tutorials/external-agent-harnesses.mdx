@@ -151,6 +151,18 @@ The built-in external agents, such as Claude Code, add this prefix when `token_i
 
 Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. While the agent exports traces, `base_url_for_run` also appends `/ng-trace/<traceparent>` after the prefix so the model server can parent the harness's calls to the run's span; the model server strips it, and a harness that inspects the URL should keep it (see [Distributed Tracing](/main/observability/distributed-tracing#trace-context-in-the-model-url)). The built-in agents known to rewrite the model URL, `harness_agent` (replaces a loopback host) and `vibench_agent` (replaces the host and keeps the path), keep every path segment; the OpenHands capture overlay only appends to the base URL. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
 
+## Turn capture off for a rollout
+
+A training framework that also runs rollouts it does not train on, such as validation rollouts, can skip capture for each of them. Set `_ng_skip_token_capture: true` on the row, next to `_ng_rollout_id`:
+
+```json
+{"_ng_rollout_id": "val-12-0", "_ng_skip_token_capture": true, "responses_create_params": {"input": "..."}}
+```
+
+None of that rollout's model calls carries the `training-token-capture` segment, so the model server records no token ids for it. An agent's `/run` reads the key from the row. For a row that runs through an Environment Server, rollout collection passes the setting as `skip_token_capture: true` in the episode request, and the Environment Server activates its agents without the segment. An agent activated on a rollout path without the segment captures none of that activation's calls, whatever its own `token_id_capture` setting.
+
+`false`, or no key, leaves capture to the run's `token_id_capture` settings: a row can turn capture off, never on. Rollout collection does not rebuild the response of a row that skips capture.
+
 ## Run a first rollout with Claude Code
 
 This example collects captured rollouts from the Claude Code agent on the `reasoning_gym` example tasks. It combines the settings from the previous section into one file. Run the commands from the root of the Gym repository.

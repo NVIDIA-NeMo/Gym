@@ -92,7 +92,11 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_context import (
+    check_rollout_id_length,
+    maybe_rollout_id_from_run_body,
+    skips_token_capture,
+)
 from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
@@ -510,13 +514,17 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    # A rollout that skips token capture says so beside the task, which it leaves unchanged.
+    if skips_token_capture(row):
+        body["skip_token_capture"] = True
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:
@@ -4135,11 +4143,15 @@ executions → not run again (left to recovery)
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
-        # Participation depends only on the agent name and the static global config.
+        # An agent's participation depends only on its name and the static global config, though a row can skip
+        # capture for itself.
         # Decide it once per agent, so the per-row and per-rollout checks below do not revalidate the global config.
         token_capture_enabled_by_agent: dict[str | None, bool] = {}
 
         def token_capture_enabled_for_row(row: dict[str, Any]) -> bool:
+            # A row that skips capture (a validation rollout) has no captured calls to rebuild.
+            if skips_token_capture(row):
+                return False
             agent_name = self._agent_name_for_row(row, global_config)
             if agent_name not in token_capture_enabled_by_agent:
                 token_capture_enabled_by_agent[agent_name] = token_capture_enabled_for_agent(
