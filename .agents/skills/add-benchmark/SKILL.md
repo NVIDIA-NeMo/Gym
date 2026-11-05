@@ -130,8 +130,8 @@ Critical rules:
 
 If the server keeps state per session (a sandbox handle, a connection, a session dict):
 - Set `num_workers: 1` and enforce it in `model_post_init` (raise `ValueError` otherwise). The framework checks this for agent servers, not for resources servers
-- Override `close_resources_session()`; do not add your own `/close_session` route. It must succeed for a session that is already closed or never seeded, must not let a later seed recreate the session, and must raise if the release fails
-- Hold a per-session `asyncio.Lock` around the session dict, so a close racing a seed cannot leak a sandbox
+- Implement the state hooks `has_session_state()`, `initialize_session_state()` and `release_session_state()`, and set `seed_request_model`; the base then serves seed, close and checkpoint retirement under a per-session lock. Override `seed_session()` and `close_resources_session()` only when the hooks cannot express the lifecycle, and never add your own `/close_session` route. Close must succeed for a session that is already closed or never seeded, must not let a later seed recreate the session, and must raise if the release fails
+- A custom lifecycle holds a per-session `asyncio.Lock` around the session dict, so a close racing a seed cannot leak a sandbox
 - If seed fails after allocating a resource, free it before re-raising
 - Export `VERIFIER_FIXTURE` (`gym env test` needs it). Set `REVERIFY_MODE = ReverifyMode.STATELESS` on the config only when `verify()` uses just the request payload
 
