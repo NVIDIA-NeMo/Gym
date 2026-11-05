@@ -25,10 +25,10 @@ For compatibility configurations, use a Linux host with:
 - Preinstalled `@opencode-ai/plugin` dependencies at version 1.17.11.
 - A Gym model server and a resources server implementing task verification.
 
-Install this agent's Python requirements from its directory:
+Install this agent's locked Python dependencies from its directory:
 
 ```bash
-uv pip install -r requirements.txt
+uv sync --locked
 ```
 
 For compatibility configurations, dependency directories are mounted read-only

@@ -8,7 +8,7 @@ import aiohttp
 
 from nemo_gym.client import request
 from nemo_gym.core import NeMoGymChatCompletion
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.agentx_rubric import (
     OFFICIAL_GOAL_SYSTEM_PROMPT,
     judge_prompt,
@@ -81,13 +81,17 @@ class AgentXServer(AgentXVerifier, VisualBenchmarksServer):
                 except (
                     aiohttp.ClientError,
                     asyncio.TimeoutError,
-                    JudgeError,
+                    *JUDGE_FAILURES,
                     KeyError,
                     IndexError,
                     ValueError,
                     TypeError,
                 ) as error:
+                    if isinstance(error, JUDGE_FAILURES) and not is_judge_failure(error):
+                        raise
                     if attempt + 1 == self.config.judge_attempts:
+                        if is_judge_failure(error):
+                            raise
                         raise JudgeError(str(error) or type(error).__name__) from error
                     await asyncio.sleep(min(30, 2 ** (attempt + 1)))
         raise AssertionError("Judge attempts exhausted")

@@ -16,7 +16,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
 from resources_servers.opencode_multimodal_benchmarks.verifier import (
@@ -108,12 +108,16 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
                 except (
                     aiohttp.ClientError,
                     asyncio.TimeoutError,
-                    JudgeError,
+                    *JUDGE_FAILURES,
                     KeyError,
                     IndexError,
                     ValueError,
                 ) as error:
+                    if isinstance(error, JUDGE_FAILURES) and not is_judge_failure(error):
+                        raise
                     if attempt + 1 == self.config.judge_attempts:
+                        if is_judge_failure(error):
+                            raise
                         raise JudgeError(str(error) or type(error).__name__) from error
                     await asyncio.sleep(2 ** (attempt + 1))
         raise AssertionError("Judge attempts exhausted")

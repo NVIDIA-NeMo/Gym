@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.client import ServerClient
-from nemo_gym.verification import JudgeError
+from nemo_gym.core import NgFailureEvent
+from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
 from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig, VisualBenchmarksServer
 from resources_servers.opencode_multimodal_benchmarks.tests.test_app import request
@@ -65,8 +66,17 @@ async def test_native_judge_uses_captured_model_route_without_local_key(monkeypa
     assert client.post.call_args.kwargs["url_path"] == "/v1/chat/completions"
     assert "headers" not in client.post.call_args.kwargs
     client.post.side_effect = RuntimeError("judge transport unavailable")
-    with pytest.raises(JudgeError, match="judge transport unavailable"):
+    with pytest.raises(NgFailureEvent, match="judge transport unavailable") as caught:
         await server.verify(body)
+    assert is_judge_failure(caught.value)
+    assert caught.value.operation == "judge.request"
+
+    # A transient typed judge failure remains eligible for the configured retry.
+    server.config.judge_attempts = 2
+    client.post.side_effect = [RuntimeError("temporary judge failure"), http]
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    recovered = await server.verify(body)
+    assert recovered.reward == (0.65 if agentx else 1)
 
 
 @pytest.mark.asyncio

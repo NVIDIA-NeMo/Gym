@@ -531,9 +531,8 @@ def test_sessions_accept_provider_configuration():
 
 
 def test_missing_session_provider_is_a_final_http_refusal(monkeypatch):
-    from nemo_gym.agents import AgentSeedSessionRequest
+    from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
     from nemo_gym.core import EpisodeId, TaskId
-    from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 
     obj = agent(monkeypatch)
     assert obj._agent_continuation_capabilities() is None

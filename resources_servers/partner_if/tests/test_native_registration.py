@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Adapters that own sandboxes install the sandbox SDK in their own environments."""
 
-from nemo_gym import PARENT_DIR
+import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
 
 
 def test_the_sandbox_owning_server_installs_the_sdk_in_its_own_environment():
-    from nemo_gym.cli.setup_command import _local_nemo_gym_extras
-
-    extras = (
-        _local_nemo_gym_extras(PARENT_DIR / "resources_servers/partner_if/requirements.txt").strip("[]").split(",")
-    )
+    project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    requirements = map(Requirement, project["project"]["dependencies"])
+    extras = {extra for requirement in requirements if requirement.name == "nemo-gym" for extra in requirement.extras}
     assert "sandbox" in extras
