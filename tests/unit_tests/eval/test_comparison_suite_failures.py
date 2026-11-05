@@ -7,12 +7,15 @@ from pathlib import Path
 
 import orjson
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.cli.main import main
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.eval.comparison.suite.failures import read_saved_failures
+from nemo_gym.eval.comparison.suite.failures import read_saved_failures, saved_failure_warning
 from nemo_gym.eval.comparison.suite.report import render_suite_markdown, write_suite_reports
-from nemo_gym.eval.comparison.suite.schema import SuiteComparisonResult
+from nemo_gym.eval.comparison.suite.schema import SuiteComparisonResult, SuiteFailureSummary
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
+from nemo_gym.rollouts.rollout_collection import _counted_failure_rows
 from nemo_gym.rollouts.rollout_records import coverage_path_for
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -45,7 +48,7 @@ def _coverage(rollouts: Path, *, version: int = 2, total: int = 2) -> Path:
                 "failed_by_class": {"agent_run_error": total} if total else {},
                 "expected": 4,
                 "successful": 2,
-                "failures_counted_as_zero": 1,
+                "failures_counted_as_zero": 1 if total else 0,
                 "imputed": 0,
             }
         )
@@ -69,6 +72,48 @@ def _unchanged_statistics(before: SuiteComparisonResult, after: SuiteComparisonR
             assert new_run.repeat_scores == old_run.repeat_scores
             assert new_run.summary == old_run.summary
             assert new_run.coverage == old_run.coverage
+
+
+def _scored_store(
+    directory: Path,
+    *,
+    final_zeros: set[tuple[int, int]],
+    other_failures: set[tuple[int, int]],
+    counted_classes: list[str],
+) -> tuple[RolloutStore, int, int]:
+    directory.mkdir()
+    output = directory / "rollouts.jsonl"
+    rows = [
+        {"_ng_task_index": task, "_ng_rollout_index": repeat, "agent_ref": {"name": "agent"}}
+        for task in (0, 1)
+        for repeat in (0, 1)
+    ]
+    source = directory / "source.jsonl"
+    source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    manifest = RunManifest.create(source, rows, {}, {"agent": {"responses_api_agents": {"impl": {}}}})
+    with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+        for row in store.pending():
+            store.record_dispatch(row)
+            key = row["_ng_task_index"], row["_ng_rollout_index"]
+            if key in final_zeros or key in other_failures:
+                store.record_outcome(
+                    row
+                    | {
+                        "_ng_failure_class": "agent_run_error",
+                        "_ng_failure_terminal": key in final_zeros,
+                        "_ng_failure_counts_as_zero": key in final_zeros,
+                    }
+                )
+            else:
+                store.record_outcome(row | {"reward": 0.4 + 0.2 * row["_ng_rollout_index"], "response": {}})
+        counted = _counted_failure_rows(store.failures(), counted_classes)
+        scored = store.selected("success") + counted
+    entry = {
+        "agent_ref": {"name": "agent"},
+        **compute_aggregate_metrics(scored).model_dump(mode="json", exclude_none=True),
+    }
+    aggregate_metrics_path_for(output).write_bytes(orjson.dumps([entry]))
+    return store, len(counted), len(scored)
 
 
 @pytest.mark.parametrize("version", [1, 2])
@@ -96,11 +141,19 @@ def test_saved_failures_warn_without_changing_statistics_or_reading_rollouts(
     summary = result.cells[0].candidate.failures
     assert summary.source == source
     assert summary.scope == "rollout_file"
-    assert summary.counts.model_dump() == {"total": 2, "final": 1, "not_final": 1, "by_class": {"agent_run_error": 2}}
+    assert summary.counts.model_dump() == {
+        "total": 2,
+        "final": 1,
+        "not_final": 1,
+        "by_class": {"agent_run_error": 2},
+        "counted_as_zero": 1,
+        "final_zeros": None,
+    }
     assert summary.unavailable_reason is None
     assert result.cells[0].baseline.failures is None
     assert result.warnings == [
-        "model/test candidate: Saved failures (entire rollout file): 2 (1 final, 1 not final; agent_run_error=2)."
+        "model/test candidate: Saved failures (entire rollout file): 2 "
+        "(1 scored as zero, 1 not in the score; agent_run_error=2)."
     ]
     _unchanged_statistics(control, result)
     assert result.overall.statistics.ci_low is not None
@@ -239,10 +292,166 @@ def test_counts_from_real_store_exclude_a_failure_recovered_by_a_later_attempt(t
     summary = read_saved_failures(output)
 
     assert len(failures_path_for(output).read_bytes().splitlines()) == 3
-    assert summary.counts.model_dump() == {"total": 2, "final": 1, "not_final": 1, "by_class": {"agent_run_error": 2}}
+    assert summary.counts.model_dump() == {
+        "total": 2,
+        "final": 1,
+        "not_final": 1,
+        "by_class": {"agent_run_error": 2},
+        "counted_as_zero": None,
+        "final_zeros": 0,
+    }
     assert summary.source == coverage_path_for(output)
     assert summary.unavailable_reason is None
     assert {file: file.read_bytes() for file in before} == before
+
+
+@pytest.mark.parametrize("record_aggregation_count", [False, True])
+def test_complete_scored_run_identifies_terminal_policy_zeros(tmp_path: Path, record_aggregation_count: bool) -> None:
+    store, counted, scored = _scored_store(
+        tmp_path / "candidate",
+        final_zeros={(0, 0), (0, 1), (1, 0)},
+        other_failures=set(),
+        counted_classes=[],
+    )
+    pair = _pair(tmp_path, "comparison", _values(0.2, 0.4), _values(0.4, 0.6))
+    pair["candidate"] = {"rollouts": str(store.output)}
+    path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
+    control = _compare(path)
+    reporting = {"scored": scored}
+    if record_aggregation_count:
+        reporting["failures_counted_as_zero"] = counted
+    store.write_coverage(**reporting)
+    coverage = orjson.loads(coverage_path_for(store.output).read_bytes())
+    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+
+    result = _compare(path)
+
+    assert coverage["complete"] is True
+    assert coverage["scored"] == coverage["expected"] == 4
+    assert coverage["final_zeros"] == counted == 3
+    counts = result.cells[0].candidate.failures.counts
+    assert counts.total == counts.final_zeros == 3
+    assert counts.counted_as_zero == (3 if record_aggregation_count else None)
+    assert result.cells[0].candidate.coverage.status == "verified"
+    assert result.cells[0].statistics.ci_low is not None
+    assert len(result.warnings) == 1
+    expected = "3 scored as zero, 0 not in the score" if record_aggregation_count else "3 final policy zeros"
+    assert expected in result.warnings[0]
+    assert "3 not in the score" not in result.warnings[0]
+    _unchanged_statistics(control, result)
+    assert {file: file.read_bytes() for file in sources} == sources
+    write_suite_reports(result, tmp_path / "reports", "both")
+    saved = orjson.loads((tmp_path / "reports/suite_compare_report.json").read_bytes())
+    assert saved["cells"][0]["candidate"]["failures"]["counts"]["final_zeros"] == 3
+    assert expected in (tmp_path / "reports/suite_compare_report.md").read_text()
+
+
+def test_aggregation_zero_count_includes_nonterminal_failures_beyond_final_policy_zeros(tmp_path: Path) -> None:
+    store, counted, scored = _scored_store(
+        tmp_path / "candidate",
+        final_zeros={(1, 0)},
+        other_failures={(1, 1)},
+        counted_classes=["agent_run_error"],
+    )
+    store.write_coverage(scored=scored, failures_counted_as_zero=counted)
+    original = coverage_path_for(store.output).read_bytes()
+
+    summary = read_saved_failures(store.output)
+
+    assert summary.counts.total == counted == 2
+    assert summary.counts.final_zeros == 1
+    assert summary.counts.counted_as_zero == 2
+    assert orjson.loads(original)["scored"] == 4
+    assert "2 scored as zero, 0 not in the score" in saved_failure_warning(summary)
+    assert coverage_path_for(store.output).read_bytes() == original
+
+
+def test_partial_final_zero_count_does_not_classify_other_failures_as_unscored(tmp_path: Path) -> None:
+    _, _, candidate = _suite(tmp_path)
+    source = _coverage(candidate)
+    payload = orjson.loads(source.read_bytes())
+    payload.pop("failures_counted_as_zero")
+    payload["final_zeros"] = 1
+    source.write_bytes(orjson.dumps(payload))
+
+    summary = read_saved_failures(candidate)
+
+    assert summary.counts.counted_as_zero is None
+    assert summary.counts.final_zeros == 1
+    warning = saved_failure_warning(summary)
+    assert "1 final policy zeros" in warning
+    assert "1 other failures (score inclusion unknown)" in warning
+    assert "not in the score" not in warning
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_missing_zero_count_split_preserves_known_failures_with_unknown_score_inclusion(
+    tmp_path: Path, version: int
+) -> None:
+    path, _, candidate = _suite(tmp_path)
+    control = _compare(path)
+    source = _coverage(candidate, version=version)
+    payload = orjson.loads(source.read_bytes())
+    payload.pop("failures_counted_as_zero")
+    source.write_bytes(orjson.dumps(payload))
+
+    result = _compare(path)
+
+    counts = result.cells[0].candidate.failures.counts
+    assert counts.total == 2
+    assert counts.counted_as_zero is counts.final_zeros is None
+    assert len(result.warnings) == 1
+    assert "1 final, 1 not final; score inclusion unknown" in result.warnings[0]
+    assert "not in the score" not in result.warnings[0]
+    _unchanged_statistics(control, result)
+
+
+@pytest.mark.parametrize("both_present", [False, True])
+def test_failure_summary_requires_exactly_one_result(tmp_path: Path, both_present: bool) -> None:
+    values = (
+        {"counts": {"total": 0, "final": 0, "not_final": 0, "by_class": {}}, "unavailable_reason": "unknown"}
+        if both_present
+        else {}
+    )
+
+    with pytest.raises(ValidationError, match="exactly one"):
+        SuiteFailureSummary(source=tmp_path / "rollouts_coverage.json", **values)
+
+
+@pytest.mark.parametrize(
+    ("change", "expected_reason"),
+    [
+        ({"failures_counted_as_zero": True}, "at failures_counted_as_zero: Input should be a valid integer"),
+        (
+            {"failures_counted_as_zero": -1},
+            "at failures_counted_as_zero: Input should be greater than or equal to 0",
+        ),
+        ({"failures_counted_as_zero": 3}, "Failures counted as zero must not exceed the total failure count."),
+        (
+            {"final_zeros": 2, "failures_counted_as_zero": 2},
+            "Final policy zeros must not exceed the final failure count.",
+        ),
+        (
+            {"final_zeros": 1, "failures_counted_as_zero": 0},
+            "Failures counted as zero must include all final policy zeros.",
+        ),
+    ],
+)
+def test_invalid_zero_count_splits_remain_advisory(tmp_path: Path, change: dict, expected_reason: str) -> None:
+    path, _, candidate = _suite(tmp_path)
+    control = _compare(path)
+    source = _coverage(candidate)
+    source.write_bytes(orjson.dumps(orjson.loads(source.read_bytes()) | change))
+    original = source.read_bytes()
+
+    result = _compare(path)
+
+    assert result.cells[0].candidate.failures.counts is None
+    assert expected_reason in result.cells[0].candidate.failures.unavailable_reason
+    assert len(result.warnings) == 1
+    assert "Saved failures (entire rollout file): unavailable" in result.warnings[0]
+    _unchanged_statistics(control, result)
+    assert source.read_bytes() == original
 
 
 def test_shared_rollout_file_keeps_one_saved_snapshot_across_selected_agents(tmp_path: Path, monkeypatch) -> None:
@@ -278,6 +487,7 @@ def test_shared_rollout_file_keeps_one_saved_snapshot_across_selected_agents(tmp
         "failed_final": 0,
         "failed_not_final": 0,
         "failed_by_class": {},
+        "failures_counted_as_zero": 0,
     }
     read_bytes = Path.read_bytes
 
@@ -294,7 +504,10 @@ def test_shared_rollout_file_keeps_one_saved_snapshot_across_selected_agents(tmp
         result = _compare(manifest)
 
     assert orjson.loads(source.read_bytes())["failed"] == 0
-    assert len(result.warnings) == 2
+    assert result.warnings == [
+        "model/first candidate, model/second candidate: Saved failures (entire rollout file): 2 "
+        "(1 scored as zero, 1 not in the score; agent_run_error=2)."
+    ]
     for cell in result.cells:
         assert cell.candidate.failures.scope == "rollout_file"
         assert cell.candidate.failures.source == source

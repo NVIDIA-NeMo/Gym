@@ -106,13 +106,19 @@ def build_suite_comparison(
         warnings=warnings,
     )
     failures_by_path: dict[Path, SuiteFailureSummary | None] = {}
+    uses_by_path: dict[Path, list[str]] = {}
     for cell in result.cells:
         for role, run in (("baseline", cell.baseline), ("candidate", cell.candidate)):
             if run.rollouts not in failures_by_path:
                 failures_by_path[run.rollouts] = read_saved_failures(run.rollouts)
+                uses_by_path[run.rollouts] = []
             run.failures = failures_by_path[run.rollouts]
-            if run.failures is not None:
-                warning = saved_failure_warning(run.failures)
-                if warning is not None:
-                    result.warnings.append(f"{cell.model}/{cell.benchmark} {role}: {warning}")
+            label = f"{cell.model}/{cell.benchmark} {role}"
+            if label not in uses_by_path[run.rollouts]:
+                uses_by_path[run.rollouts].append(label)
+    for path, summary in failures_by_path.items():
+        if summary is not None:
+            warning = saved_failure_warning(summary)
+            if warning is not None:
+                result.warnings.append(f"{', '.join(uses_by_path[path])}: {warning}")
     return result

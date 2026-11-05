@@ -17,6 +17,8 @@ _COUNT_KEYS = {
     "final": "failed_final",
     "not_final": "failed_not_final",
     "by_class": "failed_by_class",
+    "counted_as_zero": "failures_counted_as_zero",
+    "final_zeros": "final_zeros",
 }
 
 
@@ -34,9 +36,9 @@ def read_saved_failures(path: Path) -> SuiteFailureSummary | None:
         version = payload.get("schema_version")
         if type(version) is not int or version not in (1, 2):
             raise ValueError(f"unsupported coverage schema version {version!r}")
-        if any(payload.get(name) is None for name in _COUNT_KEYS.values()):
+        if any(payload.get(_COUNT_KEYS[field]) is None for field in ("total", "final", "not_final", "by_class")):
             raise ValueError("failure counts were not recorded")
-        counts = SuiteFailureCounts.model_validate({field: payload[name] for field, name in _COUNT_KEYS.items()})
+        counts = SuiteFailureCounts.model_validate({field: payload.get(name) for field, name in _COUNT_KEYS.items()})
     except FileNotFoundError:
         return None
     except ValidationError as error:
@@ -64,7 +66,15 @@ def saved_failure_warning(summary: SuiteFailureSummary) -> str | None:
     counts = summary.counts
     if counts is None or counts.total == 0:
         return None
-    details = f"{counts.final} final, {counts.not_final} not final"
+    if counts.counted_as_zero is not None:
+        details = f"{counts.counted_as_zero} scored as zero, {counts.total - counts.counted_as_zero} not in the score"
+    elif counts.final_zeros is not None:
+        details = f"{counts.final_zeros} final policy zeros"
+        other = counts.total - counts.final_zeros
+        if other:
+            details += f", {other} other failures (score inclusion unknown)"
+    else:
+        details = f"{counts.final} final, {counts.not_final} not final; score inclusion unknown"
     classes = sorted(
         ((name, count) for name, count in counts.by_class.items() if count), key=lambda item: (-item[1], item[0])
     )
