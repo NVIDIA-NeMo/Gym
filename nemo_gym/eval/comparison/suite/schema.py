@@ -82,8 +82,17 @@ class SuiteRunSource(_SuiteModel):
 
 
 class SuiteRunPair(_SuiteModel):
-    baseline: SuiteRunSource
-    candidate: SuiteRunSource
+    """A source mapping or a nonempty collection of independent sources on each side."""
+
+    baseline: SuiteRunSource | list[SuiteRunSource]
+    candidate: SuiteRunSource | list[SuiteRunSource]
+
+    @model_validator(mode="after")
+    def validate_nonempty_sources(self) -> "SuiteRunPair":
+        for sources in (self.baseline, self.candidate):
+            if isinstance(sources, list) and not sources:
+                raise ValueError("Baseline and candidate source collections must not be empty.")
+        return self
 
 
 class SuiteManifest(_SuiteModel):
@@ -164,6 +173,13 @@ class SuiteFailureSummary(_SuiteModel):
 
 
 class SuiteRunSummary(_SuiteModel):
+    """One source or pooled repeats, with full per-source provenance under ``sources``.
+
+    For pooled repeats, path and selector fields identify the first source for
+    compatibility. Local repeat identities and saved failure accounting live under ``sources``.
+    """
+
+    sources: list["SuiteRunSummary"] = Field(default_factory=list)
     rollouts: Path
     aggregate_metrics: Path
     materialized_inputs: Path | None = None
@@ -250,6 +266,7 @@ class SuiteComparisonResult(_SuiteModel):
             "Deltas are candidate minus baseline on the normalized score scale; positive deltas favor the candidate.",
             "Benchmarks form a fixed suite; uncertainty describes independent repeat collections.",
             "Baseline and candidate repeats are unpaired and independent within and across cells.",
+            "Pooled source runs must use independent repeats, the same tasks, and comparable evaluation settings.",
             "Metrics are equally averaged within each repeat before estimating benchmark variance.",
             "Eligible benchmarks have equal model weights; eligible model-benchmark cells have equal overall weights.",
         ]

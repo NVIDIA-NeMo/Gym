@@ -23,7 +23,14 @@ from typing import List, Tuple
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides
 from nemo_gym.eval.comparison.diff import compare_runs
-from nemo_gym.eval.comparison.loading import build_loaded_run, load_agg_metrics_file, resolve_agent_selections
+from nemo_gym.eval.comparison.loading import (
+    build_loaded_run,
+    combine_run_files,
+    load_agg_metrics_file,
+    resolve_source_agent_selections,
+    validate_independent_sources,
+)
+from nemo_gym.eval.comparison.pooling import pool_loaded_runs
 from nemo_gym.eval.comparison.report import write_reports
 from nemo_gym.eval.comparison.schema import ComparisonConfig, ComparisonResult
 from nemo_gym.package_info import __version__
@@ -36,11 +43,18 @@ def invoked_command() -> str:
 
 def build_comparison_result(config: ComparisonConfig, command: str) -> ComparisonResult:
     """Load both sides, pick the agent(s), and assemble the full comparison."""
-    baseline_file = load_agg_metrics_file(
-        config.baseline_rollouts_jsonl_fpath,
-        role="baseline",
-        aggregate_metrics_fpath_override=config.baseline_aggregate_metrics_fpath,
-    )
+    baseline_paths = config.baseline_rollouts_jsonl_fpaths or [config.baseline_rollouts_jsonl_fpath]
+    baseline_overrides = config.baseline_aggregate_metrics_fpaths or [config.baseline_aggregate_metrics_fpath]
+    baseline_files = [
+        load_agg_metrics_file(
+            fpath,
+            role="baseline",
+            index=index,
+            aggregate_metrics_fpath_override=baseline_overrides[index] if index < len(baseline_overrides) else None,
+        )
+        for index, fpath in enumerate(baseline_paths)
+    ]
+    candidate_paths = config.pooled_candidate_rollouts_jsonl_fpaths or config.candidate_rollouts_jsonl_fpaths
     candidate_files = [
         load_agg_metrics_file(
             fpath,
@@ -50,23 +64,43 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
                 config.candidate_aggregate_metrics_fpaths[index] if config.candidate_aggregate_metrics_fpaths else None
             ),
         )
-        for index, fpath in enumerate(config.candidate_rollouts_jsonl_fpaths)
+        for index, fpath in enumerate(candidate_paths)
     ]
-
-    selections, warnings, skipped = resolve_agent_selections(
-        baseline_file,
+    selections, warnings, skipped = resolve_source_agent_selections(
+        baseline_files,
         candidate_files,
         agent_name=config.agent_name,
         baseline_agent_name=config.baseline_agent_name,
+        baseline_agent_names=config.baseline_agent_names,
         candidate_agent_names=config.candidate_agent_names,
     )
 
     comparisons = []
     for selection in selections:
-        baseline_run = build_loaded_run(baseline_file, selection.baseline_agent)
+        if (
+            config.baseline_rollouts_jsonl_fpaths is not None
+            or config.pooled_candidate_rollouts_jsonl_fpaths is not None
+        ):
+            validate_independent_sources(baseline_files, candidate_files, selection=selection)
+        baseline_runs = [
+            build_loaded_run(source, agent) for source, agent in zip(baseline_files, selection.baseline_agents)
+        ]
+        baseline_run = (
+            pool_loaded_runs(
+                baseline_runs, source_labels=[str(source.aggregate_metrics_fpath) for source in baseline_files]
+            )
+            if config.baseline_rollouts_jsonl_fpaths is not None
+            else baseline_runs[0]
+        )
         candidate_runs = [
             build_loaded_run(run_file, agent) for run_file, agent in zip(candidate_files, selection.candidate_agents)
         ]
+        if config.pooled_candidate_rollouts_jsonl_fpaths is not None:
+            candidate_runs = [
+                pool_loaded_runs(
+                    candidate_runs, source_labels=[str(source.aggregate_metrics_fpath) for source in candidate_files]
+                )
+            ]
         comparisons.append(compare_runs(baseline_run, candidate_runs, confidence_level=config.confidence_level))
 
     return ComparisonResult(
@@ -74,8 +108,25 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
         nemo_gym_version=__version__,
         command=command,
         confidence_level=config.confidence_level,
-        baseline=baseline_file,
-        candidates=candidate_files,
+        baseline=combine_run_files(
+            baseline_files,
+            agent_names_by_source=[
+                [selection.baseline_agents[index] for selection in selections] for index in range(len(baseline_files))
+            ],
+        )
+        if config.baseline_rollouts_jsonl_fpaths is not None
+        else baseline_files[0],
+        candidates=[
+            combine_run_files(
+                candidate_files,
+                agent_names_by_source=[
+                    [selection.candidate_agents[index] for selection in selections]
+                    for index in range(len(candidate_files))
+                ],
+            )
+        ]
+        if config.pooled_candidate_rollouts_jsonl_fpaths is not None
+        else candidate_files,
         comparisons=comparisons,
         skipped_agents=skipped,
         # Run-level warnings only. Per-comparison observations stay on their `AgentComparison.notes`
@@ -94,7 +145,8 @@ def resolve_output_dir(config: ComparisonConfig) -> Path:
         p = Path(config.output_dirpath)
         return p if p.is_absolute() else Path.cwd() / p
     # if we use the same location as the candidate rollouts, it should be save to write there and we can use _resolve_under_cwd_or_install function
-    return _resolve_under_cwd_or_install(config.candidate_rollouts_jsonl_fpaths[-1]).parent
+    paths = config.pooled_candidate_rollouts_jsonl_fpaths or config.candidate_rollouts_jsonl_fpaths
+    return _resolve_under_cwd_or_install(paths[-1]).parent
 
 
 def run_comparison(config: ComparisonConfig, command: str) -> Tuple[ComparisonResult, List[Path]]:

@@ -146,7 +146,8 @@ def test_real_cli_rejects_source_artifact_overrides(suite_path: Path, field: str
     assert error.value.code == 1
     message = " ".join(capsys.readouterr().out.split())
     assert "Cannot load suite manifest" in message
-    assert f"models.model-a.first.baseline.{field}" in message
+    assert "models.model-a.first.baseline." in message
+    assert field in message
     assert "Extra inputs are not permitted" in message
     assert not output.exists()
     assert {file: file.read_bytes() for file in sources} == sources

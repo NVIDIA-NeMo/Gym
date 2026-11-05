@@ -20,6 +20,7 @@ from pathlib import Path
 import orjson
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
@@ -748,8 +749,14 @@ def test_source_artifact_overrides_are_rejected(tmp_path: Path, field: str, role
     with pytest.raises(ConfigError, match="Cannot load suite manifest") as error:
         _compare(path)
 
-    assert f"models.model.test.{role}.{field}" in str(error.value)
-    assert "Extra inputs are not permitted" in str(error.value)
+    cause = error.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert any(
+        detail["type"] == "extra_forbidden"
+        and detail["loc"][:4] == ("models", "model", "test", role)
+        and detail["loc"][-1] == field
+        for detail in cause.errors()
+    )
     assert {file: file.read_bytes() for file in sources} == sources
 
 
