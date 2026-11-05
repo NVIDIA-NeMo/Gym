@@ -298,14 +298,22 @@ benchmark, with `--split benchmark`) through `--config`. See
 Each prepared sample carries the upstream prompts and tool JSON schemas, read at
 prepare time from `benchmarks/finance_agent_v2/upstream_spec.json` — a generated
 snapshot, because `finance_agent` is installed in this server's venv only while
-`gym eval prepare` runs in the repo-root venv. Bumping the pin means editing
-`requirements.txt` and `_UPSTREAM_SHA` in `prepare.py` together, `uv sync`, then
-regenerating the snapshot from this venv and re-running `gym eval prepare`:
+`gym eval prepare` runs in the repo-root venv. To bump the pin, update the exact
+`finance-agent` Git commit in this server's `pyproject.toml` and `_UPSTREAM_SHA` in
+`benchmarks/finance_agent_v2/prepare.py` together. Regenerate and commit this
+server's `uv.lock`, sync that lock, then regenerate the snapshot from the server
+venv and re-run `gym eval prepare`:
 
 ```bash
-cd resources_servers/finance_agent_v2 && source .venv/bin/activate
-python scripts/export_upstream_spec.py
+cd resources_servers/finance_agent_v2
+uv lock
+UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --locked
+.venv/bin/python scripts/export_upstream_spec.py
 ```
+
+Commit `pyproject.toml`, `uv.lock`, the benchmark pin, and the regenerated
+`benchmarks/finance_agent_v2/upstream_spec.json` together. Do not edit the snapshot
+by hand; the exporter reads the exact commit from the direct project dependency.
 
 `tests/test_upstream_spec.py` fails if the snapshot drifts from the installed
 package, and `prepare.py` refuses to run when the two shas disagree.
@@ -348,7 +356,7 @@ python resources_servers/finance_agent_v2/scripts/prefetch_prices.py \
 
 Each rollout has its own session, which holds the documents `parse_html_page` stored and the start of the rollout's time budget (`max_rollout_time_seconds`). The judge reads only the verify request, so the reward does not depend on this state, and `gym eval reverify` needs no session.
 
-- **Seed.** An Environment Server seeds with a typed `ResourcesSeedSessionRequest`, keyed by `resources_session_id`. A retry of the same seed keeps the stored documents, and a seed that binds the ID to another episode or task gets 409. An Agent's `/run` seeds with the legacy body, which starts the session afresh and returns `{}`.
+- **Seed.** An Environment Server seeds with a typed `ResourcesSeedSessionRequest`, keyed by `resources_session_id`. A retry of the same seed keeps the stored documents, and a seed that binds the ID to another episode or task gets 409. An Agent's `/run` seeds with the legacy body, which starts the session afresh and returns `{}`. A legacy seed with a typed session's cookie gets 409, so it cannot wipe that session's documents or restart its time budget.
 - **Release.** `/verify` releases the session, because an Agent's `/run` never closes it. A `/verify` for a session that was already closed returns a masked sample (`failure_kind=session_lost`), as on every server that follows this contract. `/close_session` releases it by `resources_session_id`, with or without the session cookie, and is idempotent. A seed for a session closed within `session_close_retry_window_seconds` gets 409.
 - **Lost sessions.** `parse_html_page` and `retrieve_information` answer 404 with `failure_kind: session_lost` when the session is not open, instead of creating storage that nothing would release. The other tools keep no session state and answer as before.
 - **Abandoned sessions.** Each seed discards sessions older than `session_ttl_seconds` (default 6 hours) that were never verified or closed, such as a rollout whose `/run` failed before `/verify`. Set it longer than the longest rollout.
@@ -419,7 +427,7 @@ the `retrieval_model_server` reference must resolve even though reverify only ca
 and `benchmarks/finance_agent_v2/`) is licensed under **Apache-2.0**, consistent
 with NeMo Gym and the SPDX headers in each source file.
 
-**Upstream dependencies** (imported, not vendored — see `requirements.txt`):
+**Upstream dependencies** (imported, not vendored — see `pyproject.toml`):
 
 | Package | Source | License |
 |---------|--------|---------|
