@@ -525,13 +525,13 @@ class TestResourcesSessions:
         server._sessions["rs-1"] = handle
 
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
-        assert server._fence.closed_episode("rs-1") is None
+        assert server._resources_session_fences.get("rs-1") is None
         assert server._sessions["rs-1"] is handle
 
         handle.stoppable = True
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
         assert server._sessions == {}
-        assert server._fence.closed_episode("rs-1") == EPISODE_ID
+        assert server._resources_session_fences.get("rs-1") == EPISODE_ID
 
     def test_failed_stop_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
         server, app = _session_server()
@@ -570,7 +570,7 @@ class TestResourcesSessions:
             started_workers.append(handle._proc)
             result = real_exec(handle, code)
             # The close lands while the call is still running, after it started the session's first worker.
-            server._fence.mark_closed("rs-1", EPISODE_ID)
+            server._resources_session_fences.fence("rs-1", EPISODE_ID)
             return result
 
         _SessionHandle.exec = exec_then_close
@@ -595,7 +595,7 @@ class TestResourcesSessions:
         assert not worker.is_alive()
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
 
-    def test_typed_seed_cannot_take_over_existing_cookie_worker(self) -> None:
+    def test_episode_seed_cannot_take_over_existing_agent_run_worker(self) -> None:
         server, app = _session_server()
         client = TestClient(app)
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
@@ -611,7 +611,7 @@ class TestResourcesSessions:
             assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {} and not worker._proc.is_alive()
 
-    def test_legacy_seed_keeps_working(self) -> None:
+    def test_agent_run_seed_keeps_working(self) -> None:
         server, app = _session_server()
         client = TestClient(app)
 
@@ -623,7 +623,9 @@ class TestResourcesSessions:
         assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {}
 
-    def test_cookie_reseed_retries_failed_worker_release_before_reset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_agent_run_reseed_retries_failed_worker_release_before_reset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         server, app = _session_server()
         client = TestClient(app, raise_server_exceptions=False)
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200

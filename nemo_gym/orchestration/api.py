@@ -35,6 +35,7 @@ from pydantic import (
     model_validator,
 )
 
+from nemo_gym.config.secret_utils import MASKED_VALUE, mask_url_passwords
 from nemo_gym.orchestration.executors.script_templates import bash_var
 
 
@@ -515,6 +516,25 @@ class BenchmarkRunConfig(_StrictModel):
         return ResumeConfig() if self.resumable is True else self.resumable
 
 
+# A query parameter's value in a URL, which may carry a credential (`?api_key=...`).
+_URL_QUERY_VALUE = re.compile(r"(?P<name>[?&][^=&#\s]*=)[^&#\s]*")
+
+
+def _without_url_credentials(value: Any) -> Any:
+    """`value` with the user-info password and every query value of each URL in it masked, also inside a list."""
+    if isinstance(value, str):
+        return _URL_QUERY_VALUE.sub(rf"\g<name>{MASKED_VALUE}", mask_url_passwords(value))
+    if isinstance(value, (list, tuple)):
+        return [_without_url_credentials(item) for item in value]
+    return value
+
+
+def _shown_policy_value(key: str, value: Any) -> str:
+    """A policy run value as a conflict message shows it, with no credential: an API key is never printed, and a
+    URL keeps neither its password nor its query values."""
+    return "<redacted>" if key == "policy_api_key" else repr(_without_url_credentials(value))
+
+
 class GymInstallConfig(_StrictModel):
     repo: str = "https://github.com/NVIDIA-NeMo/gym"
     ref: str  # Git tag or commit hash.
@@ -784,17 +804,20 @@ class SubmitConfig(_StrictModel):
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     "policy_api_key": "dummy",  # pragma: allowlist secret
                 }
-                # A saved config holds the keys this block wrote at submit; only a value that differs conflicts.
+                # A config that went through this block once (a saved config, or a resolved one submitted again)
+                # holds the keys it wrote; a key with the value it would write again is accepted as it is, and only
+                # a value that differs conflicts.
                 for bench_name, benchmark in self.driver.benchmarks.items():
-                    conflicts = [
-                        k
-                        for k, v in policy_run.items()
-                        if k in benchmark.run and not (saved_config and benchmark.run[k] == v)
-                    ]
+                    conflicts = [k for k, v in policy_run.items() if k in benchmark.run and benchmark.run[k] != v]
                     if conflicts:
+                        differing = "; ".join(
+                            f"{k}={_shown_policy_value(k, benchmark.run[k])} in the run, "
+                            f"{_shown_policy_value(k, policy_run[k])} from driver.policy_model"
+                            for k in conflicts
+                        )
                         raise ValueError(
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
-                            f"but driver.policy_model is also set. Remove one."
+                            f"but driver.policy_model is also set ({differing}). Remove one."
                         )
                     benchmark.run.update(copy.deepcopy(policy_run))
 

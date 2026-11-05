@@ -13,6 +13,7 @@ from nemo_gym.agents.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -20,7 +21,7 @@ from nemo_gym.agents.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode_context import current_rollout_id, rollout_context
-from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims
+from nemo_gym.server_runtime.request_handling.session_routing import SessionOwners
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 
 
@@ -149,7 +150,7 @@ async def test_failed_close_retains_state_and_can_retry(agent):
     assert agent._session_records[seed.agent_session_id].state is None
 
 
-async def test_retry_window_begins_after_cleanup_and_is_not_extended(agent, monkeypatch):
+async def test_close_retry_window_begins_after_cleanup_and_is_not_extended(agent, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
@@ -166,14 +167,14 @@ async def test_retry_window_begins_after_cleanup_and_is_not_extended(agent, monk
     clock[0] = 209.0
     assert await agent.close_agent_session(request, _close(seed)) == first
     clock[0] = 210.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(AgentSessionConflictError, match="^409: Agent session is no longer available$"):
         await agent.close_agent_session(request, _close(seed))
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     assert not agent._session_records
     assert agent._agent_session_id_from_request(request) == seed.agent_session_id
     with pytest.raises(HTTPException):
         agent._require_agent_session(seed.agent_session_id)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(AgentSessionConflictError, match="cookie names a session that is no longer available"):
         await agent.seed_agent_session(request, seed)
 
 
@@ -254,7 +255,7 @@ async def test_request_and_close_response_cannot_mutate_stored_binding(agent):
     assert retry.resources_cookies == {"session": "updated"}
 
 
-async def test_close_receipt_expiry_does_not_expire_active_sessions(agent, monkeypatch):
+async def test_fence_expiry_does_not_expire_active_sessions(agent, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     seed = _seed()
@@ -331,7 +332,7 @@ async def test_a_failed_release_keeps_the_state_for_a_later_close(agent, monkeyp
     assert seed.agent_session_id not in agent._session_records
 
 
-async def test_lifespan_closes_open_sessions_and_preserves_receipts(agent):
+async def test_lifespan_closes_open_sessions_and_preserves_saved_replies(agent):
     app = agent.setup_webserver()
     async with app.router.lifespan_context(app):
         first, second = _seed(), _seed(1)
@@ -360,19 +361,19 @@ async def test_shutdown_closes_partial_state_after_canceled_seed(agent):
     assert agent._session_records[seed.agent_session_id].state is None
 
 
-async def test_shutdown_releases_rollout_claim_but_retains_close_receipt(agent, tmp_path):
+async def test_shutdown_releases_rollout_ownership_but_keeps_the_saved_reply(agent, tmp_path):
     app = agent.setup_webserver()
-    claims = SessionClaims(str(tmp_path), "a" * 32, agent.holds_agent_session)
-    agent.use_agent_session_claims(claims)
+    owners = SessionOwners(str(tmp_path), "a" * 32, agent.holds_agent_session)
+    agent.use_agent_session_owners(owners)
     seed = _seed()
     rollout_key = f"/rollouts/{seed.episode_id.capture_key}"
     async with app.router.lifespan_context(app):
         await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-        assert claims.claimant(rollout_key) == claims.routing_id
-    assert claims.claimant(rollout_key) is None
+        assert owners.owner(rollout_key) == owners.routing_id
+    assert owners.owner(rollout_key) is None
     assert not agent.holds_agent_session(rollout_key)
-    receipt = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
-    assert receipt.agent_observations.source == "test"
+    saved_reply = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
+    assert saved_reply.agent_observations.source == "test"
     agent._close_agent_session_state.assert_awaited_once()
 
 
@@ -465,7 +466,7 @@ async def test_shutdown_cancellation_propagates_after_canceling_cleanup(agent):
     assert agent._session_records[seed.agent_session_id].state is not None
 
 
-async def test_cancellation_resistant_close_cannot_cache_a_successful_receipt(agent):
+async def test_cancellation_resistant_close_cannot_save_a_successful_reply(agent):
     seed = _seed()
     await agent.seed_agent_session(SimpleNamespace(session={}), seed)
     release, entered = asyncio.Event(), asyncio.Event()

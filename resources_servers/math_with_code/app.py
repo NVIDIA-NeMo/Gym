@@ -220,8 +220,8 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         loop = asyncio.get_running_loop()
         # Close awaits the worker's stop before marking the fence. Serialize publication with that whole operation,
         # so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
-        async with self._fence.locked(sid):
-            if self._fence.closed_episode(sid) is not None or sid in self._verified_sessions:
+        async with self._resources_session_locks.locked(sid):
+            if self._resources_session_fences.get(sid) is not None or sid in self._verified_sessions:
                 raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
             try:
                 if sid not in self._sessions:
@@ -248,7 +248,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 stderr="",
                 error_message=str(e),
             )
-        if self._fence.closed_episode(sid) is not None:
+        if self._resources_session_fences.get(sid) is not None:
             # The session closed while this call ran, so stop the worker the call may have started.
             await self._cleanup_session(sid)
             raise ResourcesSessionLostError(f"math_with_code session {sid} closed during the call")
@@ -263,7 +263,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         return session_id in self._sessions
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Release a prior cookie run; the worker still starts on the first tool call."""
+        """Release state from a prior agent-run seed; the worker still starts on the first tool call."""
         await self.release_session_state(session_id)
 
     async def release_session_state(self, session_id: str) -> None:
@@ -272,7 +272,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        if self._fence.closed_episode(session_id) is not None:
+        if self._resources_session_fences.get(session_id) is not None:
             # An Environment Server verifies before it closes, so this verify is out of order; mask it.
             return PythonMathVerifyResponse(
                 **(body.model_dump() | lost_session_verification(f"math_with_code session {session_id} is closed"))
@@ -320,7 +320,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         finally:
             # A successful verify reply ends checkpoint ownership. Keep failures retriable, and serialize
             # cleanup with a tool's first allocation so no worker can be published after we release it.
-            async with self._fence.locked(session_id):
+            async with self._resources_session_locks.locked(session_id):
                 await self.release_session_state(session_id)
                 if session_id not in self._verified_sessions:
                     self._verified_sessions.remember(session_id, (self._session_episodes.pop(session_id, None), None))

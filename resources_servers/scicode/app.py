@@ -19,8 +19,8 @@ Runs the agent's accumulated per-sub-step Python solutions against each sub-step
 (targets loaded from test_data.h5) and returns a binary reward: 1.0 iff every sub-step passes.
 Per-sub-step counts are also returned so sub-step accuracy can be computed downstream.
 
-Each sub-step is executed in a subprocess in this server's own process (instead of a
-Docker sandbox), so the subprocess inherits this server's interpreter and dependencies.
+Each sub-step runs in a subprocess using the configured grading interpreter. Optional
+sandbox execution moves that subprocess and its scientific dependencies off the server host.
 """
 
 import asyncio
@@ -40,6 +40,7 @@ from scicode_integration.runner import (
     run_substep,
     sanitize_test,
 )
+from scicode_integration.sandbox_runner import ScicodeSandboxConfig, run_sandbox_substep
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.server_runtime import (
@@ -63,7 +64,9 @@ class ScicodeGradingInterpreter(BaseModel):
 
 
 class ScicodeResourcesServerConfig(BaseResourcesServerConfig):
-    num_processes: int = 20
+    num_processes: int = Field(default=20, ge=1)
+    # Optional remote execution; interpreter and test-data paths then refer to the image.
+    sandbox: Optional[ScicodeSandboxConfig] = None
     # Per-sub-step execution timeout
     timeout_secs: float = 30.0
     # Local path to SciCode's test_data.h5 (staged manually)
@@ -139,14 +142,16 @@ class ScicodeResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context):
         self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
-        # Fail before accepting rollouts when a benchmark pins its data or requires an explicit
-        # multi-environment grading protocol. Legacy SciCode keeps both checks lazy.
-        if self.config.test_data_md5:
+        if self.config.test_data_md5 and not self.config.sandbox:
             self._resolve_test_data()
-        if self.config.grading_interpreters or self.config.required_grading_interpreters > 1:
+        if self.config.sandbox or self.config.grading_interpreters or self.config.required_grading_interpreters > 1:
             self._resolve_grading_interpreters()
 
     def _resolve_test_data(self) -> str:
+        if self.config.sandbox:
+            if not self.config.test_data_fpath or not Path(self.config.test_data_fpath).is_absolute():
+                raise ValueError("Sandbox test_data_fpath must be an absolute path inside the image")
+            return self.config.test_data_fpath
         if self._resolved_test_data_path is not None:
             return self._resolved_test_data_path
         if not self.config.test_data_fpath:
@@ -182,6 +187,15 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             return self._resolved_grading_interpreters
 
         configured = self.config.grading_interpreters
+        if self.config.sandbox:
+            self._resolve_test_data()
+            if len(configured) < self.config.required_grading_interpreters:
+                raise ValueError("Sandbox grading requires explicit grading_interpreters inside the image")
+            if len({item.name for item in configured}) != len(configured):
+                raise ValueError("Duplicate SciCode grading interpreter name")
+            if any(not Path(item.python_executable).is_absolute() for item in configured):
+                raise ValueError("Sandbox grading interpreter paths must be absolute")
+            return [(item.name, item.python_executable) for item in configured]
         if configured:
             resolved = []
             seen_names = set()
@@ -303,7 +317,18 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 else:
                     call = partial(run_substep, program, self.config.timeout_secs, executable)
                 async with self._semaphore:
-                    result = await loop.run_in_executor(None, call)
+                    if self.config.sandbox:
+                        result = await run_sandbox_substep(
+                            program,
+                            config=self.config.sandbox,
+                            python_executable=executable,
+                            timeout_secs=self.config.timeout_secs,
+                            test_data_path=h5_path,
+                            test_data_md5=self.config.test_data_md5,
+                            output_tail_chars=self.config.output_tail_chars if record else 2000,
+                        )
+                    else:
+                        result = await loop.run_in_executor(None, call)
                 per_environment[name] = bool(result["passed"])
                 attempts.append((name, result))
                 if result["error"]:
@@ -322,7 +347,17 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             output = _step_output(i, "executed", passed, result, code=code, environment=name) if record else None
             return passed, per_environment, per_environment_errors, output, _step_exit(result)
 
-        evaluated_steps = list(await asyncio.gather(*[_run_substep(i) for i in scored]))
+        tasks = [asyncio.create_task(_run_substep(i)) for i in scored]
+        try:
+            evaluated_steps = list(await asyncio.gather(*tasks))
+        except BaseException:
+            # A failed request must not leave sibling sandboxes running after its caller retries.
+            # Canceling a local executor await cannot stop its subprocess or release its permit safely.
+            if self.config.sandbox:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         step_results = [passed for passed, _, _, _, _ in evaluated_steps]
         step_environment_results = [per_environment for _, per_environment, _, _, _ in evaluated_steps]
         step_environment_errors = [per_environment_errors for _, _, per_environment_errors, _, _ in evaluated_steps]

@@ -139,7 +139,7 @@ libraries; later calls reuse the same worker and variables.
   `episode_id`, succeeds; a close with another `episode_id` gets 409. A seed that arrives after its session closed is
   refused with 409 for `session_close_retry_window_seconds`. An `execute_python` call for a closed session gets 404
   with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with reward 0.
-- Under an Agent's own `/run`, the deprecated cookie seed takes the row itself and stops any previous worker before
+- The deprecated agent-run seed sent by an agent's own `/run` takes the row itself and stops any previous worker before
   resetting the same cookie ID. The first tool call starts a new worker; `/verify` (or `/end_session`) stops it. After
   `/verify`, an `execute_python` call on that cookie gets 404 with `failure_kind: session_lost` until the cookie is
   seeded again or `session_close_retry_window_seconds` passes.
