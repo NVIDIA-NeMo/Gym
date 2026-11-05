@@ -286,7 +286,7 @@ def _server_hosts(config) -> dict[tuple[str, str], str]:
 @pytest.mark.parametrize("in_sandbox", [True, False])
 def test_sandbox_model_access_moves_only_the_model_server(tmp_path, monkeypatch, in_sandbox):
     """With otherwise identical inputs, a harness that calls the model from inside the sandbox gets a model
-    server on the node's resolved address while the head server (its unauthenticated /global_config_dict_yaml
+    server on the node's resolved address while the registry server (its unauthenticated /global_config_dict_yaml
     endpoint returns the merged configuration, credentials included), the agent server and the environment
     server stay on loopback as on main. A harness that calls the model from the host moves nothing."""
     write_task(tmp_path / "ds" / "a")
@@ -317,7 +317,7 @@ def test_sandbox_model_access_moves_only_the_model_server(tmp_path, monkeypatch,
 
     hosts = _server_hosts(config)
     assert config.use_absolute_ip is agent.runs_in_sandbox
-    assert config.head_server.host == "127.0.0.1"
+    assert config.registry_server.host == "127.0.0.1"
     model_hosts = {key: host for key, host in hosts.items() if key[1] == "responses_api_models"}
     other_hosts = {key: host for key, host in hosts.items() if key[1] != "responses_api_models"}
     assert model_hosts == {

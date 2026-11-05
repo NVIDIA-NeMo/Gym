@@ -193,7 +193,7 @@ async def test_worker_discovery_is_scoped_to_deployment(monkeypatch, tmp_path: P
             ]
 
     monkeypatch.setattr(
-        "resources_servers.osworld.session_manager.ServerClient.load_head_server_config",
+        "resources_servers.osworld.session_manager.ServerClient.load_registry_server_config",
         lambda: SimpleNamespace(host="head.example", port=8080),
     )
     monkeypatch.setattr(

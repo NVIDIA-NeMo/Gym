@@ -74,20 +74,20 @@ Servers are started in two stages:
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%
 flowchart TB
     Main["Main Process<br/>gym env start"]
-    Head["Head Server<br/>Port 11000"]
+    Registry["Registry Server<br/>Port 11000"]
     Env["Environment Server<br/>Own venv + port"]
     Agent["Agent Server<br/>Own venv + port"]
     Model["Model Server<br/>Own venv + port"]
     Resources["Resources Server<br/>Own venv + port"]
 
-    Main --> Head
+    Main --> Registry
     Main -->|spawn| Env
     Main -->|spawn| Agent
     Main -->|spawn| Model
     Main -->|spawn| Resources
 ```
 
-1. **Head Server**: Started as a background thread in the main process. Provides endpoints for config discovery (`/global_config_dict_yaml`) and server instance listing (`/server_instances`).
+1. **Registry Server**: Started as a background thread in the main process. Provides endpoints for config discovery (`/global_config_dict_yaml`) and server instance listing (`/server_instances`).
 
 2. **Server Subprocesses**: Each configured server is spawned as an independent OS process:
    - Each server has its own Python virtual environment in order to isolate dependencies.
@@ -100,9 +100,9 @@ flowchart TB
 
 3. **Readiness Check**: The main process waits in two steps.
    - First, it sends an HTTP request to the root URL of each managed server until every server accepts the connection. The response status code is not checked, because many servers have no route at `/`. A server counts as ready when it accepts connections, not when it returns HTTP 200. `server_spinup_timeout_seconds` bounds this wait.
-   - Second, it performs a best-effort connection check on upstream model endpoints named in the config, such as `policy_base_url`, retrying refused connections and timeouts. If the first probe cannot resolve a hostname, it prints a warning and skips that endpoint; a ready head therefore does not guarantee that every model endpoint is reachable. This step exists because a Gym model server is a proxy. It accepts connections as soon as it starts, even when no inference server is behind it. `model_endpoint_readiness_timeout_seconds` bounds this wait, and `0` skips it.
+   - Second, it performs a best-effort connection check on upstream model endpoints named in the config, such as `policy_base_url`, retrying refused connections and timeouts. If the first probe cannot resolve a hostname, it prints a warning and skips that endpoint; a ready registry server therefore does not guarantee that every model endpoint is reachable. This step exists because a Gym model server is a proxy. It accepts connections as soon as it starts, even when no inference server is behind it. `model_endpoint_readiness_timeout_seconds` bounds this wait, and `0` skips it.
 
-   After both steps pass, the head server is marked ready. If either wait times out, `gym env start` stops with an error that names the servers or endpoints that never answered. See [Gym Server Startup Timeout](/troubleshooting/configuration#gym-server-startup-timeout) and [Model Endpoint Unreachable](/troubleshooting/configuration#model-endpoint-unreachable).
+   After both steps pass, the registry server is marked ready. If either wait times out, `gym env start` stops with an error that names the servers or endpoints that never answered. See [Gym Server Startup Timeout](/troubleshooting/configuration#gym-server-startup-timeout) and [Model Endpoint Unreachable](/troubleshooting/configuration#model-endpoint-unreachable).
 
 ## Running State
 
@@ -120,7 +120,7 @@ When the user presses Ctrl+C (or the process receives SIGINT):
 1. SIGINT is forwarded to all server subprocesses.
 2. The main process waits about one second for each subprocess to exit.
 3. A subprocess that is still running after that wait is killed with SIGKILL. Gym prints the names of the killed processes. Work in progress in a killed server is lost, and its cleanup code does not run.
-4. The head server thread is stopped, and Gym prints `NeMo Gym finished!`.
+4. The registry server thread is stopped, and Gym prints `NeMo Gym finished!`.
 
 A clean exit is not guaranteed. A server that is slow to stop, such as one waiting on a sandbox or an inference call, is force-killed. A killed process can leave Ray error messages in the log. In rare cases, a process that does not exit after SIGKILL remains as a zombie until the main process exits.
 
@@ -189,14 +189,14 @@ When you run `gym eval run --no-serve`, the system collects rollout results by e
 sequenceDiagram
     autonumber
     participant Client as Rollout Collection
-    participant Head as Head Server
+    participant Registry as Registry Server
     participant Env as Environment Server
     participant Agent as Agent
     participant Model as Model
     participant Resources as Resources
 
-    Client->>Head: GET /global_config_dict_yaml
-    Head-->>Client: Server addresses
+    Client->>Registry: GET /global_config_dict_yaml
+    Registry-->>Client: Server addresses
 
     loop Each input row, in parallel
         Client->>Env: POST /run
@@ -223,7 +223,7 @@ sequenceDiagram
     end
 ```
 
-The client first queries the Head Server to discover server addresses from the global config. It then reads the input JSONL and sends one `POST /run` per row to the Environment Server that fronts the row's agent. Completed rollouts are written to output JSONL.
+The client first queries the Registry Server to discover server addresses from the global config. It then reads the input JSONL and sends one `POST /run` per row to the Environment Server that fronts the row's agent. Completed rollouts are written to output JSONL.
 
 **Concurrency behavior differs by use case:**
 - **Standalone rollout collection** (`gym eval run --no-serve`): `num_samples_in_parallel` limits active requests. `max_resident_rollout_tasks` limits how many rollout tasks the driver admits at once. When both are set, active requests cannot exceed the lower of the two limits. When `max_resident_rollout_tasks` is unset, the driver admits the complete workload as before.

@@ -88,7 +88,7 @@ gym eval run --no-serve \
 
 Use `model-provider.yaml` to supply the policy model and sandbox provider settings, and provide
 `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` privately. Pass the same recipe and overlay to both commands:
-`--no-serve` does not inherit routing from the running head server. The model-server host must be reachable
+`--no-serve` does not inherit routing from the running registry server. The model-server host must be reachable
 from the sandbox; its reference is derived from the NOOA agent configuration. Restricted SWE tasks require
 an OpenSandbox deployment with `dns+nft` enforcement; unsupported providers fail explicitly. The policy
 allows all ports and routes on the model-server host, including any cohosted services. Preparation preserves upstream grading metadata in the shared flat dataset.

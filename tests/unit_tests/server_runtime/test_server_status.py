@@ -168,7 +168,7 @@ class TestServerStatus:
         mock_head_config.host = "127.0.0.1"
         mock_head_config.port = 11000
 
-        monkeypatch.setattr(ServerClient, "load_head_server_config", lambda: mock_head_config)
+        monkeypatch.setattr(ServerClient, "load_registry_server_config", lambda: mock_head_config)
 
         mock_response = MagicMock()
         mock_response.json.return_value = mock_instances
@@ -210,12 +210,12 @@ class TestServerStatus:
         first_call = mock_get.call_args_list[0]
         assert first_call[0][0] == "http://127.0.0.1:11000/server_instances"
 
-    def test_discover_servers_head_server_down(self, monkeypatch: MonkeyPatch, capsys, caplog) -> None:
+    def test_discover_servers_registry_server_down(self, monkeypatch: MonkeyPatch, capsys, caplog) -> None:
         mock_head_config = MagicMock()
         mock_head_config.host = "127.0.0.1"
         mock_head_config.port = 11000
 
-        monkeypatch.setattr(ServerClient, "load_head_server_config", lambda: mock_head_config)
+        monkeypatch.setattr(ServerClient, "load_registry_server_config", lambda: mock_head_config)
 
         mock_get = MagicMock(side_effect=requests.exceptions.ConnectionError("Connection refused"))
         monkeypatch.setattr(requests, "get", mock_get)
@@ -227,5 +227,5 @@ class TestServerStatus:
         assert len(servers) == 0
         # The warning goes through logging (stderr), keeping stdout machine-readable for `--json`.
         assert capsys.readouterr().out == ""
-        assert "Could not connect to head server" in caplog.text
+        assert "Could not connect to registry server" in caplog.text
         assert "gym env start" in caplog.text

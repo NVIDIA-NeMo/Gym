@@ -284,9 +284,9 @@ export SBATCH_QOS=${SBATCH_QOS:-interactive}
 # install them at runtime.
 SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 # No ++use_absolute_ip=true here, though upstream sets it. It binds every server to the node IP,
-# which puts the head server somewhere other than 127.0.0.1:11000 -- where gym eval run --no-serve
+# which puts the registry server somewhere other than 127.0.0.1:11000 -- where gym eval run --no-serve
 # looks for it. Upstream gets away with it because it serves end-to-end and never has to discover
-# its own servers. Jobs 6563122 and 6563743 both died on "Could not connect to the head server"
+# its own servers. Jobs 6563122 and 6563743 both died on "Could not connect to the registry server"
 # because of this; bench_e2e.py has never passed it, which is why the same split works there.
 #
 ENV_START_ATTEMPTS=${ENV_START_ATTEMPTS:-4}

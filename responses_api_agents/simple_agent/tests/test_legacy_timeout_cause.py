@@ -98,7 +98,8 @@ async def test_policy_failure_survives_vllm_agent_environment_store(
 
     def client():
         return ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=OmegaConf.create(config)
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+            global_config_dict=OmegaConf.create(config),
         )
 
     async def start(server, name, kind, impl):

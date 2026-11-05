@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
-# Wait for gym env start head server and all child servers to become ready.
+# Wait for gym env start registry server and all child servers to become ready.
 #
-# Usage: ./scripts/wait_for_servers.sh <gym_env_start_pid> [head_server_port] [max_wait_seconds]
+# Usage: ./scripts/wait_for_servers.sh <gym_env_start_pid> [registry_server_port] [max_wait_seconds]
 #
 # Arguments:
 #   gym_env_start_pid   PID of the background gym env start process
-#   head_server_port    Port of the head server (default: 11000)
+#   registry_server_port  Port of the registry server (default: 11000)
 #   max_wait_seconds    Max seconds to wait for child servers (default: 180)
 #
 # Environment:
-#   HEAD_MAX_WAIT       Max seconds to wait for the head server (default: 180)
+#   REGISTRY_MAX_WAIT   Max seconds to wait for the registry server (default: 180). The former name
+#                       HEAD_MAX_WAIT is still read when REGISTRY_MAX_WAIT is unset.
 
 set -euo pipefail
 
-NG_RUN_PID="${1:?Usage: wait_for_servers.sh <gym_env_start_pid> [head_server_port] [max_wait_seconds]}"
-HEAD_PORT="${2:-11000}"
+NG_RUN_PID="${1:?Usage: wait_for_servers.sh <gym_env_start_pid> [registry_server_port] [max_wait_seconds]}"
+REGISTRY_PORT="${2:-11000}"
 MAX_WAIT="${3:-180}"
 
-HEAD_URL="http://127.0.0.1:${HEAD_PORT}"
+REGISTRY_URL="http://127.0.0.1:${REGISTRY_PORT}"
 POLL_INTERVAL=2
 
 check_pid() {
@@ -27,24 +28,24 @@ check_pid() {
   fi
 }
 
-# Phase 1: Wait for head server to respond on /server_instances.
-# The head server starts Ray first, which can take close to a minute on a
+# Phase 1: Wait for registry server to respond on /server_instances.
+# The registry server starts Ray first, which can take close to a minute on a
 # shared network filesystem, so the old fixed 60s was too tight.
-HEAD_MAX_WAIT="${HEAD_MAX_WAIT:-180}"
-# The head server has no root route, but /server_instances returns 200.
-echo "Waiting for head server on port ${HEAD_PORT}..."
-HEAD_READY="false"
-for i in $(seq 1 $((HEAD_MAX_WAIT / POLL_INTERVAL))); do
-  if curl -sf "${HEAD_URL}/server_instances" > /dev/null 2>&1; then
-    echo "Head server up after $((i * POLL_INTERVAL))s"
-    HEAD_READY="true"
+REGISTRY_MAX_WAIT="${REGISTRY_MAX_WAIT:-${HEAD_MAX_WAIT:-180}}"
+# The registry server has no root route, but /server_instances returns 200.
+echo "Waiting for registry server on port ${REGISTRY_PORT}..."
+REGISTRY_READY="false"
+for i in $(seq 1 $((REGISTRY_MAX_WAIT / POLL_INTERVAL))); do
+  if curl -sf "${REGISTRY_URL}/server_instances" > /dev/null 2>&1; then
+    echo "Registry server up after $((i * POLL_INTERVAL))s"
+    REGISTRY_READY="true"
     break
   fi
   check_pid
   sleep "$POLL_INTERVAL"
 done
-if [ "$HEAD_READY" != "true" ]; then
-  echo "Head server did not respond within ${HEAD_MAX_WAIT}s"
+if [ "$REGISTRY_READY" != "true" ]; then
+  echo "Registry server did not respond within ${REGISTRY_MAX_WAIT}s"
   exit 1
 fi
 
@@ -54,7 +55,7 @@ ITERATIONS=$((MAX_WAIT / POLL_INTERVAL))
 ALL_READY="false"
 
 for i in $(seq 1 "$ITERATIONS"); do
-  RAW_RESPONSE=$(curl -s "${HEAD_URL}/server_instances" 2>&1) || true
+  RAW_RESPONSE=$(curl -s "${REGISTRY_URL}/server_instances" 2>&1) || true
   URLS=$(echo "$RAW_RESPONSE" | python3 -c "
 import json, sys
 try:

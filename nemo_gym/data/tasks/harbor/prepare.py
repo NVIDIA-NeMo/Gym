@@ -107,7 +107,7 @@ ORACLE_AGENT = "harbor_oracle_agent"
 # itself, needs the model server to advertise the node's IP (`use_absolute_ip`). The harness declares that on
 # the agent class its entrypoint runs (`calls_model_from_sandbox: ClassVar[bool] = True`), read from source
 # like `ray_enabled`; an agent whose config declares `SANDBOX_MODEL_BASE_URL_KEY` routes its model calls
-# through the sandbox too. Only the model server is moved (`absolute_ip_server_types`): the head server, whose
+# through the sandbox too. Only the model server is moved (`absolute_ip_server_types`): the registry server, whose
 # config endpoint returns the merged configuration, the agent and the environment server stay on loopback as
 # on any other run; a deployment that needs more sets `absolute_ip_server_types` or `default_host` itself.
 SANDBOX_MODEL_BASE_URL_KEY = "sandbox_model_base_url"

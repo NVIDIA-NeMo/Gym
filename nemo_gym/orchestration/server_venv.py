@@ -32,9 +32,9 @@ from packaging.version import InvalidVersion, Version
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.config.global_config import (
     COMPONENT_EXTRAS_KEY_NAME,
-    HEAD_SERVER_CONSTRAINTS_KEY_NAME,
-    HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
+    PARENT_PROCESS_CONSTRAINTS_KEY_NAME,
+    PARENT_PROCESS_DEPS_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
@@ -230,20 +230,20 @@ def _server_python_request(dir_path: Path, parent_python: str) -> str:
 
 
 def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
-    head_server_deps = [str(dependency) for dependency in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]]
-    head_server_dep_args = shlex.join(head_server_deps)
+    parent_process_deps = [str(dependency) for dependency in global_config_dict[PARENT_PROCESS_DEPS_KEY_NAME]]
+    parent_process_dep_args = shlex.join(parent_process_deps)
     # Pins applied only to packages a server installs anyway, e.g. the parent's exact Ray version.
-    head_server_constraints = [
-        str(constraint) for constraint in global_config_dict.get(HEAD_SERVER_CONSTRAINTS_KEY_NAME) or []
+    parent_process_constraints = [
+        str(constraint) for constraint in global_config_dict.get(PARENT_PROCESS_CONSTRAINTS_KEY_NAME) or []
     ]
-    constraint_args = " ".join(shlex.quote(c) for c in head_server_constraints)
-    constraint_flag = f"-c <(printf '%s\\n' {constraint_args}) " if head_server_constraints else ""
+    constraint_args = " ".join(shlex.quote(c) for c in parent_process_constraints)
+    constraint_flag = f"-c <(printf '%s\\n' {constraint_args}) " if parent_process_constraints else ""
     # A constraint cannot replace an exact stale pin in a server dependency (for example
     # another Ray version), which makes the solve impossible or splits one Ray cluster across
     # versions. Passing the same pins as overrides replaces such a pin and, like a constraint,
-    # never adds a package the server does not require. head_server_deps stay plain
+    # never adds a package the server does not require. parent_process_deps stay plain
     # requirements, so a server pin that conflicts with them still fails the install loudly.
-    parent_override_flag = f"--overrides <(printf '%s\\n' {constraint_args}) " if head_server_constraints else ""
+    parent_override_flag = f"--overrides <(printf '%s\\n' {constraint_args}) " if parent_process_constraints else ""
 
     venv_path = get_venv_path(dir_path, global_config_dict)
     venv_python_fpath = venv_path / "bin/python"
@@ -301,7 +301,7 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
                 else "'-e .'"
             )
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{target} {head_server_dep_args}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{target} {parent_process_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
@@ -309,13 +309,13 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}nemo-gym{version_spec} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources {target} {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources {target} {parent_process_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
             override_flag = "--override overrides.txt " if has_overrides_txt else ""
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{override_flag}-r requirements.txt {head_server_dep_args}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{override_flag}-r requirements.txt {parent_process_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning
@@ -324,7 +324,7 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
                 extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
                 install_cmd = (
                     f"""(echo 'nemo-gym{extras}{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}{override_flag}-r /dev/stdin {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}{override_flag}-r /dev/stdin {parent_process_dep_args}"""
                 )
         else:
             raise RuntimeError(
@@ -398,9 +398,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             raise RuntimeError(f"component_extras[{component_path!r}] must be a list of nonempty extra names.")
         for extra in extras:
             sync_command.extend(["--extra", extra])
-        for requirement in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]:
+        for requirement in global_config_dict[PARENT_PROCESS_DEPS_KEY_NAME]:
             sync_command.extend(["--requirement", requirement])
-        for constraint in global_config_dict.get(HEAD_SERVER_CONSTRAINTS_KEY_NAME) or []:
+        for constraint in global_config_dict.get(PARENT_PROCESS_CONSTRAINTS_KEY_NAME) or []:
             sync_command.extend(["--constraint", constraint])
         if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME):
             sync_command.append("--verbose")
@@ -499,3 +499,10 @@ def run_command(
         stderr=redirect_stderr,
         start_new_session=start_new_session,
     )
+
+
+# Serves the names this module had before the head server's dependency keys were renamed, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

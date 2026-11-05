@@ -335,7 +335,7 @@ def test_harness_property_reaches_model_capture_and_links_message(tmp_path, pars
             return {"output": []}
 
     client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0},
+        registry_server_config={"host": "localhost", "port": 0},
         global_config_dict=OmegaConf.create(
             {
                 "observability_enabled": True,

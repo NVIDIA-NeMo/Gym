@@ -80,7 +80,8 @@ async def test_body_failure_survives_actual_simple_agent_environment_store(tmp_p
 
     def client():
         return ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=OmegaConf.create(config)
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+            global_config_dict=OmegaConf.create(config),
         )
 
     async def start(server, name, kind, impl):

@@ -227,7 +227,7 @@ async def test_a_run_with_routing_off_survives_a_connection_reset_before_any_rep
             }
         )
         client = ServerClient(
-            head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config
+            registry_server_config=BaseServerConfig(host="head", port=1), global_config_dict=global_config
         )
         monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
         source = tmp_path / "input.jsonl"

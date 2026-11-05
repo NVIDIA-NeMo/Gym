@@ -131,7 +131,7 @@ def _environment_server(
     )
     response = _agent_response()
     client = client_type(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=global_config,
         calls=[],
         responses=[

@@ -51,7 +51,7 @@ def _config(**model_servers) -> DictConfig:
     return DictConfig(
         {
             "dry_run": False,
-            "head_server": {"host": "127.0.0.1", "port": 11000},
+            "registry_server": {"host": "127.0.0.1", "port": 11000},
             **model_servers,
         }
     )

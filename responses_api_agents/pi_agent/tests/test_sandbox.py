@@ -1404,7 +1404,7 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         **OmegaConf.to_container(config[agent_name].responses_api_agents.pi_agent, resolve=True),
     )
     config.policy_model = {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}
-    transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
+    transport = ServerClient(registry_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent.server_client = transport
     environment = SingleAgentTurnEnvironmentServer(
         config=SingleAgentTurnEnvironmentServerConfig(

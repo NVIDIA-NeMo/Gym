@@ -271,12 +271,12 @@ jq -cn --slurpfile ok <(jq -c '[._ng_task_index, ._ng_rollout_index]' <rollouts>
   | to_entries[] | select($done[.key] | not) | .value
   | select(._ng_failure_class == "provider_unavailable")' \
   <rollouts>_failures.jsonl > <retry>.jsonl
-# Stop the gym env start servers first: reverify launches its own server stack, with a head server on the same port.
+# Stop the gym env start servers first: reverify launches its own server stack, with a registry server on the same port.
 gym eval reverify --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml --model-type openai_model \
     '+model_endpoint_readiness_timeout_seconds=0' \
     --inputs <rollouts>_materialized_inputs.jsonl --rollouts <retry>.jsonl --output <recovered>.jsonl
-# Run gym env start again with the same configs: aggregate reads the config from the head server and posts to each
+# Run gym env start again with the same configs: aggregate reads the config from the registry server and posts to each
 # agent server's /aggregate_metrics endpoint.
 gym eval aggregate -i "'<rollouts>.jsonl,<recovered>.jsonl'" -o <merged>.jsonl
 ```

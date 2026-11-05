@@ -238,7 +238,7 @@ user in the run directory's `unsafe-resume-journal.jsonl`. Future resumes contin
 payloads are preserved; newly written payloads carry the run identifier. Gym still rejects corrupt or unsupported
 manifests and materialized inputs that no longer match their saved manifest.
 
-With `--no-serve`, Gym obtains the server configuration from the running head server, so a changed model or verifier
+With `--no-serve`, Gym obtains the server configuration from the running registry server, so a changed model or verifier
 still prevents verified resume. Missing required server configurations are errors.
 Nested task parameters and model settings still affect experiment identity.
 

@@ -660,12 +660,12 @@ class TestLegacySetupContract:
         assert "--skip-if-ready" in shlex.split(before)
         assert "uv pip install" in self._installation_command(before)
 
-    def test_head_server_deps(self, tmp_path: Path) -> None:
+    def test_parent_process_deps(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
 
         actual_command = setup_env_command(
             dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"head_server_deps": ["dep 1", "dep 2"]},
+            global_config_dict=self._debug_global_config_dict(tmp_path) | {"parent_process_deps": ["dep 1", "dep 2"]},
             prefix="my server name",
         )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install --overrides <(printf '%s\\n' 'ray==test ray version') -c <(printf '%s\\n' 'ray==test ray version') -r requirements.txt 'dep 1' 'dep 2' > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"

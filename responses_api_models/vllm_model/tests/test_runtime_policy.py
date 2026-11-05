@@ -23,8 +23,8 @@ def test_vllm_model_venv_keeps_the_parent_python(tmp_path: Path) -> None:
     with (ROOT / "pyproject.toml").open("rb") as source:
         python_floor = tomllib.load(source)["project"]["requires-python"].removeprefix(">=")
     config = {
-        "head_server_deps": [],
-        "head_server_constraints": [],
+        "parent_process_deps": [],
+        "parent_process_constraints": [],
         "python_version": python_floor,
         "skip_venv_if_present": False,
         "uv_venv_dir": str(tmp_path),

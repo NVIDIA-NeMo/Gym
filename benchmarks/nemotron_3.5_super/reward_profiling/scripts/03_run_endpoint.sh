@@ -91,7 +91,7 @@ fi
 env_start_log=$SWEEP_DIR/env_start.log
 : > "$env_start_log"
 
-# No ++use_absolute_ip: it binds servers to the node IP, which puts the head server somewhere other
+# No ++use_absolute_ip: it binds servers to the node IP, which puts the registry server somewhere other
 # than where gym eval run --no-serve looks for it.
 gym env start --config "$SWEEP_DIR/sweep_config.yaml" \
     +uv_venv_dir=/opt/uv_venvs \

@@ -75,8 +75,8 @@ for compatibility; a new pairing does not need another combined preset.
 `configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
 such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
 agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
-model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
-on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the registry server and the agent itself
+on `127.0.0.1`: the registry server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
 harness on the Gym host. Hermes derives the sandbox's lifetime from its own timeouts. Supply the image in
 `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
 `hermes_agent.responses_api_agents.hermes_agent.sandbox_config`.

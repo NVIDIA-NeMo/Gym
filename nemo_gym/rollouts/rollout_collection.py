@@ -92,6 +92,7 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.config.renamed_keys import renamed_keyword
 from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
@@ -3270,7 +3271,7 @@ class _BoundedCompletionIterator:
 class RolloutCollectionHelper(BaseModel):
     """Collect rollouts by sending tasks to a running Gym deployment.
 
-    Each rollout batch fetches the deployment's configuration from the head server.
+    Each rollout batch fetches the deployment's configuration from the registry server.
     A caller that runs many batches against one deployment can set ``reuse_server_client=True``.
     The helper then fetches the configuration once.
     Build a new helper after that deployment's configuration changes.
@@ -3282,7 +3283,7 @@ class RolloutCollectionHelper(BaseModel):
         "Build a new helper after the deployment's configuration changes.",
     )
     _cached_server_client: Optional[ServerClient] = PrivateAttr(default=None)
-    _cached_head_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
+    _cached_registry_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
 
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
@@ -3349,7 +3350,7 @@ class RolloutCollectionHelper(BaseModel):
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
-        the head server's config. Input rows are not mutated; the expanded, stamped copies are
+        the registry server's config. Input rows are not mutated; the expanded, stamped copies are
         returned.
         """
         config = RolloutCollectionConfig(
@@ -5090,7 +5091,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
     def _run_examples_with_metadata(
         self,
         examples: List[Dict],
-        head_server_config: Optional[BaseServerConfig] = None,
+        registry_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
         environment_server_name: str | None = None,
@@ -5133,7 +5134,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``interleave_by_agent`` is enabled by the full evaluation path. Lower-level callers retain
         the order they supplied.
         """
-        server_client = self.setup_server_client(head_server_config)
+        server_client = self.setup_server_client(registry_server_config)
         if environment_server_name is not None:
             for row in examples:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
@@ -5391,10 +5392,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         return _EagerCompletionIterator(awaitables, total=len(examples))
 
+    @renamed_keyword("head_server_config", "registry_server_config")
     def run_outcomes(
         self,
         examples: List[Dict],
-        head_server_config: Optional[BaseServerConfig] = None,
+        registry_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         *,
         run_id: str | None = None,
@@ -5422,14 +5424,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         return _RowResultIterator(
             self._run_examples_with_metadata(
-                examples, head_server_config=head_server_config, semaphore=semaphore, typed_outcomes=True
+                examples, registry_server_config=registry_server_config, semaphore=semaphore, typed_outcomes=True
             ),
         )
 
+    @renamed_keyword("head_server_config", "registry_server_config")
     def run_examples(
         self,
         examples: List[Dict],
-        head_server_config: Optional[BaseServerConfig] = None,
+        registry_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
         environment_server_name: str | None = None,
@@ -5539,7 +5542,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
         enrich = None
         if enrich_results:
-            global_config = self.setup_server_client(head_server_config).global_config_dict
+            global_config = self.setup_server_client(registry_server_config).global_config_dict
             capture_dirs = model_call_capture_dirs_from_config(global_config)
             observability_enabled = observability_enabled_from_config(global_config)
 
@@ -5605,7 +5608,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     sources[scoped] = (index, logical_rollout_id(dict(row)))
         completions = self._run_examples_with_metadata(
             dispatched,
-            head_server_config=head_server_config,
+            registry_server_config=registry_server_config,
             semaphore=semaphore,
             route_failures_to_sidecar=route_failures_to_sidecar,
             environment_server_name=environment_server_name,
@@ -5638,20 +5641,24 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             )
         return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
 
-    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
-        """Return a client for the head server, reusing the cached one when the helper opted in.
+    @renamed_keyword("head_server_config", "registry_server_config")
+    def setup_server_client(self, registry_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        """Return a client for the registry server, reusing the cached one when the helper opted in.
 
-        Without opt-in, every call fetches the configuration from the head server again.
-        An opted-in helper keeps one client and fetches again only when the head config differs from the cached one.
-        Build a new helper after the configuration behind the same head changes.
+        Without opt-in, every call fetches the configuration from the registry server again.
+        An opted-in helper keeps one client and fetches again only when the registry server config differs from the
+        cached one.
+        Build a new helper after the configuration behind the same registry server changes.
         """
         if not self.reuse_server_client:
-            return setup_server_client_utils(head_server_config)
-        if self._cached_server_client is None or head_server_config != self._cached_head_server_config:
-            client = setup_server_client_utils(head_server_config)
-            head_snapshot = head_server_config.model_copy(deep=True) if head_server_config is not None else None
+            return setup_server_client_utils(registry_server_config)
+        if self._cached_server_client is None or registry_server_config != self._cached_registry_server_config:
+            client = setup_server_client_utils(registry_server_config)
+            registry_snapshot = (
+                registry_server_config.model_copy(deep=True) if registry_server_config is not None else None
+            )
             self._cached_server_client = client
-            self._cached_head_server_config = head_snapshot
+            self._cached_registry_server_config = registry_snapshot
         return self._cached_server_client
 
 
@@ -6006,7 +6013,7 @@ class RolloutAggregationHelper(BaseModel):
         @functools.cache
         def servers_by_agent() -> Mapping[str, list[str]]:
             # With nothing to score and nothing to count, only the coverage report keys rollouts, and an
-            # agent's name does for that: the head server is reached for scoring alone.
+            # agent's name does for that: the registry server is reached for scoring alone.
             if not (results or config.count_failure_classes_as_zero or config.count_missing_rollouts_as_zero):
                 return {}
             return _environment_servers_by_agent(helper.setup_server_client().global_config_dict)

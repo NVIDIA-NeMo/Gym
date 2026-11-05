@@ -71,7 +71,7 @@ def resources_server(args: argparse.Namespace) -> TerminalBench4ResourcesServer:
     return TerminalBench4ResourcesServer(
         config=TerminalBench4Config.model_validate(data | {"host": "127.0.0.1", "port": 0, "name": "tbsci_oracle"}),
         server_client=ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=config
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=config
         ),
     )
 

@@ -536,6 +536,8 @@ _SERVER_RUNTIME_OPTIONS = frozenset(
         "model_base_url",
         "vllm_base_url",
         "switchyard_base_url",
+        "registry_server",
+        # The registry server's key before its rename, still accepted in configs.
         "head_server",
         "disallowed_ports",
         "port_range_low",

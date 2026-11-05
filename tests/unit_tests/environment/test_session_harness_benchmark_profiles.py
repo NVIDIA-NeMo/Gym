@@ -33,7 +33,7 @@ def test_profile_is_not_a_standalone_agent_variant(agent: str, monkeypatch: pyte
 
 
 @pytest.mark.parametrize("agent", HARNESSES)
-def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
+def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_registry_server(
     agent: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = compose_profile_on_hle(agent, monkeypatch, cli_args=("+default_host=192.0.2.30",))
@@ -53,8 +53,8 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
     environment = get_first_server_config_dict(config, HLE_ENVIRONMENT)
     assert environment.agent_server.name == composed
     assert list(environment.resources_tool_transports) == []
-    # Sandboxes reach the model server at the caller's address; the head server and the agent stay on loopback.
-    assert config.head_server.host == "127.0.0.1"
+    # Sandboxes reach the model server at the caller's address; the registry server and the agent stay on loopback.
+    assert config.registry_server.host == "127.0.0.1"
     assert settings.host == "127.0.0.1"
     # The agent runs the harness on the Gym host for unseeded requests, so only the model server takes the address.
     assert get_first_server_config_dict(config, "policy_model").host == "192.0.2.30"

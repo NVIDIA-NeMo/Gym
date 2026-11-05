@@ -52,7 +52,7 @@ flowchart LR
 **How it works:**
 1. The training framework initializes the Ray cluster and creates vLLM workers with HTTP servers
 2. The training framework creates a NeMo Gym Ray actor within the same cluster
-3. The NeMo Gym actor spawns NeMo Gym servers (Head, Agent, Model, Resources) as subprocesses
+3. The NeMo Gym actor spawns NeMo Gym servers (Registry, Agent, Model, Resources) as subprocesses
 4. NeMo Gym's Model Server proxies inference requests to the training framework's vLLM HTTP endpoints
 5. Results flow back through the actor to the training loop
 

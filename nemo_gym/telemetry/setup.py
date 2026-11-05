@@ -340,7 +340,7 @@ def _direct_reference(requirement_name: str, direct_url: dict) -> Optional[str]:
     if subdirectory:
         url = f"{url}#subdirectory={subdirectory}"
     # No spaces around the '@'. PEP 508 allows either form, but `setup_env_command`
-    # interpolates this into a shell command line and joins head_server_deps unquoted, so
+    # interpolates this into a shell command line and joins parent_process_deps unquoted, so
     # the spaced form would be split into separate arguments. Quoting at that call site
     # would be the better fix and is tracked separately.
     return f"{requirement_name}@{url}"

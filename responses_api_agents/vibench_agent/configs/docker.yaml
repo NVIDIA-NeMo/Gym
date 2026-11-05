@@ -16,7 +16,7 @@
 # Only the model server binds 0.0.0.0, because on Linux Docker Engine a 127.0.0.1
 # bind is not visible from the bridge gateway (172.17.0.1). global_config only
 # applies default_host to servers without an explicit host, so this overrides that
-# one server and leaves the resources server, agent and head server on loopback --
+# one server and leaves the resources server, agent and registry server on loopback --
 # a global default_host would publish all of them, and grader API keys live in
 # those processes. Docker Desktop already forwards host.docker.internal.
 #

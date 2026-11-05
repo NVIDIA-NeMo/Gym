@@ -12,11 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""`ServerClient`, which finds Gym servers through the head server and calls them, and server URLs."""
+"""`ServerClient`, which finds Gym servers through the registry server and calls them, and server URLs."""
 
 import json
 import logging
 import re
+import warnings
 from importlib import import_module
 from os import getenv
 from typing import Any, Literal, Optional, Union, Unpack
@@ -27,7 +28,7 @@ from aiohttp import (
 )
 from aiohttp.client import _RequestOptions
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 
 from nemo_gym.client.http_client import (
@@ -41,13 +42,19 @@ from nemo_gym.config.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     TRACE_CONTEXT_PATH_SEGMENT,
     BaseServerConfig,
-    HeadServerUnreachableError,
+    RegistryServerUnreachableError,
 )
 from nemo_gym.config.global_config import (
-    HEAD_SERVER_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
+    REGISTRY_SERVER_KEY_NAME,
     get_first_server_config_dict,
     get_global_config_dict,
+)
+from nemo_gym.config.renamed_keys import (
+    RENAMED_KEYS_REMOVED_IN,
+    renamed_attribute,
+    renamed_keyword,
+    with_renamed_keys,
 )
 from nemo_gym.core.episode_context import (
     VERIFIER_INVOCATION_HEADER,
@@ -86,11 +93,16 @@ def _connectable_client_host(host: str) -> str:
 
 
 class ServerClient(BaseModel):
-    head_server_config: BaseServerConfig
+    registry_server_config: BaseServerConfig
 
     global_config_dict: DictConfig
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    _accept_renamed_keys = model_validator(mode="before")(
+        classmethod(lambda cls, data: with_renamed_keys(data, {"head_server_config": "registry_server_config"}))
+    )
+    head_server_config = renamed_attribute("head_server_config", "registry_server_config", owner="ServerClient")
 
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -140,52 +152,64 @@ class ServerClient(BaseModel):
         return next(iter(headers), None)
 
     @classmethod
-    def load_head_server_config(cls) -> BaseServerConfig:
+    def load_registry_server_config(cls) -> BaseServerConfig:
         global_config_dict = get_global_config_dict()
-        server_config_dict = global_config_dict[HEAD_SERVER_KEY_NAME]
+        server_config_dict = global_config_dict[REGISTRY_SERVER_KEY_NAME]
         config = BaseServerConfig.model_validate(server_config_dict)
         return config
 
     @classmethod
-    def load_from_global_config(cls, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
+    def load_head_server_config(cls) -> BaseServerConfig:
+        """Deprecated name of `load_registry_server_config`."""
+        warnings.warn(
+            "ServerClient.load_head_server_config was renamed load_registry_server_config; the old name will be "
+            f"removed in nemo_gym {RENAMED_KEYS_REMOVED_IN}. Use ServerClient.load_registry_server_config instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return cls.load_registry_server_config()
+
+    @classmethod
+    @renamed_keyword("head_server_config", "registry_server_config")
+    def load_from_global_config(cls, registry_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
         """Build a client from the fully resolved global config.
 
         Gym-launched server processes reuse the config injected by their parent.
-        Other processes fetch the config from the head server.
+        Other processes fetch the config from the registry server.
         """
-        if head_server_config is None:
-            head_server_config = cls.load_head_server_config()
+        if registry_server_config is None:
+            registry_server_config = cls.load_registry_server_config()
 
         if _has_injected_global_config_env():
             return cls(
-                head_server_config=head_server_config,
+                registry_server_config=registry_server_config,
                 global_config_dict=get_global_config_dict(),
             )
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
-        head_server_host = _connectable_client_host(head_server_config.host)
-        head_server_url = f"http://{head_server_host}:{head_server_config.port}"
+        registry_server_host = _connectable_client_host(registry_server_config.host)
+        registry_server_url = f"http://{registry_server_host}:{registry_server_config.port}"
         try:
             response = requests.get(
-                f"{head_server_url}/global_config_dict_yaml",
+                f"{registry_server_url}/global_config_dict_yaml",
             )
         except ConnectionError as e:
             # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
             # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
             logger.debug(
-                "Could not fetch the global config from the head server at %s", head_server_url, exc_info=True
+                "Could not fetch the global config from the registry server at %s", registry_server_url, exc_info=True
             )
             # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
-            raise HeadServerUnreachableError(
-                f"Could not connect to the head server at {head_server_url}. Is the head server running? "
+            raise RegistryServerUnreachableError(
+                f"Could not connect to the registry server at {registry_server_url}. Is the registry server running? "
                 "Start it with: `gym env start`. If it is already running on a different host or port, pass "
-                "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
+                "`++registry_server.host=<host>` / `++registry_server.port=<port>` so this command can find it."
             ) from e
 
         global_config_dict_yaml = response.content.decode()
         global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
 
-        return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
+        return cls(registry_server_config=registry_server_config, global_config_dict=global_config_dict)
 
     async def request(
         self,
@@ -306,8 +330,8 @@ class ServerClient(BaseModel):
         )
 
     def poll_for_status(self, server_name: str, *, timeout_seconds: float = 5) -> ServerStatus:  # pragma: no cover
-        if server_name == HEAD_SERVER_KEY_NAME:
-            server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]
+        if server_name == REGISTRY_SERVER_KEY_NAME:
+            server_config_dict = self.global_config_dict[REGISTRY_SERVER_KEY_NAME]
         else:
             server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
 
@@ -402,10 +426,12 @@ def apply_rollout_prefix(
     return base_url.rstrip("/") + prefix
 
 
-def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover
-    server_client = ServerClient.load_from_global_config(head_server_config)
+@renamed_keyword("head_server_config", "registry_server_config")
+def setup_server_client(registry_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover
+    server_client = ServerClient.load_from_global_config(registry_server_config)
 
-    # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
+    # We set this rollout global aiohttp client to use the same max connections as the underlying registry server
+    # global config.
     if not is_global_aiohttp_client_setup():
         set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
 

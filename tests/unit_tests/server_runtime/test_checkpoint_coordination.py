@@ -118,7 +118,7 @@ def deployment(*servers: tuple[str, Optional[str]]) -> tuple[InProcessClient, di
         apps[name] = app
         global_config[name] = {SERVER_TYPES[kind or "model"]: {name: {}}}
     client = InProcessClient(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create(global_config),
         apps=apps,
     )
@@ -377,7 +377,7 @@ async def test_discover_reports_a_server_that_is_down_instead_of_retrying_foreve
 
     monkeypatch.setattr("nemo_gym.client.server_client.request", refused)
     client = ServerClient(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create(
             {"env": {"environment_servers": {"env": {"host": "127.0.0.1", "port": 9}}}}
         ),
@@ -397,7 +397,7 @@ async def test_discover_reports_a_server_that_never_replies(monkeypatch: pytest.
     monkeypatch.setattr("nemo_gym.client.server_client.request", silent)
     monkeypatch.setattr(coordination, "_DISCOVER_TIMEOUT_SECONDS", 0.05)
     client = ServerClient(
-        head_server_config=BaseServerConfig(host="head", port=1),
+        registry_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create(
             {"env": {"environment_servers": {"env": {"host": "127.0.0.1", "port": 9}}}}
         ),

@@ -92,8 +92,8 @@ cd "$WORKSPACE_DIR"
   --model-url "$POLICY_BASE_URL" \
   --model-api-key "$POLICY_API_KEY" \
   --model "$POLICY_MODEL_NAME" \
-  "++head_server.host=127.0.0.1" \
-  "++head_server.port=$HEAD_PORT" \
+  "++registry_server.host=127.0.0.1" \
+  "++registry_server.port=$HEAD_PORT" \
   "++uv_venv_dir=$VENV_ROOT" \
   "++observability_enabled=true" \
   "++model_call_capture_dir=$RESULTS_DIR/model-call-capture" \
@@ -111,8 +111,8 @@ GYM_PID=$!
   --limit 1 \
   --concurrency 1 \
   "++environment_server_routes.nooa-counter=example_session_state_mgmt_environment_server" \
-  "++head_server.host=127.0.0.1" \
-  "++head_server.port=$HEAD_PORT"
+  "++registry_server.host=127.0.0.1" \
+  "++registry_server.port=$HEAD_PORT"
 
 "$PYTHON_BIN" "$ROOT_DIR/responses_api_agents/nooa_agent/smoke/verify_stateful_rollout.py" \
   --rollouts "$RESULTS_DIR/rollouts.jsonl"

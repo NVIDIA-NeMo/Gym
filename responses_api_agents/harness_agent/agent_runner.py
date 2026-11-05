@@ -68,7 +68,7 @@ def main() -> None:
     if model_ref.get("name"):
         global_config[model_ref["name"]] = {"responses_api_models": {"sandbox_model": {"host": "", "port": 0}}}
     sc = ServerClient(
-        head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
+        registry_server_config=BaseServerConfig(host="127.0.0.1", port=0),
         global_config_dict=OmegaConf.create(global_config),
     )
     sc._build_server_base_url = lambda _: model_url

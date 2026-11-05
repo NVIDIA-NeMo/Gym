@@ -247,9 +247,9 @@ def _start_local_server() -> str:
         name=SERVER_NAME,
     )
     # The env never calls out through server_client; an empty one satisfies
-    # the constructor without a head server.
+    # the constructor without a registry server.
     server_client = ServerClient(
-        head_server_config=BaseServerConfig(host="", port=0), global_config_dict=OmegaConf.create({})
+        registry_server_config=BaseServerConfig(host="", port=0), global_config_dict=OmegaConf.create({})
     )
     env = OpenAirCongestionEnv(config=config, server_client=server_client)
     server = uvicorn.Server(
@@ -281,7 +281,7 @@ async def _run_against_local(base_url: str) -> float:
 def main() -> None:
     try:
         server_client = ServerClient.load_from_global_config()
-    except Exception as e:  # no head server: run standalone
+    except Exception as e:  # no registry server: run standalone
         print(f"No running gym found ({e}); booting a local in-process server (backend: replay).")
         asyncio.run(_run_against_local(_start_local_server()))
     else:

@@ -56,7 +56,7 @@ gym env start --config benchmarks/swebench/pro/hermes.yaml --config model-provid
 ```
 
 While those servers are running, collect rollouts from another terminal using the same
-configuration. `--no-serve` does not inherit routing settings from the running head server:
+configuration. `--no-serve` does not inherit routing settings from the running registry server:
 
 ```bash
 gym eval run --no-serve \

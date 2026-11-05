@@ -375,7 +375,7 @@ async def test_collector_saves_actual_cohort_failure_class_and_reason(
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: OmegaConf.create({}))
     # Use the real collector, agent, resource and aggregate endpoints. Only the
-    # config/head-server discovery is replaced by the fixture's bound addresses.
+    # config/registry-server discovery is replaced by the fixture's bound addresses.
     body = member(0).model_dump(mode="json", by_alias=True)
     del body["response"]
     body.pop("_ng_task_index", None)  # Let the collector assign the task index.

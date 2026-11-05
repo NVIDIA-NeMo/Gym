@@ -41,7 +41,10 @@ logger = logging.getLogger(__name__)
 RENAMED_KEYS_REMOVED_IN = "0.10.0"
 
 # Top-level config keys renamed: old key -> new key.
-RENAMED_TOP_LEVEL_KEYS: dict[str, str] = {}
+RENAMED_TOP_LEVEL_KEYS: dict[str, str] = {
+    # The block naming the registry server's address, formerly the head server.
+    "head_server": "registry_server",
+}
 # Keys renamed inside each server instance of a server type, such as `responses_api_agents`:
 # server type -> {old key: new key}.
 RENAMED_SERVER_INSTANCE_KEYS: dict[str, dict[str, str]] = {}

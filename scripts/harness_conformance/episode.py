@@ -143,7 +143,7 @@ def _config(
             cleanup_timeout_seconds=10,
         )
     config = {
-        "head_server": {"host": "127.0.0.1", "port": ports["policy_model"]},
+        "registry_server": {"host": "127.0.0.1", "port": ports["policy_model"]},
         "observability_enabled": True,
         "model_call_capture_dir": str(directory / "capture"),
         "policy_model": {"responses_api_models": {"probe": {**server(ports["policy_model"]), "name": "policy_model"}}},

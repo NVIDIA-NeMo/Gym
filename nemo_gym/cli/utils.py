@@ -168,7 +168,7 @@ def exit_cleanly_on_config_error(fn):
             code = getattr(e, "stop_exit_code", None) if isinstance(e, RuntimeError) else None
             if code is None:
                 raise
-            # A typed stop (for example a head server that never answered): exit with its code, not a traceback.
+            # A typed stop (for example a registry server that never answered): exit with its code, not a traceback.
             rich.print(f"[red]Stopped:[/red] {escape(str(e))}")
             raise SystemExit(code) from None
 

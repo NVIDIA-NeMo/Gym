@@ -83,7 +83,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> module.SWEAtlasQA
     monkeypatch.setattr(module, "create_provider", lambda config: provider)
     monkeypatch.setattr(module, "validate_source", MagicMock(return_value=None))
     client = ServerClient(
-        head_server_config={"host": "127.0.0.1", "port": 8000},
+        registry_server_config={"host": "127.0.0.1", "port": 8000},
         global_config_dict=OmegaConf.create(
             {
                 "sandbox": {"test": {}},

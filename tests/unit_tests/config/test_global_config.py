@@ -35,9 +35,9 @@ from nemo_gym.config.config_types import (
     ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
-    HeadServerConfigMalformedError,
     MalformedConfigPathsError,
     NoServerInstancesError,
+    RegistryServerConfigMalformedError,
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
@@ -49,7 +49,7 @@ from nemo_gym.config.global_config import (
     AGENT_SESSION_AGENT_TYPES,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
-    DEFAULT_HEAD_SERVER_PORT,
+    DEFAULT_REGISTRY_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
     UV_LOCK_TIMEOUT_KEY_NAME,
@@ -80,13 +80,13 @@ class TestGlobalConfig:
     def _default_global_config_dict_values(self) -> dict:
         return {
             "use_absolute_ip": False,
-            "head_server": {"host": "127.0.0.1", "port": 11000},
+            "registry_server": {"host": "127.0.0.1", "port": 11000},
             "disallowed_ports": [11000],
             "port_range_low": 10_001,
             "port_range_high": 20_000,
             # From self._mock_versions_for_testing
-            "head_server_deps": ["openai==test openai version"],
-            "head_server_constraints": ["ray==test ray version"],
+            "parent_process_deps": ["openai==test openai version"],
+            "parent_process_constraints": ["ray==test ray version"],
             "python_version": "test python version",
             "skip_venv_if_present": False,
             "dry_run": False,
@@ -238,8 +238,8 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
-        assert global_config_dict["head_server_constraints"] == ["ray==test ray version"]
-        assert not any(dep.startswith("ray") for dep in global_config_dict["head_server_deps"])
+        assert global_config_dict["parent_process_constraints"] == ["ray==test ray version"]
+        assert not any(dep.startswith("ray") for dep in global_config_dict["parent_process_deps"])
 
     def test_config_parses_without_ray_installed(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
@@ -247,25 +247,25 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
-        assert global_config_dict["head_server_constraints"] == []
+        assert global_config_dict["parent_process_constraints"] == []
 
-    def test_head_server_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
-        assert "openai==2.6.0" in global_config_dict["head_server_deps"]
+        assert "openai==2.6.0" in global_config_dict["parent_process_deps"]
 
-    def test_head_server_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
         monkeypatch.setattr(nemo_gym.config.global_config, "plugin_distributions", lambda: ["gym-substrate"])
         monkeypatch.setattr(nemo_gym.config.global_config, "installed_requirement", lambda dist, req: f"{req}==0.1.0")
 
         global_config_dict = get_global_config_dict()
-        assert "gym-substrate==0.1.0" in global_config_dict["head_server_deps"]
+        assert "gym-substrate==0.1.0" in global_config_dict["parent_process_deps"]
 
-    def test_head_server_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
@@ -275,7 +275,7 @@ class TestGlobalConfig:
         assert "openai==2.52.0" in str(excinfo.value)
         assert "openai<=2.7.2" in str(excinfo.value)
 
-    def test_head_server_deps_omits_pin_with_explicit_skew_opt_in(
+    def test_parent_process_deps_omits_pin_with_explicit_skew_opt_in(
         self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
     ) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
@@ -283,13 +283,13 @@ class TestGlobalConfig:
 
         with caplog.at_level("WARNING"):
             global_config_dict = get_global_config_dict()
-        assert not any(dep.startswith("openai") for dep in global_config_dict["head_server_deps"])
+        assert not any(dep.startswith("openai") for dep in global_config_dict["parent_process_deps"])
         assert global_config_dict["allow_openai_version_skew"] is True
         # The warning must name both sides of the skew.
         assert "openai==2.52.0" in caplog.text
         assert "openai<=2.7.2" in caplog.text
 
-    def test_head_server_deps_rejects_non_boolean_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parent_process_deps_rejects_non_boolean_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
         # YAML/CLI plumbing can hand the key through as a string; "false" is
         # truthy and must not silently enable the skew.
@@ -1387,10 +1387,10 @@ contested: second_inner
         assert {"my_key": "my_value"} == get_first_server_config_dict(global_config_dict, "a")
 
     def test_find_open_port_avoids_disallowed_ports(self, monkeypatch: MonkeyPatch) -> None:
-        """Test that find_open_port retries when the head server port is returned."""
+        """Test that find_open_port retries when the registry server port is returned."""
         randint_mock = MagicMock()
         randint_mock.side_effect = [
-            DEFAULT_HEAD_SERVER_PORT,  # first attempt: 11000 (conflict)
+            DEFAULT_REGISTRY_SERVER_PORT,  # first attempt: 11000 (conflict)
             12345,  # second attempt (safe)
         ]
         monkeypatch.setattr(nemo_gym.config.global_config, "randint", randint_mock)
@@ -1405,7 +1405,7 @@ contested: second_inner
         get_global_config_dict_mock.return_value = {"port_range_low": 10_001, "port_range_high": 20_000}
         monkeypatch.setattr(nemo_gym.config.global_config, "get_global_config_dict", get_global_config_dict_mock)
 
-        port = find_open_port(disallowed_ports=[DEFAULT_HEAD_SERVER_PORT])
+        port = find_open_port(disallowed_ports=[DEFAULT_REGISTRY_SERVER_PORT])
 
         assert port == 12345
         assert randint_mock.call_count == 2  # first: conflict, second: success
@@ -1430,8 +1430,10 @@ contested: second_inner
         assert "after 5 attempts" in str(exc_info.value)
         assert socket_instance.bind.call_count == 5
 
-    def test_get_global_config_dict_prevents_port_conflict_with_head_server(self, monkeypatch: MonkeyPatch) -> None:
-        """Integration test: verify that child servers never get the head server port."""
+    def test_get_global_config_dict_prevents_port_conflict_with_registry_server(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """Integration test: verify that child servers never get the registry server port."""
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
@@ -1458,7 +1460,7 @@ contested: second_inner
         global_config_dict = get_global_config_dict()
 
         resource_port = global_config_dict["test_resource"]["resources_servers"]["test_server"]["port"]
-        head_port = global_config_dict["head_server"]["port"]
+        head_port = global_config_dict["registry_server"]["port"]
 
         assert resource_port == 12345
         assert head_port == 11000
@@ -1640,7 +1642,7 @@ contested: second_inner
 
         global_config_dict = get_global_config_dict()
 
-        assert global_config_dict["head_server"]["host"] == expected_ip
+        assert global_config_dict["registry_server"]["host"] == expected_ip
         assert global_config_dict["test_resource"]["responses_api_models"]["test_model"]["host"] == expected_ip
 
     def test_recursively_hide_secrets(self) -> None:
@@ -2123,36 +2125,36 @@ class TestConfigLoadErrors:
         assert "list" in message
 
     @mark.parametrize(
-        ("head_server", "named_fields"),
+        ("registry_server", "named_fields"),
         [
-            ({"port": "notanint"}, ["head_server.port"]),  # what `++head_server.port=notanint` arrives as
-            ({"host": None}, ["head_server.host"]),  # setdefault keeps an explicit null
-            ({"host": None, "port": "notanint"}, ["head_server.host", "head_server.port"]),  # all at once
+            ({"port": "notanint"}, ["registry_server.port"]),  # what `++registry_server.port=notanint` arrives as
+            ({"host": None}, ["registry_server.host"]),  # setdefault keeps an explicit null
+            ({"host": None, "port": "notanint"}, ["registry_server.host", "registry_server.port"]),  # all at once
         ],
     )
-    def test_parse_malformed_head_server_raises_actionable_error(
-        self, head_server: dict, named_fields: list[str]
+    def test_parse_malformed_registry_server_raises_actionable_error(
+        self, registry_server: dict, named_fields: list[str]
     ) -> None:
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
-            initial_global_config_dict=DictConfig({"head_server": head_server}),
+            initial_global_config_dict=DictConfig({"registry_server": registry_server}),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
         )
-        with raises(HeadServerConfigMalformedError) as exc_info:
+        with raises(RegistryServerConfigMalformedError) as exc_info:
             parser.parse(parse_config)
 
         message = str(exc_info.value)
         for field in named_fields:
             assert field in message
-        assert "++head_server.port=" in message
+        assert "++registry_server.port=" in message
         assert isinstance(exc_info.value, ValueError)  # same compat contract as the rest of the family
         assert isinstance(exc_info.value.__cause__, ValidationError)  # `from e` keeps the pydantic detail
 
     @mark.parametrize(
-        ("head_server", "shown_as"),
+        ("registry_server", "shown_as"),
         [
-            ("foo", "'foo'"),  # `++head_server=foo` used to die with an AttributeError on the block's first `.get`
+            ("foo", "'foo'"),  # `++registry_server=foo` used to die with an AttributeError on the block's first `.get`
             # Falsy non-mappings are malformed too, not "absent": they must not fall back to the defaults.
             (False, "False"),
             (0, "0"),
@@ -2161,43 +2163,45 @@ class TestConfigLoadErrors:
         ],
         ids=["scalar", "false", "zero", "empty-string", "empty-list"],
     )
-    def test_parse_non_mapping_head_server_raises_actionable_error(self, head_server: object, shown_as: str) -> None:
+    def test_parse_non_mapping_registry_server_raises_actionable_error(
+        self, registry_server: object, shown_as: str
+    ) -> None:
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
-            initial_global_config_dict=DictConfig({"head_server": head_server}),
+            initial_global_config_dict=DictConfig({"registry_server": registry_server}),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
         )
-        with raises(HeadServerConfigMalformedError) as exc_info:
+        with raises(RegistryServerConfigMalformedError) as exc_info:
             parser.parse(parse_config)
 
         message = str(exc_info.value)
         assert "must be a mapping" in message
         assert f"Got: {shown_as}." in message
-        assert "++head_server.port=" in message
+        assert "++registry_server.port=" in message
 
-    def test_parse_null_head_server_takes_the_defaults(self) -> None:
-        # `head_server: null` is the one non-mapping that means "not configured".
+    def test_parse_null_registry_server_takes_the_defaults(self) -> None:
+        # `registry_server: null` is the one non-mapping that means "not configured".
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
-            initial_global_config_dict=DictConfig({"head_server": None}),
+            initial_global_config_dict=DictConfig({"registry_server": None}),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
         )
 
         parsed = parser.parse(parse_config)
 
-        assert parsed["head_server"] == {"host": "127.0.0.1", "port": DEFAULT_HEAD_SERVER_PORT}
-        assert parsed["disallowed_ports"] == [DEFAULT_HEAD_SERVER_PORT]
+        assert parsed["registry_server"] == {"host": "127.0.0.1", "port": DEFAULT_REGISTRY_SERVER_PORT}
+        assert parsed["disallowed_ports"] == [DEFAULT_REGISTRY_SERVER_PORT]
 
     @mark.parametrize(
         "server_host",
         [{"host": None}, {}],  # an explicit null, and no `host` key at all
         ids=["null-host", "omitted-host"],
     )
-    def test_parse_head_server_host_may_reference_a_defaulted_server_host(self, server_host: dict) -> None:
-        # The referenced host is only filled in by validate_and_populate_defaults, so the head server block must not
-        # be resolved and validated before that runs.
+    def test_parse_registry_server_host_may_reference_a_defaulted_server_host(self, server_host: dict) -> None:
+        # The referenced host is only filled in by validate_and_populate_defaults, so the registry server block must
+        # not be resolved and validated before that runs.
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
             initial_global_config_dict=DictConfig(
@@ -2207,7 +2211,7 @@ class TestConfigLoadErrors:
                             "test_server": {"entrypoint": "app.py", "domain": "other", "port": 12000, **server_host}
                         }
                     },
-                    "head_server": {"host": "${test_resource.resources_servers.test_server.host}"},
+                    "registry_server": {"host": "${test_resource.resources_servers.test_server.host}"},
                 }
             ),
             skip_load_from_cli=True,
@@ -2217,28 +2221,28 @@ class TestConfigLoadErrors:
         parsed = parser.parse(parse_config)
 
         assert parsed["test_resource"]["resources_servers"]["test_server"]["host"] == "127.0.0.1"
-        assert parsed["head_server"]["host"] == "127.0.0.1"
-        assert parsed["head_server"]["port"] == DEFAULT_HEAD_SERVER_PORT
+        assert parsed["registry_server"]["host"] == "127.0.0.1"
+        assert parsed["registry_server"]["port"] == DEFAULT_REGISTRY_SERVER_PORT
 
-    def test_parse_keeps_a_head_server_value_pydantic_can_coerce(self) -> None:
+    def test_parse_keeps_a_registry_server_value_pydantic_can_coerce(self) -> None:
         # The check is deliberately lax and validate-only: a quoted port in existing YAML keeps working, and the
         # block is left exactly as written, so `gym env resolve` still prints what the user configured. The
-        # validated int is what reaches the port allocator, so the head server's port is still kept off it.
+        # validated int is what reaches the port allocator, so the registry server's port is still kept off it.
         parser = GlobalConfigDictParser()
         parse_config = GlobalConfigDictParserConfig(
-            initial_global_config_dict=DictConfig({"head_server": {"host": "127.0.0.1", "port": "8080"}}),
+            initial_global_config_dict=DictConfig({"registry_server": {"host": "127.0.0.1", "port": "8080"}}),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
         )
 
         parsed = parser.parse(parse_config)
 
-        assert parsed["head_server"] == {"host": "127.0.0.1", "port": "8080"}
+        assert parsed["registry_server"] == {"host": "127.0.0.1", "port": "8080"}
         assert parsed["disallowed_ports"] == [8080]
 
     def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
         parser = GlobalConfigDictParser()
-        config = DictConfig({"config_paths": [], "head_server": {"port": 11000}})
+        config = DictConfig({"config_paths": [], "registry_server": {"port": 11000}})
         with raises(NoServerInstancesError) as exc_info:
             parser.raise_on_no_server_instances(config)
         assert "gym env start" in str(exc_info.value)
@@ -3672,17 +3676,17 @@ class TestComposeUnboundAgent:
             self._parse_with_cli(self._config(), self._cli_override(renamed, no_such_field=1), monkeypatch)
 
 
-def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
+def test_partial_registry_server_inherits_the_resolved_host(monkeypatch):
     """Pinning only the port must not suppress the host default.
 
-    A caller that constrains the head server to an allocated port range cannot
+    A caller that constrains the registry server to an allocated port range cannot
     also supply the host: it is the address of whichever node the job lands on,
     which only `use_absolute_ip` resolves, and only here.
     """
     from omegaconf import OmegaConf
 
     from nemo_gym.config.global_config import (
-        HEAD_SERVER_KEY_NAME,
+        REGISTRY_SERVER_KEY_NAME,
         USE_ABSOLUTE_IP,
         GlobalConfigDictParser,
         GlobalConfigDictParserConfig,
@@ -3695,13 +3699,13 @@ def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
         {
             **GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
             USE_ABSOLUTE_IP: True,
-            HEAD_SERVER_KEY_NAME: {"port": 63000},
+            REGISTRY_SERVER_KEY_NAME: {"port": 63000},
         }
     )
     parsed = GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial)
 
-    assert parsed[HEAD_SERVER_KEY_NAME]["port"] == 63000, "explicit port must survive"
-    assert parsed[HEAD_SERVER_KEY_NAME]["host"] == "10.1.2.3", "host must be filled in"
+    assert parsed[REGISTRY_SERVER_KEY_NAME]["port"] == 63000, "explicit port must survive"
+    assert parsed[REGISTRY_SERVER_KEY_NAME]["host"] == "10.1.2.3", "host must be filled in"
 
 
 class TestRolloutRunLabels:
@@ -3764,7 +3768,7 @@ def test_explicit_default_host_skips_hostname_resolution(monkeypatch):
     resolver = MagicMock(side_effect=gaierror("hostname does not resolve"))
     monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", resolver)
     config = GlobalConfigDictParser().parse(_absolute_ip_parse_config({"default_host": "192.0.2.20"}))
-    assert config.head_server.host == "192.0.2.20"
+    assert config.registry_server.host == "192.0.2.20"
     resolver.assert_not_called()
 
 
@@ -3802,7 +3806,7 @@ class TestAbsoluteIpServerTypes:
     @staticmethod
     def _hosts(config) -> dict[str, str]:
         return {
-            "head": config.head_server.host,
+            "head": config.registry_server.host,
             "model": config.model.responses_api_models.m.host,
             "tools": config.tools.resources_servers.r.host,
         }

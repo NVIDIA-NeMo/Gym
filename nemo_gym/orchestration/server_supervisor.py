@@ -40,7 +40,6 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
     DRY_RUN_KEY_NAME,
-    HEAD_SERVER_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -48,6 +47,7 @@ from nemo_gym.config.global_config import (
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     PORT_RANGE_HIGH_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
+    REGISTRY_SERVER_KEY_NAME,
     SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
@@ -60,7 +60,7 @@ from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAIL
 from nemo_gym.orchestration.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
-from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
+from nemo_gym.server_runtime.registry_server import RegistryServer, ServerInstanceDisplayConfig
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers
@@ -475,7 +475,7 @@ class ServerSpinupTimeoutError(RuntimeError):
 
 
 class ServerStartFailedError(RuntimeError):
-    """A Gym server process (or the head server) exited before it was ready.
+    """A Gym server process (or the registry server) exited before it was ready.
 
     ``failure_kind`` is ``server_start_failed``. ``errno`` is the errno of the bind error the server printed, when it
     printed one: ``errno.EADDRINUSE`` means another process took its port between the port check and the bind.
@@ -489,8 +489,8 @@ class ServerStartFailedError(RuntimeError):
         self.errno = errno
 
 
-class HeadServerUnresponsiveError(ServerStartFailedError):
-    """The head server's thread is running but it never answered within `head_server_spinup_timeout_seconds`.
+class RegistryServerUnresponsiveError(ServerStartFailedError):
+    """The registry server's thread is running but it never answered within `registry_server_spinup_timeout_seconds`.
 
     Not resumable: the CLI exits with ``stop_exit_code`` (76), which a job chain reads as "another attempt cannot
     help", instead of holding its allocation in the wait.
@@ -499,20 +499,20 @@ class HeadServerUnresponsiveError(ServerStartFailedError):
     stop_exit_code = 76
 
 
-# How long the supervisor waits for a live head server to answer. 0 or a negative value waits forever.
-HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "head_server_spinup_timeout_seconds"
-_DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC = 900.0
+# How long the supervisor waits for a live registry server to answer. 0 or a negative value waits forever.
+REGISTRY_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "registry_server_spinup_timeout_seconds"
+_DEFAULT_REGISTRY_SERVER_SPINUP_TIMEOUT_SEC = 900.0
 
 
-def _head_server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
-    value = global_config_dict.get(HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
+def _registry_server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
+    value = global_config_dict.get(REGISTRY_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
     if value is None:
-        return _DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC
+        return _DEFAULT_REGISTRY_SERVER_SPINUP_TIMEOUT_SEC
     try:
         return float(value)
     except (TypeError, ValueError):
         raise ConfigError(
-            f"`{HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}` must be a number of seconds, got {value!r}."
+            f"`{REGISTRY_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}` must be a number of seconds, got {value!r}."
         ) from None
 
 
@@ -598,9 +598,9 @@ def _startup_outcome(error: BaseException) -> str:
 
 
 class RunHelper:  # pragma: no cover
-    _head_server: uvicorn.Server
-    _head_server_thread: Thread
-    _head_server_instance: HeadServer
+    _registry_server: uvicorn.Server
+    _registry_server_thread: Thread
+    _registry_server_instance: RegistryServer
 
     _processes: Dict[str, Popen]
     # The output tail of each server in `_processes`, from the stream its errors go to.
@@ -616,7 +616,7 @@ class RunHelper:  # pragma: no cover
     _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
-        """Start the head server and every configured server, and wait until all of them are ready.
+        """Start the registry server and every configured server, and wait until all of them are ready.
 
         Any failure or interrupt before readiness shuts down everything started so far, then re-raises.
         Callers reach their own `shutdown()` only after this returns.
@@ -625,7 +625,7 @@ class RunHelper:  # pragma: no cover
         for attempt in (1, 2):
             self._processes = dict()
             self._output_tails = dict()
-            self._head_server = None
+            self._registry_server = None
             self._h2_ping_sidecar = None
             # Until every server is ready, a server that exits is a failed start (see poll()).
             self._servers_ready = False
@@ -646,20 +646,20 @@ class RunHelper:  # pragma: no cover
         """After a server found its port in use, give it a fresh one in the config every server is started from.
 
         Each server learns every other server's port from that config when it starts, so the caller starts them all
-        again. Only a bind that failed with EADDRINUSE qualifies. The head server moves the same way: every server and
-        the collection client read its port from that config.
+        again. Only a bind that failed with EADDRINUSE qualifies. The registry server moves the same way: every server
+        and the collection client read its port from that config.
         """
         if not isinstance(error, ServerStartFailedError) or error.errno != errno.EADDRINUSE:
             return False
         global_config_dict = get_global_config_dict()
-        if error.server_name == HEAD_SERVER_KEY_NAME:
-            server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME)
+        if error.server_name == REGISTRY_SERVER_KEY_NAME:
+            server_config = global_config_dict.get(REGISTRY_SERVER_KEY_NAME)
         else:
             server_config = getattr(self, "_server_configs", {}).get(error.server_name)
         if server_config is None:
             return False
         taken = [config.get("port") for config in getattr(self, "_server_configs", {}).values()]
-        taken.append(global_config_dict.get(HEAD_SERVER_KEY_NAME, {}).get("port"))
+        taken.append(global_config_dict.get(REGISTRY_SERVER_KEY_NAME, {}).get("port"))
         port = _find_open_port_using_range(
             disallowed_ports=[port for port in taken if isinstance(port, int)],
             port_range_low=global_config_dict[PORT_RANGE_LOW_KEY_NAME],
@@ -683,7 +683,7 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
         self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
-        self._head_server_spinup_timeout_seconds = _head_server_spinup_timeout_seconds(global_config_dict)
+        self._registry_server_spinup_timeout_seconds = _registry_server_spinup_timeout_seconds(global_config_dict)
         self._server_shutdown_timeout_seconds = _server_shutdown_timeout_seconds(global_config_dict)
         self._startup.mark("load_config")
 
@@ -722,9 +722,11 @@ class RunHelper:  # pragma: no cover
         # Assume Nemo Gym Run is for a single agent.
         config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
 
-        # We always run the head server in this `run` command.
-        self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
-        self._startup.mark("start_head_server")
+        # We always run the registry server in this `run` command.
+        self._registry_server, self._registry_server_thread, self._registry_server_instance = (
+            RegistryServer.run_webserver()
+        )
+        self._startup.mark("start_registry_server")
 
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
@@ -793,7 +795,7 @@ class RunHelper:  # pragma: no cover
                 )
             )
 
-        self._head_server_instance.set_server_instances(
+        self._registry_server_instance.set_server_instances(
             [inst.model_dump(mode="json") for inst in self._server_instance_display_configs]
         )
 
@@ -804,12 +806,12 @@ class RunHelper:  # pragma: no cover
         self._startup.mark("spawn_servers")
 
         self._server_client = ServerClient(
-            head_server_config=ServerClient.load_head_server_config(),
+            registry_server_config=ServerClient.load_registry_server_config(),
             global_config_dict=global_config_dict,
         )
 
-        self._wait_for_head_server()
-        self._startup.mark("wait_for_head_server")
+        self._wait_for_registry_server()
+        self._startup.mark("wait_for_registry_server")
 
         print("Waiting for servers to spin up")
         if global_config_dict[DRY_RUN_KEY_NAME]:
@@ -850,52 +852,54 @@ class RunHelper:  # pragma: no cover
         )
         return process
 
-    def _wait_for_head_server(self) -> None:
-        """Wait until the head server answers, for at most `head_server_spinup_timeout_seconds`.
+    def _wait_for_registry_server(self) -> None:
+        """Wait until the registry server answers, for at most `registry_server_spinup_timeout_seconds`.
 
-        A head server thread that ended (a failed bind) never will: that is a typed start failure, with EADDRINUSE when
-        its port is taken now, so `start` moves it to a fresh port once. A live head server that never answers is a
-        `HeadServerUnresponsiveError`, which stops the run instead of holding its allocation.
+        A registry server thread that ended (a failed bind) never will: that is a typed start failure, with EADDRINUSE
+        when its port is taken now, so `start` moves it to a fresh port once. A live registry server that never answers
+        is a `RegistryServerUnresponsiveError`, which stops the run instead of holding its allocation.
         """
-        print("Waiting for head server to spin up")
-        timeout_seconds = getattr(self, "_head_server_spinup_timeout_seconds", _DEFAULT_HEAD_SERVER_SPINUP_TIMEOUT_SEC)
+        print("Waiting for registry server to spin up")
+        timeout_seconds = getattr(
+            self, "_registry_server_spinup_timeout_seconds", _DEFAULT_REGISTRY_SERVER_SPINUP_TIMEOUT_SEC
+        )
         deadline = monotonic() + timeout_seconds if timeout_seconds > 0 else None
         poll_count = 0
         while True:
-            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
+            status = self._server_client.poll_for_status(REGISTRY_SERVER_KEY_NAME)
             if status == "success":
                 return
-            if not self._head_server_thread.is_alive():
-                head = getattr(getattr(self, "_head_server_instance", None), "config", None)
-                bind_errno = _port_bind_errno(head.host, head.port) if head is not None else None
+            if not self._registry_server_thread.is_alive():
+                registry = getattr(getattr(self, "_registry_server_instance", None), "config", None)
+                bind_errno = _port_bind_errno(registry.host, registry.port) if registry is not None else None
                 raise ServerStartFailedError(
-                    "server_start_failed: the head server exited before it was ready; its error is in the log "
+                    "server_start_failed: the registry server exited before it was ready; its error is in the log "
                     + (
-                        f"above. Its port {head.port} is already in use."
+                        f"above. Its port {registry.port} is already in use."
                         if bind_errno == errno.EADDRINUSE
-                        else f"above. Set its port with `++{HEAD_SERVER_KEY_NAME}.port=<port>` if it is taken."
+                        else f"above. Set its port with `++{REGISTRY_SERVER_KEY_NAME}.port=<port>` if it is taken."
                     ),
-                    server_name=HEAD_SERVER_KEY_NAME,
+                    server_name=REGISTRY_SERVER_KEY_NAME,
                     errno=bind_errno,
                 )
             if deadline is not None and monotonic() >= deadline:
-                raise HeadServerUnresponsiveError(
-                    f"server_start_failed: the head server did not answer within {timeout_seconds:g}s although it is "
-                    f"running (last status `{status}`). Stopping instead of waiting on the allocation. Raise the "
-                    f"limit with `++{HEAD_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, or set it to 0 to wait "
-                    "without a limit.",
-                    server_name=HEAD_SERVER_KEY_NAME,
+                raise RegistryServerUnresponsiveError(
+                    f"server_start_failed: the registry server did not answer within {timeout_seconds:g}s although it "
+                    f"is running (last status `{status}`). Stopping instead of waiting on the allocation. Raise the "
+                    f"limit with `++{REGISTRY_SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME}=<seconds>`, or set it to 0 to "
+                    "wait without a limit.",
+                    server_name=REGISTRY_SERVER_KEY_NAME,
                     errno=None,
                 )
 
             if poll_count % 10 == 0:  # Print every 30s
-                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+                print(f"Registry server is not up yet (status `{status}`). Sleeping...")
 
             poll_count += 1
             sleep(3)
 
     def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
-        """Mark the head ready only after every managed server and model endpoint is reachable."""
+        """Mark the registry server ready only after every managed server and model endpoint is reachable."""
         self.wait_for_spinup()
         if self._startup is not None:
             self._startup.mark("wait_for_servers")
@@ -903,7 +907,7 @@ class RunHelper:  # pragma: no cover
         self.wait_for_model_endpoints(global_config_dict)
         if self._startup is not None:
             self._startup.mark("wait_for_model_endpoints")
-        self._head_server_instance.mark_ready()
+        self._registry_server_instance.mark_ready()
         self._servers_ready = True
         if self._startup is not None:
             self._startup.finish()
@@ -927,8 +931,8 @@ class RunHelper:  # pragma: no cover
         print(f"{'#' * 100}\n")
 
     def poll(self) -> None:
-        if not self._head_server_thread.is_alive():
-            raise RuntimeError("Head server finished unexpectedly!")
+        if not self._registry_server_thread.is_alive():
+            raise RuntimeError("Registry server finished unexpectedly!")
 
         if self._h2_ping_sidecar is not None:
             self._h2_ping_sidecar.check()
@@ -1111,13 +1115,13 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
             h2_ping_sidecar.stop()
             self._h2_ping_sidecar = None
 
-        # None before the head server starts and after an earlier shutdown.
-        if self._head_server is not None:
-            self._head_server.should_exit = True
-            self._head_server_thread.join()
+        # None before the registry server starts and after an earlier shutdown.
+        if self._registry_server is not None:
+            self._registry_server.should_exit = True
+            self._registry_server_thread.join()
 
-        self._head_server = None
-        self._head_server_thread = None
+        self._registry_server = None
+        self._registry_server_thread = None
 
         print("NeMo Gym finished!")
 

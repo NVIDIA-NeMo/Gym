@@ -2467,7 +2467,7 @@ class TestCli:
 
     def test_build_run_advertises_node_ip_for_the_model_server_only(self, tmp_path):
         """The sandboxed harness reaches the model server, so that is the one server the run config moves off
-        loopback; the head server (its config endpoint returns the merged configuration), the agent and the
+        loopback; the registry server (its config endpoint returns the merged configuration), the agent and the
         environment server are not named and keep 127.0.0.1."""
         agent = resolve_agent("hermes_agent")
         path, _ = build_run(self._prepared(tmp_path), agent, sandbox="opensandbox", overrides=[])

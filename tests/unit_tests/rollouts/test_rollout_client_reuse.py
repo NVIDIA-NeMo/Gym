@@ -17,7 +17,7 @@ from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 def load_client(monkeypatch):
     def load(head=None):
         return ServerClient(
-            head_server_config=head or BaseServerConfig(host="localhost", port=11000),
+            registry_server_config=head or BaseServerConfig(host="localhost", port=11000),
             global_config_dict=OmegaConf.create({"version": 0}),
         )
 
@@ -82,7 +82,7 @@ def test_switching_heads_and_explicit_versus_default_invalidates_cache(load_clie
 def test_failed_initial_load_is_retried(load_client):
     helper = RolloutCollectionHelper(reuse_server_client=True)
     client = ServerClient(
-        head_server_config=BaseServerConfig(host="localhost", port=11000),
+        registry_server_config=BaseServerConfig(host="localhost", port=11000),
         global_config_dict=OmegaConf.create({}),
     )
     load_client.side_effect = [ConnectionError("head unavailable"), client]
@@ -111,4 +111,4 @@ def test_client_cache_is_not_serialized(load_client):
     helper.setup_server_client()
     dumped = helper.model_dump()
     assert dumped["reuse_server_client"] is True
-    assert not {"_cached_server_client", "_cached_head_server_config"} & dumped.keys()
+    assert not {"_cached_server_client", "_cached_registry_server_config"} & dumped.keys()

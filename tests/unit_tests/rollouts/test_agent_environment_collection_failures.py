@@ -104,7 +104,7 @@ async def _collect(monkeypatch, statuses: list[int]):
             },
         }
         env_client = ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=1),
             global_config_dict=OmegaConf.create(global_config),
         )
         env = LegacyAgentEnvironmentServer(
@@ -122,7 +122,7 @@ async def _collect(monkeypatch, statuses: list[int]):
         servers.append(await _serve(env_app))
         global_config["environment"]["environment_servers"]["legacy_agent"]["port"] = servers[-1][2]
         collector_client = ServerClient(
-            head_server_config=BaseServerConfig(host="127.0.0.1", port=1),
+            registry_server_config=BaseServerConfig(host="127.0.0.1", port=1),
             global_config_dict=OmegaConf.create(global_config),
         )
         monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda *args: collector_client)

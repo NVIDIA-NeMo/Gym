@@ -58,7 +58,7 @@ allow_deserialization_module("responses_api_agents.haystack_agent.chat_generator
 
 # Lazily-constructed, process-wide client. We don't build it at import time so the module
 # can be imported (e.g. by Haystack deserialization or in unit tests) without a running
-# Gym head server. Tests may monkeypatch this attribute with a mock.
+# Gym registry server. Tests may monkeypatch this attribute with a mock.
 _server_client: Optional[ServerClient] = None
 
 

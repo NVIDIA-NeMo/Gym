@@ -358,9 +358,9 @@ def test_supervisor_is_the_only_writer_of_the_active_servers_gauge():
 
 
 def test_server_requirements_contain_no_spaces():
-    """`head_server_deps` is interpolated into a shell command line **unquoted**.
+    """`parent_process_deps` is interpolated into a shell command line **unquoted**.
 
-    `setup_env_command` builds `uv pip install ... {" ".join(head_server_deps)}`, so a
+    `setup_env_command` builds `uv pip install ... {" ".join(parent_process_deps)}`, so a
     requirement containing spaces is split into separate arguments by the shell. The
     spaced PEP 508 form `nemo-lens[sdk] @ git+https://...` is therefore unusable here.
 
