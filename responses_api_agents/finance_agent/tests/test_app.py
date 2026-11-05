@@ -21,6 +21,7 @@ stops parsing or stops setting a required field fails these tests.
 
 import asyncio
 import json
+from http.cookies import SimpleCookie
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -32,7 +33,13 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from yarl import URL
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest, OutcomeAction, agent_outcome_policy
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    agent_outcome_policy,
+    check_agent_seed_rejected,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -43,7 +50,6 @@ from nemo_gym.core import (
 )
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
     FinanceAgentConfig,
@@ -1011,7 +1017,8 @@ def _session_seed(**overrides) -> AgentSeedSessionRequest:
 def _tool_reply(body: str, *, cookies: dict | None = None, status: int = 200) -> MagicMock:
     reply = MagicMock()
     reply.status = status
-    reply.cookies = cookies or {}
+    # As aiohttp gives them: Morsels in a SimpleCookie, not plain strings.
+    reply.cookies = SimpleCookie(cookies or {})
     reply.content.read = AsyncMock(return_value=body.encode())
     return reply
 
@@ -1106,6 +1113,21 @@ class TestAgentSessions:
     def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
         agent, _ = _make_agent_and_client()
         assert check_agent_seed_rejected(agent.setup_webserver(), _session_seed(**unsupported)).startswith(reason)
+
+    def test_an_optional_mcp_access_beside_the_direct_grant_is_accepted(self) -> None:
+        """Only a required MCP grant is refused; an optional one the agent ignores must not fail the seed."""
+        _, client = _make_agent_and_client()
+        optional = MCPToolAccess(
+            name="resources",
+            required=False,
+            connection=MCPStreamableHTTPConnection(url="http://resources:9000/mcp"),
+        )
+
+        reply = client.post(
+            "/v1/agent_sessions", json=_session_seed(tool_accesses=[_GRANT, optional]).model_dump(mode="json")
+        )
+
+        assert reply.status_code == 200, reply.text
 
     def test_tool_calls_go_through_the_grant_and_close_returns_the_cookie_jar(self, monkeypatch) -> None:
         model_mock = _dotjson_mock(
@@ -1205,6 +1227,38 @@ class TestAgentSessions:
         assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
         assert agent_outcome_policy(response) == OutcomeAction.RETRY
 
+    @pytest.mark.parametrize(
+        ("status", "action"),
+        [
+            (400, OutcomeAction.VERIFY),
+            (413, OutcomeAction.VERIFY),
+            (422, OutcomeAction.VERIFY),
+            (408, OutcomeAction.RETRY),
+            (425, OutcomeAction.RETRY),
+            (429, OutcomeAction.RETRY),
+            (500, OutcomeAction.RETRY),
+            (502, OutcomeAction.RETRY),
+            (504, OutcomeAction.RETRY),
+            (401, OutcomeAction.FAIL),
+            (403, OutcomeAction.FAIL),
+            (404, OutcomeAction.FAIL),
+        ],
+    )
+    def test_every_documented_model_status_through_raise_for_status(self, status: int, action: OutcomeAction) -> None:
+        """Each status row of the README table, with the error raised by the agent's own raise_for_status call."""
+        agent, client = _session_client(AsyncMock())
+        agent.server_client.post = AsyncMock(return_value=_model_error_reply(status))
+        _seed(client)
+
+        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+
+        assert response.status == "failed"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+            "failure_kind": "model_request_error",
+            "status_code": status,
+        }
+        assert agent_outcome_policy(response) == action
+
     @pytest.mark.parametrize("status", [500, 400])
     def test_context_overflow_in_a_session_is_graded_at_any_status(self, status: int) -> None:
         """An overflow is the model's own failure, so the episode is verified, not dispatched again until it fits."""
@@ -1232,6 +1286,22 @@ class TestAgentSessions:
         assert response.status != "failed"
         assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
         assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+
+    def test_legacy_responses_reply_carries_the_resources_cookie_for_verify(self) -> None:
+        """A legacy /run reads the resources cookie for its /verify from this /v1/responses reply."""
+        agent, client = _make_agent_and_client()
+        tool_reply = _dotjson_mock({"results": "submitted"})
+        tool_reply.cookies = SimpleCookie({"session": "after-submit"})
+        agent.server_client.post = AsyncMock(
+            side_effect=_route(
+                _dotjson_mock(_tool_call_response("submit_final_result", '{"final_result": "42"}')), tool_reply
+            )
+        )
+
+        response = client.post("/v1/responses", json=_INPUT)
+
+        assert response.status_code == 200, response.text
+        assert response.cookies.get("session") == "after-submit"
 
     def test_tool_abort_in_a_session_is_graded_like_the_legacy_run(self, monkeypatch) -> None:
         """An aborting tool error ends the loop as upstream does; the answer is graded, not retried."""
@@ -1280,3 +1350,37 @@ class TestAgentSessions:
             ("sec_filing_search", "failed", "http_404"),
             ("submit_final_result", "completed", None),
         ]
+
+    def test_captured_model_calls_carry_the_invocation_session_header(self, monkeypatch) -> None:
+        """Capture ties each model call to its AgentInvocation through x-session-id; a legacy /run sends none."""
+        model_mock = _dotjson_mock(_tool_call_response("submit_final_result", '{"final_result": "42"}'))
+        agent, client = _session_client(model_mock, observability=True)
+        monkeypatch.setattr(
+            "responses_api_agents.finance_agent.app.http_request",
+            AsyncMock(return_value=_tool_reply('{"results": "submitted"}')),
+        )
+        _seed(client)
+
+        assert client.post("/ng-rollout/rollout/v1/responses", json=_INPUT).status_code == 200
+
+        assert [call.kwargs.get("headers") for call in agent.server_client.post.await_args_list] == [
+            {"x-session-id": "root"}
+        ]
+
+        legacy_agent, legacy_client = _make_agent_and_client()
+        legacy_agent.server_client.global_config_dict = {"observability_enabled": True}
+        legacy_agent.server_client.post = AsyncMock(
+            side_effect=_route(
+                _dotjson_mock(_tool_call_response("submit_final_result", '{"final_result": "42"}')),
+                _dotjson_mock({"results": "submitted"}),
+            )
+        )
+
+        assert legacy_client.post("/ng-rollout/rollout/v1/responses", json=_INPUT).status_code == 200
+
+        model_calls = [
+            call
+            for call in legacy_agent.server_client.post.await_args_list
+            if call.kwargs["server_name"] == _MODEL_SERVER
+        ]
+        assert model_calls and all("headers" not in call.kwargs for call in model_calls)
