@@ -394,7 +394,7 @@ async def test_a_submitted_run_is_completed_with_usage_and_observations(agent) -
 
     assert response.status == "completed"
     assert response.usage.total_tokens == 45
-    assert response.metadata["miniswe_termination"] == "completed"
+    assert response.metadata["mini_swe_termination"] == "completed"
     assert response.metadata["harness_pid"] == "7"
     assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
     bundle = state.observations
@@ -415,7 +415,7 @@ async def test_a_limit_stop_is_incomplete_and_verifiable(agent, exit_status) -> 
     response = await agent._activate(state, body())
 
     assert response.status == "incomplete"
-    assert response.metadata["miniswe_termination"] == exit_status
+    assert response.metadata["mini_swe_termination"] == exit_status
 
 
 async def test_a_deadline_stop_is_incomplete_with_partial_work(agent) -> None:
@@ -444,7 +444,7 @@ async def test_a_run_killed_mid_step_is_the_agents_own_result(agent) -> None:
 
     response = await agent._activate(state, body())
 
-    assert (response.status, response.metadata["miniswe_termination"]) == ("incomplete", "killed")
+    assert (response.status, response.metadata["mini_swe_termination"]) == ("incomplete", "killed")
 
 
 @pytest.mark.parametrize(

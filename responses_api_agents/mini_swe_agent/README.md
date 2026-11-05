@@ -126,7 +126,7 @@ response and the reported conversation.
 | mini-SWE ended with | Response | Verified |
 | --- | --- | --- |
 | `Submitted` | `completed` | Yes |
-| `LimitsExceeded`, `TimeExceeded`, a context-window error, or Gym's deadline | `incomplete`; `miniswe_termination` names it | Yes |
+| `LimitsExceeded`, `TimeExceeded`, a context-window error, or Gym's deadline | `incomplete`; `mini_swe_termination` names it | Yes |
 | No exit status: the run was killed mid-step, by its own command or an OOM kill | `incomplete`, `killed` | Yes |
 | A model call that failed (LiteLLM's error, such as `RateLimitError`) or `RepeatedFormatError` | `failed` with `ng_agent_outcome` | By the Environment Server's outcome policy |
 | No trajectory, a required MCP server that did not connect, or another exception | HTTP 500, retryable | No |

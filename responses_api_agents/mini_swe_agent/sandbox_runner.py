@@ -27,7 +27,7 @@ from uuid import uuid4
 
 
 # Set for each bash command while task MCP servers are running, so mcp_cli.py can record the call that made it.
-TOOL_CALL_ID_VARIABLE = "NEMO_GYM_MINISWE_TOOL_CALL_ID"
+TOOL_CALL_ID_VARIABLE = "NEMO_GYM_MINI_SWE_TOOL_CALL_ID"
 # mcp_cli.py connects to every server at once, each within this many seconds.
 MCP_CONNECT_TIMEOUT_S = 30
 MCP_UNAVAILABLE_EXIT = 3

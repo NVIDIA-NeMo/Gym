@@ -404,7 +404,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             except Exception:
                 LOG.exception("Could not build mini-SWE observations at close")
         observations = state.observations or AgentObservationBundle(
-            source="miniswe", gaps=[ObservationGap(code="observation_capture_failed")]
+            source="mini_swe", gaps=[ObservationGap(code="observation_capture_failed")]
         )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -517,7 +517,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         cleanup = state.session.cleanup
         sandbox_outcome = stopped or ("completed" if status in ("completed", "incomplete") else "failed")
         return AgentObservationBundle(
-            source="miniswe",
+            source="mini_swe",
             records=[
                 invocation,
                 *records,
@@ -597,8 +597,8 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 "harness_execution": "sandbox",
-                "miniswe_version": MINI_SWE_VERSION,
-                "miniswe_termination": termination,
+                "mini_swe_version": MINI_SWE_VERSION,
+                "mini_swe_termination": termination,
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"stop_reason": "wall_time"} if timed_out else {}),
                 **(

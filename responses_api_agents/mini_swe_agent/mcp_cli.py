@@ -22,7 +22,7 @@ SERVERS_FILE = Path(__file__).with_name("mcp_servers.json")
 SOCKET_FILE = Path(__file__).with_name("mcp.sock")
 CALLS_FILE = Path(__file__).with_name("mcp_calls.jsonl")
 # mini-SWE's local environment sets it for each bash command; see sandbox_runner.py.
-TOOL_CALL_ID_VARIABLE = "NEMO_GYM_MINISWE_TOOL_CALL_ID"
+TOOL_CALL_ID_VARIABLE = "NEMO_GYM_MINI_SWE_TOOL_CALL_ID"
 # Tool results and listings can be large (screenshots, page snapshots).
 MESSAGE_LIMIT = 64 * 1024 * 1024
 # Servers connect concurrently, each within this budget; the runner waits for all of them (see sandbox_runner.py).
