@@ -35,6 +35,8 @@ GLOBAL_CONFIG = {
     "sandbox": {"local": {}},
     "labelled_sandbox": {"local": {}, "default_metadata": {"team": "provider", "pool": "a"}},
     "remote_sandbox": {"opensandbox": {}},
+    "misspelled_sandbox": {"typo_provider": {}},
+    "malformed_sandbox": {"local": 17},
     "policy_model": {"responses_api_models": {"vllm_model": {"host": "10.0.0.5", "port": 9000}}},
 }
 
@@ -97,6 +99,10 @@ def mcp_grant(*, required):
         (agent(sandbox_provider="unknown_sandbox"), seed(borrowed=False), "unknown_sandbox"),
         (agent(sandbox_provider="sandbox", sandbox_config={"imagee": "x"}), seed(borrowed=False), "imagee"),
         (agent(sandbox_provider="sandbox", sandbox_config={"ports": [0]}), seed(borrowed=False), "port"),
+        (agent(sandbox_provider="sandbox", sandbox_config={"workdir": 123}), seed(borrowed=False), "workdir"),
+        # Provider blocks that resolve but cannot build a provider.
+        (agent(), seed(provider="misspelled_sandbox"), "typo_provider"),
+        (agent(sandbox_provider="malformed_sandbox"), seed(borrowed=False), "must be a mapping"),
     ],
 )
 def test_unservable_seeds_are_final_refusals(instance, body, reason):

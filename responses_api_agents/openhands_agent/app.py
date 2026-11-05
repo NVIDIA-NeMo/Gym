@@ -202,7 +202,8 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             if not isinstance(access.connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("OpenHands supports only direct sandbox connections")
             workdir, provider_ref = access.workdir, access.connection.provider_config_ref
-        path = PurePosixPath(workdir or "")
+        # A workdir that is not a string (sandbox_config is untyped) is refused like an empty one.
+        path = PurePosixPath(workdir if isinstance(workdir, str) else "")
         if (
             not path.is_absolute()
             or ".." in path.parts
@@ -217,10 +218,11 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
                 provider_name=next(iter(provider_config), None),
             )
+            # An unknown provider name or malformed provider settings fail here, before any sandbox exists.
+            provider = create_provider(provider_config)
         except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
 
-        provider = create_provider(provider_config)
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
         else:
