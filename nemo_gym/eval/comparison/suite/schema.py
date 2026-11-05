@@ -42,9 +42,18 @@ class SuiteComparisonConfig(BaseNeMoGymCLIConfig):
         default=None, description="Report directory; defaults to the suite YAML's directory."
     )
     report_format: ReportFormat = Field(default="both", description="Reports to write: md, json, or both.")
-    check_health: bool = False
-    health_check_workers: int | None = Field(default=None, ge=1)
-    health_check_output_dirpath: str | None = None
+    check_health: bool = Field(
+        default=False, description="Check rollout health and add advisory warnings to comparison reports."
+    )
+    health_check_workers: int | None = Field(
+        default=None,
+        ge=1,
+        description="Number of worker processes for --check-health; defaults to automatic selection.",
+    )
+    health_check_output_dirpath: str | None = Field(
+        default=None,
+        description="Retain detailed reports for --check-health; defaults to temporary storage removed after checking.",
+    )
 
 
 class SuiteMetricDefinition(_SuiteModel):
