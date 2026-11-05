@@ -13,7 +13,7 @@ phase machine::
 The control plane here owns everything that is the same for every participant:
 
 - checkpoint-ID fencing, phases, and idempotent replay of completed operations;
-- retire: refusing an attempt's requests, stopping its work and freeing its state before replying. The
+- retire: refusing an attempt's requests, stopping its work and releasing its state before replying. The
   refusal outlives the retire, because a request a caller sent before its own retire can arrive after
   this server's retire finished; it lasts until the controller calls ``forget`` for the rollout;
 - restore refuses the attempts it replaces in the same way, until ``forget``:
@@ -321,8 +321,8 @@ class ClaimRestored(Protocol):
     ) -> AbstractAsyncContextManager[Optional[dict[str, Any]]]: ...
 
 
-class SessionFreed(Protocol):
-    """Told of a session a participant freed outside a request.
+class SessionReleased(Protocol):
+    """Told of a session a participant released outside a request.
 
     ``until_forget`` says the session stays refused until the controller forgets its rollout.
     """
@@ -355,12 +355,12 @@ class CheckpointParticipant(ABC):
         self.on_change: Optional[Callable[[], Awaitable[None]]] = None
         # With several workers, takes a restored record from the coordinator by the key ``claim_key`` gives it.
         # The coordinator leases the record to this worker until the block it opens ends.
-        # A failure gives it back, once the teardown it names has freed what the block installed.
+        # A failure gives it back, once the teardown it names has released what the block installed.
         self.claim_restored: Optional[ClaimRestored] = None
-        # With several workers, told of each session this participant freed outside a request, such as by a retire,
-        # so the session's routing claim ends too.
-        # A retired session's claim lasts until the forget that ends its refusal, which tells this again.
-        self.on_session_freed: Optional[SessionFreed] = None
+        # With several workers, told of each session this participant released outside a request, such as by a retire,
+        # so the worker's ownership of the session ends too.
+        # A retired session's ownership lasts until the forget that ends its refusal, which tells this again.
+        self.on_session_released: Optional[SessionReleased] = None
 
     async def notify(self) -> None:
         """Wake a prepare that waits for this participant to become ready."""
@@ -407,7 +407,7 @@ class CheckpointParticipant(ABC):
     @abstractmethod
     async def retire(self, episode_id: EpisodeId) -> None:
         """Stop the running work of ``episode_id`` and earlier attempts, wait until it has stopped,
-        then free their state, live or restored.
+        then release their state, live or restored.
         Return only once nothing of them remains.
 
         If this raises or is cancelled, whatever is still running must stay tracked, so a retry stops it again.
@@ -453,12 +453,12 @@ class CheckpointParticipant(ABC):
         """Unclaimed restored episodes: no next attempt has used them here yet. Each is named by the attempt that continues it.
 
         A commit deletes the ones its scope leaves out: the controller no longer continues them,
-        and nothing else would free their restored state.
+        and nothing else would release their restored state.
         """
         return []
 
     async def delete_restored(self, episode_id: EpisodeId) -> None:
-        """Free the restored state of ``episode_id``,
+        """Release the restored state of ``episode_id``,
         a replacement attempt that never started here and that the controller no longer continues.
 
         Unlike a retire, it must leave nothing that refuses the attempt later, such as a capture-ledger fence:
@@ -485,7 +485,7 @@ class CheckpointParticipant(ABC):
         Runs once the restore's install has finished, and before another restore installs.
         Raising keeps admission closed, and the next resume or restore calls this again.
         The default keeps everything:
-        the controller retires the restored attempts after a failed restore, which frees it.
+        the controller retires the restored attempts after a failed restore, which releases it.
         """
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
@@ -515,12 +515,12 @@ class CheckpointParticipant(ABC):
         """The identities of restored state no request has used yet, as ``record_identity`` names them.
 
         With several workers, the coordinator compares them with every worker's records,
-        and frees a restored copy another worker's live copy replaces with ``delete_unclaimed_session``.
+        and releases a restored copy another worker's live copy replaces with ``delete_unclaimed_session``.
         """
         raise NotImplementedError(f"the {self.kind} participant does not report its unclaimed restored state")
 
     async def delete_unclaimed_session(self, identity: str) -> None:
-        """Free the restored state named by ``identity`` if no request has used it, refusing nothing later."""
+        """Release the restored state named by ``identity`` if no request has used it, refusing nothing later."""
         raise NotImplementedError(f"the {self.kind} participant does not delete unclaimed restored state")
 
     @staticmethod
@@ -584,7 +584,7 @@ class ParticipantControlPlane:
         self._write: Optional[_Write] = None
         # The last restore's install.
         # It can outlive the restore's deadline, as a thread does,
-        # and a retire must not free restored state before the install that brings it finishes.
+        # and a retire must not release restored state before the install that brings it finishes.
         self._install: Optional[asyncio.Task] = None
         # Reopens admission once an install that outlived its failed restore has finished.
         self._reopening: Optional[asyncio.Task] = None
@@ -760,7 +760,7 @@ class ParticipantControlPlane:
             await self.participant.wait_changed(min(remaining, 1.0))
 
     async def retire(self, request: RetireRequest) -> dict[str, Any]:
-        """Refuse these attempts, stop their running work and free their state, then reply.
+        """Refuse these attempts, stop their running work and release their state, then reply.
 
         Allowed when idle, and after a restore, where nothing is running yet.
         While a checkpoint is open it is refused: stopping an episode waits for its final cleanup,

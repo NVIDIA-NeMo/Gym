@@ -963,14 +963,14 @@ class TestResourcesSessions:
 
         provider.close_error = RuntimeError("sandbox API unavailable")
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
-        assert server._fence.closed_episode("rs-1") is None
+        assert server._resources_session_fences.get("rs-1") is None
         assert "rs-1" in server._sessions
 
         provider.close_error = None
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
         assert provider.closed == 1
         assert server._sessions == {}
-        assert server._fence.closed_episode("rs-1") == EPISODE_ID
+        assert server._resources_session_fences.get("rs-1") == EPISODE_ID
 
     def test_failed_stop_at_verify_keeps_ownership_and_fails_the_request(self):
         server, client = _session_client(raise_server_exceptions=False)
@@ -1092,7 +1092,7 @@ class TestResourcesSessions:
         try:
             with pytest.raises(RuntimeError, match="sandbox API unavailable"):
                 await close
-            assert server._fence.closed_episode("rs-1") is None
+            assert server._resources_session_fences.get("rs-1") is None
             assert "rs-1" in server._sessions
             provider = _LocalFakeProvider.instances[-1]
             provider.close_error = None
@@ -1141,7 +1141,7 @@ class TestResourcesSessions:
         assert pending.cells == []
         with pytest.raises(RuntimeError, match="sandbox stop failed"):
             await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
-        assert server._fence.closed_episode("rs-1") is None
+        assert server._resources_session_fences.get("rs-1") is None
 
         provider.close_error = None
         monkeypatch.setattr(_LocalFakeProvider, "upload_file", real_upload)
@@ -1162,7 +1162,7 @@ class TestResourcesSessions:
         assert provider.closed == 1
         assert server._sessions == {}
 
-    def test_typed_seed_cannot_take_over_existing_cookie_sandbox(self) -> None:
+    def test_episode_seed_cannot_take_over_existing_agent_run_sandbox(self) -> None:
         server, client = _session_client()
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
         assert client.post("/stateful_python_code_exec", json={"code": "value = 42"}).status_code == 200
@@ -1179,7 +1179,7 @@ class TestResourcesSessions:
             assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {} and provider.closed == 1
 
-    def test_legacy_seed_keeps_working(self):
+    def test_agent_run_seed_keeps_working(self):
         server, client = _session_client()
 
         # An Agent's /run seeds with the row itself.
@@ -1190,7 +1190,7 @@ class TestResourcesSessions:
         assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {}
 
-    def test_cookie_reseed_retries_failed_sandbox_stop_before_reset(self) -> None:
+    def test_agent_run_reseed_retries_failed_sandbox_stop_before_reset(self) -> None:
         server, client = _session_client(raise_server_exceptions=False)
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
         assert client.post("/stateful_python_code_exec", json={"code": "value = 42"}).status_code == 200
