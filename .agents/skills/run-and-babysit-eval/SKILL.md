@@ -92,7 +92,8 @@ gym eval submit --config submit.yaml            # --select a,b submits only thos
 ```
 
 The job id is `gym_job_id` in the run directory's `gym-job.json` (or in `gym eval submit --json`). The
-`Run directory:` line ends with it but wraps when stdout is not a terminal.
+`Run directory:` line ends with it but wraps when stdout is not a terminal. The same file has each
+benchmark's Slurm `job_id` and the Gym commit that submitted the run.
 
 A resumable benchmark is a chain of Slurm jobs. Each job queues its successor (`afternotok`) and a
 sentinel (`afterany`), then reads its predecessor's final state:
