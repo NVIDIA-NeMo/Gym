@@ -707,7 +707,7 @@ def test_health_only_accepts_already_selected_rows(prepared_run, newer):
     from scripts.harness_conformance.runner import inspect_episode
     from scripts.harness_conformance.scenarios import SCENARIOS
 
-    from nemo_gym.rollouts.rollout_health import JournalHealthUnavailable, run_health_checks
+    from nemo_gym.rollouts.rollout_health import run_health_checks
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -735,8 +735,8 @@ def test_health_only_accepts_already_selected_rows(prepared_run, newer):
         report = inspect_episode(SCENARIOS[0], output.parent, {})
         assert report is not None
     else:
-        with pytest.raises(JournalHealthUnavailable, match="superseded outcomes"):
-            run_health_checks(output, workers=1)
+        result = run_health_checks(output, workers=1)
+        assert len(result.rollouts) == int(newer == "succeeded")
     assert before == (output.read_bytes(), failures_path_for(output).read_bytes())
 
 
@@ -1054,7 +1054,7 @@ def test_incomplete_legacy_cache_never_erases_nonempty_outcomes(prepared_run, ar
 
 
 def test_output_named_failures_checks_its_own_history(prepared_run):
-    from nemo_gym.rollouts.rollout_health import JournalHealthUnavailable, run_health_checks
+    from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_store import raw_outcomes_are_selected
 
     original, prepare = prepared_run
@@ -1067,8 +1067,9 @@ def test_output_named_failures_checks_its_own_history(prepared_run):
         store.record_outcome(row | {"reward": 0.0, "response": {}})
     assert collection._expand_input_glob(str(output)) == [str(output)]
     assert not raw_outcomes_are_selected(output)
-    with pytest.raises(JournalHealthUnavailable, match="superseded"):
-        run_health_checks(output, workers=1)
+    result = run_health_checks(output, workers=1)
+    assert len(result.rollouts) == 1
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
 
 
 async def test_no_progress_resume_uses_bounded_infrastructure_retries(runner_config, monkeypatch, tmp_path):
