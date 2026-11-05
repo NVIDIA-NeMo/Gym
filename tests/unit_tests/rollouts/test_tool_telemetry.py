@@ -8,7 +8,17 @@ from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.trajectory.trajectory_record import NG_TRAJECTORY_KEY
 
 
-def _tool(span_id, *, name="bash", status="completed", start=100.0, end=100.5, parent=None, boundary="lifecycle"):
+def _tool(
+    span_id,
+    *,
+    name="bash",
+    status="completed",
+    start=100.0,
+    end=100.5,
+    parent=None,
+    boundary="lifecycle",
+    instance=None,
+):
     timing = {"boundary": boundary, "timing_source": "opencode.tool_part", "started_at": start, "completed_at": end}
     if start is not None and end is not None:
         timing |= {"duration_ms": (end - start) * 1000, "duration_source": "wall_clock"}
@@ -20,6 +30,7 @@ def _tool(span_id, *, name="bash", status="completed", start=100.0, end=100.5, p
         "tool_name": name,
         "status": status,
         "timings": [timing],
+        "agent_instance": instance,
     }
 
 
@@ -125,3 +136,41 @@ def test_a_v1_record_or_a_malformed_tool_records_nothing_and_does_not_raise(tele
 
     assert spans.get_finished_spans() == ()
     assert gym_metrics.TOOL_CALLS_INSTRUMENT not in metrics()
+
+
+def test_spans_are_keyed_and_parented_within_their_agent_instance(telemetry) -> None:
+    dispatch, spans, _ = telemetry
+    result = _result(
+        _tool("parent", instance="a", name="task-a"),
+        _tool("parent", instance="b", name="task-b"),
+        _tool("child", instance="a", parent="parent", start=100.1, end=100.2),
+    )
+
+    tool_telemetry.record_tool_telemetry(result, dispatch)
+
+    finished = spans.get_finished_spans()
+    assert len(finished) == 3
+    by_name = {span.attributes.get(gym_metrics.TOOL_NAME_ATTRIBUTE): span for span in finished}
+    child = next(span for span in finished if span.attributes[gym_metrics.TOOL_SPAN_ID_ATTRIBUTE] == "child")
+    assert child.parent.span_id == by_name["task-a"].context.span_id
+
+
+def test_a_chain_longer_than_the_recursion_limit_is_emitted_in_full(telemetry) -> None:
+    import sys
+
+    dispatch, spans, _ = telemetry
+    depth = sys.getrecursionlimit() + 100
+    chain = [_tool(f"t{i}", parent=f"t{i - 1}" if i else None) for i in reversed(range(depth))]
+
+    tool_telemetry.record_tool_telemetry(_result(*chain, _tool("unrelated")), dispatch)
+
+    assert len(spans.get_finished_spans()) == depth + 1
+
+
+def test_a_tool_name_longer_than_the_limit_counts_as_other(telemetry) -> None:
+    _, _, metrics = telemetry
+
+    tool_telemetry.record_tool_telemetry(_result(_tool("a", name="x" * 1000)), None)
+
+    [count] = metrics()[gym_metrics.TOOL_CALLS_INSTRUMENT]
+    assert count.attributes[gym_metrics.TOOL_NAME_ATTRIBUTE] == gym_metrics.TOOL_NAME_OTHER

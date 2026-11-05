@@ -67,18 +67,14 @@ def _emit_tool_spans(tools: list[TrajectoryToolCall], dispatch_span_context: "Sp
     from nemo_gym.telemetry.gym_metrics import tool_span_attributes
 
     tracer = otel_trace.get_tracer("nemo.gym")
-    by_span_id = {tool.span_id: tool for tool in tools if tool.span_id}
-    emitted: dict[str, "SpanContext"] = {}
+    # A span id is unique within its agent instance, and a parent is resolved within the same instance.
+    by_key = {(tool.agent_instance, tool.span_id): tool for tool in tools if tool.span_id}
+    emitted: dict[tuple, Optional["SpanContext"]] = {}
 
-    def emit(tool: TrajectoryToolCall) -> Optional["SpanContext"]:
-        if tool.span_id in emitted:
-            return emitted[tool.span_id]
+    def emit(tool: TrajectoryToolCall, parent: "SpanContext") -> Optional["SpanContext"]:
         timing = _span_timing(tool)
         if timing is None:
             return None
-        parent = dispatch_span_context
-        if tool.parent_span_id in by_span_id:
-            parent = emit(by_span_id[tool.parent_span_id]) or dispatch_span_context
         span = tracer.start_span(
             TOOL_SPAN_NAME,
             context=set_span_in_context(NonRecordingSpan(parent)),
@@ -86,9 +82,23 @@ def _emit_tool_spans(tools: list[TrajectoryToolCall], dispatch_span_context: "Sp
         )
         safe_set_span_attributes(span, tool_span_attributes(tool, timing))
         span.end(end_time=int(timing.completed_at * 1e9))
-        if tool.span_id:
-            emitted[tool.span_id] = span.get_span_context()
         return span.get_span_context()
 
     for tool in tools:
-        emit(tool)
+        # Walk up to the nearest ancestor already emitted (iteratively: chains can be long), then emit downwards.
+        chain, seen, current = [], set(), tool
+        while current is not None:
+            key = (current.agent_instance, current.span_id)
+            if current.span_id and (key in emitted or key in seen):
+                break
+            chain.append(current)
+            seen.add(key)
+            current = by_key.get((current.agent_instance, current.parent_span_id)) if current.parent_span_id else None
+        parent = dispatch_span_context
+        if current is not None:
+            parent = emitted.get((current.agent_instance, current.span_id)) or dispatch_span_context
+        for link in reversed(chain):
+            context = emit(link, parent)
+            if link.span_id:
+                emitted[(link.agent_instance, link.span_id)] = context
+            parent = context or parent

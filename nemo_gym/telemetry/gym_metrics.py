@@ -697,6 +697,8 @@ TOOL_MODEL_CALL_ID_ATTRIBUTE = "nemo.gym.tool.model_call_id"
 TOOL_AGENT_INSTANCE_ATTRIBUTE = "nemo.gym.agent.instance"
 # Tool names are free-form, so a metric keeps the first names a process sees and counts the rest as `other`.
 TOOL_NAME_LIMIT = 64
+# A longer name is no bounded label either.
+TOOL_NAME_MAX_LENGTH = 128
 TOOL_NAME_OTHER = "other"
 TOOL_NAME_UNKNOWN = "unknown"
 _tool_names_seen: set[str] = set()
@@ -707,6 +709,8 @@ def bounded_tool_name(name: Optional[str]) -> str:
     """The tool name as a metric label: as recorded while fewer than ``TOOL_NAME_LIMIT`` names are in use."""
     if not name:
         return TOOL_NAME_UNKNOWN
+    if len(name) > TOOL_NAME_MAX_LENGTH:
+        return TOOL_NAME_OTHER
     with _tool_names_lock:
         if name in _tool_names_seen:
             return name
