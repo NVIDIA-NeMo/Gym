@@ -74,13 +74,11 @@ class SuiteBenchmarkDefinition(_SuiteModel):
 
 
 class SuiteRunSource(_SuiteModel):
-    """One run, resolved relative to its suite manifest."""
+    """One run with companion artifacts discovered from its rollout path."""
 
     rollouts: Path
-    aggregate_metrics: Path | None = None
     agent: str | None = None
     environment_server: str | None = None
-    materialized_inputs: Path | None = None
 
 
 class SuiteRunPair(_SuiteModel):

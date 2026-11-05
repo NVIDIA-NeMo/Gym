@@ -193,11 +193,11 @@ Each `baseline` or `candidate` mapping supports:
 
 | Field | Meaning |
 | --- | --- |
-| `rollouts` | Required run identity. Its aggregate-metrics sibling is read. |
-| `aggregate_metrics` | Optional explicit path when the aggregate file has a different name or location. |
+| `rollouts` | Required run identity. Gym discovers its aggregate-metrics and materialized-input companion files. |
 | `agent` | Optional selector matching an aggregate entry's `agent_ref.name`. This is usually the agent name; entries for several environment servers sharing an agent can use server names as labels. |
 | `environment_server` | Optional selector matching an aggregate entry's `_ng_environment_server`. Use the server's configuration instance name. Older aggregate files can lack this field. |
-| `materialized_inputs` | Optional path to the collection inputs used to verify planned task/repeat coverage. The usual sibling is discovered automatically when present. |
+
+Aggregate metrics must be available as the rollout file's companion; materialized inputs are optional, but planned coverage remains unverified when they are missing. Symlinked rollout files use the same companion-aware path resolution as `gym eval compare`, rejecting conflicting companion locations. Suite sources do not support separate aggregate-metrics or materialized-input paths.
 
 Selection happens independently for every baseline and candidate source. If neither selector is set, the aggregate must contain exactly one entry. If a selector is set, exactly one entry must match; when both are set, that entry must match both. Missing or ambiguous matches are errors that list the available choices.
 

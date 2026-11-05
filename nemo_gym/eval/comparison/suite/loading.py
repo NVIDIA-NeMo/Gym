@@ -114,10 +114,6 @@ def resolve_metric_definitions(
     return resolved
 
 
-def _resolve_path(path: Path, directory: Path) -> Path:
-    return (directory / path).resolve() if not path.is_absolute() else path.resolve()
-
-
 def _object_rows(value: object, *, field: str, path: Path) -> tuple[Mapping[str, object], ...]:
     if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
         raise ConfigError(f"'{path}' needs '{field}' to be a list of objects.")
@@ -210,7 +206,8 @@ def _read_planned_tasks(path: Path, agent: str, *, environment_server: str | Non
     if not tasks:
         raise ConfigError(
             f"Materialized inputs '{path}' contain no tasks for aggregate entry '{agent}' "
-            f"(environment_server={environment_server!r}). Check the source selectors and materialized_inputs path."
+            f"(environment_server={environment_server!r}). "
+            "Check the source selectors and the rollout's materialized-input companion."
         )
     return {repeat: frozenset(indices) for repeat, indices in tasks.items()}
 
@@ -241,11 +238,7 @@ def _repeat_count(
 def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun:
     """Select one aggregate entry by agent and/or server, retaining its recorded repeat rows."""
     rollouts = resolve_rollout_path(directory / source.rollouts, read_only=True)
-    metrics = (
-        _resolve_path(source.aggregate_metrics, directory)
-        if source.aggregate_metrics is not None
-        else aggregate_metrics_path_for(rollouts)
-    )
+    metrics = aggregate_metrics_path_for(rollouts)
     entries = _read_agent_entries(metrics)
     agent, entry = _select_entry(entries, source, path=metrics)
     environment_server = entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
@@ -266,16 +259,8 @@ def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun
     if not isinstance(agent_metrics, dict):
         raise ConfigError(f"'{metrics}' agent_metrics must be an object.")
     count = _repeat_count(rows=rows, groups=groups, agent_metrics=agent_metrics, path=metrics, agent=agent)
-    inputs = (
-        _resolve_path(source.materialized_inputs, directory)
-        if source.materialized_inputs is not None
-        else materialized_path_for(rollouts)
-    )
-    planned = (
-        _read_planned_tasks(inputs, agent, environment_server=environment_server)
-        if source.materialized_inputs is not None or inputs.exists()
-        else None
-    )
+    inputs = materialized_path_for(rollouts)
+    planned = _read_planned_tasks(inputs, agent, environment_server=environment_server) if inputs.exists() else None
     return LoadedSuiteRun(
         rollouts=rollouts,
         aggregate_metrics=metrics,

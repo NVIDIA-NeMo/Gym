@@ -737,16 +737,20 @@ def test_duplicate_repeat_indices_are_rejected(tmp_path: Path) -> None:
         _compare(path)
 
 
-def test_source_aggregate_override_is_resolved_relative_to_manifest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", ["aggregate_metrics", "materialized_inputs"])
+@pytest.mark.parametrize("role", ["baseline", "candidate"])
+def test_source_artifact_overrides_are_rejected(tmp_path: Path, field: str, role: str) -> None:
     pair = _pair(tmp_path, "run", _values(0.2, 0.4), _values(0.4, 0.6))
-    original = aggregate_metrics_path_for(Path(pair["baseline"]["rollouts"]))
-    custom = tmp_path / "custom.json"
-    original.rename(custom)
-    pair["baseline"]["aggregate_metrics"] = "custom.json"
+    pair[role][field] = "unsupported.json"
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
-    result = _compare(path)
-    assert result.cells[0].baseline.aggregate_metrics == custom
-    assert result.overall.statistics.delta == pytest.approx(20)
+    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+
+    with pytest.raises(ConfigError, match="Cannot load suite manifest") as error:
+        _compare(path)
+
+    assert f"models.model.test.{role}.{field}" in str(error.value)
+    assert "Extra inputs are not permitted" in str(error.value)
+    assert {file: file.read_bytes() for file in sources} == sources
 
 
 @pytest.mark.parametrize("companions_beside_alias", [False, True])
@@ -806,48 +810,7 @@ def test_rollout_alias_rejects_competing_companion_layouts_like_run_comparison(t
     assert {file: file.read_bytes() for file in sources} == sources
 
 
-def test_rollout_alias_keeps_explicit_artifact_overrides_relative_to_manifest(tmp_path: Path) -> None:
-    target = Path(_write_run(tmp_path / "blob", _values(0.8, 0.9), planned_tasks=(99,)))
-    override = Path(_write_run(tmp_path / "overrides", _values(0.2, 0.4)))
-    candidate = _write_run(tmp_path / "candidate", _values(0.4, 0.6))
-    alias = tmp_path / "aliases" / "latest.jsonl"
-    alias.parent.mkdir()
-    alias.symlink_to(target)
-    metrics = aggregate_metrics_path_for(override)
-    inventory = materialized_path_for(override)
-    path = _manifest(
-        tmp_path,
-        benchmarks={"test": {"metrics": [_scale()]}},
-        models={
-            "model": {
-                "test": {
-                    "baseline": {
-                        "rollouts": str(alias.relative_to(tmp_path)),
-                        "aggregate_metrics": str(metrics.relative_to(tmp_path)),
-                        "materialized_inputs": str(inventory.relative_to(tmp_path)),
-                    },
-                    "candidate": {"rollouts": candidate},
-                }
-            }
-        },
-    )
-    sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
-
-    result = _compare(path)
-
-    cell = result.cells[0]
-    assert cell.baseline.rollouts == target
-    assert cell.baseline.aggregate_metrics == metrics
-    assert cell.baseline.materialized_inputs == inventory
-    assert cell.baseline.coverage.status == "verified"
-    assert cell.baseline.repeat_scores == pytest.approx([20, 40])
-    assert result.overall.statistics.delta == pytest.approx(20)
-    assert result.overall.statistics.ci_low is not None
-    assert result.warnings == []
-    assert {file: file.read_bytes() for file in sources} == sources
-
-
-def test_rollout_aliases_cannot_reuse_physical_source_with_distinct_aggregate_overrides(tmp_path: Path) -> None:
+def test_rollout_aliases_cannot_reuse_physical_source_with_distinct_aggregate_companions(tmp_path: Path) -> None:
     target = tmp_path / "blob" / "data.jsonl"
     target.parent.mkdir()
     baseline = Path(_write_run(tmp_path / "baseline", _values(0.2, 0.4)))
@@ -857,10 +820,7 @@ def test_rollout_aliases_cannot_reuse_physical_source_with_distinct_aggregate_ov
     candidate.unlink()
     candidate.symlink_to(target)
     sources = {
-        role: {
-            "rollouts": str(alias.relative_to(tmp_path)),
-            "aggregate_metrics": str(aggregate_metrics_path_for(alias).relative_to(tmp_path)),
-        }
+        role: {"rollouts": str(alias.relative_to(tmp_path))}
         for role, alias in (("baseline", baseline), ("candidate", candidate))
     }
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": sources}})
@@ -869,18 +829,15 @@ def test_rollout_aliases_cannot_reuse_physical_source_with_distinct_aggregate_ov
         _compare(path)
 
 
-def test_explicit_inventory_is_relative_to_manifest_and_ignores_other_agents(
+def test_companion_inventory_follows_relative_rollout_path_and_ignores_other_agents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pair = {
-        "baseline": {
-            "rollouts": _write_run(tmp_path / "baseline", _values(0.2, 0.4), planned_tasks=(99,)),
-            "materialized_inputs": "inventories/baseline.jsonl",
-        },
+        "baseline": {"rollouts": _write_run(tmp_path / "baseline", _values(0.2, 0.4))},
         "candidate": {"rollouts": _write_run(tmp_path / "candidate", _values(0.4, 0.6))},
     }
-    inventory = tmp_path / "inventories" / "baseline.jsonl"
-    inventory.parent.mkdir()
+    inventory = materialized_path_for(Path(pair["baseline"]["rollouts"]))
+    pair["baseline"]["rollouts"] = "baseline/rollouts.jsonl"
     # The foreign agent reuses the same indices and has extra tasks: all of its rows
     # must be filtered before duplicate detection and coverage verification.
     rows = [
@@ -908,11 +865,12 @@ def test_explicit_inventory_is_relative_to_manifest_and_ignores_other_agents(
     assert result.warnings == []
 
 
-def test_missing_explicit_inventory_does_not_fall_back_to_valid_sibling(tmp_path: Path) -> None:
+def test_malformed_companion_inventory_is_rejected(tmp_path: Path) -> None:
     pair = _pair(tmp_path, "run", _values(0.2, 0.4), _values(0.4, 0.6))
-    pair["baseline"]["materialized_inputs"] = "missing_inventory.jsonl"
+    inventory = materialized_path_for(Path(pair["baseline"]["rollouts"]))
+    inventory.write_text("not valid JSON\n")
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
-    with pytest.raises(ConfigError, match="Cannot read materialized inputs.*missing_inventory.jsonl"):
+    with pytest.raises(ConfigError, match="Cannot read materialized inputs.*rollouts_materialized_inputs.jsonl"):
         _compare(path)
 
 
@@ -1170,12 +1128,12 @@ def test_recorded_group_subset_of_planned_tasks_without_rollout_infos_suppresses
     assert "Results are missing 1 of 2 planned tasks (task indices: 1)." in result.cells[0].baseline.coverage.notes
 
 
-def test_same_rollouts_cannot_be_reused_through_different_aggregate_overrides(tmp_path: Path) -> None:
+def test_distinct_rollouts_cannot_reuse_physical_aggregate_companion(tmp_path: Path) -> None:
     pair = _pair(tmp_path, "run", _values(0.2, 0.4), _values(0.4, 0.6))
     baseline_metrics = aggregate_metrics_path_for(Path(pair["baseline"]["rollouts"]))
-    candidate_override = tmp_path / "candidate_override.json"
-    candidate_override.write_bytes(baseline_metrics.read_bytes())
-    pair["candidate"] = {"rollouts": pair["baseline"]["rollouts"], "aggregate_metrics": str(candidate_override)}
+    candidate_metrics = aggregate_metrics_path_for(Path(pair["candidate"]["rollouts"]))
+    candidate_metrics.unlink()
+    candidate_metrics.symlink_to(baseline_metrics)
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
-    with pytest.raises(ConfigError, match="reuses the same rollouts file and agent.*independent source"):
+    with pytest.raises(ConfigError, match="reuses the same aggregate file and agent.*independent source"):
         _compare(path)

@@ -128,6 +128,30 @@ def test_disabled_configuration_help_still_requires_suite(help_key: str, monkeyp
     assert "Displaying help for SuiteComparisonConfig" not in output
 
 
+@pytest.mark.parametrize("field", ["aggregate_metrics", "materialized_inputs"])
+def test_real_cli_rejects_source_artifact_overrides(suite_path: Path, field: str, monkeypatch, capsys) -> None:
+    payload = yaml.safe_load(suite_path.read_text())
+    payload["models"]["model-a"]["first"]["baseline"][field] = "unsupported.json"
+    suite_path.write_text(yaml.safe_dump(payload))
+    output = suite_path.parent / "reports"
+    sources = {file: file.read_bytes() for file in suite_path.parent.rglob("*") if file.is_file()}
+    monkeypatch.setattr(
+        "sys.argv",
+        ["gym", "eval", "compare-suite", "--suite", str(suite_path), "--output-dir", str(output)],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        main()
+
+    assert error.value.code == 1
+    message = " ".join(capsys.readouterr().out.split())
+    assert "Cannot load suite manifest" in message
+    assert f"models.model-a.first.baseline.{field}" in message
+    assert "Extra inputs are not permitted" in message
+    assert not output.exists()
+    assert {file: file.read_bytes() for file in sources} == sources
+
+
 def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     suite_path: Path, monkeypatch, capsys
 ) -> None:
@@ -344,8 +368,8 @@ def test_report_destination_cannot_overwrite_an_input(suite_path: Path, monkeypa
     collision = output / "suite_compare_report.json"
     original_bytes = original.read_bytes()
     collision.write_bytes(original_bytes)
-    baseline["aggregate_metrics"] = str(collision)
-    suite_path.write_text(yaml.safe_dump(payload))
+    original.unlink()
+    original.symlink_to(collision)
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -363,4 +387,6 @@ def test_report_destination_cannot_overwrite_an_input(suite_path: Path, monkeypa
     assert error.value.code == 1
     assert "would overwrite a source artifact" in " ".join(capsys.readouterr().out.split())
     assert collision.read_bytes() == original_bytes
+    assert original.is_symlink()
+    assert original.read_bytes() == original_bytes
     assert not (output / "suite_compare_report.md").exists()
