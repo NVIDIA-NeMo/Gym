@@ -21,6 +21,7 @@ import re
 import signal
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
+from threading import Lock
 from typing import Optional, Tuple
 
 import numpy as np
@@ -82,6 +83,7 @@ class SessionHandle:
         parent_conn, child_conn = context.Pipe()
         self._conn = parent_conn
         self._max_execution_time = max_execution_time
+        self._close_lock = Lock()
         self._proc = context.Process(
             target=_session_worker,
             args=(child_conn, max_execution_time),
@@ -116,37 +118,42 @@ class SessionHandle:
         raise TimeoutError("Execution timed out (worker unresponsive)")
 
     def close(self):
-        if self.is_closed:
-            return
-        self.is_closed = True
+        # exec() can close from an executor thread while lifecycle cleanup closes from the event loop.
+        with self._close_lock:
+            if self.is_closed:
+                return
 
-        try:
-            self._conn.send({"cmd": "close"})
-        except Exception:
-            logging.debug("Failed to send close command to worker")
-
-        try:
-            self._conn.close()
-        except Exception:
-            logging.exception("Error while closing session pipe")
-
-        self._proc.join(timeout=1)
-        if self._proc.is_alive():
-            logging.warning(f"Session process {self._proc.pid} still alive after close; escalating to terminate.")
             try:
-                self._proc.terminate()
-                self._proc.join(timeout=1)
-                if self._proc.is_alive():
-                    logging.error(f"Session process {self._proc.pid} resisted terminate; resorting to kill.")
-                    self._proc.kill()
-                    self._proc.join()
+                self._conn.send({"cmd": "close"})
             except Exception:
-                logging.exception(f"Error while force-terminating process {self._proc.pid}")
+                logging.debug("Failed to send close command to worker")
 
-        try:
-            self._proc.close()
-        except Exception:
-            logging.exception("Error during final Process object cleanup")
+            try:
+                self._conn.close()
+            except Exception:
+                logging.exception("Error while closing session pipe")
+
+            self._proc.join(timeout=1)
+            if self._proc.is_alive():
+                logging.warning(f"Session process {self._proc.pid} still alive after close; escalating to terminate.")
+                try:
+                    self._proc.terminate()
+                    self._proc.join(timeout=1)
+                    if self._proc.is_alive():
+                        logging.error(f"Session process {self._proc.pid} resisted terminate; resorting to kill.")
+                        self._proc.kill()
+                        self._proc.join(timeout=1)
+                except Exception:
+                    logging.exception(f"Error while force-terminating process {self._proc.pid}")
+
+            if self._proc.is_alive():
+                raise RuntimeError(f"Python worker {self._proc.pid} is still alive; retry session cleanup")
+            self.is_closed = True
+
+            try:
+                self._proc.close()
+            except Exception:
+                logging.exception("Error during final Process object cleanup")
 
 
 def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):

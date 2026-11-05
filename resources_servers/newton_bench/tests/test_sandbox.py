@@ -3,8 +3,11 @@
 
 import multiprocessing
 import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
-from pytest import MonkeyPatch
+from pytest import MonkeyPatch, raises
 
 from resources_servers.newton_bench.newton_bench_utils.sandbox import SessionHandle
 
@@ -33,3 +36,69 @@ def test_worker_releases_unrelated_socket_and_preserves_python_state(monkeypatch
         peer_socket.close()
         if handle is not None:
             handle.close()
+
+
+def test_failed_worker_termination_remains_retryable() -> None:
+    handle = SessionHandle.__new__(SessionHandle)
+    handle._close_lock = threading.Lock()
+    handle._conn = MagicMock()
+    handle._proc = MagicMock()
+    handle._proc.is_alive.return_value = True
+    handle._proc.kill.side_effect = OSError("provider denied kill")
+    handle.is_closed = False
+    with raises(RuntimeError, match="still alive"):
+        handle.close()
+    assert not handle.is_closed
+    handle._proc.close.assert_not_called()
+    handle._proc.is_alive.return_value = False
+    handle.close()
+    assert handle.is_closed
+    handle._proc.close.assert_called_once()
+
+
+def test_worker_close_serializes_concurrent_callers(monkeypatch: MonkeyPatch) -> None:
+    handle = SessionHandle(max_execution_time=60)
+    original_send = handle._conn.send
+    first_sending, second_started, second_sending, finish = (threading.Event() for _ in range(4))
+    sends = []
+    send_lock = threading.Lock()
+
+    def paused_send(message) -> None:
+        with send_lock:
+            sends.append(message)
+            first = len(sends) == 1
+        if first:
+            first_sending.set()
+            if not finish.wait(5):
+                raise TimeoutError("Test did not allow the first close to finish")
+        else:
+            second_sending.set()
+        original_send(message)
+
+    def second_close() -> None:
+        second_started.set()
+        handle.close()
+
+    try:
+        assert handle.exec("41 + 1")[2] == "42"
+        monkeypatch.setattr(handle._conn, "send", paused_send)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(handle.close)
+            try:
+                assert first_sending.wait(5)
+                second = pool.submit(second_close)
+                assert second_started.wait(5)
+                # Both callers entered close; only the owner can touch the pipe/process until it finishes.
+                overlapped = second_sending.wait(0.2)
+            finally:
+                finish.set()
+            first.result(timeout=10)
+            second.result(timeout=10)
+        assert not overlapped
+        assert sends == [{"cmd": "close"}]
+        assert handle.is_closed
+        assert handle._proc._closed
+    finally:
+        finish.set()
+        monkeypatch.setattr(handle._conn, "send", original_send)
+        handle.close()

@@ -132,7 +132,9 @@ A session's first `execute_python` call starts its Python worker from a forkserv
 the server once: workers neither inherit the server's sockets nor import the numerical libraries again. The first
 worker in a server process waits a few seconds for that import, off the event loop and outside the
 `max_execution_time + 5` second response wait; later workers start in milliseconds. The session's other calls reuse
-that worker and its Python variables.
+that worker and its Python variables. If the request is cancelled during startup, the session retains the pending
+worker so verify, close, retirement, and the idle sweep can wait for it and release it. Failed termination retains
+the handle and ownership for retry; cleanup still attempts the other sessions.
 
 The episode seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
 `task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
