@@ -257,55 +257,20 @@ def synthesized_group(task: HarborTask | None = None) -> dict[str, Any]:
     so an extra Compose file extends a plain image task the same way it extends a Compose task. The sandbox
     adapter fills ``main``'s image and command from the task, as it does for a task file that leaves them out.
 
-    ``main`` starts as the task's single sandbox would: when the loader read the task image's configuration
-    (``task.image_shell`` is set whenever it did) it resolved how Docker starts the image the task's Dockerfile
-    describes, the recorded ``ENTRYPOINT`` or none after ``ENTRYPOINT []`` (``HarborTask.entrypoint``, what the
-    single sandbox runs beside its keepalive) in the Dockerfile's final ``WORKDIR`` (``HarborTask.entrypoint_workdir``,
-    the single sandbox's ``cwd`` for it). The image resolution otherwise fills ``main``'s ``entrypoint`` and
-    ``working_dir`` from the record of ``task.image``, the base image's for a Dockerfile the loader resolved, so the
-    entrypoint is written here always: the resolution would start the base's on a task whose Dockerfile cleared it
-    merely because an overlay was attached. ``working_dir`` is the entrypoint's directory, the ``WORKDIR``: a
-    Compose service's ``working_dir`` is the directory its command runs in, and Harbor's built image carries the
-    ``WORKDIR`` as that (its ``docker-compose-build.yaml`` writes no ``working_dir`` for ``main``), so the adapter
-    starts ``main``'s command, entrypoint included, and runs its recorded healthcheck there, as the single sandbox
-    runs both (``_start_entrypoint`` names ``task.entrypoint_workdir``, ``_wait_healthy`` gives the image check the
-    same). The adapter makes a missing ``working_dir`` as root at create, where the single sandbox makes the
-    ``WORKDIR`` the entrypoint user's before its entrypoint starts (``_start_entrypoint``, ``overlay_workdir_command``),
-    so the server hands it to that user between the create and ``main``'s command (``_start_compose_group``'s
-    setup hook on ``main``), and the entrypoint starts in its own directory in the group too. An
-    ``[environment].workdir`` is not the container's directory in Harbor either: it is the ``cwd`` of
-    Harbor's execs (harbor 0.22.0 ``environments/docker/docker.py`` 1104), and the server passes it per exec the same
-    way (the agent's commands, the step scripts and checks, the verifier's run), so ``main``'s ``working_dir`` is
-    never that. Written for a task without an overlay (a pull-mode Dockerfile, no ``RUN`` lines), never unset for
-    a Dockerfile the loader resolved (``/`` at least); a built image without a recorded ``WorkingDir`` leaves the
-    resolution nothing to fill either.
+    For a Dockerfile task whose image configuration the loader resolved, preserve its ENTRYPOINT (including an explicit
+    clear) and final WORKDIR instead of inheriting the base image's settings. The server's setup hook runs
+    any Dockerfile RUN lines and installs the image's startup user before the command and healthcheck. The
+    adapter defers the working directory until that setup finishes, so it cannot create a root-owned directory
+    ahead of a non-root Dockerfile WORKDIR step. No ``user`` is written here: numeric users need resolution
+    inside the running image, while an explicit user in a job overlay still wins over the installed default.
 
-    An overlay task's ``main`` carries no ``working_dir``, as its single sandbox is created without the task workdir
-    (``_create_sandbox_within_deadline``): the Compose adapter creates a service's ``working_dir`` as root before
-    the overlay's ``RUN`` lines run, and the overlay's ``WORKDIR`` step (``overlay_workdir_command``) leaves an
-    existing directory as it is, so a final ``WORKDIR`` under a non-root ``USER`` would stay root's and a ``RUN``
-    line in it fail; left to the overlay, the directory is created and owned by the user in effect at that
-    ``WORKDIR``, as in the build. No ``user`` is written either: the adapter runs ``main``'s command as the
-    sandbox's default user. For a task without an overlay that is the task's resolved user (``HarborTask.user``,
-    installed at creation by ``_sandbox_spec``: the Dockerfile's final ``USER`` unless ``[agent].user`` names
-    another), the user the single sandbox gives the entrypoint (``task.entrypoint_user``) unless ``[agent].user``
-    differs. For an overlay task the sandbox has no default user until ``_set_default_user`` installs the task's
-    after the group started, and the resolution fills ``working_dir`` from the base image's record, so ``main``'s
-    entrypoint starts as the base image's own user in the base image's own ``WorkingDir``, not as the Dockerfile's
-    final ``USER`` in its final ``WORKDIR``, which is how the single sandbox runs it (``_start_entrypoint`` names
-    ``task.entrypoint_user`` and ``task.entrypoint_workdir``) and how Harbor's built image starts it. That gap is
-    left open here: the directory cannot be written (above), and the user would need the name mapping the single
-    sandbox's ``_image_user_name`` does for a numeric ``USER``. The agent's commands are unaffected: they run as
-    ``task.user`` in ``task.workdir`` once the seed has installed the user and prepared the directory. A task whose
-    image the loader has no configuration for (a prebuilt ``docker_image`` with no Dockerfile) is left to the
-    resolution, as a task file's ``main`` is; without a ``task`` the service is empty.
+    ``[agent].user`` and ``[environment].workdir`` apply to the agent's later commands, independently of startup.
+    A prebuilt ``docker_image`` task without a Dockerfile is left to image resolution; without a task, main is empty.
     """
     main: dict[str, Any] = {}
     if task is not None and task.image_shell is not None:
         main["entrypoint"] = list(task.entrypoint or [])
-        if task.entrypoint_workdir and not task.overlay:
-            # The entrypoint's directory, the Dockerfile's final WORKDIR, not [environment].workdir, which is the
-            # cwd of the execs (above). An overlay task's final WORKDIR is the overlay's to create and own.
+        if task.entrypoint_workdir:
             main["working_dir"] = task.entrypoint_workdir
     return {"services": {MAIN_SERVICE: main}}
 
