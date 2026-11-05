@@ -256,7 +256,7 @@ def test_mcp_tool_call_requires_session_token() -> None:
         assert result.get("isError") is True
 
 
-def _typed_seed(resources_session_id: str = "resources-session", task_data: dict | None = None) -> dict:
+def _episode_seed(resources_session_id: str = "resources-session", task_data: dict | None = None) -> dict:
     # The body single_agent_turn sends: task_data holds the row's own fields.
     return ResourcesSeedSessionRequest(
         resources_session_id=resources_session_id,
@@ -266,7 +266,7 @@ def _typed_seed(resources_session_id: str = "resources-session", task_data: dict
     ).model_dump(mode="json")
 
 
-def _typed_close(resources_session_id: str = "resources-session") -> dict:
+def _episode_close(resources_session_id: str = "resources-session") -> dict:
     return ResourcesCloseSessionRequest(
         resources_session_id=resources_session_id, episode_id=EpisodeId(rollout_id="rollout", attempt=0)
     ).model_dump(mode="json")
@@ -286,18 +286,18 @@ def test_resources_session_contract(over_mcp: bool) -> None:
 
     check_resources_session_contract(
         app,
-        ResourcesSeedSessionRequest.model_validate(_typed_seed("contract-session")),
+        ResourcesSeedSessionRequest.model_validate(_episode_seed("contract-session")),
         keeps_state=True,
         holds_state=lambda resources_session_id: resources_session_id in server.session_id_to_state,
         verify_body=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
     )
 
 
-def test_typed_seed_rejects_malformed_task_data() -> None:
+def test_episode_seed_rejects_malformed_task_data() -> None:
     server = _server()
 
     with TestClient(server.setup_webserver()) as client:
-        response = client.post("/seed_session", json=_typed_seed(task_data={"verifier_metadata": "Paris"}))
+        response = client.post("/seed_session", json=_episode_seed(task_data={"verifier_metadata": "Paris"}))
 
     assert response.status_code == 422
     assert "task_data" in response.json()["detail"]
@@ -305,15 +305,15 @@ def test_typed_seed_rejects_malformed_task_data() -> None:
     assert server.session_id_to_state == {}
 
 
-def test_repeated_typed_seed_keeps_recorded_weather_calls() -> None:
+def test_repeated_episode_seed_keeps_recorded_weather_calls() -> None:
     server = _server()
 
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
         assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
         # A seed retried after its reply was lost arrives without the cookie.
         client.cookies.clear()
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
 
         assert server.session_id_to_state["resources-session"]["weather_calls"] == [
             {"city": "Paris", "weather": "The weather in Paris is sunny and 72 F."}
@@ -337,14 +337,14 @@ def test_tool_call_without_open_session_is_lost() -> None:
     assert server.session_id_to_state == {}
 
 
-def test_typed_seed_grants_mcp_tools_until_close() -> None:
+def test_episode_seed_grants_mcp_tools_until_close() -> None:
     # An Environment Server reads the MCP grant from resources_tools and hands its token to the agent; the token's
     # tool calls land in the session /verify scores, and fail once the session is closed.
     pytest.importorskip("mcp")
     server = _server()
 
     with _mcp_client(server) as client:
-        seed_response = client.post("/seed_session", json=_typed_seed())
+        seed_response = client.post("/seed_session", json=_episode_seed())
         assert seed_response.status_code == 200
         seed = seed_response.json()
         assert seed["resources_session_id"] == "resources-session"
@@ -362,7 +362,7 @@ def test_typed_seed_grants_mcp_tools_until_close() -> None:
         assert verify_response.json()["reward"] == 1.0
         assert verify_response.json()["tool_call_seen"] is True
 
-        assert client.post("/close_session", json=_typed_close()).status_code == 200
+        assert client.post("/close_session", json=_episode_close()).status_code == 200
         assert server.session_id_to_state == {}
 
         result = _rpc(
@@ -378,10 +378,10 @@ def test_typed_seed_grants_mcp_tools_until_close() -> None:
 
 
 @pytest.mark.parametrize("stage", ["active", "verified", "closed"])
-def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+def test_agent_run_seed_cannot_overwrite_episode_or_closed_cookie(stage: str) -> None:
     server = _server()
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
         if stage == "verified":
             assert (
                 client.post(
@@ -391,32 +391,34 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
                 == 200
             )
         elif stage == "closed":
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
         before = dict(server.session_id_to_state)
         assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 409
         assert server.session_id_to_state == before
 
 
 @pytest.mark.parametrize("mcp", [False, True])
-def test_malformed_typed_seed_does_not_fall_back_to_legacy(mcp: bool) -> None:
+def test_malformed_episode_seed_does_not_fall_back_to_legacy(mcp: bool) -> None:
     server = _server()
-    malformed = dict({"verifier_metadata": {"expected_city": "Paris"}}) | {"resources_session_id": "incomplete-typed"}
+    malformed = dict({"verifier_metadata": {"expected_city": "Paris"}}) | {
+        "resources_session_id": "incomplete-episode"
+    }
     with _mcp_client(server) if mcp else TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=malformed).status_code == 422
     assert server.session_id_to_state == {}
     assert server._session_episodes == {}
 
 
-def test_typed_seed_after_verification_is_refused_and_does_not_reopen_the_session() -> None:
+def test_episode_seed_after_verification_is_refused_and_does_not_reopen_the_session() -> None:
     server = _server()
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
         assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
         verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
         assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
 
         # A seed retried after the verdict must not hand a new, empty history to a verified session.
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 409
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 409
         assert server.session_id_to_state == {}
         assert server._session_episodes == {}
         assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
@@ -425,7 +427,7 @@ def test_typed_seed_after_verification_is_refused_and_does_not_reopen_the_sessio
 def test_tool_call_after_verification_is_refused_and_the_verdict_stays_retryable() -> None:
     server = _server()
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
         assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
         verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
         assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
@@ -442,12 +444,12 @@ def test_verify_after_verify_and_close_is_masked_not_replayed() -> None:
     # The retained verification receipt must not outlive the close.
     server = _server()
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
         assert client.post("/get_weather", json={"city": "Paris"}).status_code == 200
         verify_body = _verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json")
         assert client.post("/verify", json=verify_body).json()["reward"] == 1.0
 
-        assert client.post("/close_session", json=_typed_close()).status_code == 200
+        assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         late = client.post("/verify", json=verify_body).json()
         assert late["mask_sample"] is True
@@ -456,8 +458,8 @@ def test_verify_after_verify_and_close_is_masked_not_replayed() -> None:
 
 
 @pytest.mark.parametrize("mcp", [False, True])
-def test_cookie_seed_accepts_dataset_row_with_task_id_column(mcp: bool) -> None:
-    # /run seeds with the whole dataset row, and a row's own task_id column is not a typed seed's task_id.
+def test_agent_run_seed_accepts_dataset_row_with_task_id_column(mcp: bool) -> None:
+    # /run seeds with the whole dataset row, and a row's own task_id column is not a episode seed's task_id.
     server = _server()
     row = {"verifier_metadata": {"expected_city": "Paris"}, "task_id": "weather-1"}
     with _mcp_client(server) if mcp else TestClient(server.setup_webserver()) as client:
@@ -465,7 +467,7 @@ def test_cookie_seed_accepts_dataset_row_with_task_id_column(mcp: bool) -> None:
     assert list(server.session_id_to_state.values()) == [{"weather_calls": []}]
 
 
-def test_cookie_reseed_of_a_live_session_starts_a_fresh_history() -> None:
+def test_agent_run_reseed_of_a_live_session_starts_a_fresh_history() -> None:
     server = _server()
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).status_code == 200
@@ -475,8 +477,8 @@ def test_cookie_reseed_of_a_live_session_starts_a_fresh_history() -> None:
     assert list(server.session_id_to_state.values()) == [{"weather_calls": []}]
 
 
-@pytest.mark.parametrize("typed", [False, True])
-def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed: bool, monkeypatch) -> None:
+@pytest.mark.parametrize("episode", [False, True])
+def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(episode: bool, monkeypatch) -> None:
     from omegaconf import DictConfig
 
     clock = [100.0]
@@ -490,7 +492,7 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert (
             client.post(
                 prefix + "/seed_session",
-                json=_typed_seed() if typed else {"verifier_metadata": {"expected_city": "Paris"}},
+                json=_episode_seed() if episode else {"verifier_metadata": {"expected_city": "Paris"}},
             ).status_code
             == 200
         )
@@ -510,8 +512,8 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
             json=_verify_request("Paris", "The weather in Paris is sunny and 72 F.").model_dump(mode="json"),
         ).json()
         assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
-        if typed:
-            wrong_owner = _typed_close()
+        if episode:
+            wrong_owner = _episode_close()
             wrong_owner["episode_id"]["rollout_id"] = "other"
             assert client.post(prefix + "/close_session", json=wrong_owner).status_code == 409
         clock[0] += server.config.session_close_retry_window_seconds + 1
@@ -545,8 +547,8 @@ def test_next_cookie_run_keeps_its_cookie_and_starts_a_fresh_history() -> None:
     assert second["reward"] == resent["reward"] == 0.0 and second["mask_sample"] is False
 
 
-@pytest.mark.parametrize("typed", [False, True])
-def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
+@pytest.mark.parametrize("episode", [False, True])
+def test_checkpoint_retire_releases_live_session(episode: bool) -> None:
     from omegaconf import DictConfig
 
     server = _server()
@@ -554,18 +556,20 @@ def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
         {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
     )
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/ng-rollout/rollout/seed_session", json=_typed_seed() if typed else {}).status_code == 200
+        assert (
+            client.post("/ng-rollout/rollout/seed_session", json=_episode_seed() if episode else {}).status_code == 200
+        )
         client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
         assert server.session_id_to_state == {}
         assert server._session_episodes == {}
 
 
-def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+def test_episode_seed_cannot_replace_a_live_legacy_session() -> None:
     server = _server()
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={}).status_code == 200
         sid = next(iter(server.session_id_to_state))
         original = server.session_id_to_state[sid]
-        assert client.post("/seed_session", json=_typed_seed(sid)).status_code == 409
+        assert client.post("/seed_session", json=_episode_seed(sid)).status_code == 409
         assert server.session_id_to_state[sid] is original
         assert server._session_episodes == {}

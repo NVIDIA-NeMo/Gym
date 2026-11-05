@@ -130,7 +130,7 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         state = self.session_id_to_state.get(session_id)
         verified = self._verified_sessions.get(session_id)
-        if self._fence.closed_episode(session_id) is not None:
+        if session_id in self._resources_session_fences:
             state, verified = None, None
         expected_city_value = (body.verifier_metadata or {}).get("expected_city", "Paris")
         expected_weather = _weather_sentence(expected_city_value)

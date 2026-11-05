@@ -35,7 +35,13 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    FailureBoundary,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    observe_failure,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -829,6 +835,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 if exists.return_code == 0:
                     await sandbox.download(remote, local)
         except Exception as exc:
+            if isinstance(exc, NgFailureEvent):
+                observe_failure(exc)
             sandbox_failed = True
             update_metrics(
                 params.metrics_fpath,
@@ -877,6 +885,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         if patch.strip() and error_kind is None:
             try:
                 resolved, error_kind = await self._grade_sandbox_patch(params, patch_bytes)
+            except NgFailureEvent as exc:
+                if exc.boundary != FailureBoundary.SANDBOX:
+                    raise
+                observe_failure(exc)
+                error_kind = "sandbox"
+                (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except SandboxCreateError as exc:
                 error_kind = "sandbox"
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
