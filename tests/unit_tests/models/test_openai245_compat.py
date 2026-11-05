@@ -28,8 +28,8 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 from nemo_gym.models.chat_completions_converter import (
-    ResponsesConverter,
-    ResponsesConverterState,
+    ChatCompletionsConverter,
+    ChatCompletionsConverterState,
     split_responses_input_output_items,
 )
 
@@ -169,7 +169,7 @@ def test_program_items_retain_required_sdk_fields(item: dict, missing: str) -> N
 def test_chat_conversion_rejects_caller_linkage_even_when_reporting_fields_may_drop(
     item: dict, caller: dict, drop: bool
 ) -> None:
-    converter = ResponsesConverter(return_token_id_information=False, custom_tool_strategy="function_bridge")
+    converter = ChatCompletionsConverter(return_token_id_information=False, custom_tool_strategy="function_bridge")
     request = NeMoGymResponseCreateParamsNonStreaming(input=[{**item, "caller": caller}])
     before = request.model_dump(mode="json")
     with pytest.raises(NotImplementedError, match="^Responses .*caller metadata") as failure:
@@ -182,8 +182,8 @@ def test_chat_conversion_rejects_caller_linkage_even_when_reporting_fields_may_d
     "item", CALLER_ITEMS, ids=["function-call", "function-result", "custom-call", "custom-result"]
 )
 def test_caller_rejection_does_not_change_conversion_state(item: dict) -> None:
-    converter = ResponsesConverter(return_token_id_information=False)
-    state = ResponsesConverterState(
+    converter = ChatCompletionsConverter(return_token_id_information=False)
+    state = ChatCompletionsConverterState(
         return_token_id_information=False, assistant_item_buffered=True, content_buffer="buffered text"
     )
     before = state.model_dump()
@@ -199,7 +199,7 @@ def test_caller_rejection_does_not_change_conversion_state(item: dict) -> None:
 
 
 def test_absent_and_null_callers_keep_chat_conversion_compatible() -> None:
-    converter = ResponsesConverter(return_token_id_information=False, custom_tool_strategy="function_bridge")
+    converter = ChatCompletionsConverter(return_token_id_information=False, custom_tool_strategy="function_bridge")
     omitted = NeMoGymResponseCreateParamsNonStreaming(input=CALLER_ITEMS)
     explicit_null = NeMoGymResponseCreateParamsNonStreaming(input=[{**item, "caller": None} for item in CALLER_ITEMS])
     assert converter.responses_to_chat_completion_create_params(omitted).model_dump() == (
@@ -232,7 +232,7 @@ def test_native_prompt_cache_options_survive_both_request_schemas_and_conversion
         {"messages": [{"role": "user", "content": "synthetic input"}], "tools": [], "prompt_cache_options": options}
     )
     assert chat.model_dump(mode="json", exclude_unset=True)["prompt_cache_options"] == options
-    converter = ResponsesConverter(return_token_id_information=False)
+    converter = ChatCompletionsConverter(return_token_id_information=False)
     responses = converter.chat_completion_to_responses_create_params(chat)
     assert responses.model_dump(mode="json")["prompt_cache_options"] == options
     serialized = responses.model_dump(mode="json", exclude_unset=True)
@@ -308,7 +308,7 @@ def test_chat_tool_conversion_rejects_caller_eligibility(
         tool.update(parameters={}, strict=False)
     request = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool])
     before = request.model_dump()
-    converter = ResponsesConverter(return_token_id_information=False, custom_tool_strategy=strategy)
+    converter = ChatCompletionsConverter(return_token_id_information=False, custom_tool_strategy=strategy)
     with pytest.raises(NotImplementedError, match="^Responses tool caller eligibility") as error:
         converter.responses_to_chat_completion_create_params(request, drop_unrepresentable_request_fields=drop)
     assert "sensitive-tool" not in str(error.value)
@@ -336,7 +336,7 @@ def test_chat_tool_caller_eligibility_absent_and_null_remain_compatible(tool_typ
     tool = {"type": tool_type, "name": "synthetic-tool"}
     if tool_type == "function":
         tool.update(parameters={}, strict=False)
-    converter = ResponsesConverter(return_token_id_information=False, custom_tool_strategy=strategy)
+    converter = ChatCompletionsConverter(return_token_id_information=False, custom_tool_strategy=strategy)
     omitted = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool])
     null = NeMoGymResponseCreateParamsNonStreaming(input="synthetic", tools=[tool | {"allowed_callers": None}])
     assert converter.responses_to_chat_completion_create_params(omitted).model_dump() == (

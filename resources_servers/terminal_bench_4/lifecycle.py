@@ -143,6 +143,7 @@ async def prepare_session(session, loader):
         session.session_id + "__verifier__trial",
         session.directory,
         verifier=True,
+        placement_group=session.environment.placement_group,
     )
     if session.config.environment.efs_logs_host_path:
         session.shared_logs = SharedLogs(session.environment)

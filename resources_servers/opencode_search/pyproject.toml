@@ -51,7 +51,7 @@ exclude-dependencies = [
 required-version = ">=0.13.4"
 
 [tool.uv.sources]
-nemo-gym = { path = "../..", editable = true }
+"nemo-gym" = { path = "../..", editable = true }
 
 [tool.uv.sources.nemo-lens]
 git = "https://github.com/NVIDIA-NeMo/Lens.git"
