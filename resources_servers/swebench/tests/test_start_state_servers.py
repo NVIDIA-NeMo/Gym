@@ -15,6 +15,7 @@
 """Start states on the servers that grade the image's tree as shipped (scale_swe, swemer, swe_next,
 swemer_oml)."""
 
+import functools
 import importlib
 import shutil
 import subprocess
@@ -165,7 +166,7 @@ async def test_a_test_command_exiting_96_keeps_the_normal_verdict(name, setup_pa
             self.code = code
 
         async def exec(self, command, timeout_s=None):
-            return SimpleNamespace(stdout="FAILED some_test\n", stderr="", return_code=self.code)
+            return SimpleNamespace(stdout="FAILED some_test\n", stderr="", return_code=self.code, error_type=None)
 
     def verdict(result):
         fields = dict(vars(result))
@@ -249,6 +250,8 @@ async def test_seeding_keeps_the_image_tree_and_extracts_only_the_agent_work(nam
     server._pristine_untracked_files = lambda sandbox, workdir: server_cls._pristine_untracked_files(
         server, sandbox, workdir
     )
+    if "_seed_session" in vars(server_cls):  # Scale-SWE's cookie seed delegates to its shared seeding step.
+        server._seed_session = functools.partial(server_cls._seed_session, server)
     body = getattr(app, spec["seed"])(
         instance_id="toy", workdir=str(repo), setup_patch=setup, squash_history=True, **spec["request"]
     )

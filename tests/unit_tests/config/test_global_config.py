@@ -62,7 +62,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
-from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
 class TestGlobalConfig:
@@ -90,6 +90,7 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "server_spinup_timeout_seconds": 600,
+            "server_shutdown_timeout_seconds": 1,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
@@ -3473,6 +3474,18 @@ class TestComposeUnboundAgent:
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
         }
 
+    def test_legacy_relay_keeps_the_servers_own_worker_settings(self) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        server["num_workers"] = 4
+        server["uvicorn_reuse_port"] = True
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert relay["num_workers"] == 4
+        assert relay["uvicorn_reuse_port"] is True
+
     @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
     def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
         config = self._session_environment_config(harness_type)
@@ -3497,6 +3510,30 @@ class TestComposeUnboundAgent:
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
+
+    def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
+        config = self._session_environment_config("langgraph_agent")
+        config.langgraph_agent.responses_api_agents.langgraph_agent.resources_server = None
+        config["independent_agent"] = {
+            "responses_api_agents": {"hermes_agent": {"entrypoint": "app.py", "resources_server": None}}
+        }
+        config["independent_environment"] = {
+            "environment_servers": {
+                "single_agent_turn_legacy": {
+                    "agent_server": {"type": "responses_api_agents", "name": "independent_agent"},
+                    "resources_tool_transports": ["mcp"],
+                }
+            }
+        }
+        independent_before = OmegaConf.to_container(config.independent_environment)
+
+        GlobalConfigDictParser().compose_unbound_agent(config, selected_agent="langgraph_agent")
+
+        environment = config.gpqa_mcqa_environment_server.environment_servers.single_agent_turn_legacy
+        assert environment.agent_server.name == "gpqa_mcqa_langgraph_agent"
+        assert environment.resources_tool_transports == []
+        assert OmegaConf.to_container(config.independent_environment) == independent_before
+        assert config.independent_agent.responses_api_agents.hermes_agent.resources_server is None
 
     def _cli_dict(self, config: dict) -> DictConfig:
         """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""

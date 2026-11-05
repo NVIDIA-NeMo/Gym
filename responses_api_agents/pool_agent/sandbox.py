@@ -11,8 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from shlex import quote
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
-from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.agents import RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import approx, fixture, raises
+from pytest import approx, fixture, mark, raises
 from starlette.testclient import TestClient
 
 from nemo_gym.client import ServerClient
@@ -35,8 +35,10 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.verification import JudgeError
+from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,
@@ -447,7 +449,7 @@ class TestJudgeFailureInheritance:
         self, server: PhysicsJudgeResourcesServer
     ) -> None:
         # Covered transitively: the inherited math_with_judge judge call goes through
-        # call_judge, so a transport failure surfaces as JudgeError (routed to the
+        # call_judge, so a transport failure surfaces as a judge failure (routed to the
         # failures sidecar), not a raw 500.
         server.server_client.post = AsyncMock(side_effect=RuntimeError("judge down"))
         request = LibraryJudgeMathVerifyRequest(
@@ -456,5 +458,36 @@ class TestJudgeFailureInheritance:
             question="What is 2+2?",
             expected_answer="4",
         )
-        with raises(JudgeError, match="judge down"):
+        with raises(NgFailureEvent, match="judge down") as failure:
             await server.verify(request)
+        assert is_judge_failure(failure.value)
+
+
+class TestSavedVerdictForRecovery:
+    # This server parses its own verdict and builds math_with_judge's JudgeEvaluation without a verdict label. Its
+    # saved evaluation keeps the shape it had before the label existed: recovery reads a present null label as a judge
+    # that gave no verdict, so a valid verdict must not save one.
+    @mark.parametrize("judge_text,reward", [("Judgement: [Correct]", 1.0), ("Reasoning... so [Incorrect].", 0.0)])
+    def test_a_valid_verdict_through_verify_saves_no_label_and_is_not_rejudged(
+        self, server: PhysicsJudgeResourcesServer, judge_text: str, reward: float
+    ) -> None:
+        _attach_judge_text(server, judge_text)
+        question = "How many sides does a hexagon have?"
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": question}]},
+            "question": question,
+            "expected_answer": "six",  # in words, so the symbolic check fails and the judge decides
+            "response": _make_text_response(r"The answer is \boxed{6}.", response_id="policy_resp"),
+        }
+        with TestClient(server.setup_webserver()) as client:
+            reply = client.post("/verify", json=body)
+        assert reply.status_code == 200, reply.text
+        verified = reply.json()
+        assert server.server_client.post.await_count == 1
+        assert verified["reward"] == reward
+        assert verified["judge_evaluations"]
+        assert all("verdict_label" not in evaluation for evaluation in verified["judge_evaluations"])
+        row = {"_ng_task_index": 0, "_ng_rollout_index": 0, **verified}
+        evidence = saved_row_evidence(row)
+        assert evidence["_ng_collected_grading_facts"]["judge_unparsed"] is False
+        assert reverification_cause(evidence) is None

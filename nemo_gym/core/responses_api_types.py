@@ -646,7 +646,7 @@ RESPONSES_TO_TRAIN = {
 #   web_search_call, file_search_call, code_interpreter_call, image_generation_call,
 #   mcp_call, computer_call, local_shell_call.
 #
-# training_variant_of() is reached only from ResponsesConverter.postprocess_assistant_message_dict,
+# training_variant_of() is reached only from ChatCompletionsConverter.postprocess_assistant_message_dict,
 # which passes response_output[-1].
 # That list is local to the function.
 # It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage,
@@ -882,6 +882,10 @@ NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 def _normalize_output_item_for_replay(item: Any) -> Any:
     """Convert a provider output item for request replay."""
     if isinstance(item, BaseModel):
+        # Only these two need rewriting; dumping any other typed item without its unset defaults drops its
+        # type and role tags, and the bare remainder validates as a different item.
+        if getattr(item, "type", None) not in {"additional_tools", "computer_call_output"}:
+            return item
         item = item.model_dump(exclude_unset=True)
     if not isinstance(item, dict):
         return item
@@ -1550,6 +1554,10 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     # Disallow deprecated args
     # function_call: FunctionCall
     # functions: Iterable[Function]
+
+
+# The dispatch and checkpoint gate share this exact liveness-only SSE frame.
+SSE_KEEPALIVE = b": keep-alive\n\n"
 
 
 ########################################

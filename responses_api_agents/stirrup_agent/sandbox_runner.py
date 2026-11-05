@@ -247,6 +247,7 @@ class Observer:
     """Record the model responses and tool executions the agent server reports as rollout evidence."""
 
     def __init__(self) -> None:
+        self.compactions: list[dict[str, Any]] = []
         self.response_ids: list[str] = []
         self.usages: list[dict[str, Any]] = []
         self.shell: LocalShell | None = None
@@ -270,6 +271,40 @@ class Observer:
             return response
 
         completions.create = observed_create
+
+    def watch_compaction(self, agent: NeMoAgent) -> None:
+        summarize = agent.summarize_messages
+        report_summary = agent._logger.context_summarization_complete
+        summary = None
+
+        def completed(content: str, bridge: str) -> None:
+            nonlocal summary
+            summary = content
+            report_summary(content, bridge)
+
+        async def observed_summarize(*args: Any, **kwargs: Any) -> Any:
+            nonlocal summary
+            summary = None
+            first = len(self.response_ids)
+            outcome = "failed"
+            try:
+                result = await summarize(*args, **kwargs)
+                outcome = "completed"
+                return result
+            finally:
+                self.compactions.append(
+                    {
+                        "invocation_id": INVOCATION_ID,
+                        "trigger": "automatic",
+                        "outcome": outcome,
+                        "observed_at": time.time(),
+                        "summary": summary,
+                        "model_calls": [{"response_id": value} for value in self.response_ids[first:]],
+                    }
+                )
+
+        agent._logger.context_summarization_complete = completed
+        agent.summarize_messages = observed_summarize
 
     def watch_tool_calls(self, agent_class: type[NeMoAgent]) -> None:
         run_tool = agent_class.run_tool
@@ -332,6 +367,7 @@ class Observer:
                 "status": status,
                 "model_response_ids": self.response_ids,
                 "tool_calls": self.tool_calls(history, list(output_items)),
+                "compactions": self.compactions,
             },
             "usages": self.usages,
         }
@@ -377,6 +413,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             min_compaction_summary_words=payload["min_compaction_summary_words"],
             **({"system_prompt": system_prompt} if system_prompt else {}),
         )
+        observer.watch_compaction(agent)
         started = time.time()
         stop_reason = None
         model_error = None

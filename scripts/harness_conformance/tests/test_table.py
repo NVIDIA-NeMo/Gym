@@ -163,14 +163,14 @@ def test_pytest_gate_runs_whole_directory_and_reports_skips(tmp_path, monkeypatc
         assert "PYTEST_ADDOPTS" not in kwargs["env"]
         assert kwargs["env"]["NEMO_GYM_EXTRA_ROOTS"] == str(tmp_path)
         assert kwargs["cwd"] == tmp_path
-        assert command[3] == "tests/unit_tests/harness_capabilities"
+        assert command[3] == "tests/unit_tests/rollouts/harness_capabilities"
         Path(command[-1]).write_text(
             "<testsuites><testsuite><testcase/><testcase><skipped/></testcase></testsuite></testsuites>"
         )
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(table.subprocess, "run", run)
-    result = table.run_tests(tmp_path, tmp_path, name="checker", path="tests/unit_tests/harness_capabilities")
+    result = table.run_tests(tmp_path, tmp_path, name="checker", path="tests/unit_tests/rollouts/harness_capabilities")
     assert result["passed"] == 1 and result["skipped"] == 1
 
 

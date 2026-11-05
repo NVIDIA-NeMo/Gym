@@ -81,7 +81,12 @@ class RecordingBackend(BaseExporter):
 def _make_run(tmp_path: Path, *, saved_config: Optional[dict] = None) -> RunArtifacts:
     rollouts = tmp_path / "run.jsonl"
     rows = [
-        {"_ng_task_index": 0, "reward": 1.0, "ng_trajectory": {"big": "x"}, "ng_model_call_capture": {"calls": []}},
+        {
+            "_ng_task_index": 0,
+            "reward": 1.0,
+            "ng_trajectory": {"task_id": "0", "rollout_id": "0-0"},
+            "ng_model_call_capture": {"calls": []},
+        },
         {"_ng_task_index": 1, "reward": 0.0},
         {"_ng_task_index": 2, "_ng_dispatch_drained": True},
     ]
@@ -124,7 +129,12 @@ class TestExport:
         assert backend.metrics == [flatten_aggregate_metrics(AGGREGATE_ENTRIES)]
         assert backend.rollouts == [
             [
-                {"_ng_task_index": 0, "reward": 1.0, "ng_model_call_capture": {"calls": []}},
+                {
+                    "_ng_task_index": 0,
+                    "reward": 1.0,
+                    "ng_trajectory": {"task_id": "0", "rollout_id": "0-0"},
+                    "ng_model_call_capture": {"calls": []},
+                },
                 {"_ng_task_index": 1, "reward": 0.0},
             ]
         ]
@@ -137,17 +147,17 @@ class TestExport:
         backend.export(artifacts)
 
         assert backend.marker_during_logging is False
-        assert artifacts.export_done_fpath("recording").read_text() == "backend-run-7"
+        assert orjson.loads(artifacts.export_done_fpath("recording").read_bytes())["run_id"] == "backend-run-7"
 
     def test_an_already_exported_run_is_skipped_without_opening_the_backend(self, tmp_path: Path) -> None:
         artifacts = _make_run(tmp_path)
-        artifacts.export_done_fpath("recording").write_text("earlier-run")
+        assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
         backend = _backend(artifacts)
 
         result = backend.export(artifacts)
 
         assert result.state is ExportState.SKIPPED
-        assert result.detail == {"reason": "already exported", "run_id": "earlier-run"}
+        assert result.detail == {"reason": "already exported", "run_id": "backend-run-7"}
         assert backend.events == []
 
     def test_a_backend_failure_is_reported_leaves_no_marker_and_still_closes_the_backend(
@@ -192,7 +202,7 @@ class TestExport:
 
         _backend(artifacts).export(artifacts)
 
-        assert (tmp_path / "run_recording_export_done").read_text() == "backend-run-7"
+        assert orjson.loads((tmp_path / "run_recording_export_done").read_bytes())["run_id"] == "backend-run-7"
         assert not (tmp_path / "run_recording_run_id").exists()
 
     def test_a_live_run_id_does_not_make_the_export_skip_and_is_reported(
@@ -211,7 +221,7 @@ class TestExport:
         assert backend.events == ["setup", "teardown"]
         assert "logged" in caplog.text and "live as run live-run-3" in caplog.text
         assert live.read_text() == "live-run-3"
-        assert (tmp_path / "run_recording_export_done").read_text() == "backend-run-7"
+        assert orjson.loads((tmp_path / "run_recording_export_done").read_bytes())["run_id"] == "backend-run-7"
 
     def test_an_export_does_not_become_the_run_a_later_live_resume_reopens(self, tmp_path: Path) -> None:
         artifacts = _make_run(tmp_path)
@@ -251,7 +261,7 @@ class TestExport:
         assert not artifacts.export_done_fpath("recording").exists()
         assert not list(tmp_path.glob(".*.tmp"))
         assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
-        assert artifacts.export_done_fpath("recording").read_text() == "backend-run-7"
+        assert orjson.loads(artifacts.export_done_fpath("recording").read_bytes())["run_id"] == "backend-run-7"
 
 
 class ForgetfulBackend(RecordingBackend):
@@ -329,7 +339,7 @@ class TestRunMustBeExportable:
         assert result.detail["uploaded_rollouts"] is False
         assert backend.metrics == [flatten_aggregate_metrics(AGGREGATE_ENTRIES)]
         assert backend.rollouts == []
-        assert artifacts.export_done_fpath("recording").read_text() == "backend-run-7"
+        assert orjson.loads(artifacts.export_done_fpath("recording").read_bytes())["run_id"] == "backend-run-7"
 
     def test_the_freshness_check_needs_the_rollouts_file_to_compare_against(self, tmp_path: Path) -> None:
         artifacts = _make_run(tmp_path)
@@ -500,7 +510,7 @@ class TestRegisteredBackends:
         client.log_dict.assert_called_once()
         assert client.log_dict.call_args.args[1] == {"policy_api_key": "****", "model": "m"}
         client.set_terminated.assert_called_once_with("mlflow-run-1", status="FINISHED")
-        assert artifacts.export_done_fpath("mlflow").read_text() == "mlflow-run-1"
+        assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "mlflow-run-1"
         assert MLflowExporter.from_global_config(config).export(artifacts).state is ExportState.SKIPPED
         assert client.create_run.call_count == 1
 
@@ -526,7 +536,7 @@ class TestRegisteredBackends:
         assert "id" not in init.call_args.kwargs
         run.config.update.assert_called_once_with({"policy_api_key": "****", "model": "m"})
         run.finish.assert_called_once()
-        assert artifacts.export_done_fpath("wandb").read_text() == "wandb-run-1"
+        assert orjson.loads(artifacts.export_done_fpath("wandb").read_bytes())["run_id"] == "wandb-run-1"
 
 
 def test_skip_exporters_leaves_live_exporters_unopened(monkeypatch: MonkeyPatch) -> None:
@@ -572,7 +582,7 @@ class TestWandbCredentials:
 
         assert result.state is ExportState.SUCCEEDED, result.error
         assert os.environ["WANDB_API_KEY"] == "env-key"  # pragma: allowlist secret
-        assert artifacts.export_done_fpath("wandb").read_text() == "wandb-run-1"
+        assert orjson.loads(artifacts.export_done_fpath("wandb").read_bytes())["run_id"] == "wandb-run-1"
 
     def test_a_key_on_the_command_overrides_the_environment(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("WANDB_API_KEY", "env-key")  # pragma: allowlist secret
