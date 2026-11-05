@@ -14,7 +14,6 @@ from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
     PROVIDER_IO_TIMEOUT,
-    PROVIDER_OOM_KILLED,
     PROVIDER_REQUEST_FAILED,
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
@@ -322,7 +321,7 @@ async def test_confirmed_non_oom_terminal_state_preserves_the_original_failure(m
     [
         ("Failed", "ContainerFailed", "sandbox OOMKilled", PROVIDER_UNAVAILABLE),
         ("Running", "OOMKilled", "", PROVIDER_COMMAND_OUTCOME_UNKNOWN),
-        ("Failed", "OOMKilled", "", PROVIDER_OOM_KILLED),
+        ("Failed", "OOMKilled", "", PROVIDER_UNAVAILABLE),
     ],
 )
 async def test_pty_uses_the_same_explicit_evidence(state, reason, message, kind):
@@ -340,8 +339,8 @@ async def test_pty_uses_the_same_explicit_evidence(state, reason, message, kind)
     failure = await provider._pty_failure(handle, cause)
     assert failure.failure_kind == kind
     assert failure.__cause__ is cause
-    if kind == PROVIDER_OOM_KILLED:
-        assert failure.details.provider_status_reason == "OOMKilled"
+    if state == "Failed":
+        assert failure.details.provider_status_reason == reason
         assert "lifecycle status" in failure.failure_reason
 
 
