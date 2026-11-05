@@ -14,9 +14,8 @@ from omegaconf import OmegaConf
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.copilot_agent.app import (
     CopilotAgent,
     CopilotAgentConfig,
