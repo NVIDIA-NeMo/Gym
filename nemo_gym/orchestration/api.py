@@ -26,10 +26,12 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializationInfo,
+    SerializerFunctionWrapHandler,
     Tag,
     ValidationInfo,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -421,13 +423,41 @@ ComputeConfig = Annotated[
 
 
 class ResumeConfig(_StrictModel):
-    # Non-timeout failures (job script bugs, OOM, etc.) are resubmitted at most this many
-    # times, so a broken benchmark doesn't requeue forever.
-    max_retries: int = 3
+    # Infrastructure retries the chain admits, at most this many: preemption, node failure and boot failure, or a
+    # retry the saved evidence names after another stop. A generic FAILED, an out-of-memory kill or a deadline stops
+    # the chain instead.
+    # Scheduler TIMEOUT continues planned segments within max_walltime; it is not a model timeout.
+    max_retries: int = Field(default=3, ge=0)
     # Optional cap on the chain's total accumulated walltime, as a Slurm-style
     # duration string (e.g. "48:00:00"). None means resume until max_retries is
-    # hit on a non-timeout failure, or the job completes/is cancelled.
+    # spent on infrastructure failures, or the job completes/is cancelled.
     max_walltime: str | None = None
+    # Partial overrides of the recovery outcome policy (RecoveryOutcomePolicyConfig): `by_failure_kind`,
+    # `by_status_code` and `default_action` choose which saved failures recovery retries, re-judges (verify) or
+    # fails. Entries it does not name keep their defaults. It is validated as the Python API validates it, at
+    # config load: registered failure kinds, status codes 400-599, and no `count_as_zero`. Recovery and the
+    # in-job continuation read it from the run's saved config. Precedence: an explicit Python `outcome_policy`
+    # argument to `recover()` / `inspect_recovery()` replaces it, and it replaces the defaults; the budget flags
+    # (`--extend-retries`, `--max-walltime`) are separate and unchanged. There is no CLI flag for it.
+    recovery_outcome_policy: dict[str, Any] | None = None
+
+    @field_validator("recovery_outcome_policy")
+    @classmethod
+    def _validate_recovery_outcome_policy(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            # Imported here: recovery imports the executors, which import this module.
+            from nemo_gym.orchestration.recovery import configured_outcome_policy
+
+            configured_outcome_policy(value)
+        return value
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_recovery_outcome_policy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A run without the section saves the same config, and the same resume_config accounting, as before it existed.
+        data = handler(self)
+        if self.recovery_outcome_policy is None:
+            data.pop("recovery_outcome_policy", None)
+        return data
 
 
 _COMMAND_AND_RUN = (
@@ -449,9 +479,17 @@ class BenchmarkRunConfig(_StrictModel):
     # API key (when driver.policy_model is set) so the script can reach the served
     # model without repeating its address.
     command: str | None = None
+    # Post-run exports of this benchmark's rollouts, by exporter name (see `gym eval export`). Each value is that
+    # exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export.
+    export: dict[str, dict[str, Any] | None] = {}
 
     @model_validator(mode="after")
     def _validate_command(self, info: ValidationInfo) -> "BenchmarkRunConfig":
+        if self.command is not None and any(settings is not None for settings in self.export.values()):
+            raise ValueError(
+                "A benchmark sets both `command` and `export`, but an export reads the rollouts file `gym eval run` "
+                "writes, which `command` replaces. Drop `export`, or run through `gym eval run`."
+            )
         # A saved config holds the policy keys driver.policy_model wrote into a command's run at submit, which
         # the command reads as NEMO_GYM_POLICY_*. SubmitConfig checks a saved command, where the policy is known.
         if self.command is not None and self.run and not (info.context and info.context.get(SAVED_CONFIG)):
@@ -519,6 +557,9 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
 class JobConfig(_StrictModel):
     # Remote base directory. Each submit creates a timestamped subdirectory here.
     output_path: str
+    # Post-run exports every benchmark runs by default, by exporter name; a benchmark's own `export` override
+    # them. Benchmarks that run a `command` take none of them.
+    export: dict[str, dict[str, Any] | None] = {}
 
 
 class OtelConfig(_StrictModel):
@@ -757,6 +798,13 @@ class SubmitConfig(_StrictModel):
                         )
                     benchmark.run.update(copy.deepcopy(policy_run))
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_exports(self) -> "SubmitConfig":
+        from nemo_gym.orchestration.exports import validate_exports
+
+        validate_exports(self)
         return self
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:

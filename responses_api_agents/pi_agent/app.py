@@ -31,20 +31,23 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -60,7 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -69,7 +72,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess, ToolAccess
-from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
@@ -276,7 +278,7 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
                 # Match the other adapters: reasoning belongs in reasoning items,
                 # not in the final text consumed by benchmark verifiers.
                 output_items.extend(
-                    ResponsesConverter(return_token_id_information=False).postprocess_assistant_message_dict(
+                    ChatCompletionsConverter(return_token_id_information=False).postprocess_assistant_message_dict(
                         {"role": "assistant", "content": "\n".join(texts)}
                     )
                 )
@@ -632,6 +634,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/pi_agent/workspaces"
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
+    system_prompt_mode: Literal["append", "replace"] = "append"
+    enable_tools: bool = True
     timeout: int = Field(default=900, gt=0)
     bash_timeout: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
@@ -665,7 +669,6 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "grant that also offers one is left out."
         ),
     )
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -912,10 +915,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             Path(__file__).with_name(output_limit_extension), f"{state.session.session_dir}/{output_limit_extension}"
         )
         runtime_guards_extension = "runtime-guards.mjs"
-        await state.session.sandbox.upload(
-            Path(__file__).with_name(runtime_guards_extension),
-            f"{state.session.session_dir}/{runtime_guards_extension}",
-        )
+        if self.config.enable_tools:
+            await state.session.sandbox.upload(
+                Path(__file__).with_name(runtime_guards_extension),
+                f"{state.session.session_dir}/{runtime_guards_extension}",
+            )
         await state.session.sandbox.upload(
             Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
         )
@@ -945,8 +949,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             "--no-extensions",
             "--extension",
             f"{state.session.session_dir}/{output_limit_extension}",
-            "--extension",
-            f"{state.session.session_dir}/{runtime_guards_extension}",
+            *(
+                ["--extension", f"{state.session.session_dir}/{runtime_guards_extension}"]
+                if self.config.enable_tools
+                else []
+            ),
             "--extension",
             f"{state.session.session_dir}/outcome.mjs",
             *mcp_extension,
@@ -954,10 +961,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             "--no-prompt-templates",
             "--no-themes",
         ]
+        if not self.config.enable_tools:
+            command.append("--no-builtin-tools")
         if self.config.thinking:
             command += ["--thinking", self.config.thinking]
         if system:
-            command += ["--append-system-prompt", system]
+            flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
+            command += [flag, system]
         env = {
             "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
             "PI_SKIP_VERSION_CHECK": "1",
@@ -1286,7 +1296,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
-        if self.config.bash_timeout is not None:
+        if self.config.enable_tools and self.config.bash_timeout is not None:
             env["NEMO_GYM_PI_BASH_TIMEOUT"] = str(self.config.bash_timeout)
             cmd += ["--extension", str(Path(__file__).with_name("bash-timeout.mjs"))]
         if self.config.output_token_policy == "remaining_context":
@@ -1301,10 +1311,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             cmd += ["--provider", provider, "--model", model_id]
         else:
             cmd += ["--model", self.config.model]
+        if not self.config.enable_tools:
+            cmd.append("--no-builtin-tools")
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if system_prompt:
-            cmd += ["--append-system-prompt", system_prompt]
+            flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
+            cmd += [flag, system_prompt]
         cmd += self.config.extra_args
         cmd.append(instruction)
 

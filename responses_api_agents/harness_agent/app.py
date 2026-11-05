@@ -30,10 +30,11 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+    sandbox_server_url,
 )
 from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
@@ -51,8 +52,8 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
 
 LOG = logging.getLogger(__name__)
@@ -265,7 +266,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "--exclude=*.pyc",
                 "--exclude=.*",
                 "--exclude=node_modules",
-                "--exclude=data",
+                # The agent's own datasets; nemo_gym/data is library code and ships.
+                f"--exclude={agent_pkg}/data",
                 "--exclude=tests",
                 "--exclude=outputs",
                 "--exclude=workspaces",
@@ -348,11 +350,13 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "url_prefix": self.url_path_for_run("", body),
             }
             token = _RUN_CONTEXT.set(run_context)
+            phase = "agent"
             try:
                 if self.config.forward_mcp_tools:
                     run_context["mcp"] = self._mcp_server_entry(seed)
                 agent_resp = await self.responses(request, body.responses_create_params)
                 agent_resp_json = agent_resp.model_dump(mode="json")
+                phase = "verify"
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
@@ -376,7 +380,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     raise
                 # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
                 LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
-                return _masked_result(body, failure_kind, f"{type(exc).__name__}: {exc}")
+                sandbox_id = (descriptor or {}).get("sandbox_id") if isinstance(descriptor, Mapping) else None
+                facts = sandbox_failure_prefix(
+                    phase=phase,
+                    sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                    reason=provider_error_reason(exc),
+                    http_status=error_to_http_status(exc),
+                )
+                return _masked_result(body, failure_kind, f"{facts}{type(exc).__name__}: {exc}")
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise

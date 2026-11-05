@@ -9,15 +9,15 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
+    AgentSessionState,
     SandboxCommand,
     SandboxSession,
+    is_harness_termination_failure,
     shell_assignments,
 )
-from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
-from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
@@ -130,7 +130,9 @@ class OpenClawSandboxSession(AgentSessionState):
         if not probe.cleanup_confirmed:
             try:
                 await probe.stop_harness(timeout=timeout)
-            except HarnessTerminationError as error:
+            except NgFailureEvent as error:
+                if not is_harness_termination_failure(error):
+                    raise
                 # A final negative receipt cannot be retried. Release the borrowed sandbox as the agent run's
                 # session does, with cleanup reported unconfirmed; Resources tears the sandbox down.
                 LOG.exception("OpenClaw MCP probe termination unconfirmed; releasing for Resources teardown")
