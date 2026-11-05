@@ -37,6 +37,10 @@ A bare numeric Dockerfile `USER` with no passwd entry runs as that integer user 
 OpenSandbox's plain exec. Other providers, and OpenSandbox's PTY and bash sessions, still need a named user.
 A `uid:gid` pair is supported only on Docker. These limits apply with or without a job-level Compose overlay.
 
+For Compose tasks, `[environment.healthcheck]` runs at seed as main's Compose `user:` when set. This also applies
+to tasks with their own `environment/docker-compose.yaml` and no job-level overlay. Decimal user strings become
+integer user IDs; an absent or empty `user:` falls back to the image account. The agent keeps its configured user.
+
 ## `dataset.toml` and the `[gym]` table
 
 Harbor's own tables (`[dataset]`) are left to Harbor. What a dataset needs on top of its tasks goes in a `[gym]`

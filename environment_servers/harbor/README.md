@@ -89,7 +89,9 @@ the server refuses either at seed. Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
 the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
-[Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
+[Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed as main's Compose `user:` when one is set, including for a task
+with its own `environment/docker-compose.yaml` and no job-level overlay. A decimal string is passed as an integer
+user ID; an absent or empty `user:` falls back to the image account. This does not change the agent's configured user.
 A Compose file's `${NAME}` resolves as Harbor's `docker compose` would: Gym's infrastructure variables, the task's
 `[environment].env`, the process environment, then `environment/.env`; a name none of them sets is an empty string
 at prepare, with one warning. The server's `compose_variables` fill such names at seed, below everything the task
