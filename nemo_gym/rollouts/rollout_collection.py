@@ -1494,7 +1494,12 @@ class SharedRolloutCollectionConfig(
             raise ValueError("environment_server_routes are required when environment_routing_mode=taskset")
         return self
 
-    def check_completion(
+    def check_completion(self, **kwargs: Any) -> None:
+        """Raise the strict run's rejection, if any; see :meth:`completion_rejection`."""
+        if (rejection := self.completion_rejection(**kwargs)) is not None:
+            raise rejection
+
+    def completion_rejection(
         self,
         *,
         expected: int,
@@ -1505,8 +1510,9 @@ class SharedRolloutCollectionConfig(
         made_progress: bool,
         final_zero_rows: Sequence[Mapping[str, Any]] = (),
     ) -> None:
-        """Reject unfinished work; allow omissions alongside completed tasks.
+        """The error that rejects unfinished work, or None; omissions alongside completed tasks are allowed.
 
+        Collection decides this before it computes the aggregate, so a rejected run publishes no score.
         Drivers must supply whether any tasks can still be retried and whether
         this invocation saved outcomes that made progress (not just interruptions). Assuming either can cause endless
         automatic restarts when a driver has no work left or makes no progress.
@@ -1516,7 +1522,7 @@ class SharedRolloutCollectionConfig(
         passes ``completed`` has already counted them.
         """
         if not self.require_complete and not intentionally_omitted:
-            return
+            return None
         if completed is None:
             completed = len(
                 {
@@ -1540,17 +1546,18 @@ class SharedRolloutCollectionConfig(
                 expected,
                 intentionally_omitted,
             )
-            return
+            return None
         if not self.require_complete:
-            return
+            return None
         if completed < expected:
-            raise IncompleteEvaluationError(
+            return IncompleteEvaluationError(
                 f"EVAL FAILED: {completed}/{expected} samples completed. "
                 f"Partial artifacts retained at {self.output_jsonl_fpath}."
                 + (" No tasks are eligible for retry." if not retryable else ""),
                 retryable=retryable,
                 made_progress=made_progress,
             )
+        return None
 
 
 def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
@@ -4569,10 +4576,34 @@ executions → not run again (left to recovery)
         # Aggregate persisted results plus explicitly counted metrics-only failures and missing
         # rollouts, matching `gym eval aggregate` without changing either rollout artifact.
         imputed: List[Dict[str, Any]] = []
+        # A strict run publishes no score until it is complete: decide before the aggregate is computed or
+        # exported, and raise once the per-row artifacts, coverage and status are saved.
+        # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
+        # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
+        rejection: Optional[BaseException] = None
+        if config.require_complete:
+            rejection = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+        if rejection is None:
+            rejection = config.completion_rejection(
+                expected=completion["expected"],
+                results=persisted_results,
+                completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
+                intentionally_omitted=completion["intentionally_omitted"],
+                retryable=completion["retryable"] > 0,
+                made_progress=store.progress_outcomes_recorded > 0,
+            )
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
                 "Run `gym eval aggregate` after all shards finish to compute the global metrics."
+            )
+            aggregate_metrics_fpath = None
+        elif rejection is not None:
+            # An aggregate an earlier segment left describes a different set of rows: remove it with the score.
+            await asyncio.to_thread(aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
+            print(
+                "Not computing aggregate metrics: the run is incomplete and require_complete is set. "
+                "Resume it; the aggregate is written when the run completes."
             )
             aggregate_metrics_fpath = None
         else:
@@ -4655,20 +4686,8 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
-        if config.require_complete and (
-            stop := await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
-        ):
-            raise stop
-        # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
-        # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
-        config.check_completion(
-            expected=completion["expected"],
-            results=persisted_results,
-            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
-            intentionally_omitted=completion["intentionally_omitted"],
-            retryable=completion["retryable"] > 0,
-            made_progress=store.progress_outcomes_recorded > 0,
-        )
+        if rejection is not None:
+            raise rejection
         return results
 
     async def _call_aggregate_metrics(
