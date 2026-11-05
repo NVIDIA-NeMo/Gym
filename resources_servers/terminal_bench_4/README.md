@@ -1,5 +1,18 @@
 # TB4 resources server
 
+Each episode automatically uses one `nemo.nvidia.com/placement-group` value for its
+agent, verifier, EFS logs helper, and Compose services, seeds, and volume helpers.
+Point the CPU provider at the cell router to distribute episodes while keeping
+their storage and networking on one cell. Compose collections retain separate
+volume directories and cleanup ownership.
+
+With `environment.sandbox_split_endpoints: true`, any task whose agent or verifier
+requires a GPU sends every role and helper directly to `OPENSANDBOX_DOMAIN_GPU`
+using `OPENSANDBOX_API_KEY_GPU`; CPU tasks use the corresponding `_CPU` variables.
+Set the GPU domain to the direct GPU deployment, rather than the CPU router.
+Placement metadata is still sent to direct deployments, where it requires no
+special routing behavior.
+
 ## Contract
 
 `/seed_session` provisions the pinned task and returns its sandbox descriptor,

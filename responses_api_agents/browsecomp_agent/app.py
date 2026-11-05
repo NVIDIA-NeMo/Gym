@@ -63,7 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.models import VLLMConverter
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -1489,7 +1489,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """Hit the policy model's vLLM /tokenize endpoint and return the prompt
         token count (used to decide context reset without a full generation).
         (ported from gym-gitlab b66e37c6)"""
-        converter = VLLMConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         chat_completion_create_params = converter.responses_to_chat_completion_create_params(body)
         chat_completion_create_params = chat_completion_create_params.model_dump()
         # Same projection as vllm_model/app.py's tokenize path.
