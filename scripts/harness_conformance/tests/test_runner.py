@@ -78,6 +78,9 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
     agent = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
     assert agent["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
     assert config["model_call_capture_dir"] == str(tmp_path / "capture")
+    if harness == "openclaw":
+        assert agent["openclaw_version"] == "2026.6.11"
+        assert agent["timeout"] == 12
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
     assert set(config["probe_environment"]["environment_servers"]) == {environment_type}
     if use_agent_sessions:

@@ -97,7 +97,12 @@ from responses_api_agents.openclaw_agent.observability import (
     build_openclaw_observations,
     discover_openclaw_session_tree,
 )
-from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK, OpenClawSandboxSession
+from responses_api_agents.openclaw_agent.sandbox import (
+    _SANDBOX_PATH_CHECK,
+    PROVIDER_REPLAY_READY,
+    PROVIDER_REPLAY_RECEIPT,
+    OpenClawSandboxSession,
+)
 from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 
@@ -429,7 +434,9 @@ if [ "$#" -gt 0 ]; then
 fi
 """
     check_paths = f"(set -- {shlex.join([workdir, str(Path(directory).parent), runtime])}{_SANDBOX_PATH_CHECK})"
-    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}"
+    # A provider's upload may create a missing parent as root; the plugin writes its readiness receipt beside itself.
+    owned = shlex.join([f"{directory}/home/.openclaw", f"{directory}/provider_plugin"])
+    return bootstrap + f"{check_paths} && mkdir -p {owned}"
 
 
 # One ``openclaw mcp probe`` per MCP grant: CLI startup, connection and tool listing.
@@ -685,6 +692,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
                     f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
                 )
+            for name in ("index.mjs", "openclaw.plugin.json"):
+                await sandbox.upload(
+                    Path(__file__).with_name("provider_plugin") / name, f"{directory}/provider_plugin/{name}"
+                )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
@@ -795,7 +806,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     "allow": ["read", "write", "edit", "exec", "process"],
                     "exec": {"host": "gateway", "security": "full", "ask": "off"},
                 },
-                "plugins": {"enabled": False},
+                "plugins": {
+                    "enabled": True,
+                    "allow": ["nemo-gym"],
+                    "load": {"paths": [f"{state.session.session_dir}/provider_plugin"]},
+                    "entries": {"nemo-gym": {"enabled": True}},
+                },
             }
         )
         mcp_servers, required_grants = self._granted_mcp_servers(state.request)
@@ -872,6 +888,35 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ]
         if state.observations is not None:
             state.observations.gaps.extend(mcp_gaps)
+        artifacts = state.session.artifacts or {}
+        policy_receipt = artifacts.get(PROVIDER_REPLAY_RECEIPT)
+        if policy_receipt != PROVIDER_REPLAY_READY:
+            transcript = artifacts.get(f"home/.openclaw/agents/main/sessions/{session_id}.jsonl", "")
+            model_or_tool_activity = any(
+                isinstance(event.get("message"), dict) and event["message"].get("role") in {"assistant", "toolResult"}
+                for event in parse_openclaw_session_events(transcript)
+            )
+            # Startup counts toward the task budget. A supervisor timeout before
+            # any model/tool activity needs no replay policy and remains gradable.
+            startup_timeout = (
+                policy_receipt is None
+                and (state.session.cleanup or {}).get("timed_out")
+                and response.status == "incomplete"
+                and not response.output
+                and response.usage.total_tokens == 0
+                and not model_or_tool_activity
+            )
+            if not startup_timeout:
+                for record in state.observations.records:
+                    if record.kind == "agent_invocation":
+                        record.status = "failed"
+                # Keep the worker's own failure, such as a startup crash, in the activation error.
+                cause = f": {response.error.message}" if response.error is not None else ""
+                raise HTTPException(
+                    502,
+                    "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
+                    + cause,
+                )
         if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
             # Runtime and cleanup failures must not become gradable model outcomes.
             raise HTTPException(502, response.error.message)
@@ -1024,6 +1069,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         gaps = []
         artifacts = state.session.artifacts or {}
+        # Record this on interrupted activations too, before close releases the sandbox.
+        if artifacts.get(PROVIDER_REPLAY_RECEIPT) != PROVIDER_REPLAY_READY:
+            gaps.append(ObservationGap(code="provider_replay_policy_unconfirmed"))
         stdout = artifacts.get("stdout.log", "")
         if "stdout.log" not in artifacts:
             gaps.append(ObservationGap(code="agent_stdout_unavailable"))
