@@ -110,6 +110,24 @@ def test_remote_projection_cannot_replace_collection_evidence(tmp_path, mutation
     assert result.source_digests == raw.source_digests
 
 
+def test_the_remote_reader_reports_the_admissions_a_killed_rejudge_pass_left(tmp_path):
+    # A re-judge pass killed after admitting its judge failure leaves an admission without an outcome. The Store reader
+    # reports it, and the remote bridge keeps it, so remote recovery re-judges the saved answer as local recovery does.
+    from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _admitted_by_a_dead_pass
+
+    job, _, identity = _admitted_by_a_dead_pass(tmp_path)
+    raw = collect(job)
+    selected = select_managed_evidence(raw, job)
+    assert selected.unresolved_rejudgments == [identity]
+
+    conn = ProjectionConnection("__GYM_MANAGED:" + selected.model_dump_json())
+    result = _remote_managed_evidence(conn, raw, job, config())
+
+    assert result.managed_reader_error is None
+    assert result.unresolved_rejudgments == [identity]
+    assert decide(result).action.value == decide(selected).action.value == "reverify"
+
+
 def test_unpinned_remote_runtime_is_not_installed(tmp_path):
     prepare_managed(tmp_path, "healthy")
     conn = ProjectionConnection(AssertionError("must not connect"))
