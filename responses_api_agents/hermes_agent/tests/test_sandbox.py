@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlparse
 
 import pytest
 from fastapi import HTTPException
@@ -22,6 +23,7 @@ from nemo_gym.agents import (
     STOP_REQUEST_FILE,
     AgentCloseSessionRequest,
     AgentOutcomePolicyConfig,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     OutcomeAction,
     SandboxPythonRuntime,
@@ -1543,8 +1545,10 @@ async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, 
     factory.connect = AsyncMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
 
-    with pytest.raises(ValueError, match=r"\+\+use_absolute_ip=true"):
+    # The same URL fails every attempt, so the seed is refused with a final 422 rather than a retried 500.
+    with pytest.raises(AgentSeedRejectedError, match=r"\+\+use_absolute_ip=true") as refused:
         await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    assert refused.value.status_code == 422
 
     # Refused before the sandbox was connected or anything uploaded, so there is nothing to clean up.
     create_provider.assert_not_called()
@@ -1568,19 +1572,55 @@ def _owned_seed_with_search_grant(state) -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest.model_validate(body.model_dump(mode="json"))
 
 
+def _owned_seed_with_several_grants(state, *, required: bool = True) -> AgentSeedSessionRequest:
+    """A required and an optional MCP grant on different hosts, plus an optional direct HTTP grant Hermes skips."""
+    body = _owned_seed_with_search_grant(state).model_dump(mode="json")
+    body["tool_accesses"] = [
+        {
+            "kind": "mcp",
+            "name": "episode_search_tools",
+            "required": required,
+            "connection": {"url": "http://resources.example:7000/mcp", "headers": {"x-session": "token"}},
+        },
+        {
+            "kind": "mcp",
+            "name": "episode_docs",
+            "required": False,
+            "connection": {"url": "http://docs.example:9000/mcp", "headers": {"x-session": "token"}},
+        },
+        {"kind": "direct_http", "name": "direct", "base_url": "http://direct.example", "required": False},
+    ]
+    return AgentSeedSessionRequest.model_validate(body)
+
+
 @pytest.mark.parametrize(
-    ("network_access", "allowed"),
+    ("network_access", "required", "allowed"),
     [
-        ("inherit", None),
-        ("model_only", ["model"]),
-        ("model_and_tools", ["model", "resources.example"]),
+        ("inherit", True, None),
+        # A required grant under model_only is refused (see the refusal test), so this case grants optional ones.
+        ("model_only", False, ["model"]),
+        ("model_and_tools", True, ["config.example", "docs.example", "model", "resources.example"]),
     ],
 )
 async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(
-    agent, state, monkeypatch, network_access, allowed
+    agent, state, monkeypatch, network_access, required, allowed
 ):
     import responses_api_agents.hermes_agent.app as module
 
+    # A grant declared in the agent's configuration counts as well as the episode's.
+    agent.config = HermesAgentConfig.model_validate(
+        {
+            **agent.config.model_dump(),
+            "tool_accesses": [
+                {
+                    "kind": "mcp",
+                    "name": "configured_tools",
+                    "required": False,
+                    "connection": {"url": "http://config.example:8100/mcp", "headers": {"x-session": "token"}},
+                }
+            ],
+        }
+    )
     agent.config.sandbox_provider = "runtime"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
     agent.config.network_access = network_access
@@ -1592,19 +1632,24 @@ async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(
         module, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock())
     )
 
-    await agent.seed_agent_session(SimpleNamespace(session={}), _owned_seed_with_search_grant(state))
+    body = _owned_seed_with_several_grants(state, required=required)
+    await agent.seed_agent_session(SimpleNamespace(session={}), body)
 
     policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
     if allowed is None:
         assert policy is None
     else:
         assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+        # The runner's payload calls the Model Server at the URL whose host the policy allows.
+        payload_url = agent.resolve_model_base_url(agent.config.model_server.name, body.episode_id.capture_key)
+        assert urlparse(payload_url).hostname in allowed
 
 
-async def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(agent, state, monkeypatch):
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(agent, state, monkeypatch, network_access):
     import responses_api_agents.hermes_agent.app as module
 
-    agent.config.network_access = "model_only"
+    agent.config.network_access = network_access
     factory = MagicMock(return_value=state.session.sandbox)
     factory.connect = AsyncMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
@@ -1613,40 +1658,55 @@ async def test_network_access_with_borrowed_sandbox_is_rejected_before_connectin
     create_provider = MagicMock()
     monkeypatch.setattr(module, "create_provider", create_provider)
 
-    with pytest.raises(HTTPException) as rejected:
-        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    with TestClient(agent.setup_webserver()) as client:
+        rejected = client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json"))
 
-    assert rejected.value.status_code == 422
-    assert "borrowed" in str(rejected.value.detail)
+    assert rejected.status_code == 422, rejected.text
+    assert "borrowed" in rejected.json()["detail"]
     create_provider.assert_not_called()
     factory.connect.assert_not_awaited()
 
 
-async def test_unenforceable_network_access_is_a_terminal_seed_refusal(agent, state, monkeypatch):
+@pytest.mark.parametrize(
+    ("provider", "provider_options", "required", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, False, "not both"),
+        ("docker", {}, False, "requires the OpenSandbox network-policy provider"),
+        # model_only blocks a required grant's host, so the session would fail only after the sandbox exists.
+        ("opensandbox", {}, True, "model_and_tools"),
+    ],
+    ids=["explicit_policy", "provider_without_policies", "required_grant"],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(
+    agent, state, monkeypatch, provider, provider_options, required, reason
+):
     import responses_api_agents.hermes_agent.app as module
 
     agent.config.sandbox_provider = "runtime"
     agent.config.sandbox_config = {
         "image": "test-image",
         "workdir": "/workspace",
-        "provider_options": {"network_policy": {}},
+        "provider_options": provider_options,
     }
     agent.config.network_access = "model_only"
     factory = MagicMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    # A non-host-network provider keeps the model URL check from refusing first.
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
-    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
-    monkeypatch.setattr(module, "create_provider", lambda config: provider)
+    created = SimpleNamespace(name=provider, aclose=AsyncMock())
+    monkeypatch.setattr(module, "create_provider", lambda config: created)
+    body = _owned_seed_with_several_grants(state, required=required)
 
-    with pytest.raises(HTTPException) as refused:
-        await agent.seed_agent_session(SimpleNamespace(session={}), _owned_seed_with_search_grant(state))
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
 
     # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
-    assert refused.value.status_code == 422
-    assert "not both" in str(refused.value.detail)
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
     factory.assert_not_called()
-    provider.aclose.assert_awaited_once()
+    created.aclose.assert_awaited_once()
+    assert body.agent_session_id not in agent._session_records
 
 
 async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monkeypatch, caplog):

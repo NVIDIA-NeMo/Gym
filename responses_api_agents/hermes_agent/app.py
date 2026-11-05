@@ -306,8 +306,8 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
         description=(
             "Egress of a sandbox Hermes creates: `model_only` allows only the model server's host, `model_and_tools` "
             "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
-            "borrows one rejects any other value than `inherit`. Such a sandbox cannot install the runtime, so its "
-            "image must carry it (see README)."
+            "borrows one rejects any other value than `inherit`. The Agent Server builds Hermes's runtime and "
+            "uploads it, so a restricted sandbox needs no network for setup."
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
@@ -520,7 +520,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
         # without use_absolute_ip) would make every model call fail and the episode score 0 unmasked.
         model_base_url = self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key)
-        assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
+        try:
+            assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
+        except ValueError as error:
+            # A model URL the sandbox cannot reach fails the same way on every attempt: refuse the seed.
+            raise AgentSeedRejectedError(str(error)) from error
         provider = create_provider(provider_config)
         try:
             if owns_sandbox:
@@ -539,6 +543,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
                         str(access.connection.url)
                         for access in self.effective_tool_accesses(body)
                         if isinstance(access, MCPToolAccess)
+                    ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
                     ],
                 )
                 sandbox = AsyncSandbox(provider)
