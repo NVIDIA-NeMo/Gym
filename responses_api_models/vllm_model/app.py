@@ -32,6 +32,7 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.core import (
@@ -55,8 +56,6 @@ from nemo_gym.models import (
     ChatCompletionsConverter,
     ExternalCaptureHandler,
     SimpleResponsesAPIModel,
-    VLLMConverter,  # noqa: F401  # re-exported for importers of this module
-    VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     context_overflow_error_fields,
     is_propagated_refusal,
     make_external_capture_handler,
@@ -2573,6 +2572,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             LOG.warning("endpoint %s answered a call; it serves sessions again", client.base_url)
         health.consecutive_failures = 0
         health.failed_at = None
+
+
+# The VLLMConverter aliases this module re-exported, with a warning naming ChatCompletionsConverter.
+__getattr__ = moved_names_getattr(__name__)
 
 
 if __name__ == "__main__":

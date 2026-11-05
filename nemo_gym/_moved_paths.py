@@ -838,16 +838,27 @@ for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
     _listed.update(_renamed)
 
 # ResponsesConverter renamed ChatCompletionsConverter: AnthropicConverter also converts to and from the Responses API.
+# The VLLMConverter aliases go with it: the LiteLLM and Azure OpenAI model servers use the converter too.
 # The chat_completions_converter entries also serve its old module path, nemo_gym.responses_converter.
 _CONVERTER = "nemo_gym.models.chat_completions_converter"
+_VLLM_CONVERTER_ALIASES = {
+    "VLLMConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+    "VLLMConverterResponsesToChatCompletionsState": MovedPath(
+        new=f"{_CONVERTER}:ChatCompletionsConverterState", since="0.8.0"
+    ),
+}
 _RENAMED_CONVERTER_NAMES: dict[str, dict[str, MovedPath]] = {
     _CONVERTER: {
         "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
         "ResponsesConverterState": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverterState", since="0.8.0"),
+        **_VLLM_CONVERTER_ALIASES,
     },
     "nemo_gym.models": {
         "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+        **_VLLM_CONVERTER_ALIASES,
     },
+    # Servers imported the aliases from the vLLM model server, which re-exported them.
+    "responses_api_models.vllm_model.app": _VLLM_CONVERTER_ALIASES,
     "nemo_gym.models.token_capture.completion": {
         "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
     },
